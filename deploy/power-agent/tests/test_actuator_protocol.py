@@ -53,6 +53,7 @@ class TestProtocolSatisfaction(unittest.TestCase):
             "apply_cap",
             "restore_default",
             "restore_default_by_uuid",
+            "scan_uuid_index_map",
         ):
             self.assertTrue(
                 callable(getattr(actuator, method, None)),
@@ -350,6 +351,52 @@ class TestRestoreDefault(unittest.TestCase):
             NvmlActuator(metrics=metrics).restore_default(2)
         metrics.applied_limit_watts.labels.assert_called_with(gpu="2")
         metrics.applied_limit_watts.labels.return_value.set.assert_called_with(410)
+
+
+class TestScanUuidIndexMap(unittest.TestCase):
+    """NVML identity snapshot. Indices are process-stable and NVML does not
+    reconnect / re-enumerate, so a clean pass is conclusive; a count or per-index
+    read failure marks it inconclusive."""
+
+    def test_clean_scan_returns_full_map_conclusive(self):
+        mock_nvml = MagicMock()
+        mock_nvml.nvmlDeviceGetCount.return_value = 2
+        mock_nvml.nvmlDeviceGetHandleByIndex.side_effect = lambda idx: f"h{idx}"
+        mock_nvml.nvmlDeviceGetUUID.side_effect = lambda h: {
+            "h0": b"GPU-a",
+            "h1": b"GPU-b",
+        }[h]
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}):
+            with patch.object(power_agent, "pynvml", mock_nvml):
+                mapping, conclusive = NvmlActuator().scan_uuid_index_map()
+        self.assertEqual(mapping, {"GPU-a": 0, "GPU-b": 1})
+        self.assertTrue(conclusive)
+
+    def test_count_read_failure_is_inconclusive(self):
+        mock_nvml = MagicMock()
+        mock_nvml.nvmlDeviceGetCount.side_effect = RuntimeError("nvml down")
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}):
+            with patch.object(power_agent, "pynvml", mock_nvml):
+                mapping, conclusive = NvmlActuator().scan_uuid_index_map()
+        self.assertEqual(mapping, {})
+        self.assertFalse(conclusive)
+
+    def test_per_index_read_failure_is_inconclusive_but_keeps_others(self):
+        mock_nvml = MagicMock()
+        mock_nvml.nvmlDeviceGetCount.return_value = 2
+        mock_nvml.nvmlDeviceGetHandleByIndex.side_effect = lambda idx: f"h{idx}"
+
+        def get_uuid(h):
+            if h == "h1":
+                raise RuntimeError("transient")
+            return b"GPU-a"
+
+        mock_nvml.nvmlDeviceGetUUID.side_effect = get_uuid
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}):
+            with patch.object(power_agent, "pynvml", mock_nvml):
+                mapping, conclusive = NvmlActuator().scan_uuid_index_map()
+        self.assertEqual(mapping, {"GPU-a": 0})
+        self.assertFalse(conclusive)
 
 
 class TestRestoreDefaultByUuid(unittest.TestCase):

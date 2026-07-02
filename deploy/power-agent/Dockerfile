@@ -40,19 +40,21 @@ ARG DOCKER_PROXY=
 # -----------------------------------------------------------------------------
 # Stage 1: extract pydcgm + libdcgm.so from the upstream DCGM image
 # -----------------------------------------------------------------------------
-# Pin a specific DCGM version. Bump in lockstep with the GPU Operator's
-# nvidia-dcgm tag — the hostengine and the bindings should share a
-# major version (DCGM guarantees backward compat within a major, not
-# across).
-#
-# The 4.2.3-2 tag is NOT published on NGC (verified 2026-05-21 via
-# `docker manifest inspect nvcr.io/nvidia/cloud-native/dcgm:4.2.3-2-ubuntu22.04`
-# → 404). The earliest resolvable DCGM 4.x runtime image is 4.5.1-1.
-# We pin to 4.5.1 because:
-#   - DcgmActuator uses `dcgm_structs.c_dcgmDeviceConfig_v2`, which only
-#     exists in DCGM 4.x (no 3.x fallback path);
-#   - 4.5.1 is the only 4.x ubuntu22.04 tag NGC currently publishes.
-ARG DCGM_IMAGE=nvcr.io/nvidia/cloud-native/dcgm:4.5.1-1-ubuntu22.04
+# Pin the vendored client to a version >= the operator's nvidia-dcgm
+# hostengine. NVIDIA's compatibility guidance is client >= hostengine (NOT
+# merely the same major), so pin the client to the `dcgm` tag your GPU Operator
+# deploys for its nvidia-dcgm hostengine (see the operator's values:
+# `dcgm.version` / the nvidia-dcgm image tag) and bump this in lockstep when
+# that tag moves. The default below (4.5.2) matches the nvidia-dcgm hostengine
+# shipped by recent GPU Operator releases; confirm against your operator.
+# Requirements:
+#   - DcgmActuator uses `dcgm_structs.c_dcgmDeviceConfig_v2`, which only exists
+#     in DCGM 4.x (no 3.x fallback path), so this MUST stay on a 4.x tag;
+#   - keep it >= the deployed hostengine version.
+# NGC publishes newer 4.x tags over time (e.g. 4.6.0); override DCGM_IMAGE to
+# match your operator. Validate any new tag resolves before merge:
+#   docker manifest inspect nvcr.io/nvidia/cloud-native/dcgm:<tag>
+ARG DCGM_IMAGE=nvcr.io/nvidia/cloud-native/dcgm:4.5.2-1-ubuntu22.04
 FROM ${DCGM_IMAGE} AS dcgm-vendor
 
 # pydcgm bindings location changed between DCGM majors:

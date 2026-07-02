@@ -97,17 +97,21 @@ class StubMetrics:
 # ---------------------------------------------------------------------------
 
 
-def nvidia_smi_power_limit(gpu_idx: int) -> float:
-    """Return the current power limit on GPU `gpu_idx`, in watts.
+def nvidia_smi_power_limit(gpu_uuid: str) -> float:
+    """Return the current power limit on the GPU carrying `gpu_uuid`, in watts.
 
-    Calls `nvidia-smi --query-gpu=power.limit` rather than going through
-    the actuators — this is the third-party ground truth.
+    Queries by UUID (``nvidia-smi -i`` accepts a GPU UUID), NOT by an
+    actuator-native index: DCGM and NVML index spaces can differ, so an
+    index-based read could observe a DIFFERENT physical GPU than the actuator
+    just probed and report false parity failures. Binding ground truth to the
+    UUID the actuator reported keeps this read on the same physical GPU on both
+    paths. This is the third-party ground truth (independent of both bindings).
     """
     out = subprocess.check_output(
         [
             "nvidia-smi",
             "-i",
-            str(gpu_idx),
+            gpu_uuid,
             "--query-gpu=power.limit",
             "--format=csv,noheader,nounits",
         ],
@@ -116,13 +120,16 @@ def nvidia_smi_power_limit(gpu_idx: int) -> float:
     return float(out)
 
 
-def nvidia_smi_default_limit(gpu_idx: int) -> float:
-    """Factory default power limit, in watts."""
+def nvidia_smi_default_limit(gpu_uuid: str) -> float:
+    """Factory default power limit for the GPU carrying `gpu_uuid`, in watts.
+
+    Queried by UUID for the same reason as `nvidia_smi_power_limit`.
+    """
     out = subprocess.check_output(
         [
             "nvidia-smi",
             "-i",
-            str(gpu_idx),
+            gpu_uuid,
             "--query-gpu=power.default_limit",
             "--format=csv,noheader,nounits",
         ],
@@ -148,11 +155,15 @@ def probe(
 
     Steps per GPU:
       1. Snapshot UUID, constraints, current pids.
-      2. Read cap via nvidia-smi (ground truth, before apply).
+      2. Read cap via nvidia-smi BY UUID (ground truth, before apply).
       3. apply_cap(gpu, test_watts) — measure return value.
-      4. Read cap via nvidia-smi (ground truth, after apply).
+      4. Read cap via nvidia-smi BY UUID (ground truth, after apply).
       5. restore_default(gpu).
-      6. Read cap via nvidia-smi (ground truth, after restore).
+      6. Read cap via nvidia-smi BY UUID (ground truth, after restore).
+
+    All nvidia-smi reads are keyed on the UUID the actuator reported for the
+    index, never the index itself, so a DCGM/NVML index-space mismatch cannot
+    make ground truth read a different physical GPU than the actuator probed.
 
     `verify_writes=False` skips the apply/restore steps entirely
     (read-only mode).
@@ -170,8 +181,8 @@ def probe(
             uuid = actuator.get_uuid(i)
             min_w, max_w = actuator.constraints_w(i)
             pids = actuator.list_running_pids(i)
-            ns_before = nvidia_smi_power_limit(i)
-            ns_default = nvidia_smi_default_limit(i)
+            ns_before = nvidia_smi_power_limit(uuid)
+            ns_default = nvidia_smi_default_limit(uuid)
 
             write_skipped_reason = None
             if not verify_writes:
@@ -182,10 +193,10 @@ def probe(
             if write_skipped_reason is None:
                 eff = actuator.apply_cap(i, test_watts)
                 time.sleep(sleep_s)
-                ns_applied = nvidia_smi_power_limit(i)
+                ns_applied = nvidia_smi_power_limit(uuid)
                 actuator.restore_default(i)
                 time.sleep(sleep_s)
-                ns_restored = nvidia_smi_power_limit(i)
+                ns_restored = nvidia_smi_power_limit(uuid)
             else:
                 eff = ns_applied = ns_restored = None
 
@@ -226,26 +237,35 @@ def parity_check(nvml_result, dcgm_result, *, tolerance_w: float):
         )
         return len(failures)  # bail — per-GPU comparison meaningless
 
-    for nvml_gpu, dcgm_gpu in zip(nvml_result["gpus"], dcgm_result["gpus"]):
-        idx = nvml_gpu["idx"]
+    # Join by UUID, NOT positional zip: the two actuators can enumerate the same
+    # physical GPUs under DIFFERENT indices (NVML index order need not match
+    # DCGM's), so `zip(nvml, dcgm)` would compare mismatched GPUs and report
+    # phantom diffs. The UUID is the hardware-stable identity shared by both
+    # paths, so it is the correct join key.
+    nvml_by_uuid = {g["uuid"]: g for g in nvml_result["gpus"]}
+    dcgm_by_uuid = {g["uuid"]: g for g in dcgm_result["gpus"]}
 
-        if nvml_gpu["uuid"] != dcgm_gpu["uuid"]:
-            failures.append(
-                f"GPU {idx}: uuid diff — nvml={nvml_gpu['uuid']!r} "
-                f"dcgm={dcgm_gpu['uuid']!r}"
-            )
+    for missing in sorted(set(nvml_by_uuid) - set(dcgm_by_uuid)):
+        failures.append(f"UUID {missing}: seen by NVML but NOT DCGM")
+    for missing in sorted(set(dcgm_by_uuid) - set(nvml_by_uuid)):
+        failures.append(f"UUID {missing}: seen by DCGM but NOT NVML")
+
+    for uuid in sorted(set(nvml_by_uuid) & set(dcgm_by_uuid)):
+        nvml_gpu = nvml_by_uuid[uuid]
+        dcgm_gpu = dcgm_by_uuid[uuid]
+        where = f"UUID {uuid} (nvml idx {nvml_gpu['idx']}, dcgm idx {dcgm_gpu['idx']})"
 
         # Constraints: allow ±1 W slop (DCGM returns floats; NVML
         # returns ints; both come from the same firmware register but
         # the conversion path differs slightly).
         if abs(nvml_gpu["min_w"] - dcgm_gpu["min_w"]) > tolerance_w:
             failures.append(
-                f"GPU {idx}: min_w diff — nvml={nvml_gpu['min_w']} "
+                f"{where}: min_w diff — nvml={nvml_gpu['min_w']} "
                 f"dcgm={dcgm_gpu['min_w']}"
             )
         if abs(nvml_gpu["max_w"] - dcgm_gpu["max_w"]) > tolerance_w:
             failures.append(
-                f"GPU {idx}: max_w diff — nvml={nvml_gpu['max_w']} "
+                f"{where}: max_w diff — nvml={nvml_gpu['max_w']} "
                 f"dcgm={dcgm_gpu['max_w']}"
             )
 
@@ -259,7 +279,7 @@ def parity_check(nvml_result, dcgm_result, *, tolerance_w: float):
                 > tolerance_w
             ):
                 failures.append(
-                    f"GPU {idx}: apply_cap return diff — "
+                    f"{where}: apply_cap return diff — "
                     f"nvml={nvml_gpu['apply_cap_returned']} "
                     f"dcgm={dcgm_gpu['apply_cap_returned']}"
                 )
@@ -275,7 +295,7 @@ def parity_check(nvml_result, dcgm_result, *, tolerance_w: float):
                 > tolerance_w
             ):
                 failures.append(
-                    f"GPU {idx}: nvidia-smi after-apply diff — "
+                    f"{where}: nvidia-smi after-apply diff — "
                     f"nvml={nvml_gpu['ns_after_apply']:.1f} W "
                     f"dcgm={dcgm_gpu['ns_after_apply']:.1f} W"
                 )
@@ -284,14 +304,14 @@ def parity_check(nvml_result, dcgm_result, *, tolerance_w: float):
         if nvml_gpu["ns_after_restore"] is not None:
             if abs(nvml_gpu["ns_after_restore"] - nvml_gpu["ns_default"]) > tolerance_w:
                 failures.append(
-                    f"GPU {idx}: nvml restore_default — "
+                    f"{where}: nvml restore_default — "
                     f"got {nvml_gpu['ns_after_restore']:.1f} W, "
                     f"expected {nvml_gpu['ns_default']:.1f} W (factory default)"
                 )
         if dcgm_gpu["ns_after_restore"] is not None:
             if abs(dcgm_gpu["ns_after_restore"] - dcgm_gpu["ns_default"]) > tolerance_w:
                 failures.append(
-                    f"GPU {idx}: dcgm restore_default — "
+                    f"{where}: dcgm restore_default — "
                     f"got {dcgm_gpu['ns_after_restore']:.1f} W, "
                     f"expected {dcgm_gpu['ns_default']:.1f} W (factory default)"
                 )

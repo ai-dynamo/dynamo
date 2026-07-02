@@ -205,6 +205,29 @@ class Actuator(Protocol):
         """
         ...
 
+    def scan_uuid_index_map(self) -> tuple[dict[str, int], bool]:
+        """Snapshot every currently-visible GPU as ``{uuid: index}`` plus a
+        ``conclusive`` flag.
+
+        ``conclusive`` is True only when the ENTIRE topology was enumerated
+        without error in a single consistent view, so a caller may treat a UUID
+        absent from the map as proof the GPU is gone. On any partial / failed
+        enumeration it is False and the map must be treated as non-authoritative
+        (a missing UUID is NOT proof of absence).
+
+        Cold-start orphan recovery uses this instead of a
+        ``range(device_count())`` + per-index ``get_uuid`` loop. On the DCGM path
+        ``get_uuid`` reconnects on its OWN, and a reconnect can GROW discovery (a
+        hostengine restart re-enumerating more GPUs); with the loop bound fixed
+        at the pre-growth length the newly-enumerated indices are never visited,
+        yet no probe raises — so a persisted UUID that merely MOVED to a new
+        index looks absent and gets pruned. Implementations MUST build the map
+        from ONE consistent enumeration (DCGM: inside a single ``_with_reconnect``
+        that re-materializes the topology length, mirroring
+        ``_resolve_idx_for_uuid``) so a mid-scan growth is fully rescanned.
+        """
+        ...
+
 
 class NvmlActuator:
     """NVML-backed actuator — the default and only path in PR #9682.
@@ -282,6 +305,38 @@ class NvmlActuator:
 
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
         return power_agent._nvml_uuid(handle)
+
+    def scan_uuid_index_map(self) -> tuple[dict[str, int], bool]:
+        """NVML identity snapshot. NVML indices are process-stable and NVML does
+        not reconnect / re-enumerate mid-scan, so a clean pass over
+        ``range(nvmlDeviceGetCount())`` is conclusive; a device-count read
+        failure or any per-index UUID read failure marks it inconclusive."""
+        import pynvml
+
+        try:
+            count = pynvml.nvmlDeviceGetCount()
+        except Exception as e:
+            logger.warning(
+                "NVML device-count read failed during identity scan; "
+                "treating as inconclusive: %s",
+                e,
+            )
+            return {}, False
+
+        mapping: dict[str, int] = {}
+        conclusive = True
+        for idx in range(count):
+            try:
+                mapping[self.get_uuid(idx)] = idx
+            except Exception as e:
+                conclusive = False
+                logger.warning(
+                    "NVML UUID read failed for index %d during identity scan; "
+                    "marking scan inconclusive: %s",
+                    idx,
+                    e,
+                )
+        return mapping, conclusive
 
     def list_running_pids(
         self, gpu_idx: int, expected_uuid: Optional[str] = None
@@ -603,8 +658,9 @@ class DcgmActuator:
                 "DCGM 3.x bindings detected). Rebuild the Power Agent "
                 "image against a DCGM 4.x base via "
                 "`--build-arg DCGM_IMAGE=nvcr.io/nvidia/cloud-native/"
-                "dcgm:4.5.1-1-ubuntu22.04` (or newer 4.x tag); see "
-                "deploy/power-agent/Dockerfile."
+                "dcgm:<4.x-tag>` — pin the tag your GPU Operator's "
+                "nvidia-dcgm hostengine deploys (client >= hostengine); see "
+                "the DCGM_IMAGE default in deploy/power-agent/Dockerfile."
             )
 
         self._handle = pydcgm.DcgmHandle(
@@ -1843,6 +1899,82 @@ class DcgmActuator:
             return None, scan_complete
 
         return self._with_reconnect(_scan)
+
+    def scan_uuid_index_map(self) -> tuple[dict[str, int], bool]:
+        """DCGM identity snapshot built inside ONE ``_with_reconnect``.
+
+        Mirrors ``_resolve_idx_for_uuid``'s growth-safety: the scan re-reads
+        ``len(self._discovered_gpu_ids)`` on every entry, and a
+        ``CONNECTION_NOT_VALID`` propagates to the single outer handler, which
+        rebuilds discovery (new topology length) and re-runs the WHOLE scan — so
+        a hostengine reconnect that grew the GPU set mid-scan is fully rescanned
+        rather than silently leaving newly-enumerated indices unvisited. Any
+        other per-index error marks the scan inconclusive; a sustained
+        outage / reconnect failure that escapes ``_with_reconnect`` is reported
+        as ``({}, False)`` (weak evidence — the caller must not prune on it),
+        which also covers the ``device_count() == 0`` outage case the naive
+        cached-count path could not distinguish from a genuinely empty node.
+        """
+        import dcgm_structs
+
+        # An empty cached topology is NOT trustworthy evidence of a GPU-less
+        # node on the DCGM path. Power Agent runs on GPU nodes, so zero
+        # discovered GPUs far more likely means discovery never populated, or a
+        # dropped hostengine connection that the scan below could not surface:
+        # `range(0)` issues no hostengine call, so `_with_reconnect` never fires
+        # and the loop would return ``({}, True)`` — causing recovery to prune
+        # EVERY persisted UUID as absent (a cap-leak / ownership-loss fail-open).
+        # Report inconclusive instead so recovery retains persisted UUIDs and
+        # retries next boot. (NVML, by contrast, has no reconnect/stale-topology
+        # hazard: a clean `nvmlDeviceGetCount()==0` there is genuinely empty.)
+        if not self._discovered_gpu_ids:
+            logger.warning(
+                "DCGM identity scan found an empty topology (0 discovered "
+                "GPUs); treating as INCONCLUSIVE so orphan recovery retains "
+                "persisted UUIDs this boot rather than pruning them all as "
+                "absent."
+            )
+            return {}, False
+
+        def _scan() -> tuple[dict[str, int], bool]:
+            mapping: dict[str, int] = {}
+            conclusive = True
+            for idx in range(len(self._discovered_gpu_ids)):
+                try:
+                    mapping[self._read_uuid_raw(idx)] = idx
+                except dcgm_structs.DCGMError as e:
+                    if e.value == dcgm_structs.DCGM_ST_CONNECTION_NOT_VALID:
+                        # Restart the COMPLETE scan against rebuilt topology; a
+                        # partial pre-reconnect map cannot be trusted (indices
+                        # may have moved AND the set may have grown).
+                        raise
+                    conclusive = False
+                    logger.warning(
+                        "Failed to inspect GPU index %d during DCGM identity "
+                        "scan; marking scan inconclusive: %s",
+                        idx,
+                        e,
+                    )
+                except Exception as e:
+                    conclusive = False
+                    logger.warning(
+                        "Failed to inspect GPU index %d during DCGM identity "
+                        "scan; marking scan inconclusive: %s",
+                        idx,
+                        e,
+                    )
+            return mapping, conclusive
+
+        try:
+            return self._with_reconnect(_scan)
+        except Exception as e:
+            logger.warning(
+                "DCGM identity scan failed (%s: %s); treating as inconclusive "
+                "so orphan recovery neither prunes nor restores this boot.",
+                type(e).__name__,
+                e,
+            )
+            return {}, False
 
     # ------------------------------------------------------------------
     # Internal helpers

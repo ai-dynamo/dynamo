@@ -254,6 +254,8 @@ class TestProtocolSatisfaction(unittest.TestCase):
             "default_w",
             "apply_cap",
             "restore_default",
+            "restore_default_by_uuid",
+            "scan_uuid_index_map",
         ):
             self.assertTrue(
                 callable(getattr(actuator, method, None)),
@@ -2313,6 +2315,114 @@ class TestResolveIdxTopologyGrowth(unittest.TestCase):
         # Found at the GROWN index (1), NOT falsely reported gone (None).
         self.assertEqual(idx, 1)
         self.assertTrue(scan_complete)
+
+
+class TestScanUuidIndexMap(unittest.TestCase):
+    """`scan_uuid_index_map` builds a conclusive {uuid: index} snapshot inside
+    ONE `_with_reconnect`, so cold-start orphan recovery can prune absent UUIDs
+    without the per-index-`get_uuid` false-gone hole (a reconnect that GROWS the
+    topology mid-scan is fully rescanned)."""
+
+    def test_clean_scan_returns_full_map_conclusive(self):
+        actuator, modules, _, _ = _make_initialized_actuator(metrics=MagicMock())
+        actuator._discovered_gpu_ids = [10, 20]
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with patch.object(
+                actuator,
+                "_read_uuid_raw",
+                side_effect=lambda idx: {0: "GPU-A", 1: "GPU-B"}[idx],
+            ):
+                mapping, conclusive = actuator.scan_uuid_index_map()
+
+        self.assertEqual(mapping, {"GPU-A": 0, "GPU-B": 1})
+        self.assertTrue(conclusive)
+
+    def test_rescans_grown_topology_after_reconnect(self):
+        """The reconnect-growth case: a UUID that moved to a newly-enumerated
+        index must appear in the map (not be missing → pruned as absent)."""
+        actuator, modules, _, _ = _make_initialized_actuator(metrics=MagicMock())
+        DCGMError = modules["dcgm_structs"].DCGMError
+        CONNECTION_NOT_VALID = modules["dcgm_structs"].DCGM_ST_CONNECTION_NOT_VALID
+
+        actuator._discovered_gpu_ids = [10]
+        state = {"reconnected": False}
+
+        def fake_init():
+            actuator._discovered_gpu_ids = [10, 20]
+            state["reconnected"] = True
+
+        def read_uuid(idx):
+            gid = actuator._discovered_gpu_ids[idx]
+            if not state["reconnected"] and gid == 10:
+                raise DCGMError(CONNECTION_NOT_VALID)
+            return {10: "GPU-B", 20: "GPU-A"}[gid]
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with patch.object(actuator, "init", side_effect=fake_init), patch.object(
+                actuator, "_read_uuid_raw", side_effect=read_uuid
+            ):
+                mapping, conclusive = actuator.scan_uuid_index_map()
+
+        self.assertTrue(state["reconnected"])
+        # GPU-A (the moved UUID) is present at its GROWN index 1.
+        self.assertEqual(mapping, {"GPU-B": 0, "GPU-A": 1})
+        self.assertTrue(conclusive)
+
+    def test_non_connection_error_is_inconclusive_but_keeps_others(self):
+        actuator, modules, _, _ = _make_initialized_actuator(metrics=MagicMock())
+        DCGMError = modules["dcgm_structs"].DCGMError
+        GENERIC_ERROR = modules["dcgm_structs"].DCGM_ST_GENERIC_ERROR
+        actuator._discovered_gpu_ids = [10, 20]
+
+        def read_uuid(idx):
+            if idx == 0:
+                return "GPU-A"
+            raise DCGMError(GENERIC_ERROR)  # non-connection → mark inconclusive
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with patch.object(actuator, "_read_uuid_raw", side_effect=read_uuid):
+                mapping, conclusive = actuator.scan_uuid_index_map()
+
+        self.assertEqual(mapping, {"GPU-A": 0})
+        self.assertFalse(conclusive)
+
+    def test_empty_cached_topology_is_inconclusive(self):
+        """0 discovered GPUs on the DCGM path is NOT trusted as a genuinely
+        empty node (Power Agent runs on GPU nodes): `range(0)` issues no
+        hostengine call, so `_with_reconnect` never fires and a naive scan would
+        return ({}, True), pruning EVERY persisted UUID. It must be inconclusive
+        so recovery retains them."""
+        actuator, modules, _, _ = _make_initialized_actuator(metrics=MagicMock())
+        actuator._discovered_gpu_ids = []
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            mapping, conclusive = actuator.scan_uuid_index_map()
+
+        self.assertEqual(mapping, {})
+        self.assertFalse(conclusive)
+
+    def test_sustained_outage_returns_empty_inconclusive(self):
+        """A CONNECTION_NOT_VALID that persists across the single reconnect
+        retry escapes `_with_reconnect`; scan_uuid_index_map reports ({}, False)
+        so recovery neither prunes nor restores (device_count==0-due-to-outage
+        is NOT mistaken for a genuinely empty node)."""
+        actuator, modules, _, _ = _make_initialized_actuator(metrics=MagicMock())
+        DCGMError = modules["dcgm_structs"].DCGMError
+        CONNECTION_NOT_VALID = modules["dcgm_structs"].DCGM_ST_CONNECTION_NOT_VALID
+        actuator._discovered_gpu_ids = [10]
+
+        def read_uuid(idx):
+            raise DCGMError(CONNECTION_NOT_VALID)  # persists across the retry
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with patch.object(actuator, "init", side_effect=lambda: None), patch.object(
+                actuator, "_read_uuid_raw", side_effect=read_uuid
+            ):
+                mapping, conclusive = actuator.scan_uuid_index_map()
+
+        self.assertEqual(mapping, {})
+        self.assertFalse(conclusive)
 
 
 class TestRestoreUpdatesAppliedGauge(unittest.TestCase):

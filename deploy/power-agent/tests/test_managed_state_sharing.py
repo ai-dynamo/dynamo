@@ -95,11 +95,25 @@ class TestOrphanReloadKeepsAlias(unittest.TestCase):
     def test_reload_does_not_rebind_alias(self):
         before = power_agent._previously_managed
 
+        # GPU-x is present and BUSY, so the reload is RETAINED (the running-PID
+        # pre-filter skips it) — this test asserts the alias is not rebound and
+        # the reload lands in the shared set, not prune semantics (those are
+        # covered in test_orphan_recovery.py::TestAbsentPersistedUuid). Present +
+        # busy keeps GPU-x without depending on any prune branch.
         actuator = MagicMock()
-        actuator.device_count.return_value = 0  # skip the per-GPU loop body
+        actuator.device_count.return_value = 1
+        actuator.get_uuid.side_effect = lambda idx: "GPU-x"
+        # Startup recovery consumes ONE conclusive identity snapshot; GPU-x is
+        # present and BUSY, so it is retained via the running-PID pre-filter.
+        actuator.scan_uuid_index_map.return_value = ({"GPU-x": 0}, True)
+        actuator.list_running_pids.side_effect = lambda idx, expected_uuid=None: [
+            1234
+        ]  # busy → retained
 
         with patch.object(
-            power_agent, "_load_previously_managed_gpus", return_value={"GPU-x"}
+            power_agent,
+            "_read_managed_gpus_state",
+            return_value=({"GPU-x"}, True),
         ):
             with patch.object(power_agent, "_persist_managed_gpus"):
                 power_agent._restore_orphaned_gpus_on_startup(actuator)
@@ -107,8 +121,9 @@ class TestOrphanReloadKeepsAlias(unittest.TestCase):
         # Same object before and after, and still the managed_state set.
         self.assertIs(power_agent._previously_managed, before)
         self.assertIs(power_agent._previously_managed, managed_state.previously_managed)
-        # And the reload landed in that shared object.
+        # And the reload landed in that shared object (retained because busy).
         self.assertEqual(managed_state.previously_managed, {"GPU-x"})
+        actuator.restore_default_by_uuid.assert_not_called()
 
 
 if __name__ == "__main__":

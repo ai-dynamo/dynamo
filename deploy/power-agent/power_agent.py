@@ -140,64 +140,71 @@ def _extract_pod_uid_from_cgroup(pid: int) -> Optional[str]:
 _previously_managed: set[str] = managed_state.previously_managed
 
 
-def _load_previously_managed_gpus() -> set[str]:
-    """Load the persisted set of UUIDs this agent previously capped.
+def _read_managed_gpus_state() -> tuple[set[str], bool]:
+    """Load the persisted managed-UUID set AND whether the read was conclusive.
 
-    Defensive parsing — corrupt / malformed state files must never crash
-    the agent's startup. Per PR #9682 CodeRabbit review, this catches a
-    superset of the original (FileNotFoundError, JSONDecodeError) cases:
+    Returns ``(uuids, conclusive)``:
 
-      * OSError (PermissionError, IsADirectoryError, NotADirectoryError,
-        I/O errors) — disk problems on the host volume should NOT brick
-        the agent. Returning empty means we lose the orphan-recovery
-        opportunity for this restart, which is strictly better than
-        CrashLoopBackOff with no caps actuated.
-      * Non-dict JSON root — a file containing a top-level list / int /
-        string / null would have crashed `.get(...)` with AttributeError.
+      * ``conclusive=True``  — the file was read and parsed cleanly, INCLUDING a
+        legitimately empty / absent-file first-boot state. ``uuids`` is
+        authoritative and the caller may safely rewrite the file.
+      * ``conclusive=False`` — the read or parse FAILED (I/O / permission error,
+        corrupt JSON, or a structurally-invalid root / ``managed_uuids`` field).
+        The true on-disk state is UNKNOWN, so ``uuids`` is empty and the caller
+        MUST NOT rewrite the file (rewriting empty would ERASE state a transient
+        failure merely hid) and MUST skip orphan recovery this boot.
+
+    Defensive parsing — corrupt / malformed state files must never crash the
+    agent's startup. Per PR #9682 CodeRabbit review this catches a superset of
+    the original (FileNotFoundError, JSONDecodeError) cases:
+
+      * OSError (PermissionError, IsADirectoryError, NotADirectoryError, I/O
+        errors) — disk problems on the host volume should NOT brick the agent;
+        inconclusive so the caller skips recovery + leaves the file untouched.
+      * Non-dict JSON root — a top-level list / int / string / null would have
+        crashed `.get(...)`; inconclusive (do not clobber a hand-editable file).
       * Non-list `managed_uuids` — a misshapen value would have crashed
-        `set(...)` (int) or silently iterated characters (string).
-      * Non-string entries — bytes / ints / None inside the list could
-        flow through to downstream `in _previously_managed` checks
-        comparing against `str` UUIDs and silently never match. Coerce
-        the type guard at the boundary instead.
-
-    Every malformed-state branch logs at WARNING and returns ``set()``
-    so the operator can spot the corruption in pod logs without losing
-    cap-write availability.
+        `set(...)`; inconclusive.
+      * Non-string entries — bytes / ints / None inside an otherwise valid list
+        are dropped at the boundary; this is still a CONCLUSIVE read of a
+        mostly-valid file (the kept subset is authoritative).
     """
     try:
         with open(_MANAGED_STATE_PATH) as f:
             raw = json.load(f)
     except FileNotFoundError:
-        return set()
+        return set(), True  # first boot — conclusively empty
     except (OSError, json.JSONDecodeError) as e:
         logger.warning(
-            "Failed to read managed-GPU state at %s (%s: %s); "
-            "treating as empty. Orphan recovery will skip this startup.",
+            "Failed to read managed-GPU state at %s (%s: %s); read is "
+            "INCONCLUSIVE — skipping orphan recovery and leaving the file "
+            "untouched this startup (retry next boot).",
             _MANAGED_STATE_PATH,
             type(e).__name__,
             e,
         )
-        return set()
+        return set(), False
 
     if not isinstance(raw, dict):
         logger.warning(
             "Managed-GPU state at %s has unexpected root type %s "
-            "(expected object); treating as empty.",
+            "(expected object); read is INCONCLUSIVE — leaving the file "
+            "untouched this startup.",
             _MANAGED_STATE_PATH,
             type(raw).__name__,
         )
-        return set()
+        return set(), False
 
     uuids = raw.get("managed_uuids", [])
     if not isinstance(uuids, list):
         logger.warning(
             "Managed-GPU state at %s has unexpected managed_uuids type "
-            "%s (expected list); treating as empty.",
+            "%s (expected list); read is INCONCLUSIVE — leaving the file "
+            "untouched this startup.",
             _MANAGED_STATE_PATH,
             type(uuids).__name__,
         )
-        return set()
+        return set(), False
 
     # Count invalid entries directly rather than from len(set) vs
     # len(list): the set comprehension deduplicates,
@@ -214,7 +221,17 @@ def _load_previously_managed_gpus() -> set[str]:
             invalid_count,
             len(valid),
         )
-    return valid
+    return valid, True
+
+
+def _load_previously_managed_gpus() -> set[str]:
+    """Back-compat wrapper returning ONLY the UUID set (drops the conclusive
+    flag). Kept for callers/tests that just need the parsed set; startup orphan
+    recovery uses `_read_managed_gpus_state` directly so it can honour read
+    conclusiveness (skip recovery + avoid an empty-state rewrite on a failed
+    read)."""
+    uuids, _ = _read_managed_gpus_state()
+    return uuids
 
 
 def _persist_managed_gpus(uuids: set[str]) -> None:
@@ -239,6 +256,17 @@ def _nvml_uuid(handle) -> str:
     return uuid.decode("ascii") if isinstance(uuid, bytes) else uuid
 
 
+# UUIDs whose cap ACQUISITION completed (cap live in hardware + in-memory
+# ownership recorded) but whose durable ADD to `managed_gpus.json` failed.
+# Acquisition-side peer of `_pending_retirement`: without it,
+# `_record_managed_gpu_by_uuid` adds the UUID to `_previously_managed` before
+# persisting, so a persist failure is masked by the membership guard and never
+# retried — a later SIGKILL / node crash then loses the ONLY orphan-recovery
+# record and strands the live cap. Retried (persistence ONLY, never a hardware
+# re-apply) by `_flush_pending_acquisitions` at the top of every reconcile.
+_pending_acquisition: set[str] = set()
+
+
 def _record_managed_gpu_by_uuid(uuid: str) -> None:
     """Library-agnostic UUID persistence helper.
 
@@ -247,15 +275,65 @@ def _record_managed_gpu_by_uuid(uuid: str) -> None:
     NVML (`nvmlDeviceGetUUID`) or DCGM (`DCGM_FI_DEV_UUID`). Separating
     the persistence from the UUID source means DcgmActuator can
     record state without reaching into the NVML helpers.
+
+    Durability: the UUID is added to the in-memory `_previously_managed` mirror
+    first (the cap is already live, so the GPU must look managed to this
+    process's shutdown / orphan paths). If the durable write then fails we do
+    NOT re-raise — the cap write already succeeded and reconcile must continue —
+    but we record the UUID in `_pending_acquisition` so
+    `_flush_pending_acquisitions` retries the persist next cycle. Otherwise the
+    membership guard below would suppress every future persist attempt for this
+    UUID, and an ungraceful exit would strand the cap with no recovery record.
     """
-    if uuid not in _previously_managed:
-        _previously_managed.add(uuid)
+    if uuid in _previously_managed:
+        return
+    _previously_managed.add(uuid)
+    try:
         _persist_managed_gpus(_previously_managed)
+    except Exception as e:
+        _pending_acquisition.add(uuid)
+        logger.warning(
+            "Recorded managed GPU UUID %s in memory but persisting the durable "
+            "set failed; the cap is live and the durable record will be retried "
+            "next reconcile (orphan recovery after an ungraceful exit depends on "
+            "it): %s",
+            uuid,
+            e,
+        )
 
 
 def _record_managed_gpu_uuid(handle) -> None:
     """Called from _apply_cap() after every successful NVML write."""
     _record_managed_gpu_by_uuid(_nvml_uuid(handle))
+
+
+def _flush_pending_acquisitions() -> None:
+    """Retry the durable ADD for cap acquisitions whose hardware write +
+    in-memory ownership completed but whose `_persist_managed_gpus` write
+    failed.
+
+    Retries ONLY the persistence (writes the authoritative in-memory
+    `_previously_managed`), never a hardware re-apply, so it can never disturb a
+    live cap. Called at the top of every reconcile cycle so it flushes
+    independently of Kubernetes API health, mirroring
+    `_flush_pending_retirements`."""
+    if not _pending_acquisition:
+        return
+    try:
+        _persist_managed_gpus(_previously_managed)
+    except Exception as e:
+        logger.warning(
+            "Deferred acquisition persistence retry failed (%d pending); will "
+            "retry next cycle: %s",
+            len(_pending_acquisition),
+            e,
+        )
+        return
+    logger.info(
+        "Flushed %d deferred cap acquisition(s) to durable state.",
+        len(_pending_acquisition),
+    )
+    _pending_acquisition.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -279,9 +357,14 @@ class PowerAgentMetrics:
         if _PROMETHEUS_AVAILABLE and prometheus_port > 0:
             self.applied_limit_watts = Gauge(
                 "dynamo_power_agent_applied_limit_watts",
-                "Current live power limit per physical GPU (watts). Tracks the "
-                "cap we apply and is re-synced to the live value on restore / "
-                "no-write paths, so it never strands on a stale cap.",
+                "Last applied/observed power limit per GPU index (watts), "
+                "updated on every apply and re-synced to the live value on "
+                "restore / no-write paths. NOTE: series are labeled by the "
+                "actuator's GPU index. On the DCGM actuator a hostengine "
+                "re-enumeration can move a GPU to a new index; the new index is "
+                "updated but the old index series is NOT deleted and lingers "
+                "until the process restarts. NVML indices are process-stable, "
+                "so this caveat does not apply to the default actuator.",
                 labelnames=("gpu",),
             )
             self.multi_pod_gpu_total = Counter(
@@ -291,10 +374,13 @@ class PowerAgentMetrics:
             )
             self.apply_failures_total = Counter(
                 "dynamo_power_agent_apply_failures_total",
-                "Times an actuator write (NVML nvmlDeviceSetPowerManagementLimit "
-                "or DCGM dcgmConfigSet) raised — the cap was NOT applied to the "
-                "GPU. Distinct from policy fallbacks (tracked by "
-                "safe_default_applied_total) where the cap IS applied at safe-default.",
+                "Times a cap could NOT be made live on the GPU: the actuator "
+                "write (NVML nvmlDeviceSetPowerManagementLimit or DCGM "
+                "dcgmConfigSet) failed, OR the DCGM path refused the write "
+                "because it could not verify the target GPU's identity "
+                "(re-enumeration / unreadable UUID) before writing. Distinct "
+                "from policy fallbacks (tracked by safe_default_applied_total) "
+                "where the cap IS applied at safe-default.",
             )
             self.safe_default_applied_total = Counter(
                 "dynamo_power_agent_safe_default_applied_total",
@@ -891,20 +977,52 @@ def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
     # Reload IN PLACE — never rebind `_previously_managed`, or the alias to
     # `managed_state.previously_managed` (shared with the actuator's module
     # copy) would split and re-introduce the dual-copy bug.
-    reloaded = _load_previously_managed_gpus()
+    reloaded, conclusive = _read_managed_gpus_state()
     _previously_managed.clear()
     _previously_managed.update(reloaded)
-    for gpu_idx in range(actuator.device_count()):
+    if not conclusive:
+        # The durable state could not be read conclusively (I/O error or corrupt
+        # JSON). We do NOT know which GPUs a prior incarnation owned, so acting
+        # now would be unsafe on both sides: recovering from an empty view could
+        # strand real orphaned caps, and persisting the empty set would ERASE
+        # the (possibly intact) on-disk record a transient failure merely hid.
+        # Skip recovery AND the rewrite; the next boot retries the read.
+        logger.warning(
+            "Managed-GPU state read was inconclusive; skipping startup orphan "
+            "recovery and leaving the on-disk state untouched this boot."
+        )
+        return
+
+    persisted_snapshot = set(_previously_managed)
+    # UUIDs this pass removed from `_previously_managed` (restored or pruned).
+    # Queued for the reconcile-loop retirement flush if the final persist fails,
+    # so a pruned record can't linger on disk indefinitely.
+    retired_uuids: set[str] = set()
+
+    # ONE conclusive identity snapshot instead of a `range(device_count())` +
+    # per-index `get_uuid` loop. That naive loop was falsely conclusive on the
+    # DCGM path: the range is fixed pre-reconnect, but each `get_uuid` can
+    # reconnect and GROW discovery, so a persisted UUID that MOVED to a
+    # newly-enumerated index was never visited (no probe raised) and got pruned
+    # as absent. `scan_uuid_index_map` builds the map inside a single
+    # `_with_reconnect` that re-materializes the topology length, so a mid-scan
+    # growth is fully rescanned (see actuator.py `_resolve_idx_for_uuid` /
+    # `scan_uuid_index_map`). `scan_complete` is True only when the whole
+    # topology was enumerated cleanly, so an absent UUID is provably gone.
+    uuid_to_idx, scan_complete = actuator.scan_uuid_index_map()
+
+    # Restore pass — hardware writes, only on GPUs we positively identified as
+    # ours in the snapshot. Runs regardless of `scan_complete`: restoring a live
+    # orphan cap on a visible idle GPU is always safe (idle-gated + identity-
+    # bound), and `restore_default_by_uuid` re-resolves identity itself.
+    for uuid in sorted(persisted_snapshot & set(uuid_to_idx)):
+        gpu_idx = uuid_to_idx[uuid]
         try:
-            uuid = actuator.get_uuid(gpu_idx)
-            if uuid not in _previously_managed:
-                continue
-            # Bind the idle check to `uuid` (same reason as the reconcile
-            # path): resolving PIDs by bare `gpu_idx` on the DCGM path could
-            # read a re-enumerated GPU's workload and let us restore/retire the
-            # wrong GPU. A mismatch raises `_GpuIdentityMismatch`, caught by the
-            # per-GPU handler below, which keeps the UUID for a later startup —
-            # fail closed.
+            # Bind the idle check to `uuid` (same reason as the reconcile path):
+            # resolving PIDs by bare `gpu_idx` on the DCGM path could read a
+            # re-enumerated GPU's workload and let us restore/retire the wrong
+            # GPU. A mismatch raises `_GpuIdentityMismatch`, caught below, which
+            # keeps the UUID for a later startup — fail closed.
             if actuator.list_running_pids(gpu_idx, expected_uuid=uuid):
                 continue  # workload running — let normal reconcile handle it
             # Delegate the ENTIRE below-default / at-default / gone decision to
@@ -914,11 +1032,9 @@ def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
             # would reintroduce an A->B->A re-enumeration hole: current_w from
             # GPU-A, default_w from GPU-B, final identity back on A could
             # falsely conclude "at default" and retire ownership while A's cap
-            # is still live. `restore_default_by_uuid`
-            # also re-resolves the index (never trusts `gpu_idx`), so a DCGM
-            # re-enumeration between the probe above and the write lands on the
-            # GPU that actually carries `uuid`. The identity-bound
-            # `list_running_pids` above stays a cheap idle pre-filter only.
+            # is still live. It also re-resolves the index (never trusts
+            # `gpu_idx`), so a DCGM re-enumeration between the snapshot above and
+            # the write lands on the GPU that actually carries `uuid`.
             restore_result = actuator.restore_default_by_uuid(uuid)
             if restore_result is False:
                 # Inconclusive: a relocation-scan probe raised / the resolved
@@ -934,16 +1050,53 @@ def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
                 )
             # True -> we restored a live below-default cap.
             # None -> restore_default_by_uuid confirmed (in one snapshot) the
-            #         GPU is already at/above default, or proved it gone on a
-            #         clean scan. Either outcome is CONCLUSIVE that no cap of
-            #         ours remains, so retire ownership: retaining a UUID whose
-            #         cap is proven gone would let a LATER unrelated cap on the
-            #         same physical GPU be clobbered by a future startup's
-            #         orphan recovery.
+            #         GPU is already at/above default. Either outcome is
+            #         CONCLUSIVE that no cap of ours remains, so retire
+            #         ownership: retaining a UUID whose cap is proven gone would
+            #         let a LATER unrelated cap on the same physical GPU be
+            #         clobbered by a future startup's orphan recovery.
             _previously_managed.discard(uuid)
+            retired_uuids.add(uuid)
         except Exception as e:
-            logger.warning("orphan-restore failed for GPU %d: %s", gpu_idx, e)
-    _persist_managed_gpus(_previously_managed)
+            logger.warning("orphan-restore failed for UUID %s: %s", uuid, e)
+
+    # Absent-UUID prune — STATE ONLY, never a hardware write. A persisted UUID
+    # missing from the snapshot is provably absent ONLY when the scan was
+    # CONCLUSIVE; then the GPU is gone, there is nothing to restore, and we drop
+    # the stale record. We deliberately do NOT call `restore_default_by_uuid`
+    # here: a UUID missing from an INCONCLUSIVE snapshot can be a transiently
+    # unreadable but PRESENT (possibly busy) GPU, and that call would strip its
+    # live cap with no idle check. On an inconclusive scan we retain everything
+    # and retry next boot.
+    if scan_complete:
+        for uuid in persisted_snapshot - set(uuid_to_idx):
+            _previously_managed.discard(uuid)
+            retired_uuids.add(uuid)
+            logger.info(
+                "Retiring stale managed-GPU record for absent UUID %s (no "
+                "visible GPU reports it; GPU replaced / removed / moved).",
+                uuid,
+            )
+
+    # Persisting must never brick startup. `_read_managed_gpus_state` already
+    # tolerates a read failure without rewriting, so the matching write here
+    # must be equally defensive: a read-only / permission-denied state volume
+    # would otherwise raise, escape `PowerAgent.__init__`, and CrashLoop the pod
+    # — the exact outcome the read path was written to avoid. On failure, queue
+    # this pass's retirements so the reconcile-loop retirement flush retries the
+    # durable write (otherwise a pruned UUID would linger on disk indefinitely).
+    try:
+        _persist_managed_gpus(_previously_managed)
+    except Exception as e:
+        if retired_uuids:
+            _pending_retirement.update(retired_uuids)
+        logger.warning(
+            "Failed to persist managed-GPU state during startup orphan recovery "
+            "(%s: %s); queued %d retirement(s) for the reconcile-loop flush.",
+            type(e).__name__,
+            e,
+            len(retired_uuids),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1208,10 +1361,12 @@ class PowerAgent:
         its GPU. Operators should alert on
         `k8s_list_failures_total > 0 over 5m`.
         """
-        # Flush any release whose durable prune failed on a previous cycle
-        # BEFORE listing pods, so it retries even during a Kubernetes API outage
-        # (the retry touches only the state volume, not the apiserver).
+        # Flush any release OR acquisition whose durable write failed on a
+        # previous cycle BEFORE listing pods, so it retries even during a
+        # Kubernetes API outage (the retry touches only the state volume, not
+        # the apiserver).
         _flush_pending_retirements()
+        _flush_pending_acquisitions()
 
         pods = self._list_pods_on_node()
         if pods is None:

@@ -70,9 +70,14 @@ agent:
   #          will fail fast at startup.
   #          REQUIRES a DCGM 4.x hostengine: the image bakes DCGM 4.x
   #          Python bindings and DcgmActuator uses c_dcgmDeviceConfig_v2,
-  #          which has no 3.x fallback. Match the operator's nvidia-dcgm
-  #          major version to the bundled bindings (DCGM guarantees compat
-  #          within a major, not across); a 3.x hostengine is unsupported.
+  #          which has no 3.x fallback. Keep the bundled client >= the
+  #          operator's nvidia-dcgm hostengine version (NVIDIA's guidance is
+  #          client >= hostengine, not merely the same major). Pin the image's
+  #          DCGM client to the `dcgm` tag your GPU Operator deploys for its
+  #          nvidia-dcgm hostengine (the image default is DCGM 4.5.2; confirm
+  #          against your operator's nvidia-dcgm image tag) and bump the
+  #          Dockerfile DCGM_IMAGE arg in lockstep when the operator moves. A
+  #          3.x hostengine is unsupported.
   #
   # Operator warning: any secondary writer to nvmlDeviceSetPowerManagementLimit
   # or dcgmConfigSet (regardless of which library it uses) will cause
@@ -91,6 +96,15 @@ agent:
     # release name or namespace), override here. The hostengine
     # must be reachable from this DaemonSet's pods (same cluster,
     # no NetworkPolicy blocking egress to gpu-operator/*).
+    #
+    # IMPORTANT: the target must resolve to the NODE-LOCAL hostengine. The
+    # stock nvidia-dcgm Service sets internalTrafficPolicy: Local, so the
+    # default host routes to the DCGM pod on the SAME node — which is required:
+    # DcgmActuator maps DCGM GPUs to NVML GPUs by comparing the REMOTE
+    # hostengine's UUIDs against this pod's LOCAL NVML UUIDs (see actuator.py
+    # _ensure_identity_map). A custom host that load-balances to a DCGM
+    # instance on ANOTHER node would fail the UUID cross-check (RuntimeError at
+    # startup) or mis-map GPUs. Any override MUST preserve node-local routing.
     host: nvidia-dcgm.gpu-operator.svc.cluster.local
     port: 5555
     # NOTE: The Power Agent issues ONLY dcgmConfigSet — never the
