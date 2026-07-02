@@ -209,8 +209,9 @@ class GlobalPlannerConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-        **kwargs,
-    ):
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> None:
         """
         Validate deployment (no-op for GlobalPlanner).
 
@@ -345,7 +346,11 @@ class GlobalPlannerConnector(PlannerConnector):
             return local.get_worker_info(sub_component_type, backend)
         return build_worker_info_from_defaults(backend, sub_component_type)
 
-    def get_model_name(self, **kwargs) -> str:
+    def get_model_name(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> str:
         """
         Get model name.
 
@@ -359,7 +364,10 @@ class GlobalPlannerConnector(PlannerConnector):
         local = self._get_local_k8s_connector()
         if local is not None:
             try:
-                return local.get_model_name(**kwargs)
+                return local.get_model_name(
+                    require_prefill=require_prefill,
+                    require_decode=require_decode,
+                )
             except (
                 ModelNameNotFoundError,
                 DeploymentModelNameMismatchError,

@@ -259,6 +259,14 @@ class NativePlannerBase:
         m = self.environment.metrics_state()
         if not m.is_valid():
             return
+        # ``is_valid`` enforces these invariants, but mypy cannot narrow
+        # dataclass fields through a separate predicate method.
+        assert m.ttft is not None
+        assert m.itl is not None
+        assert m.num_req is not None
+        assert m.request_duration is not None
+        assert m.isl is not None
+        assert m.osl is not None
         self.prometheus_metrics.observed_ttft_ms.set(m.ttft)
         self.prometheus_metrics.observed_itl_ms.set(m.itl)
         self.prometheus_metrics.observed_requests_per_second.set(

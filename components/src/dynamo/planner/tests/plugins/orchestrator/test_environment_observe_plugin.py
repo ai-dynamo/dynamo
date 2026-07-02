@@ -1,12 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
+
 from dynamo.planner.core.types import FpmObservations, ScheduledTick, TrafficObservation
 from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.plugins.builtins.observe import (
     EnvironmentObservePlugin,
     ObserveStageRequest,
 )
+
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
 
 
 class _FakeEnvironment:

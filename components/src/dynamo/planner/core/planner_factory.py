@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, cast
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.base import PlannerConnector, WorkerInfoProvider
@@ -18,7 +18,10 @@ from dynamo.planner.environment.metrics_provider.prometheus_traffic_provider imp
 from dynamo.planner.environment.metrics_provider.runtime_provider import (
     RuntimeFpmProvider,
 )
-from dynamo.planner.environment.runtime import RuntimeNamespaceBinding
+from dynamo.planner.environment.runtime import (
+    RuntimeNamespaceBinding,
+    RuntimeNamespaceResolver,
+)
 from dynamo.runtime import DistributedRuntime
 
 if TYPE_CHECKING:
@@ -102,7 +105,7 @@ def construct_environment(
     if callable(getattr(connector, "get_worker_runtime_namespace", None)):
         namespace_binding = RuntimeNamespaceBinding(
             namespace=config.namespace,
-            resolver=connector,
+            resolver=cast(RuntimeNamespaceResolver, connector),
         )
         environment.runtime_namespace_source = namespace_binding
 
@@ -147,6 +150,7 @@ def construct_planner(
         PrefillPlanner,
     )
 
+    planner_cls: type[NativePlannerBase]
     if config.mode == "disagg":
         planner_cls = DisaggPlanner
     elif config.mode == "prefill":
