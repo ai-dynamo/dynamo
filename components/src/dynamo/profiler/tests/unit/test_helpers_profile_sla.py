@@ -46,8 +46,8 @@ try:
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
         HardwareSpec,
-        ModelCacheSpec,
         MockerSpec,
+        ModelCacheSpec,
         SLASpec,
         WorkloadSpec,
     )
