@@ -112,13 +112,17 @@ runs:
         # sanity check (meson wraps nvcc with the sccache it finds on PATH,
         # sidestepping use-sccache.sh's no-server fallback). Secret values are not
         # part of BuildKit's cache key, so this never invalidates the fast path.
+        # Only forward the credentials when S3 sccache is actually configured
+        # (bucket set) — a bucket-less caller's build has no use for them.
         SECRET_ARGS=""
-        TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
-        if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
-          SECRET_ARGS+=" --secret id=aws-web-identity-token,src=${TOKEN_FILE}"
-          SECRET_ARGS+=" --secret id=aws-role-arn,env=AWS_ROLE_ARN"
-        else
-          echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
+        if [ -n "${SCCACHE_BUCKET:-}" ]; then
+          TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
+          if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
+            SECRET_ARGS+=" --secret id=aws-web-identity-token,src=${TOKEN_FILE}"
+            SECRET_ARGS+=" --secret id=aws-role-arn,env=AWS_ROLE_ARN"
+          else
+            echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
+          fi
         fi
         docker buildx build \
             --builder ${{ inputs.builder_name }} \
@@ -179,12 +183,14 @@ runs:
         # as the compliance_artifact extract above). Same IRSA secrets too, so a
         # cache-missed stage rebuild can still authenticate sccache (see above).
         SECRET_ARGS=""
-        TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
-        if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
-          SECRET_ARGS+=" --secret id=aws-web-identity-token,src=${TOKEN_FILE}"
-          SECRET_ARGS+=" --secret id=aws-role-arn,env=AWS_ROLE_ARN"
-        else
-          echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
+        if [ -n "${SCCACHE_BUCKET:-}" ]; then
+          TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
+          if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
+            SECRET_ARGS+=" --secret id=aws-web-identity-token,src=${TOKEN_FILE}"
+            SECRET_ARGS+=" --secret id=aws-role-arn,env=AWS_ROLE_ARN"
+          else
+            echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
+          fi
         fi
         docker buildx build \
             --builder ${{ inputs.builder_name }} \
