@@ -21,13 +21,6 @@
 # Helm artifact repository; its root endpoint intermittently returns 503.
 ^https://charts\.bitnami\.com/bitnami/?$
 
-# NVIDIA docs site intermittently returns 404 to GitHub runners for these
-# specific deployment-guide pages (verified 2026-06-08; links work in-browser).
-# Keep these exact so new / renamed deployment-guide links are still checked.
-^https://docs\.nvidia\.com/dynamo/kubernetes-deployment/deployment-guide$
-^https://docs\.nvidia\.com/dynamo/kubernetes-deployment/deployment-guide/dgdr-reference$
-^https://docs\.nvidia\.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery$
-
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$
 ^https://etcd\.io/docs/v3\.5/install/?$
