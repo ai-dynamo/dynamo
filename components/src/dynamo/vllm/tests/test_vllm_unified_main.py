@@ -48,7 +48,7 @@ def test_main_routes_normal_node_to_run():
 
     parse_args.assert_called_once()
     run_headless.assert_not_called()
-    run.assert_called_once_with(unified_main.VllmLLMEngine)
+    run.assert_called_once_with(unified_main.VllmLLMEngine, config=config)
 
 
 @pytest.mark.asyncio

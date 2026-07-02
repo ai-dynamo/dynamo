@@ -25,7 +25,8 @@ def main():
     if config.headless:
         run_dynamo_headless(config)
         return
-    run(VllmLLMEngine)
+    # Thread the already-parsed config through so from_args doesn't re-parse.
+    run(VllmLLMEngine, config=config)
 
 
 if __name__ == "__main__":

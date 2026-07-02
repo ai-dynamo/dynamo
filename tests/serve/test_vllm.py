@@ -195,24 +195,34 @@ vllm_configs = {
             # ceiling over model download + engine-core respawn.
             pytest.mark.timeout(1800),
             pytest.mark.model("Qwen/Qwen3-30B-A3B"),
-            # VRAM carve-out (.ai/test-model-size-guardrails.md): the 30B MoE is
-            # required to exercise real expert parallelism, and this runs on the
-            # dedicated gpu_4 nightly tier (large-VRAM, whole-node), not the
-            # 24 GiB bin-packed standard tier. profiled_vram_gib is omitted
-            # pending a profiling run; the test is not bin-packed by --max-vram-gib.
+            # DISABLED pending CI hardware. Elastic EP needs a real MoE with EPLB
+            # (`--enable-elastic-ep` requires `--enable-eplb`), and vLLM's EPLB
+            # only supports unquantized or FP8 experts — GPTQ/AWQ raise
+            # `NotImplementedError: EPLB is not supported ...`. The smallest
+            # EPLB-capable MoE (Qwen3-30B-A3B, bf16) needs ~57 GiB of weights per
+            # replica at TP=1, and DP=2->4 puts a full replica on each GPU, so it
+            # requires ~80 GiB/GPU. CI's only 4-GPU runner
+            # (prod-tester-amd-gpu-4-v2) has 24 GiB GPUs and OOMs at model load.
+            # Locally validated end-to-end on H200 GPUs with the pinned vLLM
+            # 0.24.0: initial serving, DP=2->4->2, and inference after each scale
+            # transition all pass. Keep this skipped until CI has a >=80 GiB
+            # 4-GPU runner.
+            pytest.mark.skip(
+                reason="Locally passes DP=2->4->2 on H200 with vLLM 0.24.0, but "
+                "needs a >=80 GiB 4-GPU runner (real EPLB MoE is ~57 GiB/GPU at "
+                "TP=1); CI's only 4-GPU runner is 24 GiB and OOMs at model load."
+            ),
         ],
-        # Small MoE that exercises expert parallelism; must match elastic_ep.sh's
+        # MoE that exercises real expert parallelism; must match elastic_ep.sh's
         # default so payload model-name injection resolves to the served model.
         model="Qwen/Qwen3-30B-A3B",
         request_payloads=[
             # Serving works at the initial DP size...
             chat_payload_default(repeat_count=1),
-            # ...scale up to 4 DP ranks and confirm generation survives.
-            # Scale-DOWN (4->2) is intentionally omitted: validated on 4xH100,
-            # scale-UP returns status:ok and keeps serving, but scale-DOWN never
-            # returns (hangs in vLLM 0.22.1's ray DP `_scale_down_elastic_ep`).
-            # Re-add a downscale payload once that's fixed upstream.
+            # ...scale up to 4 DP ranks and confirm generation survives...
             elastic_ep_scale_payload(new_data_parallel_size=4),
+            # ...then scale back down to 2 and confirm generation survives again.
+            elastic_ep_scale_payload(new_data_parallel_size=2),
         ],
     ),
     "aggregated_logprobs": VLLMConfig(

@@ -544,9 +544,12 @@ Lifecycle and runtime:
   drives `add_dp_placement_groups` to place DP-worker Ray actors across
   the Ray cluster, so multi-node is a Ray-cluster-membership concern
   (operator-managed `ray start`), not a per-node backend concern.
-  GPU-validated on 4×H100: scale-**up** (2→4) returns `status:ok` and keeps
-  serving; scale-**down** (4→2) currently hangs in vLLM's
-  `_scale_down_elastic_ep` (track upstream).
+  Locally GPU-validated on H200 GPUs with vLLM 0.24.0: scale-**up** (2→4)
+  and scale-**down** (4→2) return `status:ok`, and serving continues after
+  each transition. The integration test remains skipped in CI because each
+  unquantized Qwen3-30B-A3B replica needs about 57 GiB for weights at TP=1,
+  while CI's four-GPU runner has only 24 GiB per GPU; the test requires at
+  least 80 GiB per GPU for weights and runtime headroom.
 - **Headless multi-node (vLLM)** — `--headless` secondary nodes run
   vLLM workers only (multi-node TP/PP with `--data-parallel-backend mp`),
   bypassing DistributedRuntime; `unified_main` routes them to
