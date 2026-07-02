@@ -13,7 +13,13 @@ import json
 
 import pytest
 
-from dynamo.trtllm.engine import TensorRTLLMEngine
+# Importing the engine pulls in tensorrt_llm, which needs libcuda at import
+# time. Skip cleanly where the native stack isn't importable rather than
+# erroring collection.
+try:
+    from dynamo.trtllm.engine import TensorRTLLMEngine
+except Exception as exc:  # noqa: BLE001
+    pytest.skip(f"tensorrt_llm not importable ({exc})", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,
