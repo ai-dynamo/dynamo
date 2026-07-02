@@ -26,18 +26,20 @@ the default — write the row.
 
 vLLM defaults to `skip_special_tokens=true` when decoding tokens to text.
 For parsers whose grammar markers (`<|channel|>`, `<|message|>`,
-`<|tool_calls_section_begin|>`, `<|think|>`, etc.) are *single special
+`<|tool_calls_section_begin|>`, `[THINK]`, `[TOOL_CALLS]`, `<|think|>`, etc.) are *single special
 tokens* in the model's vocabulary, this strips the markers from the
 decoded text and the parser sees plain prose with no structure to match.
 
 The preprocessor flips the default to `false` for parsers whose markers
-are special tokens. Caller can still override explicitly via
-`output_options.skip_special_tokens`.
+are special tokens. An explicit `output_options.skip_special_tokens=true`
+with one of these parsers is rejected as `InvalidArgument`; returning a
+known-corrupt response is not a valid override.
 
-**Wrong value silently produces:** empty `reasoning_content` /
-`tool_calls` even when the model emitted them correctly. No error path.
-This is exactly the failure mode that broke `test_reasoning_effort` for
-gpt-oss before the harmony/gpt_oss whitelist landed.
+**If not rejected, the wrong value would silently produce:** empty
+`reasoning_content` / `tool_calls` even when the model emitted them
+correctly. This is exactly the failure mode that broke
+`test_reasoning_effort` for gpt-oss before the harmony/gpt_oss whitelist
+landed.
 
 ## PRE.2 — Per-request reasoning gate
 
@@ -95,12 +97,16 @@ match-on-parser shape) rather than a global behavior.
 `OpenAIPreprocessor::postprocessor_parsing_stream`
 
 `tool_choice = required | named` forces the backend into guided
-decoding, which constrains output to bare JSON with no reasoning
-wrapper. The preprocessor turns the reasoning parser off for these cases.
+decoding. Backends without reasoning-aware guided decoding constrain from
+token zero and emit bare JSON, so the preprocessor turns force-start
+reasoning parsers off. A backend that publishes
+`runtime_data.reasoning_aware_guided_decoding = true` delays the grammar
+until its native reasoner reaches the end marker; the preprocessor keeps
+reasoning parsing enabled for its `reasoning</think>JSON` output.
 
-**Wrong value silently produces:** parsers that inject `<think>`
-unconditionally (e.g. `minimax_append_think`) contaminate the tool-call
-JSON fed into the jail.
+**Wrong value silently produces:** false drops valid reasoning; true on a
+backend that emits bare JSON causes a force-start parser to classify the
+tool payload as `reasoning_content` instead of feeding it to the jail.
 
 ## PRE.5 — `ignore_eos` / EOS token ids
 

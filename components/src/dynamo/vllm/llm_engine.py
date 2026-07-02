@@ -69,10 +69,16 @@ from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
 )
-from dynamo.vllm.capacity import per_rank_kv_blocks
+from dynamo.vllm.capacity import (
+    per_rank_kv_blocks,
+    publish_reasoning_aware_guided_decoding,
+    reasoning_aware_guided_decoding_runtime_data,
+)
 
 from .handlers import (
     VllmEnginePauseController,
+    _engine_generate_reasoning_kwargs,
+    _request_reasoning_metadata,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -174,6 +180,10 @@ class VllmLLMEngine(LLMEngine):
         dyn_tool_call_parser: Optional[str] = None,
         dyn_reasoning_parser: Optional[str] = None,
         enable_rl: bool = False,
+        exclude_tools_when_tool_choice_none: bool = True,
+        dyn_enable_structural_tag: bool = False,
+        dyn_structural_tag_scope: str = "auto",
+        dyn_structural_tag_schema: str = "auto",
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
@@ -182,6 +192,10 @@ class VllmLLMEngine(LLMEngine):
         self._dyn_tool_call_parser = dyn_tool_call_parser
         self._dyn_reasoning_parser = dyn_reasoning_parser
         self.enable_rl = enable_rl
+        self._exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
+        self._dyn_enable_structural_tag = dyn_enable_structural_tag
+        self._dyn_structural_tag_scope = dyn_structural_tag_scope
+        self._dyn_structural_tag_schema = dyn_structural_tag_schema
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -257,6 +271,12 @@ class VllmLLMEngine(LLMEngine):
             dyn_tool_call_parser=config.dyn_tool_call_parser,
             dyn_reasoning_parser=config.dyn_reasoning_parser,
             enable_rl=config.enable_rl,
+            exclude_tools_when_tool_choice_none=(
+                config.exclude_tools_when_tool_choice_none
+            ),
+            dyn_enable_structural_tag=config.dyn_enable_structural_tag,
+            dyn_structural_tag_scope=config.dyn_structural_tag_scope,
+            dyn_structural_tag_schema=config.dyn_structural_tag_schema,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -327,6 +347,13 @@ class VllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.engine_args.model,
             served_model_name=self._served_model_name,
+            runtime_data=(
+                reasoning_aware_guided_decoding_runtime_data(
+                    vllm_config, self._dyn_reasoning_parser
+                )
+                if is_generation_stage(self.disaggregation_mode)
+                else None
+            ),
             llm=LlmRegistration(
                 context_length=self._model_max_len,
                 kv_cache_block_size=block_size,
@@ -425,6 +452,9 @@ class VllmLLMEngine(LLMEngine):
         # model resolves to None. With LoRA enabled, an unknown adapter name
         # raises rather than silently falling back to the base model.
         lora_request = self._resolve_lora_request(request.get("model"))
+        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(
+            dict(request)
+        )
 
         gen = self.engine_client.generate(
             prompt,
@@ -433,6 +463,11 @@ class VllmLLMEngine(LLMEngine):
             data_parallel_rank=local_dp_rank,
             lora_request=lora_request,
             **telemetry.engine_trace_kwargs(context),
+            **_engine_generate_reasoning_kwargs(
+                self.engine_client,
+                reasoning_ended,
+                reasoning_parser_kwargs,
+            ),
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
@@ -729,6 +764,20 @@ class VllmLLMEngine(LLMEngine):
         if model_type != ModelType.Prefill:
             runtime_config.tool_call_parser = self._dyn_tool_call_parser
             runtime_config.reasoning_parser = self._dyn_reasoning_parser
+            if self._vllm_config is not None:
+                publish_reasoning_aware_guided_decoding(
+                    runtime_config,
+                    self._vllm_config,
+                    self._dyn_reasoning_parser,
+                )
+        runtime_config.exclude_tools_when_tool_choice_none = (
+            self._exclude_tools_when_tool_choice_none
+        )
+        runtime_config.set_structural_tag_mode(
+            "on" if self._dyn_enable_structural_tag else "off"
+        )
+        runtime_config.set_structural_tag_scope(self._dyn_structural_tag_scope)
+        runtime_config.set_structural_tag_schema(self._dyn_structural_tag_schema)
 
         # Carry the worker's DP-rank range and capacity metadata (the same
         # effective vLLM values the base-model MDC publishes via EngineConfig in

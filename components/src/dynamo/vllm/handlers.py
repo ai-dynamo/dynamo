@@ -96,6 +96,7 @@ from dynamo.vllm.kv_connector_protocols import (
 )
 
 from .args import Config
+from .capacity import publish_reasoning_aware_guided_decoding
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
@@ -964,6 +965,15 @@ def _request_reasoning_metadata(
             reasoning_ended = extra_args.get("reasoning_ended")
         if reasoning_parser_kwargs is None:
             reasoning_parser_kwargs = extra_args.get("reasoning_parser_kwargs")
+
+    if not isinstance(reasoning_ended, bool):
+        reasoning_ended = None
+    if not isinstance(reasoning_parser_kwargs, dict):
+        reasoning_parser_kwargs = None
+    elif "chat_template_kwargs" in reasoning_parser_kwargs and not isinstance(
+        reasoning_parser_kwargs["chat_template_kwargs"], dict
+    ):
+        reasoning_parser_kwargs = None
 
     return reasoning_ended, reasoning_parser_kwargs
 
@@ -2121,11 +2131,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                             runtime_config = ModelRuntimeConfig()
                             runtime_config.context_length = self.model_max_len
-                            runtime_config.tool_call_parser = (
-                                self.config.dyn_tool_call_parser
+                            if not self.use_vllm_tokenizer:
+                                runtime_config.tool_call_parser = (
+                                    self.config.dyn_tool_call_parser
+                                )
+                                runtime_config.reasoning_parser = (
+                                    self.config.dyn_reasoning_parser
+                                )
+                            runtime_config.exclude_tools_when_tool_choice_none = (
+                                self.config.exclude_tools_when_tool_choice_none
                             )
-                            runtime_config.reasoning_parser = (
-                                self.config.dyn_reasoning_parser
+                            runtime_config.set_structural_tag_mode(
+                                "on" if self.config.dyn_enable_structural_tag else "off"
+                            )
+                            runtime_config.set_structural_tag_scope(
+                                self.config.dyn_structural_tag_scope
+                            )
+                            runtime_config.set_structural_tag_schema(
+                                self.config.dyn_structural_tag_schema
                             )
 
                             # Match the base-model registration topology (see
@@ -2156,6 +2179,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 lora_model_type = ModelType.Chat | ModelType.Completions
                                 lora_worker_type = WorkerType.Aggregated
                                 lora_needs_set = []
+                            if (
+                                lora_worker_type != WorkerType.Prefill
+                                and not self.use_vllm_tokenizer
+                            ):
+                                publish_reasoning_aware_guided_decoding(
+                                    runtime_config,
+                                    getattr(self.engine_client, "vllm_config", None),
+                                    self.config.dyn_reasoning_parser,
+                                )
                             if self.config.route_to_encoder:
                                 lora_needs_set.append(WorkerType.Encode)
                             lora_needs: list[list[WorkerType]] = (
@@ -2164,7 +2196,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                             # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
                             await register_model(
-                                model_input=ModelInput.Tokens,
+                                model_input=(
+                                    ModelInput.Text
+                                    if self.use_vllm_tokenizer
+                                    else ModelInput.Tokens
+                                ),
                                 model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.model,
@@ -3447,14 +3483,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard, self._abort_monitor(
-            context, request_id, abort_guard=abort_guard
+        async with (
+            _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard,
+            self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
                 gen = self.engine_client.generate(

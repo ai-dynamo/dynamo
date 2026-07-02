@@ -30,6 +30,7 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import enable_disjoint_streaming_output
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.reasoning import reasoning_parsers_compatible
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -392,18 +393,39 @@ async def parse_args(args: list[str]) -> Config:
         endpoint
     )
 
-    # Validate parser flags: error if both --{name} and --dyn-{name} are set.
-    # --dyn-{name} choices are validated by argparse; --{name} by SGLang.
+    # Tool parsing must have a single owner. Reasoning parsing is intentionally
+    # different: SGLang needs its native parser to defer guided decoding until
+    # reasoning ends, while Dynamo needs its parser to expose reasoning_content.
     _validate_parser_flags(
         parsed_args.tool_call_parser,
         dynamo_config.dyn_tool_call_parser,
         "tool-call-parser",
     )
-    _validate_parser_flags(
-        parsed_args.reasoning_parser,
-        dynamo_config.dyn_reasoning_parser,
-        "reasoning-parser",
-    )
+    if not reasoning_parsers_compatible(
+        parsed_args.reasoning_parser, dynamo_config.dyn_reasoning_parser
+    ):
+        logging.error(
+            "Incompatible reasoning parsers: --reasoning-parser=%s and "
+            "--dyn-reasoning-parser=%s do not parse the same wire format.",
+            parsed_args.reasoning_parser,
+            dynamo_config.dyn_reasoning_parser,
+        )
+        sys.exit(1)
+
+    if dynamo_config.use_sglang_tokenizer and (
+        dynamo_config.dyn_tool_call_parser
+        or dynamo_config.dyn_reasoning_parser
+        or dynamo_config.dyn_enable_structural_tag
+    ):
+        logging.error(
+            "--use-sglang-tokenizer is incompatible with Dynamo parser or "
+            "structural-tag flags: "
+            "text mode bypasses Dynamo guided-tool construction and response parsing. "
+            "Remove --dyn-tool-call-parser/--dyn-reasoning-parser/"
+            "--dyn-enable-structural-tag or use --dyn-chat-processor sglang "
+            "on the frontend."
+        )
+        sys.exit(1)
 
     if dynamo_config.custom_jinja_template and dynamo_config.use_sglang_tokenizer:
         logging.error(

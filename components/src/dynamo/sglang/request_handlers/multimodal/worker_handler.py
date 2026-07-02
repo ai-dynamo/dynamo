@@ -14,11 +14,13 @@ from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
     SglangMultimodalRequest,
 )
+from dynamo.sglang.reasoning import request_reasoning_kwargs
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 logger = logging.getLogger(__name__)
@@ -91,6 +93,17 @@ class SglangUtils:
             sampling_params["max_new_tokens"] = stop_conditions.max_tokens
         if stop_conditions.ignore_eos:
             sampling_params["ignore_eos"] = stop_conditions.ignore_eos
+
+        guided_decoding = sampling_options.guided_decoding
+        if isinstance(guided_decoding, dict):
+            json_schema = guided_decoding.get("json")
+            if json_schema is not None:
+                sampling_params["json_schema"] = json.dumps(json_schema)
+            structural_tag = guided_decoding.get("structural_tag")
+            if structural_tag is not None:
+                sampling_params["structural_tag"] = serialize_structural_tag(
+                    structural_tag
+                )
 
         logger.debug(f"Sampling params: {sampling_params}")
         return sampling_params
@@ -533,6 +546,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             bootstrap_room=bootstrap_info["bootstrap_room"],
             external_trace_header=trace_header,
             rid=context.trace_id if context else None,
+            **request_reasoning_kwargs(self.engine, request.request.model_dump()),
         )
 
         rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
@@ -594,6 +608,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                 gen_params["image_data"] = image_mm_items
             if video_data:
                 gen_params["video_data"] = video_data
+            gen_params.update(
+                request_reasoning_kwargs(self.engine, request.request.model_dump())
+            )
 
             agg_stream = await self.engine.async_generate(**gen_params)
 
@@ -804,6 +821,9 @@ class MultimodalPrefillWorkerHandler(
                 gen_params["image_data"] = image_mm_items
             if video_data:
                 gen_params["video_data"] = video_data
+            gen_params.update(
+                request_reasoning_kwargs(self.engine, request.request.model_dump())
+            )
 
             results = await self.engine.async_generate(**gen_params)
 

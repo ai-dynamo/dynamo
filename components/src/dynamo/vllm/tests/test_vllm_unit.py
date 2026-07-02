@@ -55,6 +55,41 @@ pytestmark = [
 mock_vllm_cli = make_cli_args_fixture("dynamo.vllm")
 
 
+def test_dynamo_and_native_reasoning_parsers_can_be_configured_together(
+    mock_vllm_cli,
+):
+    mock_vllm_cli(
+        "--model",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        "--dyn-tool-call-parser",
+        "nemotron_nano",
+        "--dyn-reasoning-parser",
+        "nemotron_v3",
+        "--reasoning-parser",
+        "nemotron_v3",
+    )
+
+    config = parse_args()
+
+    assert config.dyn_tool_call_parser == "nemotron_nano"
+    assert config.dyn_reasoning_parser == "nemotron_v3"
+    assert config.engine_args.reasoning_parser == "nemotron_v3"
+
+
+def test_incompatible_dynamo_and_native_reasoning_parsers_rejected(mock_vllm_cli):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--dyn-reasoning-parser",
+        "gpt_oss",
+        "--reasoning-parser",
+        "qwen3",
+    )
+
+    with pytest.raises(ValueError, match="Incompatible reasoning parsers"):
+        parse_args()
+
+
 def test_custom_jinja_template_invalid_path(mock_vllm_cli):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"
@@ -347,6 +382,10 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         component="backend",
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
+        exclude_tools_when_tool_choice_none=True,
+        dyn_enable_structural_tag=False,
+        dyn_structural_tag_scope="auto",
+        dyn_structural_tag_schema="auto",
     )
     worker_config = object()
 

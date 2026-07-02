@@ -31,6 +31,7 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
+from dynamo.sglang.reasoning import publish_reasoning_aware_guided_decoding
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
@@ -86,7 +87,7 @@ def _build_media_decoder_and_fetcher():
 
 
 async def _register_model_with_runtime_config(
-    engine: sgl.Engine,
+    engine: Optional[sgl.Engine],
     endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
@@ -341,7 +342,9 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
 
 
 async def _get_runtime_config(
-    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
+    engine: Optional[sgl.Engine],
+    server_args: ServerArgs,
+    dynamo_args: DynamoConfig,
 ) -> Optional[ModelRuntimeConfig]:
     """Extract runtime configuration from SGLang engine and args.
 
@@ -356,16 +359,28 @@ async def _get_runtime_config(
     runtime_config = ModelRuntimeConfig()
     runtime_config.context_length = server_args.context_length
     # set reasoning parser and tool call parser
-    runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
-    runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    text_mode = getattr(dynamo_args, "use_sglang_tokenizer", False)
+    runtime_config.reasoning_parser = (
+        None if text_mode else dynamo_args.dyn_reasoning_parser
+    )
+    runtime_config.tool_call_parser = (
+        None if text_mode else dynamo_args.dyn_tool_call_parser
+    )
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )
     runtime_config.set_structural_tag_mode(
-        "on" if dynamo_args.dyn_enable_structural_tag else "off"
+        "on" if not text_mode and dynamo_args.dyn_enable_structural_tag else "off"
     )
     runtime_config.set_structural_tag_scope(dynamo_args.dyn_structural_tag_scope)
     runtime_config.set_structural_tag_schema(dynamo_args.dyn_structural_tag_schema)
+    if not text_mode and server_args.disaggregation_mode != "prefill":
+        publish_reasoning_aware_guided_decoding(
+            runtime_config,
+            engine,
+            server_args,
+            dynamo_args,
+        )
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (
@@ -490,7 +505,7 @@ async def _get_runtime_config(
 
 
 async def register_model_with_readiness_gate(
-    engine: sgl.Engine,
+    engine: Optional[sgl.Engine],
     generate_endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,

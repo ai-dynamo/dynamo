@@ -343,6 +343,21 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
+        self._validate_text_mode_parsers()
+
+    def _validate_text_mode_parsers(self) -> None:
+        if self.use_vllm_tokenizer and (
+            self.dyn_tool_call_parser
+            or self.dyn_reasoning_parser
+            or self.dyn_enable_structural_tag
+        ):
+            raise ValueError(
+                "--use-vllm-tokenizer is incompatible with Dynamo parser or "
+                "structural-tag flags: "
+                "text mode bypasses Dynamo guided-tool construction and response "
+                "parsing. Remove --dyn-tool-call-parser/--dyn-reasoning-parser/"
+                "--dyn-enable-structural-tag or use the Dynamo token-mode frontend."
+            )
 
     def _resolve_embedding_transfer_mode(self) -> None:
         """Resolve embedding_transfer_mode from string to enum."""

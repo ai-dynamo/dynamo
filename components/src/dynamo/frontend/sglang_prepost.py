@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, TypeAlias
@@ -49,6 +50,7 @@ class SglangPreprocessResult:
     guided_decoding: dict[str, Any] | None
     request: dict[str, Any]
     force_reasoning: bool = False
+    effective_reasoning_parser_name: str | None = None
 
 
 # --- force_reasoning detection (mirrors sglang's template_manager) -------
@@ -58,10 +60,9 @@ class SglangPreprocessResult:
 # (the qwen3 pattern). We broaden that to also catch GLM-4.5/5 templates
 # which open a thinking block right before the generation prompt.
 #
-# A static, per-server boolean is plenty: per-request decoding of prompt
-# tails adds latency on the hot path with nothing to show for it. The
-# per-request knobs live downstream (``separate_reasoning``,
-# ``chat_template_kwargs.enable_thinking``), matching sglang's API.
+# The source scan is a default for force-reasoning families. Optional
+# ``basic``/``nemotron_deci`` policies additionally inspect the rendered
+# prompt suffix because their opener is conditional per request.
 _FORCE_REASONING_PATTERNS = (
     # qwen3-family: <|im_start|>assistant\n<think>\n
     re.compile(r"<\|im_start\|>assistant\\n<think>\\n"),
@@ -90,6 +91,22 @@ def detect_force_reasoning_from_template(chat_template: str | None) -> bool:
     return False
 
 
+def _prompt_injected_basic_reasoning(
+    tokenizer: Any, prompt_token_ids: list[int]
+) -> bool:
+    """Whether a rendered optional ``<think>`` block is currently open."""
+    try:
+        tail = tokenizer.decode(
+            prompt_token_ids[-128:],
+            skip_special_tokens=False,
+        )
+    except (AttributeError, TypeError, ValueError):
+        # Optional parsers can still detect a generated opener. Failing closed
+        # here avoids classifying an ordinary direct answer as reasoning.
+        return False
+    return tail.rstrip().endswith("<think>")
+
+
 # Reasoning parsers that default to "thinking on" unless the client
 # explicitly opts out via chat_template_kwargs. Mirrors sglang's
 # serving_chat._get_reasoning_from_request table.
@@ -101,20 +118,146 @@ _THINKING_BY_DEFAULT = {
     "kimi_k2",
 }
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
+_FORCE_REASONING_ALWAYS = {
+    "deepseek-r1",
+    "minimax-append-think",
+    "step3",
+    "step3p5",
+}
+# These Dynamo parsers recognize explicit opening markers and do not start in
+# reasoning mode on bare output.  Their SGLang format alias is qwen3, but that
+# alias's request default must not silently turn them into force parsers.
+_DYNAMO_NON_FORCE_REASONING = {"basic", "nemotron_deci"}
 
-_SGLANG_PARSER_NAME_ALIASES = {
+_REASONING_PARSERS_REQUIRING_SPECIAL_TOKENS = {
+    "gemma4",
+    "gpt-oss",
+    "kimi_k2",
+    "minimax-append-think",
+    "minimax-m3",
+    "mistral",
+}
+
+_SGLANG_TOOL_PARSER_NAME_ALIASES = {
+    "llama3_json": "llama3",
+    "harmony": "gpt-oss",
+    "deepseek_v3": "deepseekv3",
+    "deepseek_v3_1": "deepseekv31",
+    "deepseek_v3_2": "deepseekv32",
+    "deepseek_v4": "deepseekv4",
+    "deepseek-v4": "deepseekv4",
+    "minimax_m2": "minimax-m2",
+    "gemma-4": "gemma4",
     # Dynamo's Rust parser registry accepts these MiniMax-M3 aliases. SGLang
     # builds that include MiniMax-M3 expose the parser as "minimax-m3".
     "minimax_m3": "minimax-m3",
     "minimax_m3_nom": "minimax-m3",
     "minimax-m3-nom": "minimax-m3",
+    # Dynamo's Nemotron Nano tool parser is the Qwen3-Coder XML format.
+    "nemotron_nano": "qwen3_coder",
+}
+
+_SGLANG_REASONING_PARSER_NAME_ALIASES = {
+    "basic": "qwen3",
+    "deepseek_r1": "deepseek-r1",
+    "deepseek_v3": "deepseek-v3",
+    "deepseek_v3_1": "deepseek-v3",
+    "deepseek_v3_2": "deepseek-v3",
+    "deepseek_v4": "deepseek-v4",
+    "deepseekv4": "deepseek-v4",
+    "gemma-4": "gemma4",
+    "gpt_oss": "gpt-oss",
+    "kimi_k25": "kimi_k2",
+    "minimax_append_think": "minimax-append-think",
+    "minimax_m3": "minimax-m3",
+    "minimax_m3_nom": "minimax-m3",
+    "minimax-m3-nom": "minimax-m3",
+    # Nemotron Deci uses the same ordinary <think> wrapper as Qwen3.
+    "nemotron_deci": "qwen3",
+    # Dynamo/vLLM spell this parser nemotron_v3; SGLang registers the same
+    # reasoning format as nemotron_3. Keep this map separate from tool-parser
+    # aliases because the corresponding Nemotron tool parser is qwen3_coder.
+    "nemotron_nano": "nemotron_3",
+    "nemotron3": "nemotron_3",
+    "nemotron_v3": "nemotron_3",
+}
+
+# Response parsing and native backend capability matching are deliberately
+# separate for MiniMax append-think. SGLang's native MiniMax detector prepends
+# a synthetic ``<think>`` and returns the whole completion as normal content,
+# while its DeepSeek-R1 detector implements the required implicit-start split.
+# The backend must still run its actual ``minimax-append-think`` reasoner to
+# delay guided decoding at the matching end token.
+_SGLANG_RESPONSE_REASONING_PARSER_NAME_ALIASES = {
+    "minimax_append_think": "deepseek-r1",
+    "minimax-append-think": "deepseek-r1",
 }
 
 
-def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
+def _merged_chat_template_kwargs(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge public template maps using Dynamo's legacy precedence.
+
+    ``chat_template_args`` predates ``chat_template_kwargs`` and wins per key
+    when both are present, matching ``InputParamManager`` and backend text mode.
+    """
+    merged: dict[str, Any] = {}
+    for key in ("chat_template_kwargs", "chat_template_args"):
+        value = request.get(key)
+        if isinstance(value, Mapping):
+            merged.update(value)
+    return merged
+
+
+def _normalize_sglang_tool_parser_name(parser_name: str | None) -> str | None:
     if not parser_name:
         return parser_name
-    return _SGLANG_PARSER_NAME_ALIASES.get(parser_name, parser_name)
+    normalized = parser_name.strip().lower()
+    return _SGLANG_TOOL_PARSER_NAME_ALIASES.get(normalized, normalized)
+
+
+def _normalize_sglang_reasoning_parser_name(parser_name: str | None) -> str | None:
+    if not parser_name:
+        return parser_name
+    normalized = parser_name.strip().lower()
+    return _SGLANG_REASONING_PARSER_NAME_ALIASES.get(normalized, normalized)
+
+
+def _normalize_sglang_response_reasoning_parser_name(
+    parser_name: str | None,
+) -> str | None:
+    if not parser_name:
+        return parser_name
+    normalized = parser_name.strip().lower()
+    return _SGLANG_RESPONSE_REASONING_PARSER_NAME_ALIASES.get(
+        normalized, _normalize_sglang_reasoning_parser_name(normalized)
+    )
+
+
+def reasoning_parser_requires_special_tokens(parser_name: str | None) -> bool:
+    normalized = _normalize_sglang_reasoning_parser_name(parser_name)
+    return normalized in _REASONING_PARSERS_REQUIRING_SPECIAL_TOKENS
+
+
+def validate_sglang_parser_support(
+    tool_call_parser_name: str | None,
+    reasoning_parser_name: str | None,
+) -> None:
+    """Fail engine creation when the installed SGLang lacks a Dyn parser format."""
+    normalized_tool = _normalize_sglang_tool_parser_name(tool_call_parser_name)
+    if normalized_tool and normalized_tool not in FunctionCallParser.ToolCallParserEnum:
+        raise ValueError(
+            f"Dynamo tool parser {tool_call_parser_name!r} maps to SGLang "
+            f"parser {normalized_tool!r}, which this SGLang version does not support"
+        )
+
+    normalized_reasoning = _normalize_sglang_reasoning_parser_name(
+        reasoning_parser_name
+    )
+    if normalized_reasoning and normalized_reasoning not in ReasoningParser.DetectorMap:
+        raise ValueError(
+            f"Dynamo reasoning parser {reasoning_parser_name!r} maps to SGLang "
+            f"parser {normalized_reasoning!r}, which this SGLang version does not support"
+        )
 
 
 def resolve_request_force_reasoning(
@@ -137,16 +280,45 @@ def resolve_request_force_reasoning(
         enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
       * anything else: follow the statically-detected template default.
     """
-    reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
+    dynamo_parser_name = (
+        reasoning_parser_name.strip().lower()
+        if isinstance(reasoning_parser_name, str)
+        else reasoning_parser_name
+    )
+    reasoning_parser_name = _normalize_sglang_reasoning_parser_name(
+        reasoning_parser_name
+    )
     if not reasoning_parser_name:
         return False
 
-    kwargs = (
-        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
-    )
+    kwargs = _merged_chat_template_kwargs(request)
+
+    if dynamo_parser_name == "minimax_append_think":
+        return True
+
+    if dynamo_parser_name in _DYNAMO_NON_FORCE_REASONING:
+        return template_default and kwargs.get("enable_thinking") is not False
 
     if reasoning_parser_name == "minimax-m3":
         return kwargs.get("thinking_mode") != "disabled"
+
+    if reasoning_parser_name == "deepseek-r1" and (
+        kwargs.get("thinking") is False
+        or kwargs.get("enable_thinking") is False
+        or kwargs.get("thinking_mode") == "chat"
+    ):
+        return False
+
+    if reasoning_parser_name in _FORCE_REASONING_ALWAYS:
+        return True
+
+    reasoning_effort = request.get("reasoning_effort")
+    if reasoning_effort is None:
+        reasoning_effort = kwargs.get("reasoning_effort")
+    if reasoning_parser_name == "mistral":
+        return reasoning_effort is not None and reasoning_effort != "none"
+    if reasoning_parser_name == "hunyuan":
+        return reasoning_effort not in (None, "none", "no_think")
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
@@ -262,6 +434,7 @@ def create_parsers(
     reasoning_parser_name: str | None,
     sglang_tools: list[SglangTool] | None = None,
     force_reasoning: bool = False,
+    reasoning_aware_guided_decoding: bool = False,
 ) -> tuple[ToolCallParserType | None, ReasoningParser | None]:
     """Create tool call and reasoning parsers for a request.
 
@@ -271,10 +444,11 @@ def create_parsers(
     If ``sglang_tools`` is provided, reuses them; otherwise converts from
     the request's ``tools`` field.
 
-    For ``tool_choice="required"`` or a named function, uses
-    :class:`JsonArrayParser` (matching native SGLang) since guided decoding
-    constrains the output to a JSON array.  Otherwise uses the model-specific
-    :class:`FunctionCallParser`.
+    Required/named requests use the model parser when its detector supports a
+    native structural-tag grammar; otherwise they use ``JsonArrayParser`` for
+    the generic JSON-schema fallback. The reasoning parser remains active for
+    guided decoding only when the backend explicitly advertises that it delays
+    the grammar until reasoning ends.
     """
     if sglang_tools is None:
         sglang_tools = convert_tools(request.get("tools"))
@@ -283,9 +457,27 @@ def create_parsers(
     tool_call_parser: ToolCallParserType | None = None
     if sglang_tools and tool_choice != "none":
         if tool_choice == "required" or _is_named_tool_choice(tool_choice):
-            tool_call_parser = JsonArrayParser()
+            native_parser = None
+            if tool_call_parser_name:
+                native_parser = FunctionCallParser(
+                    tools=sglang_tools,
+                    tool_call_parser=_normalize_sglang_tool_parser_name(
+                        tool_call_parser_name
+                    ),
+                )
+            supports_structural_tag = bool(
+                native_parser is not None
+                and native_parser.detector.supports_structural_tag()
+                and _normalize_sglang_tool_parser_name(tool_call_parser_name)
+                != "gpt-oss"
+            )
+            tool_call_parser = (
+                native_parser if supports_structural_tag else JsonArrayParser()
+            )
         elif tool_call_parser_name:
-            tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
+            tool_call_parser_name = _normalize_sglang_tool_parser_name(
+                tool_call_parser_name
+            )
             tool_call_parser = FunctionCallParser(
                 tools=sglang_tools,
                 tool_call_parser=tool_call_parser_name,
@@ -295,13 +487,33 @@ def create_parsers(
     guided_decoding_active = tool_choice == "required" or _is_named_tool_choice(
         tool_choice
     )
-    if reasoning_parser_name and not guided_decoding_active:
-        reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
-        reasoning_parser = ReasoningParser(
-            model_type=reasoning_parser_name,
-            stream_reasoning=True,
-            force_reasoning=force_reasoning,
+    if reasoning_parser_name and (
+        not guided_decoding_active or reasoning_aware_guided_decoding
+    ):
+        reasoning_parser_name = _normalize_sglang_response_reasoning_parser_name(
+            reasoning_parser_name
         )
+        try:
+            reasoning_parser = ReasoningParser(
+                model_type=reasoning_parser_name,
+                stream_reasoning=True,
+                force_reasoning=force_reasoning,
+            )
+            if (
+                reasoning_parser_name == "nemotron_3"
+                and _merged_chat_template_kwargs(request).get("force_nonempty_content")
+                is True
+            ):
+                # Native SGLang forwards this request-local option into the
+                # Nemotron detector. Dynamo carries an untyped request here,
+                # so set the equivalent detector state explicitly.
+                reasoning_parser.detector._force_nonempty_content = True
+        except (KeyError, ValueError):
+            logger.warning(
+                "SGLang has no reasoning parser compatible with %s; "
+                "reasoning parsing is disabled for this request",
+                reasoning_parser_name,
+            )
 
     return tool_call_parser, reasoning_parser
 
@@ -393,11 +605,16 @@ def _flatten_message_content(content: Any) -> Any:
 
 def _normalize_openai_thinking_template_kwargs(
     request: dict[str, Any],
+    reasoning_policy_name: str | None = None,
 ) -> dict[str, Any]:
     request = copy.copy(request)
-    chat_template_kwargs = dict(
-        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
-    )
+    chat_template_kwargs = _merged_chat_template_kwargs(request)
+
+    def has_explicit_reasoning_toggle() -> bool:
+        return any(
+            key in chat_template_kwargs
+            for key in ("thinking", "enable_thinking", "thinking_mode")
+        )
 
     def setdefault_reasoning(enabled: bool) -> None:
         # Different SGLang model families consult different template toggles.
@@ -408,17 +625,39 @@ def _normalize_openai_thinking_template_kwargs(
         )
 
     thinking = request.get("thinking")
-    if isinstance(thinking, bool):
-        setdefault_reasoning(thinking)
-    elif isinstance(thinking, dict):
-        thinking_type = thinking.get("type")
-        if thinking_type == "enabled":
-            setdefault_reasoning(True)
-        elif thinking_type == "disabled":
-            setdefault_reasoning(False)
+    if not has_explicit_reasoning_toggle():
+        if isinstance(thinking, bool):
+            setdefault_reasoning(thinking)
+        elif isinstance(thinking, dict):
+            thinking_type = thinking.get("type")
+            if thinking_type == "enabled":
+                setdefault_reasoning(True)
+            elif thinking_type == "disabled":
+                setdefault_reasoning(False)
 
-    if request.get("reasoning_effort") == "none":
-        setdefault_reasoning(False)
+    reasoning_effort = request.get("reasoning_effort")
+    if reasoning_effort is None:
+        reasoning_effort = chat_template_kwargs.get("reasoning_effort")
+    if reasoning_effort is not None and not has_explicit_reasoning_toggle():
+        setdefault_reasoning(reasoning_effort not in {"none", "no_think"})
+
+    normalized_policy_name = (
+        reasoning_policy_name.strip().lower()
+        if isinstance(reasoning_policy_name, str)
+        else None
+    )
+    if normalized_policy_name in {"deepseek_v4", "deepseek-v4", "deepseekv4"}:
+        enabled: bool | None = None
+        for key in ("thinking", "enable_thinking"):
+            value = chat_template_kwargs.get(key)
+            if type(value) is bool:
+                enabled = value
+                break
+        if enabled is None:
+            enabled = chat_template_kwargs.get("thinking_mode") != "chat"
+        chat_template_kwargs["thinking"] = enabled
+        chat_template_kwargs["enable_thinking"] = enabled
+        chat_template_kwargs["thinking_mode"] = "thinking" if enabled else "chat"
 
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
@@ -478,9 +717,7 @@ def _render_deepseek_v4_prompt_token_ids(
             encoding_messages.insert(0, {"role": "system", "content": ""})
         encoding_messages[0]["tools"] = template_tools
 
-    chat_template_kwargs = dict(
-        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
-    )
+    chat_template_kwargs = _merged_chat_template_kwargs(request)
     thinking_mode = "thinking" if chat_template_kwargs.get("thinking") else "chat"
     reasoning_effort = (
         request.get("reasoning_effort")
@@ -527,11 +764,30 @@ def _call_with_optional_parallel_tool_calls(
     return func(*args)
 
 
+def _get_structure_constraint(
+    parser: FunctionCallParser,
+    tool_choice: Any,
+    *,
+    parallel_tool_calls: Any,
+    thinking_mode: bool = False,
+) -> Any:
+    kwargs: dict[str, Any] = {}
+    method = parser.get_structure_constraint
+    if _callable_accepts_kwarg(method, "parallel_tool_calls"):
+        kwargs["parallel_tool_calls"] = parallel_tool_calls
+    if _callable_accepts_kwarg(method, "thinking_mode"):
+        kwargs["thinking_mode"] = thinking_mode
+    return method(tool_choice, **kwargs)
+
+
 def build_tool_call_guided_decoding(
     request: dict[str, Any],
     *,
     tool_call_parser_name: str | None,
     sglang_tools: list[SglangTool] | None,
+    reasoning_parser_active: bool = False,
+    force_reasoning: bool = False,
+    reasoning_aware_guided_decoding: bool = False,
 ) -> dict[str, Any] | None:
     """Build native-SGLang-like tool call constraints for guided decoding."""
     if not sglang_tools:
@@ -541,22 +797,61 @@ def build_tool_call_guided_decoding(
     if tool_choice == "none":
         return None
 
+    if (
+        tool_choice == "auto"
+        and reasoning_parser_active
+        and not (reasoning_aware_guided_decoding and force_reasoning)
+    ):
+        # An auto structural tag that starts at token zero can reject a model's
+        # reasoning prefix.  Delay it only when the backend has explicitly
+        # advertised reasoning-aware grammar support and this request starts
+        # in reasoning.  Optional/non-force reasoners retain their native tool
+        # format so a generated reasoning start remains legal.
+        return None
+
     parallel_tool_calls = request.get("parallel_tool_calls")
     constraint: Any = None
 
-    if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+    sglang_tool_choice: Any = tool_choice
+    if _is_named_tool_choice(tool_choice):
+        sglang_tool_choice = SglangToolChoice(
+            type="function",
+            function=SglangToolChoiceFuncName(
+                name=tool_choice["function"]["name"],
+            ),
+        )
+
+    if tool_call_parser_name:
+        tool_call_parser_name = _normalize_sglang_tool_parser_name(
+            tool_call_parser_name
+        )
+        parser = FunctionCallParser(
+            tools=sglang_tools,
+            tool_call_parser=tool_call_parser_name,
+        )
+        constraint = _get_structure_constraint(
+            parser,
+            sglang_tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            # Native reasoning parsing owns the reasoning prefix; the tool
+            # structural tag describes only the post-reasoning suffix.
+            thinking_mode=False,
+        )
+        if tool_call_parser_name == "gpt-oss" and (
+            tool_choice == "required" or _is_named_tool_choice(tool_choice)
+        ):
+            # SGLang 0.5.14's Harmony structural tag leaves
+            # format.at_least_one=false even for forced choices. Use the
+            # generic JSON schema so required/named remains a hard constraint.
+            constraint = None
+
+    if constraint is None and (
+        tool_choice == "required" or _is_named_tool_choice(tool_choice)
+    ):
         # get_json_schema_constraint branches on isinstance(tool_choice,
         # ToolChoice) for the named-function case — passing our raw dict
         # would silently fall through and return None, disabling guided
         # decoding and letting the model omit required fields.
-        sglang_tool_choice: Any = tool_choice
-        if _is_named_tool_choice(tool_choice):
-            sglang_tool_choice = SglangToolChoice(
-                type="function",
-                function=SglangToolChoiceFuncName(
-                    name=tool_choice["function"]["name"],
-                ),
-            )
         constraint = (
             "json_schema",
             _call_with_optional_parallel_tool_calls(
@@ -565,17 +860,6 @@ def build_tool_call_guided_decoding(
                 sglang_tool_choice,
                 parallel_tool_calls=parallel_tool_calls,
             ),
-        )
-    elif tool_call_parser_name:
-        tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
-        parser = FunctionCallParser(
-            tools=sglang_tools,
-            tool_call_parser=tool_call_parser_name,
-        )
-        constraint = _call_with_optional_parallel_tool_calls(
-            parser.get_structure_constraint,
-            tool_choice,
-            parallel_tool_calls=parallel_tool_calls,
         )
 
     if isinstance(constraint, tuple) and len(constraint) == 2:
@@ -646,6 +930,8 @@ def preprocess_chat_request(
     reasoning_parser_name: str | None,
     exclude_tools_when_tool_choice_none: bool = True,
     template_force_reasoning: bool = False,
+    reasoning_aware_guided_decoding: bool = False,
+    reasoning_policy_parser_name: str | None = None,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -656,20 +942,99 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
-    request = _normalize_openai_thinking_template_kwargs(request)
+    policy_parser_name = reasoning_policy_parser_name or reasoning_parser_name
+    request = _normalize_openai_thinking_template_kwargs(
+        request, reasoning_policy_name=policy_parser_name
+    )
+    effective_reasoning_effort = request.get("reasoning_effort")
+    if effective_reasoning_effort is None:
+        effective_reasoning_effort = _merged_chat_template_kwargs(request).get(
+            "reasoning_effort"
+        )
+    normalized_policy_name = (
+        policy_parser_name.strip().lower()
+        if isinstance(policy_parser_name, str)
+        else None
+    )
+    if effective_reasoning_effort == "none" and (
+        normalized_policy_name == "gpt_oss"
+        or _normalize_sglang_tool_parser_name(tool_call_parser_name) == "gpt-oss"
+    ):
+        raise ValueError("reasoning_effort='none' is not supported for Harmony")
     messages = _materialize_messages(request.get("messages", []))
 
     # Per-request client escape hatch: skip reasoning parsing entirely when
     # the client sends ``separate_reasoning=False`` -- thinking text then
     # lands in ``delta.content`` instead of ``delta.reasoning_content``.
+    last_is_tool = bool(messages) and messages[-1].get("role") == "tool"
+    if isinstance(policy_parser_name, str):
+        policy_parser_name = policy_parser_name.strip().lower()
+    suppress_kimi_tool_continuation = policy_parser_name == "kimi_k25" and last_is_tool
     effective_reasoning_parser_name = (
-        reasoning_parser_name if _client_wants_separate_reasoning(request) else None
+        reasoning_parser_name
+        if _client_wants_separate_reasoning(request)
+        and not suppress_kimi_tool_continuation
+        else None
     )
-    force_reasoning = resolve_request_force_reasoning(
-        request,
-        effective_reasoning_parser_name,
-        template_force_reasoning,
+    if suppress_kimi_tool_continuation:
+        # Kimi K2.5 post-tool turns produce the visible answer directly. Keep
+        # both the frontend force parser and backend reasoner grammar out of
+        # reasoning mode for this turn.
+        request["reasoning_ended"] = True
+    force_reasoning = (
+        False
+        if suppress_kimi_tool_continuation
+        else resolve_request_force_reasoning(
+            request,
+            policy_parser_name,
+            template_force_reasoning,
+        )
     )
+    policy_kwargs = _merged_chat_template_kwargs(request)
+    policy_reasoning_effort = request.get("reasoning_effort")
+    if policy_reasoning_effort is None:
+        policy_reasoning_effort = policy_kwargs.get("reasoning_effort")
+    normalized_policy_parser_name = _normalize_sglang_reasoning_parser_name(
+        policy_parser_name
+    )
+    default_reasoning_flag = (
+        "thinking" if normalized_policy_parser_name == "kimi_k2" else "enable_thinking"
+    )
+    policy_reasoning_disabled = (
+        (
+            normalized_policy_parser_name in _THINKING_BY_DEFAULT
+            and policy_kwargs.get(default_reasoning_flag) is False
+        )
+        or (
+            policy_parser_name == "deepseek_r1"
+            and (
+                policy_kwargs.get("thinking") is False
+                or policy_kwargs.get("enable_thinking") is False
+                or policy_kwargs.get("thinking_mode") == "chat"
+            )
+        )
+        or (
+            policy_parser_name in {"deepseek_v4", "deepseek-v4", "deepseekv4"}
+            and not force_reasoning
+        )
+        or (
+            policy_parser_name in {"minimax_m3", "minimax-m3"}
+            and policy_kwargs.get("thinking_mode") == "disabled"
+        )
+        or (
+            policy_parser_name == "mistral"
+            and policy_reasoning_effort in (None, "none")
+        )
+    )
+    if policy_reasoning_disabled:
+        request["reasoning_ended"] = True
+    if (
+        policy_parser_name in _DYNAMO_NON_FORCE_REASONING
+        and "reasoning_ended" not in request
+    ):
+        # Native qwen3 defaults to reasoning-on, while these Dynamo aliases
+        # only enter reasoning when the rendered prompt explicitly opens it.
+        request["reasoning_ended"] = not force_reasoning
 
     # Convert tools to SGLang format (done once, shared with parser creation)
     sglang_tools = convert_tools(request.get("tools"))
@@ -715,11 +1080,7 @@ def preprocess_chat_request(
         if template_tools:
             template_kwargs["tools"] = template_tools
 
-        chat_template_kwargs = (
-            request.get("chat_template_kwargs")
-            or request.get("chat_template_args")
-            or {}
-        )
+        chat_template_kwargs = _merged_chat_template_kwargs(request)
         if chat_template_kwargs:
             template_kwargs.update(chat_template_kwargs)
 
@@ -732,6 +1093,13 @@ def preprocess_chat_request(
             tokenizer.apply_chat_template(template_messages, **template_kwargs)
         )
 
+    if policy_parser_name in _DYNAMO_NON_FORCE_REASONING:
+        # Template source can contain a conditional <think> branch even when
+        # this request rendered the branch off. Derive optional parser state
+        # from the actual prompt, not a one-time source regex.
+        force_reasoning = _prompt_injected_basic_reasoning(tokenizer, prompt_token_ids)
+        request["reasoning_ended"] = not force_reasoning
+
     # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder
     # while still sharing the existing Dynamo parser/guided-decoding behavior.
     tool_call_parser, reasoning_parser = create_parsers(
@@ -740,11 +1108,19 @@ def preprocess_chat_request(
         reasoning_parser_name=effective_reasoning_parser_name,
         sglang_tools=sglang_tools,
         force_reasoning=force_reasoning,
+        reasoning_aware_guided_decoding=reasoning_aware_guided_decoding,
     )
     guided_decoding = build_tool_call_guided_decoding(
         request,
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
+        reasoning_parser_active=bool(
+            reasoning_parser_name
+            and not policy_reasoning_disabled
+            and not suppress_kimi_tool_continuation
+        ),
+        force_reasoning=force_reasoning,
+        reasoning_aware_guided_decoding=reasoning_aware_guided_decoding,
     )
 
     return SglangPreprocessResult(
@@ -754,6 +1130,7 @@ def preprocess_chat_request(
         guided_decoding=guided_decoding,
         request=request,
         force_reasoning=force_reasoning,
+        effective_reasoning_parser_name=effective_reasoning_parser_name,
     )
 
 
@@ -874,6 +1251,7 @@ class SglangStreamingPostProcessor:
         history_tool_calls_count: int = 0,
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
+        reasoning_parser_name: str | None = None,
         eos_token_ids: list[int] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
@@ -881,13 +1259,16 @@ class SglangStreamingPostProcessor:
         self.reasoning_parser = reasoning_parser
         self.history_tool_calls_count = history_tool_calls_count
         self._sglang_tools = sglang_tools or []
-        self._tool_call_parser_name = _normalize_sglang_parser_name(
+        self._tool_call_parser_name = _normalize_sglang_tool_parser_name(
             tool_call_parser_name
         )
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a tool call parser is active so
         # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
-        self._skip_special_tokens = tool_call_parser is None
+        self._skip_special_tokens = tool_call_parser is None and not (
+            reasoning_parser is not None
+            and reasoning_parser_requires_special_tokens(reasoning_parser_name)
+        )
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         self._eos_token_ids = set(eos_token_ids or [])
 
@@ -905,6 +1286,21 @@ class SglangStreamingPostProcessor:
         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
+        # A reasoning/tool boundary commonly contains only newlines.  Hold
+        # those until we know whether a tool call or visible content follows:
+        # tool-only responses discard separators, while direct answers retain
+        # their original leading whitespace.
+        self._pending_content_whitespace = ""
+        self._visible_content_since_tool = False
+        self._force_nonempty_content = bool(
+            reasoning_parser is not None
+            and getattr(
+                getattr(reasoning_parser, "detector", None),
+                "_force_nonempty_content",
+                False,
+            )
+        )
+        self._pending_force_nonempty_reasoning = ""
 
     def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
         if not self._eos_token_ids:
@@ -1002,6 +1398,16 @@ class SglangStreamingPostProcessor:
             reasoning_text = r_text or None
             normal_text = n_text or ""
 
+        if self._force_nonempty_content:
+            if reasoning_text:
+                self._pending_force_nonempty_reasoning += reasoning_text
+                reasoning_text = None
+            if normal_text and self._pending_force_nonempty_reasoning:
+                # A visible answer or tool-call suffix makes the response
+                # nonempty, so the buffered prefix remains reasoning.
+                reasoning_text = self._pending_force_nonempty_reasoning
+                self._pending_force_nonempty_reasoning = ""
+
         # -- Tool call parsing (accumulate deltas) --
         content_text = normal_text
 
@@ -1028,6 +1434,27 @@ class SglangStreamingPostProcessor:
                     self._tool_call_names[idx] = tc.name
                 if tc.parameters:
                     self._tool_call_args.setdefault(idx, []).append(tc.parameters)
+
+        if self.tool_call_parser is not None and content_text:
+            if content_text.isspace():
+                if self._visible_content_since_tool and not self._tool_call_names:
+                    # Whitespace following visible narration is semantic text,
+                    # not an undecided reasoning/tool boundary.
+                    pass
+                else:
+                    self._pending_content_whitespace += content_text
+                    content_text = ""
+            elif self._pending_content_whitespace:
+                content_text = self._pending_content_whitespace + content_text
+                self._pending_content_whitespace = ""
+            if content_text and not content_text.isspace():
+                self._visible_content_since_tool = True
+
+        if finish_reason and self._pending_force_nonempty_reasoning:
+            # Nemotron's request policy moves terminal reasoning into content
+            # only when no post-reasoning answer/tool suffix was generated.
+            content_text = self._pending_force_nonempty_reasoning + content_text
+            self._pending_force_nonempty_reasoning = ""
 
         # -- Assemble delta --
         delta: dict[str, Any] = {"role": "assistant"}
@@ -1177,6 +1604,14 @@ class SglangStreamingPostProcessor:
                     "Dropping incomplete SGLang tool calls with no valid arguments: %s",
                     dropped_names,
                 )
+
+        if finish_reason and self._tool_call_names:
+            self._pending_content_whitespace = ""
+            self._visible_content_since_tool = False
+        elif finish_reason and self._pending_content_whitespace:
+            delta["content"] = self._pending_content_whitespace
+            self._pending_content_whitespace = ""
+            has_content = True
 
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []

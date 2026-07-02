@@ -19,7 +19,11 @@ from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
-from dynamo.frontend.sglang_prepost import SglangStreamingPostProcessor
+from dynamo.frontend.sglang_prepost import (
+    SglangStreamingPostProcessor,
+    convert_tools,
+    create_parsers,
+)
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -355,14 +359,46 @@ class TestContentWithToolCalls:  # FRONTEND.4 — text content interleaved with 
             reasoning += rc
         assert "Thinking about it" in reasoning
 
-    def test_content_is_whitespace_only(self, tokenizer):
-        """Content between </think> and <tool_call> should be whitespace only."""
+    def test_tool_boundary_whitespace_is_not_content(self, tokenizer):
+        """Whitespace between reasoning and a tool call is protocol framing."""
         results = _run_postprocessor(tokenizer, self.TEXT, 20)
         content = ""
         for r in results:
             c = r.get("delta", {}).get("content", "")
             content += c
-        assert content.strip() == ""
+        assert content == ""
+
+    def test_narration_before_tool_preserves_trailing_space(self, tokenizer):
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=FunctionCallParser(tools=TOOLS, tool_call_parser="hermes"),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+            tool_call_parser_name="hermes",
+        )
+        chunks = [
+            "I will call",
+            " ",
+            "<tool_call>",
+            '{"name":"get_weather","arguments":{"city":"SF"}}',
+            "</tool_call>",
+        ]
+        choices = []
+        for index, chunk in enumerate(chunks):
+            choice = post.process_output(
+                {
+                    "token_ids": tokenizer.encode(chunk, add_special_tokens=False),
+                    "finish_reason": "stop" if index == len(chunks) - 1 else None,
+                }
+            )
+            if choice:
+                choices.append(choice)
+
+        content = "".join(
+            choice.get("delta", {}).get("content", "") for choice in choices
+        )
+        assert content == "I will call "
+        assert _extract_tool_calls(choices)
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +422,12 @@ class TestNoToolCalls:  # FRONTEND.4 — text-only response (no tool calls)
             c = r.get("delta", {}).get("content", "")
             content += c
         assert "Hello, world!" in content
+
+    def test_direct_content_preserves_leading_whitespace(self, tokenizer):
+        results = _run_postprocessor(tokenizer, self.TEXT, 1)
+        content = "".join(r.get("delta", {}).get("content", "") for r in results)
+
+        assert content == "\n\nHello, world!"
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +511,46 @@ class TestSingleChunkFallback:  # FRONTEND.4 — non-streaming fallback assembly
 
 
 class TestMalformedToolCalls:  # FRONTEND.4 — malformed model output → graceful degradation
+    def test_incomplete_name_does_not_drop_direct_content_whitespace(self):
+        class DummyTokenizer:
+            def decode(self, token_ids, skip_special_tokens=True):
+                return "".join(chr(x) for x in token_ids)
+
+        class DummyToolCall:
+            tool_index = 0
+            name = "get_weather"
+            parameters = ""
+
+        class FalsePositiveParser:
+            def parse_stream_chunk(self, text):
+                return text, [DummyToolCall()] if text.isspace() else []
+
+            def has_tool_call(self, text):
+                return False
+
+        post = SglangStreamingPostProcessor(
+            tokenizer=DummyTokenizer(),
+            tool_call_parser=FalsePositiveParser(),
+            reasoning_parser=None,
+        )
+
+        assert (
+            post.process_output(
+                {"token_ids": [ord(" "), ord("\n")], "finish_reason": None}
+            )
+            is None
+        )
+        choice = post.process_output(
+            {
+                "token_ids": [ord(c) for c in "Direct answer"],
+                "finish_reason": "stop",
+            }
+        )
+
+        assert choice is not None
+        assert choice["delta"]["content"] == " \nDirect answer"
+        assert choice["delta"].get("tool_calls", []) == []
+
     def test_incomplete_arguments_are_not_emitted(self):
         class DummyTokenizer:
             def decode(self, token_ids, skip_special_tokens=True):
@@ -586,3 +668,80 @@ class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse pa
         # No tool calls, plain content preserved, no crash.
         tc = (choice or {}).get("delta", {}).get("tool_calls", [])
         assert tc == []
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("reasoning_parser_name", "force_reasoning", "reasoning_prefix"),
+        [
+            (
+                "nemotron_v3",
+                True,
+                "I should check the requested city.</think>",
+            ),
+            (
+                "deepseek-r1",
+                False,
+                "<think>I should check the requested city.</think>",
+            ),
+        ],
+    )
+    def test_reasoning_aware_guided_decoding_preserves_reasoning_and_call(
+        self,
+        tokenizer,
+        tool_choice,
+        reasoning_parser_name,
+        force_reasoning,
+        reasoning_prefix,
+    ):
+        request_tools = [tool.model_dump() for tool in TOOLS]
+        request = {"tools": request_tools, "tool_choice": tool_choice}
+        if reasoning_parser_name == "nemotron_v3":
+            request["chat_template_kwargs"] = {"force_nonempty_content": True}
+        tool_parser, reasoning_parser = create_parsers(
+            request,
+            tool_call_parser_name="nemotron_nano",
+            reasoning_parser_name=reasoning_parser_name,
+            force_reasoning=force_reasoning,
+            reasoning_aware_guided_decoding=True,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=tool_parser,
+            reasoning_parser=reasoning_parser,
+            sglang_tools=convert_tools(request_tools),
+            tool_call_parser_name="nemotron_nano",
+        )
+        text = reasoning_prefix + (
+            "<tool_call><function=get_weather>\n"
+            "<parameter=city>\nParis\n</parameter>\n"
+            "</function></tool_call>"
+        )
+
+        choice = post.process_output(
+            {
+                "token_ids": tokenizer.encode(text),
+                "finish_reason": "stop",
+            }
+        )
+
+        assert choice is not None
+        assert choice["delta"]["reasoning_content"] == (
+            "I should check the requested city."
+        )
+        assert "content" not in choice["delta"]
+        assert "<think>" not in json.dumps(choice)
+        assert "</think>" not in json.dumps(choice)
+        assert choice["finish_reason"] == "tool_calls"
+        assert len(choice["delta"]["tool_calls"]) == 1
+        call = choice["delta"]["tool_calls"][0]
+        assert call["function"]["name"] == "get_weather"
+        assert json.loads(call["function"]["arguments"]) == {"city": "Paris"}

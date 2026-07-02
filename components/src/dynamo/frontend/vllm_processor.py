@@ -11,13 +11,15 @@ import logging
 import os
 import time
 from argparse import Namespace
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any
 
 from msgspec.structs import replace as msgspec_replace
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import get_tool_call_id_type, load_chat_template
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
 from vllm.tokenizers import TokenizerLike
@@ -37,6 +39,11 @@ from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_fe
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
+from dynamo.vllm.capacity import (
+    normalize_vllm_reasoning_parser,
+    normalize_vllm_tool_parser,
+    reasoning_parsers_compatible,
+)
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import (
@@ -49,6 +56,8 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
+REASONING_AWARE_GUIDED_DECODING_RUNTIME_KEY = "reasoning_aware_guided_decoding"
+
 
 _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
@@ -58,6 +67,149 @@ _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "cancelled": FinishReason.ABORT,
     "content_filter": FinishReason.STOP,
 }
+
+_DYNAMO_NON_FORCE_REASONING = frozenset({"basic", "nemotron_deci"})
+
+
+class _ExplicitThinkReasoningParser(BaseThinkingReasoningParser):
+    """A <think> parser that starts in content mode when no marker is present."""
+
+    dynamo_generated_reasoning_start = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._initial_in_reasoning = False
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: list[int]) -> None:
+        self._initial_in_reasoning = not self.is_reasoning_end(prompt_token_ids)
+
+    def adjust_request(self, request: Any) -> Any:
+        request.skip_special_tokens = False
+        return request
+
+    @property
+    def start_token(self) -> str:
+        return "<think>"
+
+    @property
+    def end_token(self) -> str:
+        return "</think>"
+
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        for token_id in reversed(input_ids):
+            if token_id == self.start_token_id:
+                return False
+            if token_id == self.end_token_id:
+                return True
+        return True
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        for index in range(len(input_ids) - 1, -1, -1):
+            if input_ids[index] == self.start_token_id:
+                return []
+            if input_ids[index] == self.end_token_id:
+                return input_ids[index + 1 :]
+        return input_ids
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> DeltaMessage | None:
+        del previous_text, current_text, current_token_ids
+        if self.end_token_id in previous_token_ids:
+            return DeltaMessage(content=delta_text or None)
+
+        if self._initial_in_reasoning or self.start_token_id in previous_token_ids:
+            if self.end_token_id in delta_token_ids:
+                reasoning, _, content = delta_text.partition(self.end_token)
+                return DeltaMessage(
+                    reasoning=reasoning or None, content=content or None
+                )
+            return DeltaMessage(reasoning=delta_text or None)
+
+        if self.start_token_id in delta_token_ids:
+            before_start, _, after_start = delta_text.partition(self.start_token)
+            if self.end_token_id in delta_token_ids:
+                reasoning, _, content = after_start.partition(self.end_token)
+                return DeltaMessage(
+                    reasoning=reasoning or None,
+                    content=(before_start + content) or None,
+                )
+            return DeltaMessage(
+                reasoning=after_start or None, content=before_start or None
+            )
+
+        return DeltaMessage(content=delta_text or None)
+
+    def extract_reasoning(self, model_output: str, request: Any):
+        del request
+        if self.start_token not in model_output and not self._initial_in_reasoning:
+            return None, model_output or None
+        if self.start_token in model_output:
+            before_start, _, after_start = model_output.partition(self.start_token)
+        else:
+            before_start, after_start = "", model_output
+        if self.end_token not in after_start:
+            return after_start or None, before_start or None
+        reasoning, _, content = after_start.partition(self.end_token)
+        return reasoning or None, (before_start + content) or None
+
+
+class _ImplicitStartThinkReasoningParser(BaseThinkingReasoningParser):
+    """A force parser for models whose generated output omits ``<think>``.
+
+    MiniMax's append-think chat template places the model in reasoning mode,
+    but the generated completion starts with reasoning text and emits only the
+    closing marker.  vLLM's native adapter prepends ``<think>`` to content;
+    Dynamo instead needs to split that implicit reasoning prefix into the
+    OpenAI ``reasoning_content`` field without leaking either marker.
+    """
+
+    def adjust_request(self, request: Any) -> Any:
+        request.skip_special_tokens = False
+        return request
+
+    @property
+    def start_token(self) -> str:
+        return "<think>"
+
+    @property
+    def end_token(self) -> str:
+        return "</think>"
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> DeltaMessage | None:
+        del previous_text, current_text, current_token_ids
+        if self.end_token_id in previous_token_ids:
+            return DeltaMessage(content=delta_text or None)
+
+        # The opening marker is normally prompt-injected rather than emitted.
+        # Accept it defensively and never surface it in either response field.
+        reasoning_delta = delta_text.replace(self.start_token, "", 1)
+        if self.end_token_id in delta_token_ids or self.end_token in reasoning_delta:
+            reasoning, separator, content = reasoning_delta.partition(self.end_token)
+            if not separator:
+                # A special-token-aware decoder can expose the token ID while
+                # omitting its text.  In that case the whole visible delta is
+                # still pre-boundary reasoning.
+                return DeltaMessage(reasoning=reasoning_delta or None)
+            return DeltaMessage(
+                reasoning=reasoning or None,
+                content=content or None,
+            )
+        return DeltaMessage(reasoning=reasoning_delta or None)
 
 
 def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
@@ -87,21 +239,227 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     return context_length
 
 
+def _validated_reasoning_aware_guided_decoding(
+    mdc: ModelDeploymentCard,
+    effective_reasoning_parser: str | None,
+) -> bool:
+    """Trust the worker capability only for the frontend's effective parser.
+
+    A frontend parser override is local to this process; the worker that
+    published the capability could only validate its own Dynamo parser.  Fail
+    closed for old/malformed cards and reject an incompatible override rather
+    than pairing two different reasoning wire formats.
+    """
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return False
+    runtime_data = runtime_config.get("runtime_data")
+    if (
+        not isinstance(runtime_data, dict)
+        or runtime_data.get(REASONING_AWARE_GUIDED_DECODING_RUNTIME_KEY) is not True
+    ):
+        return False
+
+    worker_reasoning_parser = runtime_config.get("reasoning_parser")
+    if not isinstance(worker_reasoning_parser, str) or not worker_reasoning_parser:
+        return False
+    native_frontend_parser = normalize_vllm_reasoning_parser(effective_reasoning_parser)
+    if not native_frontend_parser:
+        return False
+    if not reasoning_parsers_compatible(
+        native_frontend_parser, worker_reasoning_parser
+    ):
+        raise ValueError(
+            "Frontend reasoning parser override is incompatible with the "
+            "worker's reasoning-aware guided-decoding parser: "
+            f"frontend={effective_reasoning_parser!r}, "
+            f"worker={worker_reasoning_parser!r}"
+        )
+    return True
+
+
+def _is_named_tool_choice(tool_choice: Any) -> bool:
+    if isinstance(tool_choice, dict):
+        function = tool_choice.get("function")
+        return (
+            tool_choice.get("type") == "function"
+            and isinstance(function, dict)
+            and bool(function.get("name"))
+        )
+    function = getattr(tool_choice, "function", None)
+    return getattr(tool_choice, "type", None) == "function" and bool(
+        getattr(function, "name", None)
+    )
+
+
+def _response_reasoning_parser_class(
+    request_for_sampling: Any,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    reasoning_ended: bool | None,
+    reasoning_aware_guided_decoding: bool,
+) -> type[ReasoningParser] | None:
+    """Disable only force-reasoning parsing for bare guided JSON.
+
+    Without backend support the required/named JSON grammar starts at token
+    zero. A parser whose prompt state is still in reasoning would otherwise
+    classify that bare JSON as reasoning. Structural-tag/custom grammars carry
+    model-native reasoning syntax and must keep the parser active.
+    """
+    if reasoning_parser_class is None or reasoning_aware_guided_decoding:
+        return reasoning_parser_class
+
+    tool_choice = getattr(request_for_sampling, "tool_choice", None)
+    guided_tool_choice = tool_choice == "required" or _is_named_tool_choice(tool_choice)
+    structured_outputs = getattr(request_for_sampling, "structured_outputs", None)
+    structural_tag = getattr(structured_outputs, "structural_tag", None)
+    grammar_from_tool_parser = getattr(
+        request_for_sampling, "_grammar_from_tool_parser", False
+    )
+    if (
+        guided_tool_choice
+        and reasoning_ended is False
+        and structural_tag is None
+        and not grammar_from_tool_parser
+    ):
+        return None
+    return reasoning_parser_class
+
+
+def _request_reasoning_policy(
+    parser_name: str | None,
+    request: dict[str, Any],
+    request_for_sampling: Any,
+    reasoning_parser_class: type[ReasoningParser] | None,
+    reasoning_ended: bool | None,
+    reasoning_aware_guided_decoding: bool,
+    normalized_template_kwargs: dict[str, Any] | None = None,
+) -> tuple[bool | None, type[ReasoningParser] | None]:
+    normalized_parser_name = (
+        parser_name.strip().lower() if isinstance(parser_name, str) else None
+    )
+    template_kwargs: dict[str, Any] = {}
+    for key in ("chat_template_kwargs", "chat_template_args"):
+        value = request.get(key)
+        if isinstance(value, dict):
+            template_kwargs.update(value)
+    root_thinking = request.get("thinking")
+    if isinstance(root_thinking, bool):
+        template_kwargs.setdefault("thinking", root_thinking)
+        template_kwargs.setdefault("enable_thinking", root_thinking)
+    elif isinstance(root_thinking, dict):
+        thinking_type = root_thinking.get("type")
+        if thinking_type in {"enabled", "disabled"}:
+            enabled = thinking_type == "enabled"
+            template_kwargs.setdefault("thinking", enabled)
+            template_kwargs.setdefault("enable_thinking", enabled)
+    if normalized_template_kwargs:
+        template_kwargs.update(normalized_template_kwargs)
+    messages = request.get("messages") or []
+    last_message = messages[-1] if messages else None
+    last_role = (
+        last_message.get("role")
+        if isinstance(last_message, dict)
+        else getattr(last_message, "role", None)
+    )
+    if normalized_parser_name == "kimi_k25" and last_role == "tool":
+        # Kimi K2.5 post-tool turns generate the visible answer directly.
+        # Native vLLM's kimi_k2 parser otherwise defaults back into reasoning.
+        return True, None
+
+    if normalized_parser_name == "mistral":
+        reasoning_effort = request.get("reasoning_effort")
+        if reasoning_effort is None:
+            reasoning_effort = template_kwargs.get("reasoning_effort")
+        if reasoning_effort is None or reasoning_effort == "none":
+            return True, None
+
+    if normalized_parser_name == "deepseek_r1":
+        disabled = (
+            template_kwargs.get("thinking") is False
+            or template_kwargs.get("enable_thinking") is False
+        )
+        disabled = disabled or template_kwargs.get("thinking_mode") == "chat"
+        if disabled:
+            return True, None
+
+    if normalized_parser_name in {"deepseek_v4", "deepseek-v4", "deepseekv4"}:
+        disabled = (
+            template_kwargs.get("thinking") is False
+            or template_kwargs.get("enable_thinking") is False
+        )
+        disabled = disabled or template_kwargs.get("thinking_mode") == "chat"
+        if disabled:
+            return True, None
+
+    if normalized_parser_name in {"minimax_m3", "minimax-m3"} and (
+        template_kwargs.get("thinking_mode") == "disabled"
+        or template_kwargs.get("enable_thinking") is False
+        or template_kwargs.get("thinking") is False
+    ):
+        return True, None
+
+    return reasoning_ended, _response_reasoning_parser_class(
+        request_for_sampling,
+        reasoning_parser_class,
+        reasoning_ended,
+        reasoning_aware_guided_decoding,
+    )
+
+
+def _resolve_reasoning_parser_names(
+    worker_parser_name: str | None,
+    frontend_override: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve policy/effective/native names without erasing Dyn semantics."""
+    effective_name = frontend_override or worker_parser_name
+    policy_name = worker_parser_name or effective_name
+    native_name = normalize_vllm_reasoning_parser(effective_name)
+    return policy_name, effective_name, native_name
+
+
+def _reasoning_parser_class(
+    policy_name: str | None,
+    native_name: str | None,
+) -> type[ReasoningParser] | None:
+    if isinstance(policy_name, str) and policy_name.strip().lower() == "kimi":
+        raise ValueError(
+            "Dynamo reasoning parser 'kimi' uses the original Kimi "
+            "◁think▷ wire format, which this vLLM version does not support"
+        )
+    if not native_name:
+        return None
+    if (
+        isinstance(policy_name, str)
+        and policy_name.strip().lower() in _DYNAMO_NON_FORCE_REASONING
+    ):
+        return _ExplicitThinkReasoningParser
+    if isinstance(policy_name, str) and policy_name.strip().lower() in {
+        "minimax_append_think",
+        "minimax-append-think",
+        "minimax_m2_append_think",
+    }:
+        return _ImplicitStartThinkReasoningParser
+    return ReasoningParserManager.get_reasoning_parser(native_name)
+
+
 def _build_reasoning_parser_metadata(
     reasoning_parser_class: type[ReasoningParser] | None,
     tokenizer: TokenizerLike,
     chat_template_kwargs: dict[str, Any],
     request_for_sampling: Any,
     prompt_token_ids: list[int],
+    reasoning_aware_guided_decoding: bool = False,
 ) -> tuple[bool | None, dict[str, Any] | None]:
-    if reasoning_parser_class is None:
+    if reasoning_parser_class is None and not reasoning_aware_guided_decoding:
         return None, None
 
     parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
-    if not getattr(request_for_sampling, "include_reasoning", True):
-        return True, parser_kwargs
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
         return True, parser_kwargs
+    if reasoning_parser_class is None:
+        # The backend-native parser can derive its initial state from these
+        # kwargs even when this frontend is not separating reasoning output.
+        return None, parser_kwargs
 
     reasoning_parser = reasoning_parser_class(
         tokenizer,
@@ -141,9 +499,13 @@ class VllmProcessor:
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
+        reasoning_parser_name: str | None,
         routed_engine: RoutedEngine,
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
+        reasoning_aware_guided_decoding: bool = False,
+        tool_call_id_type: str = "random",
+        model_config: ModelConfig | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -151,9 +513,13 @@ class VllmProcessor:
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
+        self.reasoning_parser_name = reasoning_parser_name
         self.exclude_tools_when_tool_choice_none = True
         self.block_size = block_size
         self.enable_auto_tool_choice = enable_auto_tool_choice
+        self.reasoning_aware_guided_decoding = reasoning_aware_guided_decoding
+        self.tool_call_id_type = tool_call_id_type
+        self.model_config = model_config
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -338,6 +704,9 @@ class VllmProcessor:
                 tokenizer=self.tokenizer,
                 renderer=self.input_processor.renderer,
                 tool_parser_class=self.tool_parser_class,
+                reasoning_parser_class=self.reasoning_parser_class,
+                reasoning_policy_name=self.reasoning_parser_name,
+                model_config=self.model_config,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
             )
@@ -432,6 +801,16 @@ class VllmProcessor:
             chat_template_kwargs,
             request_for_sampling,
             tokens,
+            self.reasoning_aware_guided_decoding,
+        )
+        reasoning_ended, response_reasoning_parser_class = _request_reasoning_policy(
+            self.reasoning_parser_name,
+            request,
+            request_for_sampling,
+            self.reasoning_parser_class,
+            reasoning_ended,
+            self.reasoning_aware_guided_decoding,
+            chat_template_kwargs,
         )
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
@@ -510,9 +889,11 @@ class VllmProcessor:
                     sampling_params=sampling_params,
                     prompt_token_ids=tokens,
                     tool_parser=tool_parser,
-                    reasoning_parser_class=self.reasoning_parser_class,
+                    reasoning_parser_class=response_reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
                     stream_response=bool(request.get("stream", False)),
+                    tool_call_id_type=self.tool_call_id_type,
+                    model_config=self.model_config,
                 )
 
             # StreamingPostProcessor keeps delta/tool/reasoning parser state, so
@@ -873,23 +1254,49 @@ class EngineFactory:
         )
         logger.info("vLLM OutputProcessor stream_interval=%d", stream_interval)
 
-        tool_parser_name = self.flags.tool_call_parser or mdc.runtime_config().get(
-            "tool_call_parser"
-        )
+        runtime_config = mdc.runtime_config()
+        if not isinstance(runtime_config, dict):
+            runtime_config = {}
+
+        tool_parser_name = self.flags.tool_call_parser
+        if not tool_parser_name:
+            runtime_tool_parser = runtime_config.get("tool_call_parser")
+            tool_parser_name = (
+                runtime_tool_parser.strip()
+                if isinstance(runtime_tool_parser, str) and runtime_tool_parser.strip()
+                else None
+            )
         if tool_parser_name:
-            tool_parser_class = ToolParserManager.get_tool_parser(tool_parser_name)
+            configured_tool_parser = tool_parser_name
+            tool_parser_name = normalize_vllm_tool_parser(configured_tool_parser)
+            try:
+                tool_parser_class = ToolParserManager.get_tool_parser(tool_parser_name)
+            except KeyError as exc:
+                raise ValueError(
+                    f"Dynamo tool parser {configured_tool_parser!r} maps to vLLM "
+                    f"parser {tool_parser_name!r}, which this vLLM version does "
+                    "not support"
+                ) from exc
         else:
             tool_parser_class = None
 
-        reasoning_parser_name = self.flags.reasoning_parser or mdc.runtime_config().get(
-            "reasoning_parser"
+        worker_reasoning_parser = runtime_config.get("reasoning_parser")
+        if not isinstance(worker_reasoning_parser, str):
+            worker_reasoning_parser = None
+        (
+            reasoning_policy_name,
+            effective_reasoning_parser,
+            native_reasoning_parser,
+        ) = _resolve_reasoning_parser_names(
+            worker_reasoning_parser,
+            self.flags.reasoning_parser,
         )
-        if reasoning_parser_name:
-            reasoning_parser_class = ReasoningParserManager.get_reasoning_parser(
-                reasoning_parser_name
-            )
-        else:
-            reasoning_parser_class = None
+        reasoning_aware_guided_decoding = _validated_reasoning_aware_guided_decoding(
+            mdc, effective_reasoning_parser
+        )
+        reasoning_parser_class = _reasoning_parser_class(
+            reasoning_policy_name, native_reasoning_parser
+        )
 
         block_size = self.config.kv_cache_block_size or 16
 
@@ -899,9 +1306,13 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
+            reasoning_policy_name,
             routed_engine,
             block_size=block_size,
             enable_auto_tool_choice=enable_auto_tool_choice,
+            reasoning_aware_guided_decoding=reasoning_aware_guided_decoding,
+            tool_call_id_type=get_tool_call_id_type(model_config),
+            model_config=model_config,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

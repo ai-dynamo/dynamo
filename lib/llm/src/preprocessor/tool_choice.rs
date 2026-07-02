@@ -66,13 +66,51 @@ impl OpenAIPreprocessor {
             gd.json = None;
         }
 
-        if self.apply_tool_choice_structural_tag(
-            &convert_tool_choice(tool_choice),
-            &convert_tools(tools),
-            request.inner.parallel_tool_calls,
-            prompt_injected_reasoning,
-            common_request,
-        )? {
+        let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
+        let suppress_reasoning_after_tool = matches!(reasoning_parser, Some("kimi_k25"))
+            && matches!(
+                request.inner.messages.last(),
+                Some(dynamo_protocols::types::ChatCompletionRequestMessage::Tool(
+                    _
+                ))
+            );
+        let optional_reasoning_explicitly_disabled =
+            Self::is_optional_reasoning_parser(reasoning_parser)
+                && !prompt_injected_reasoning
+                && dynamo_renderer::thinking_bool_from_args(request.chat_template_args.as_ref())
+                    == Some(false);
+        let reasoning_may_start = reasoning_parser.is_some()
+            && !Self::is_backend_reasoning_disabled_by_request(
+                reasoning_parser,
+                request.chat_template_args.as_ref(),
+            )
+            && !suppress_reasoning_after_tool
+            && !optional_reasoning_explicitly_disabled;
+        let backend_can_delay_auto_guidance = self.reasoning_aware_guided_decoding()
+            && (!Self::is_optional_reasoning_parser(reasoning_parser) || prompt_injected_reasoning);
+        let auto_reasoning_needs_unconstrained_prefix =
+            matches!(tool_choice, ChatCompletionToolChoiceOption::Auto)
+                && reasoning_may_start
+                && !backend_can_delay_auto_guidance;
+
+        // Auto structural tags describe only the optional tool-call suffix;
+        // unlike required/named tags they do not wrap a reasoning prefix. A
+        // backend without reasoning-aware grammar activation would therefore
+        // apply the tag at token zero and suppress reasoning. Leave auto
+        // unconstrained in that case and let the native model format plus the
+        // response parsers detect any tool call. Optional parsers such as
+        // basic/nemotron_deci can also generate their own `<think>` opener; a
+        // capability bit alone cannot delay grammar when the prompt did not
+        // put the native reasoner into its active state.
+        if !auto_reasoning_needs_unconstrained_prefix
+            && self.apply_tool_choice_structural_tag(
+                &convert_tool_choice(tool_choice),
+                &convert_tools(tools),
+                request.inner.parallel_tool_calls,
+                prompt_injected_reasoning,
+                common_request,
+            )?
+        {
             return Ok(true);
         }
 

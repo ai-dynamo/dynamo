@@ -6,6 +6,7 @@
 #
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -22,16 +23,20 @@ from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
+from dynamo.sglang.reasoning import reasoning_parsers_compatible
 
 from .sglang_prepost import (
     SglangStreamingPostProcessor,
     ToolCallParserType,
-    _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
+    _merged_chat_template_kwargs,
+    _normalize_sglang_reasoning_parser_name,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
     preprocess_chat_request,
+    reasoning_parser_requires_special_tokens,
+    validate_sglang_parser_support,
 )
 from .utils import (
     PreprocessError,
@@ -45,6 +50,8 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+REASONING_AWARE_GUIDED_DECODING_RUNTIME_KEY = "reasoning_aware_guided_decoding"
 
 
 def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
@@ -99,6 +106,42 @@ def _runtime_config_parser_name(
     return value if isinstance(value, str) and value else None
 
 
+def _runtime_config_bool(mdc: ModelDeploymentCard, key: str) -> bool:
+    """Read an engine capability from runtime_data, failing closed."""
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return False
+    runtime_data = runtime_config.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return False
+    return runtime_data.get(key) is True
+
+
+def _validated_reasoning_aware_guided_decoding(
+    mdc: ModelDeploymentCard,
+    effective_reasoning_parser: str | None,
+) -> bool:
+    """Validate a frontend override against the worker's parser family."""
+    if not _runtime_config_bool(mdc, REASONING_AWARE_GUIDED_DECODING_RUNTIME_KEY):
+        return False
+    worker_reasoning_parser = _runtime_config_parser_name(mdc, "reasoning_parser")
+    if not worker_reasoning_parser or not effective_reasoning_parser:
+        return False
+    native_frontend_parser = _normalize_sglang_reasoning_parser_name(
+        effective_reasoning_parser
+    )
+    if not reasoning_parsers_compatible(
+        native_frontend_parser, worker_reasoning_parser
+    ):
+        raise ValueError(
+            "Frontend reasoning parser override is incompatible with the "
+            "worker's reasoning-aware guided-decoding parser: "
+            f"frontend={effective_reasoning_parser!r}, "
+            f"worker={worker_reasoning_parser!r}"
+        )
+    return True
+
+
 def _unsupported_n_message(n: int) -> str:
     return f"Unsupported value: 'n={n}'. " "This endpoint currently supports only n=1."
 
@@ -138,8 +181,10 @@ def _map_finish_reason(raw: str | None) -> str | None:
 _w_tokenizer: Any = None
 _w_tool_call_parser_name: str | None = None
 _w_reasoning_parser_name: str | None = None
+_w_reasoning_policy_parser_name: str | None = None
 _w_exclude_tools_when_tool_choice_none: bool = True
 _w_template_force_reasoning: bool = False
+_w_reasoning_aware_guided_decoding: bool = False
 
 
 @dataclass
@@ -161,18 +206,24 @@ def _init_worker(
     model_path: str,
     tool_call_parser_name: str | None,
     reasoning_parser_name: str | None,
+    reasoning_policy_parser_name: str | None = None,
     exclude_tools_when_tool_choice_none: bool = True,
     trust_remote_code: bool = False,
     template_force_reasoning: bool = False,
+    reasoning_aware_guided_decoding: bool = False,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
+    global _w_reasoning_policy_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
+    global _w_reasoning_aware_guided_decoding
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
+    _w_reasoning_policy_parser_name = reasoning_policy_parser_name
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
     _w_template_force_reasoning = template_force_reasoning
+    _w_reasoning_aware_guided_decoding = reasoning_aware_guided_decoding
 
 
 def _preprocess_worker(
@@ -186,8 +237,10 @@ def _preprocess_worker(
         tokenizer=_w_tokenizer,
         tool_call_parser_name=_w_tool_call_parser_name,
         reasoning_parser_name=_w_reasoning_parser_name,
+        reasoning_policy_parser_name=_w_reasoning_policy_parser_name,
         exclude_tools_when_tool_choice_none=_w_exclude_tools_when_tool_choice_none,
         template_force_reasoning=_w_template_force_reasoning,
+        reasoning_aware_guided_decoding=_w_reasoning_aware_guided_decoding,
     )
 
     n = request.get("n", 1)
@@ -195,24 +248,22 @@ def _preprocess_worker(
         raise PreprocessError(_unsupported_n_message(n))
 
     dynamo_preproc = _build_dynamo_preproc(
-        request,
+        pre.request,
         pre.prompt_token_ids,
         model_name,
         eos_token_ids,
         pre.guided_decoding,
         pre.tool_call_parser,
-    )
-
-    effective_reasoning_parser_name = (
-        _w_reasoning_parser_name if _client_wants_separate_reasoning(request) else None
+        reasoning_parser_name=pre.effective_reasoning_parser_name,
+        reasoning_aware_guided_decoding=_w_reasoning_aware_guided_decoding,
     )
 
     return SglangPreprocessWorkerResult(
         prompt_token_ids=pre.prompt_token_ids,
         dynamo_preproc=dynamo_preproc,
-        request=request,
+        request=pre.request,
         force_reasoning=pre.force_reasoning,
-        effective_reasoning_parser_name=effective_reasoning_parser_name,
+        effective_reasoning_parser_name=pre.effective_reasoning_parser_name,
     )
 
 
@@ -223,6 +274,8 @@ def _build_dynamo_preproc(
     eos_token_ids: int | list[int] | None,
     guided_decoding: dict[str, Any] | None = None,
     tool_call_parser: ToolCallParserType | None = None,
+    reasoning_parser_name: str | None = None,
+    reasoning_aware_guided_decoding: bool = False,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
@@ -276,11 +329,9 @@ def _build_dynamo_preproc(
         "output_options": {
             "logprobs": logprobs_val,
             "prompt_logprobs": None,
-            # Preserve special tokens only when a tool-call parser is
-            # actually active — the parser needs delimiter tokens
-            # (e.g. <|tool_call|>) to detect calls. Mirrors the
-            # post-processor's _skip_special_tokens logic.
-            "skip_special_tokens": tool_call_parser is None,
+            # Parser-visible delimiters must survive backend decoding.
+            "skip_special_tokens": tool_call_parser is None
+            and not reasoning_parser_requires_special_tokens(reasoning_parser_name),
             "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
         "eos_token_ids": _normalize_eos_token_ids(eos_token_ids),
@@ -293,12 +344,47 @@ def _build_dynamo_preproc(
     if mm_data:
         preproc["multi_modal_data"] = mm_data
 
+    request_extra_args = request.get("extra_args")
+    extra_args = (
+        copy.deepcopy(request_extra_args)
+        if isinstance(request_extra_args, dict)
+        else {}
+    )
+
     nvext = request.get("nvext") or {}
     nvext_passthrough = {
         key: nvext[key] for key in ("metadata_upload", "extra_fields") if key in nvext
     }
     if nvext_passthrough:
-        preproc["extra_args"] = {"nvext": nvext_passthrough}
+        existing_nvext = extra_args.get("nvext")
+        merged_nvext = (
+            copy.deepcopy(existing_nvext) if isinstance(existing_nvext, dict) else {}
+        )
+        merged_nvext.update(copy.deepcopy(nvext_passthrough))
+        extra_args["nvext"] = merged_nvext
+
+    # A reasoning-aware guided-decoding backend needs the same effective
+    # chat-template knobs used by this frontend. Explicit internal metadata
+    # wins over the generated envelope, whether supplied at the request root
+    # or in an existing extra_args mapping.
+    if (
+        reasoning_parser_name or reasoning_aware_guided_decoding
+    ) and "reasoning_parser_kwargs" not in extra_args:
+        chat_template_kwargs = _merged_chat_template_kwargs(request)
+        if request.get("reasoning_effort") is not None:
+            chat_template_kwargs["reasoning_effort"] = copy.deepcopy(
+                request["reasoning_effort"]
+            )
+        extra_args["reasoning_parser_kwargs"] = {
+            "chat_template_kwargs": chat_template_kwargs
+        }
+
+    for key in ("reasoning_ended", "reasoning_parser_kwargs"):
+        if key in request:
+            extra_args[key] = copy.deepcopy(request[key])
+
+    if extra_args:
+        preproc["extra_args"] = extra_args
 
     return preproc
 
@@ -315,6 +401,8 @@ class SglangProcessor:
         preprocess_pool: ProcessPoolExecutor | None = None,
         preprocess_workers: int = 0,
         stream_interval: int = 1,
+        reasoning_aware_guided_decoding: bool = False,
+        reasoning_policy_parser_name: str | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -334,10 +422,14 @@ class SglangProcessor:
         self.routed_engine = routed_engine
         self.tool_call_parser_name = tool_call_parser_name
         self.reasoning_parser_name = reasoning_parser_name
+        self.reasoning_policy_parser_name = (
+            reasoning_policy_parser_name or reasoning_parser_name
+        )
         self.exclude_tools_when_tool_choice_none = True
         self.eos_token_ids = _normalize_eos_token_ids(eos_token_ids)
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
+        self.reasoning_aware_guided_decoding = reasoning_aware_guided_decoding
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -392,8 +484,10 @@ class SglangProcessor:
                 tokenizer=self.tokenizer,
                 tool_call_parser_name=self.tool_call_parser_name,
                 reasoning_parser_name=self.reasoning_parser_name,
+                reasoning_policy_parser_name=self.reasoning_policy_parser_name,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 template_force_reasoning=self.template_force_reasoning,
+                reasoning_aware_guided_decoding=self.reasoning_aware_guided_decoding,
             )
 
             if self.debug_perf:
@@ -412,12 +506,14 @@ class SglangProcessor:
                 raise InvalidArgument(_unsupported_n_message(n))
 
             dynamo_preproc = _build_dynamo_preproc(
-                request,
+                pre.request,
                 tokens,
                 request["model"],
                 self.eos_token_ids,
                 pre.guided_decoding,
                 pre.tool_call_parser,
+                reasoning_parser_name=pre.effective_reasoning_parser_name,
+                reasoning_aware_guided_decoding=self.reasoning_aware_guided_decoding,
             )
         except InvalidArgument:
             raise
@@ -434,6 +530,7 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            reasoning_parser_name=pre.effective_reasoning_parser_name,
             eos_token_ids=self.eos_token_ids,
         )
 
@@ -480,6 +577,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             reasoning_parser_name=preproc_result.effective_reasoning_parser_name,
             force_reasoning=preproc_result.force_reasoning,
+            reasoning_aware_guided_decoding=self.reasoning_aware_guided_decoding,
         )
 
         post = SglangStreamingPostProcessor(
@@ -491,6 +589,7 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            reasoning_parser_name=preproc_result.effective_reasoning_parser_name,
             eos_token_ids=self.eos_token_ids,
         )
 
@@ -716,15 +815,29 @@ class SglangEngineFactory:
             self.tool_call_parser_name
             or _runtime_config_parser_name(mdc, "tool_call_parser")
         )
-        reasoning_parser_name = (
-            self.reasoning_parser_name
-            or _runtime_config_parser_name(mdc, "reasoning_parser")
+        worker_reasoning_parser_name = _runtime_config_parser_name(
+            mdc, "reasoning_parser"
         )
+        reasoning_parser_name = (
+            self.reasoning_parser_name or worker_reasoning_parser_name
+        )
+        reasoning_policy_parser_name = (
+            worker_reasoning_parser_name or reasoning_parser_name
+        )
+        reasoning_aware_guided_decoding = _validated_reasoning_aware_guided_decoding(
+            mdc, reasoning_parser_name
+        )
+        validate_sglang_parser_support(tool_call_parser_name, reasoning_parser_name)
 
         if tool_call_parser_name:
             logger.info("SGLang tool call parser: %s", tool_call_parser_name)
         if reasoning_parser_name:
             logger.info("SGLang reasoning parser: %s", reasoning_parser_name)
+        if reasoning_aware_guided_decoding:
+            logger.info(
+                "Backend supports reasoning-aware guided decoding; preserving "
+                "reasoning parsing for required and named tool choices"
+            )
 
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -741,9 +854,11 @@ class SglangEngineFactory:
                     local_dir,
                     tool_call_parser_name,
                     reasoning_parser_name,
+                    reasoning_policy_parser_name,
                     self.config.exclude_tools_when_tool_choice_none,
                     self.trust_remote_code,
                     template_force_reasoning,
+                    reasoning_aware_guided_decoding,
                 ),
             )
             futures = [
@@ -779,6 +894,8 @@ class SglangEngineFactory:
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,
             stream_interval=self.stream_interval,
+            reasoning_aware_guided_decoding=reasoning_aware_guided_decoding,
+            reasoning_policy_parser_name=reasoning_policy_parser_name,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

@@ -8,7 +8,6 @@ Unit tests for vLLM backend arguments.
 need to add more tests to cover different code paths of DynamoVllmConfig.
 """
 
-
 import pytest
 
 from dynamo.vllm.backend_args import DisaggregationMode, DynamoVllmConfig
@@ -43,7 +42,27 @@ def create_config() -> DynamoVllmConfig:
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
+    config.dyn_tool_call_parser = None
+    config.dyn_reasoning_parser = None
+    config.dyn_enable_structural_tag = False
     return config
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("dyn_tool_call_parser", "qwen3"),
+        ("dyn_reasoning_parser", "qwen3"),
+        ("dyn_enable_structural_tag", True),
+    ],
+)
+def test_dynamo_preprocessing_rejected_with_vllm_text_mode(field, value):
+    config = create_config()
+    config.use_vllm_tokenizer = True
+    setattr(config, field, value)
+
+    with pytest.raises(ValueError, match="use-vllm-tokenizer"):
+        config._validate_text_mode_parsers()
 
 
 class TestResolveDisaggregationModeFromLegacyMultimodalFlags:

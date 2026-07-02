@@ -184,6 +184,17 @@ class TestReasoningParserForwarding:
             {"chat_template_kwargs": {"reasoning_effort": "high"}},
         )
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"reasoning_ended": "false"},
+            {"reasoning_parser_kwargs": []},
+            {"reasoning_parser_kwargs": {"chat_template_kwargs": []}},
+        ],
+    )
+    def test_request_reasoning_metadata_drops_malformed_values(self, payload):
+        assert mod._request_reasoning_metadata(payload) == (None, None)
+
     def test_generate_signature_support_is_cached(self, monkeypatch):
         class EngineClient:
             def generate(

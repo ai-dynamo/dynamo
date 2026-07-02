@@ -18,6 +18,7 @@ import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
+from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 import dynamo.frontend.sglang_prepost as sglang_prepost_module
@@ -26,15 +27,20 @@ from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
     _flatten_message_content,
+    _merged_chat_template_kwargs,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
-    _normalize_sglang_parser_name,
+    _normalize_sglang_reasoning_parser_name,
+    _normalize_sglang_tool_parser_name,
     _parse_json_array_buffer,
     build_tool_call_guided_decoding,
     convert_tools,
     create_parsers,
+    detect_force_reasoning_from_template,
     preprocess_chat_request,
+    reasoning_parser_requires_special_tokens,
     resolve_request_force_reasoning,
+    validate_sglang_parser_support,
 )
 from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
@@ -43,8 +49,10 @@ from dynamo.frontend.sglang_processor import (
     _init_worker,
     _map_finish_reason,
     _normalize_eos_token_ids,
+    _runtime_config_bool,
     _runtime_config_parser_name,
     _tokenizer_eos_token_ids,
+    _validated_reasoning_aware_guided_decoding,
 )
 from dynamo.frontend.utils import (
     PreprocessError,
@@ -96,6 +104,23 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["frequency_penalty"] == 0.0
         assert sampling["repetition_penalty"] == 1.0
         assert sampling["seed"] is None
+
+    def test_backend_capability_forwards_knobs_without_response_parser(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "chat_template_kwargs": {"thinking": True},
+            },
+            prompt_token_ids=[1],
+            model_name="test",
+            eos_token_ids=None,
+            reasoning_parser_name=None,
+            reasoning_aware_guided_decoding=True,
+        )
+
+        assert result["extra_args"]["reasoning_parser_kwargs"] == {
+            "chat_template_kwargs": {"thinking": True}
+        }
 
     def test_top_k_zero_maps_to_negative_one(self):
         """SGLang uses -1 for disabled top_k, OpenAI uses 0."""
@@ -270,6 +295,31 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["output_options"]["logprobs"] is None
 
+    @pytest.mark.parametrize(
+        "parser_name", ["gpt_oss", "gemma4", "mistral", "minimax_m3"]
+    )
+    def test_reasoning_only_special_tokens_are_preserved(self, parser_name):
+        result = _build_dynamo_preproc(
+            {"model": "test"},
+            [1],
+            "test",
+            None,
+            reasoning_parser_name=parser_name,
+        )
+
+        assert result["output_options"]["skip_special_tokens"] is False
+
+    def test_qwen_reasoning_does_not_disable_special_token_stripping(self):
+        result = _build_dynamo_preproc(
+            {"model": "test"},
+            [1],
+            "test",
+            None,
+            reasoning_parser_name="qwen3",
+        )
+
+        assert result["output_options"]["skip_special_tokens"] is True
+
     def test_metadata_upload_nvext_is_forwarded_to_backend(self):
         result = _build_dynamo_preproc(
             {
@@ -287,6 +337,97 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
 
         assert result["extra_args"]["nvext"]["metadata_upload"] == {
             "url": "s3://bucket/root/rollouts",
+        }
+
+    def test_reasoning_parser_kwargs_merge_with_nvext(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "chat_template_kwargs": {"enable_thinking": True},
+                "nvext": {
+                    "metadata_upload": {"url": "s3://bucket/root/rollouts"},
+                },
+            },
+            [1],
+            "test",
+            None,
+            reasoning_parser_name="nemotron_v3",
+        )
+
+        assert result["extra_args"] == {
+            "nvext": {
+                "metadata_upload": {"url": "s3://bucket/root/rollouts"},
+            },
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+        }
+
+    def test_reasoning_effort_is_preserved_in_reasoning_parser_kwargs(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "reasoning_effort": "high",
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            [1],
+            "test",
+            None,
+            reasoning_parser_name="mistral",
+        )
+
+        assert result["extra_args"]["reasoning_parser_kwargs"] == {
+            "chat_template_kwargs": {
+                "enable_thinking": True,
+                "reasoning_effort": "high",
+            }
+        }
+
+    def test_root_reasoning_effort_overrides_template_metadata(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "reasoning_effort": "none",
+                "chat_template_kwargs": {"reasoning_effort": "high"},
+            },
+            [1],
+            "test",
+            None,
+            reasoning_parser_name="mistral",
+        )
+
+        assert result["extra_args"]["reasoning_parser_kwargs"] == {
+            "chat_template_kwargs": {"reasoning_effort": "none"}
+        }
+
+    def test_explicit_reasoning_metadata_takes_precedence(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "chat_template_kwargs": {"enable_thinking": True},
+                "extra_args": {
+                    "routing_hint": "preserve-me",
+                    "reasoning_parser_kwargs": {
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    },
+                },
+                "reasoning_ended": False,
+                "reasoning_parser_kwargs": {
+                    "chat_template_kwargs": {"thinking_mode": "enabled"},
+                },
+            },
+            [1],
+            "test",
+            None,
+            reasoning_parser_name="nemotron_v3",
+        )
+
+        assert result["extra_args"] == {
+            "routing_hint": "preserve-me",
+            "reasoning_ended": False,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"thinking_mode": "enabled"},
+            },
         }
 
     def test_model_name_and_token_ids(self):
@@ -538,6 +679,38 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         assert tcp is not None
         assert rp is None
 
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        ],
+    )
+    def test_reasoning_active_for_reasoning_aware_guided_decoding(self, tool_choice):
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+        tcp, rp = create_parsers(
+            {"tools": tools, "tool_choice": tool_choice},
+            tool_call_parser_name="nemotron_nano",
+            reasoning_parser_name="nemotron_v3",
+            force_reasoning=True,
+            reasoning_aware_guided_decoding=True,
+        )
+
+        assert isinstance(tcp, FunctionCallParser)
+        assert rp is not None
+        assert type(rp.detector).__name__ == "Nemotron3Detector"
+
     def test_reasoning_active_when_tool_choice_auto(self):
         """Reasoning parser remains active for tool_choice=auto (no guided decoding)."""
         tools = [
@@ -557,7 +730,7 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         assert tcp is not None
         assert rp is not None
 
-    def test_minimax_m3_dynamo_aliases_are_normalized_for_sglang(self, monkeypatch):
+    def test_dynamo_aliases_are_normalized_by_sglang_parser_kind(self, monkeypatch):
         """Dynamo parser aliases should not leak into SGLang parser lookup."""
 
         # Test double: capture the parser name Dynamo passes to SGLang without
@@ -604,13 +777,113 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         assert tcp.tool_call_parser == "minimax-m3"
         assert rp.model_type == "minimax-m3"
 
+        tcp, rp = create_parsers(
+            {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+            },
+            tool_call_parser_name="nemotron_nano",
+            reasoning_parser_name="nemotron_v3",
+        )
 
-def test_normalize_sglang_parser_name_accepts_minimax_m3_aliases():
-    assert _normalize_sglang_parser_name("minimax-m3") == "minimax-m3"
-    assert _normalize_sglang_parser_name("minimax_m3") == "minimax-m3"
-    assert _normalize_sglang_parser_name("minimax_m3_nom") == "minimax-m3"
-    assert _normalize_sglang_parser_name("minimax-m3-nom") == "minimax-m3"
-    assert _normalize_sglang_parser_name("kimi_k2") == "kimi_k2"
+        assert tcp.tool_call_parser == "qwen3_coder"
+        assert rp.model_type == "nemotron_3"
+
+
+def test_normalize_sglang_parser_names_by_parser_kind():
+    assert _normalize_sglang_tool_parser_name("minimax_m3") == "minimax-m3"
+    assert _normalize_sglang_reasoning_parser_name("minimax_m3") == "minimax-m3"
+    assert _normalize_sglang_tool_parser_name("nemotron_nano") == "qwen3_coder"
+    assert _normalize_sglang_reasoning_parser_name("nemotron_v3") == "nemotron_3"
+    assert _normalize_sglang_reasoning_parser_name("nemotron3") == "nemotron_3"
+    assert _normalize_sglang_reasoning_parser_name("deepseek_r1") == "deepseek-r1"
+    assert _normalize_sglang_reasoning_parser_name("deepseek_v3_2") == "deepseek-v3"
+    assert _normalize_sglang_reasoning_parser_name("deepseek_v4") == "deepseek-v4"
+    assert _normalize_sglang_reasoning_parser_name("gpt_oss") == "gpt-oss"
+    assert _normalize_sglang_reasoning_parser_name("kimi_k25") == "kimi_k2"
+
+
+@pytest.mark.parametrize(
+    ("dynamo_name", "sglang_name"),
+    [
+        ("llama3_json", "llama3"),
+        ("harmony", "gpt-oss"),
+        ("deepseek_v3", "deepseekv3"),
+        ("deepseek_v3_1", "deepseekv31"),
+        ("deepseek_v3_2", "deepseekv32"),
+        ("deepseek-v4", "deepseekv4"),
+        ("minimax_m2", "minimax-m2"),
+        ("gemma-4", "gemma4"),
+        ("nemotron_nano", "qwen3_coder"),
+    ],
+)
+def test_supported_dynamo_tool_parsers_map_to_installed_sglang_parser(
+    dynamo_name, sglang_name
+):
+    assert _normalize_sglang_tool_parser_name(dynamo_name) == sglang_name
+    assert sglang_name in FunctionCallParser.ToolCallParserEnum
+
+
+def test_legacy_chat_template_args_override_kwargs_per_key():
+    request = {
+        "chat_template_kwargs": {"enable_thinking": True, "keep": "new"},
+        "chat_template_args": {"enable_thinking": False, "legacy": "yes"},
+    }
+
+    assert _merged_chat_template_kwargs(request) == {
+        "enable_thinking": False,
+        "keep": "new",
+        "legacy": "yes",
+    }
+    assert not resolve_request_force_reasoning(request, "qwen3", template_default=True)
+
+
+def test_installed_sglang_rejects_unavailable_parser_aliases(monkeypatch):
+    monkeypatch.delitem(
+        FunctionCallParser.ToolCallParserEnum, "qwen3_coder", raising=False
+    )
+    with pytest.raises(ValueError, match="does not support"):
+        validate_sglang_parser_support("nemotron_nano", None)
+
+    monkeypatch.delitem(ReasoningParser.DetectorMap, "nemotron_3", raising=False)
+    with pytest.raises(ValueError, match="does not support"):
+        validate_sglang_parser_support(None, "nemotron_v3")
+    assert (
+        _normalize_sglang_reasoning_parser_name("minimax_append_think")
+        == "minimax-append-think"
+    )
+    assert _normalize_sglang_tool_parser_name("kimi_k2") == "kimi_k2"
+
+
+def test_unsupported_sglang_reasoning_parser_fails_closed_for_guided_decoding():
+    tool_parser, reasoning_parser = create_parsers(
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        },
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="unsupported_parser",
+        reasoning_aware_guided_decoding=True,
+    )
+
+    assert isinstance(tool_parser, FunctionCallParser)
+    assert reasoning_parser is None
 
 
 def test_minimax_m3_force_reasoning_uses_thinking_mode():
@@ -630,6 +903,286 @@ def test_minimax_m3_force_reasoning_uses_thinking_mode():
         )
         is False
     )
+
+
+@pytest.mark.parametrize("parser", ["deepseek_r1", "step3", "minimax_append_think"])
+def test_force_reasoning_families_do_not_depend_on_template_detection(parser):
+    assert resolve_request_force_reasoning({}, parser, template_default=False) is True
+
+
+@pytest.mark.parametrize(
+    "parser_name", ["minimax_append_think", "minimax-append-think"]
+)
+def test_minimax_append_frontend_splits_implicit_reasoning_start(parser_name):
+    _, parser = create_parsers(
+        {"tool_choice": "auto"},
+        tool_call_parser_name=None,
+        reasoning_parser_name=parser_name,
+        force_reasoning=True,
+    )
+
+    assert type(parser.detector).__name__ == "DeepSeekR1Detector"
+    assert parser.parse_stream_chunk("implicit reason") == ("implicit reason", "")
+    assert parser.parse_stream_chunk("</think>visible") == ("", "visible")
+    assert reasoning_parser_requires_special_tokens(parser_name)
+
+
+@pytest.mark.parametrize("parser", ["basic", "nemotron_deci"])
+def test_non_force_dynamo_aliases_do_not_inherit_qwen3_default(parser):
+    assert resolve_request_force_reasoning({}, parser, template_default=False) is False
+    assert resolve_request_force_reasoning({}, parser, template_default=True) is True
+    assert (
+        resolve_request_force_reasoning(
+            {"chat_template_kwargs": {"enable_thinking": False}},
+            parser,
+            template_default=True,
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("reasoning_parser_name", "reasoning_policy_parser_name"),
+    [("kimi_k25", None), ("kimi_k2", "kimi_k25")],
+)
+def test_kimi_k25_tool_continuation_disables_frontend_and_backend_reasoning(
+    reasoning_parser_name, reasoning_policy_parser_name
+):
+    class CapturingTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return [1, 2, 3]
+
+    result = preprocess_chat_request(
+        {
+            "model": MODEL,
+            "messages": [
+                {"role": "user", "content": "Use a tool"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "done"},
+            ],
+        },
+        tokenizer=CapturingTokenizer(),
+        tool_call_parser_name=None,
+        reasoning_parser_name=reasoning_parser_name,
+        reasoning_policy_parser_name=reasoning_policy_parser_name,
+        reasoning_aware_guided_decoding=True,
+    )
+
+    assert result.reasoning_parser is None
+    assert result.force_reasoning is False
+    assert result.request["reasoning_ended"] is True
+
+
+def test_kimi_k25_tool_continuation_pool_keeps_parser_disabled(monkeypatch):
+    class CapturingTokenizer:
+        chat_template = "template"
+        eos_token_id = 2
+
+        def apply_chat_template(self, messages, **kwargs):
+            return [1, 2, 3]
+
+    request = {
+        "model": MODEL,
+        "messages": [
+            {"role": "user", "content": "Use a tool"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "done"},
+        ],
+    }
+    monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", CapturingTokenizer())
+    monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", None)
+    monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "kimi_k2")
+    monkeypatch.setattr(
+        sglang_processor_module,
+        "_w_reasoning_policy_parser_name",
+        "kimi_k25",
+    )
+    monkeypatch.setattr(
+        sglang_processor_module,
+        "_w_exclude_tools_when_tool_choice_none",
+        True,
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_reasoning_aware_guided_decoding", True
+    )
+
+    result = sglang_processor_module._preprocess_worker(request, MODEL, [2])
+
+    assert result.effective_reasoning_parser_name is None
+    assert result.force_reasoning is False
+    assert result.request["reasoning_ended"] is True
+
+
+@pytest.mark.parametrize("policy_name", ["basic", " BASIC ", "nemotron_deci"])
+def test_non_force_alias_sends_explicit_backend_reasoning_state(policy_name):
+    class CapturingTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return [1, 2, 3]
+
+    result = preprocess_chat_request(
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Use the tool"}],
+            "tools": [],
+            "tool_choice": "required",
+        },
+        tokenizer=CapturingTokenizer(),
+        tool_call_parser_name=None,
+        reasoning_parser_name="qwen3",
+        reasoning_policy_parser_name=policy_name,
+        reasoning_aware_guided_decoding=True,
+    )
+
+    assert result.force_reasoning is False
+    assert result.request["reasoning_ended"] is True
+
+
+def test_non_force_alias_uses_rendered_qwen_prompt_state(tokenizer):
+    assert detect_force_reasoning_from_template(tokenizer.chat_template)
+
+    result = preprocess_chat_request(
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Answer directly"}],
+            "tool_choice": "auto",
+        },
+        tokenizer=tokenizer,
+        tool_call_parser_name=None,
+        reasoning_parser_name="qwen3",
+        reasoning_policy_parser_name="basic",
+        template_force_reasoning=True,
+        reasoning_aware_guided_decoding=True,
+    )
+
+    assert result.force_reasoning is False
+    assert result.request["reasoning_ended"] is True
+
+
+def test_non_force_alias_ignores_user_think_literal_before_generation_prompt():
+    class CapturingTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return [1, 2, 3]
+
+        def decode(self, token_ids, skip_special_tokens=False):
+            return (
+                "<|im_start|>user\nA literal <think> tag<|im_end|>\n"
+                "<|im_start|>assistant\n"
+            )
+
+    result = preprocess_chat_request(
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "A literal <think> tag"}],
+            "tool_choice": "auto",
+        },
+        tokenizer=CapturingTokenizer(),
+        tool_call_parser_name=None,
+        reasoning_parser_name="qwen3",
+        reasoning_policy_parser_name="basic",
+        template_force_reasoning=True,
+        reasoning_aware_guided_decoding=True,
+    )
+
+    assert result.force_reasoning is False
+    assert result.request["reasoning_ended"] is True
+
+
+def test_non_force_separate_reasoning_false_does_not_disable_backend_reasoning():
+    class CapturingTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return [1, 2, 3]
+
+        def decode(self, token_ids, skip_special_tokens=False):
+            return "assistant\n<think>"
+
+    result = preprocess_chat_request(
+        {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Use the tool"}],
+            "separate_reasoning": False,
+        },
+        tokenizer=CapturingTokenizer(),
+        tool_call_parser_name=None,
+        reasoning_parser_name="qwen3",
+        reasoning_policy_parser_name="basic",
+        template_force_reasoning=True,
+        reasoning_aware_guided_decoding=True,
+    )
+
+    assert result.reasoning_parser is None
+    assert result.force_reasoning is True
+    assert result.request["reasoning_ended"] is False
+
+
+@pytest.mark.parametrize(
+    ("request_payload", "expected"),
+    [
+        ({}, False),
+        ({"reasoning_effort": "none"}, False),
+        ({"reasoning_effort": "high"}, True),
+        (
+            {
+                "reasoning_effort": "none",
+                "chat_template_kwargs": {"reasoning_effort": "high"},
+            },
+            False,
+        ),
+    ],
+)
+def test_mistral_force_reasoning_follows_effective_reasoning_effort(
+    request_payload, expected
+):
+    assert (
+        resolve_request_force_reasoning(
+            request_payload, "mistral", template_default=not expected
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("template_kwargs", "expected"),
+    [({}, True), ({"thinking": False}, False), ({"enable_thinking": True}, True)],
+)
+def test_deepseek_v4_dynamo_policy_defaults_to_thinking(template_kwargs, expected):
+    class CapturingTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return [1, 2, 3]
+
+    result = preprocess_chat_request(
+        {
+            "model": "deepseek-v4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": template_kwargs,
+        },
+        tokenizer=CapturingTokenizer(),
+        tool_call_parser_name=None,
+        reasoning_parser_name="deepseek_v4",
+    )
+
+    assert result.force_reasoning is expected
+    assert result.request["chat_template_kwargs"]["thinking"] is expected
+    assert result.request["chat_template_kwargs"]["enable_thinking"] is expected
 
 
 class _CapturingReasoningParser:
@@ -786,7 +1339,67 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert seen["tool_call_parser"] == "minimax-m3"
         assert guided == {"structural_tag": {"type": "object"}}
 
-    def test_required_tool_choice_builds_json_schema_guidance(self):
+    @pytest.mark.parametrize(
+        (
+            "reasoning_parser_active",
+            "force_reasoning",
+            "reasoning_aware_guided_decoding",
+            "expects_guidance",
+        ),
+        [
+            (False, False, False, True),
+            (True, True, False, False),
+            (True, True, True, True),
+            # Optional reasoning may begin in generated output, after the
+            # backend decided not to delay its grammar. Preserve that path.
+            (True, False, True, False),
+        ],
+    )
+    def test_auto_guidance_requires_active_delayed_reasoning(
+        self,
+        monkeypatch,
+        reasoning_parser_active,
+        force_reasoning,
+        reasoning_aware_guided_decoding,
+        expects_guidance,
+    ):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+        )
+
+        class FakeFunctionCallParser:
+            def __init__(self, *, tools, tool_call_parser):
+                pass
+
+            def get_structure_constraint(self, tool_choice, **kwargs):
+                return "structural_tag", {"type": "object"}
+
+        monkeypatch.setattr(
+            sglang_prepost_module,
+            "FunctionCallParser",
+            FakeFunctionCallParser,
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto"},
+            tool_call_parser_name="hermes",
+            sglang_tools=tools,
+            reasoning_parser_active=reasoning_parser_active,
+            force_reasoning=force_reasoning,
+            reasoning_aware_guided_decoding=reasoning_aware_guided_decoding,
+        )
+
+        assert (guided is not None) is expects_guidance
+
+    def test_required_tool_choice_builds_native_structural_guidance(self):
         tools = convert_tools(
             [
                 {
@@ -810,7 +1423,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         )
 
         assert isinstance(guided, dict)
-        assert "json" in guided
+        assert "structural_tag" in guided
 
     def test_required_tool_choice_supports_older_sglang_constraint_signature(
         self, monkeypatch
@@ -987,8 +1600,8 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert tcp is not None
         assert rp is not None
 
-    def test_required_creates_json_array_parser(self):
-        """tool_choice='required' creates JsonArrayParser, not FunctionCallParser."""
+    def test_required_structural_tag_creates_native_parser(self):
+        """Required uses the model parser when its detector has structural tags."""
         request = {
             "tools": [
                 {
@@ -1005,10 +1618,10 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         tcp, _ = create_parsers(
             request, tool_call_parser_name="hermes", reasoning_parser_name=None
         )
-        assert isinstance(tcp, JsonArrayParser)
+        assert isinstance(tcp, FunctionCallParser)
 
-    def test_named_tool_choice_creates_json_array_parser(self):
-        """Named tool_choice creates JsonArrayParser."""
+    def test_named_structural_tag_creates_native_parser(self):
+        """Named choice uses the model parser for native structural tags."""
         request = {
             "tools": [
                 {
@@ -1028,7 +1641,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         tcp, _ = create_parsers(
             request, tool_call_parser_name="hermes", reasoning_parser_name=None
         )
-        assert isinstance(tcp, JsonArrayParser)
+        assert isinstance(tcp, FunctionCallParser)
 
     def test_auto_creates_function_call_parser(self):
         """tool_choice='auto' creates FunctionCallParser."""
@@ -1069,6 +1682,32 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             request, tool_call_parser_name=None, reasoning_parser_name=None
         )
         assert isinstance(tcp, JsonArrayParser)
+
+    def test_harmony_required_uses_forcing_json_fallback(self):
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "f", "parameters": {}},
+                }
+            ],
+            "tool_choice": "required",
+        }
+        tools = convert_tools(request["tools"])
+        tcp, _ = create_parsers(
+            request,
+            tool_call_parser_name="harmony",
+            reasoning_parser_name="gpt_oss",
+            reasoning_aware_guided_decoding=True,
+        )
+        guided = build_tool_call_guided_decoding(
+            request,
+            tool_call_parser_name="harmony",
+            sglang_tools=tools,
+        )
+
+        assert isinstance(tcp, JsonArrayParser)
+        assert "json" in guided
 
 
 # ---------------------------------------------------------------------------
@@ -1226,6 +1865,68 @@ class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from
 
         assert _runtime_config_parser_name(FakeMdc(), "tool_call_parser") == "hermes"
 
+    @pytest.mark.parametrize("value", [None, False, "true", 1, {}, []])
+    def test_reasoning_aware_guided_decoding_capability_fails_closed(self, value):
+        class FakeMdc:
+            def runtime_config(self):
+                runtime_data = (
+                    {} if value is None else {"reasoning_aware_guided_decoding": value}
+                )
+                return {"runtime_data": runtime_data}
+
+        assert (
+            _runtime_config_bool(FakeMdc(), "reasoning_aware_guided_decoding") is False
+        )
+
+    def test_reads_true_reasoning_aware_guided_decoding_capability(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return {"runtime_data": {"reasoning_aware_guided_decoding": True}}
+
+        assert (
+            _runtime_config_bool(FakeMdc(), "reasoning_aware_guided_decoding") is True
+        )
+
+    def test_capability_accepts_compatible_frontend_override(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return {
+                    "reasoning_parser": "nemotron_v3",
+                    "runtime_data": {"reasoning_aware_guided_decoding": True},
+                }
+
+        assert _validated_reasoning_aware_guided_decoding(FakeMdc(), "nemotron_3")
+
+    def test_capability_accepts_minimax_append_frontend_parser(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return {
+                    "reasoning_parser": "minimax_append_think",
+                    "runtime_data": {"reasoning_aware_guided_decoding": True},
+                }
+
+        assert _validated_reasoning_aware_guided_decoding(
+            FakeMdc(), "minimax_append_think"
+        )
+
+    def test_capability_rejects_incompatible_frontend_override(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return {
+                    "reasoning_parser": "nemotron_v3",
+                    "runtime_data": {"reasoning_aware_guided_decoding": True},
+                }
+
+        with pytest.raises(ValueError, match="incompatible"):
+            _validated_reasoning_aware_guided_decoding(FakeMdc(), "gpt-oss")
+
+    def test_capability_without_worker_parser_fails_closed(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return {"runtime_data": {"reasoning_aware_guided_decoding": True}}
+
+        assert not _validated_reasoning_aware_guided_decoding(FakeMdc(), "nemotron_3")
+
 
 # ---------------------------------------------------------------------------
 # preprocess_chat_request
@@ -1234,6 +1935,43 @@ class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from
 
 class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preprocessing (multi-turn assistant tool_calls, role handling)
     """Test end-to-end preprocessing with a real tokenizer."""
+
+    def test_auto_strict_guidance_is_kept_when_reasoning_explicitly_disabled(self):
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                return [1, 2, 3]
+
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Use the tool"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "strict": True,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name="nemotron_nano",
+            reasoning_parser_name="nemotron_v3",
+            reasoning_aware_guided_decoding=True,
+        )
+
+        assert result.force_reasoning is False
+        assert result.guided_decoding is not None
+        assert "structural_tag" in result.guided_decoding
 
     def test_basic_chat(self, tokenizer):
         """Simple user message preprocesses to non-empty token IDs."""
@@ -1526,10 +2264,18 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
     def test_init_worker_propagates_exclude_flag_false(self):
         """_init_worker sets the worker-global exclude_tools flag to False."""
-        _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=False)
+        _init_worker(
+            MODEL,
+            None,
+            None,
+            exclude_tools_when_tool_choice_none=False,
+            reasoning_aware_guided_decoding=True,
+        )
         assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is False
+        assert sglang_processor_module._w_reasoning_aware_guided_decoding is True
         # Reset to default
         sglang_processor_module._w_exclude_tools_when_tool_choice_none = True
+        sglang_processor_module._w_reasoning_aware_guided_decoding = False
 
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""
@@ -1792,6 +2538,21 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.request["chat_template_kwargs"]["thinking_mode"] == "enabled"
         assert "chat_template_kwargs" not in request
 
+        preprocessed = _build_dynamo_preproc(
+            result.request,
+            result.prompt_token_ids,
+            "generic-model",
+            None,
+            reasoning_parser_name="nemotron_v3",
+        )
+        assert preprocessed["extra_args"]["reasoning_parser_kwargs"] == {
+            "chat_template_kwargs": {
+                "thinking": True,
+                "enable_thinking": True,
+                "thinking_mode": "enabled",
+            }
+        }
+
     @pytest.mark.parametrize(
         "request_update",
         [
@@ -1863,6 +2624,91 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["kwargs"]["enable_thinking"] is True
         assert result.request["chat_template_kwargs"]["thinking"] is True
         assert result.request["chat_template_kwargs"]["enable_thinking"] is True
+        assert result.force_reasoning is True
+
+    @pytest.mark.parametrize(
+        ("reasoning_effort", "explicit_kwargs", "expected"),
+        [
+            ("high", None, True),
+            ("none", None, False),
+            ("high", {"thinking": False}, False),
+            ("high", {"enable_thinking": False}, False),
+            ("high", {"thinking_mode": "disabled"}, False),
+            ("none", {"thinking": True}, True),
+        ],
+    )
+    def test_reasoning_effort_derives_toggle_without_overriding_explicit_flags(
+        self, reasoning_effort, explicit_kwargs, expected
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": reasoning_effort,
+            "tool_choice": "auto",
+        }
+        if explicit_kwargs is not None:
+            request["chat_template_kwargs"] = explicit_kwargs
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek-v3",
+        )
+
+        if explicit_kwargs is None:
+            assert captured["kwargs"]["thinking"] is expected
+            assert captured["kwargs"]["enable_thinking"] is expected
+        else:
+            for key, value in explicit_kwargs.items():
+                assert captured["kwargs"][key] == value
+            absent_aliases = {
+                "thinking",
+                "enable_thinking",
+                "thinking_mode",
+            } - explicit_kwargs.keys()
+            assert absent_aliases.isdisjoint(captured["kwargs"])
+        assert result.force_reasoning is expected
+
+    @pytest.mark.parametrize(
+        "parser_name", ["deepseek-v3", "deepseek_v3_1", "deepseek_v3_2"]
+    )
+    def test_rust_normalized_reasoning_effort_enables_deepseek_v3_aliases(
+        self, parser_name
+    ):
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                return [1, 2, 3]
+
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "high",
+                "chat_template_args": {
+                    "thinking": True,
+                    "enable_thinking": True,
+                    "thinking_mode": "enabled",
+                    "reasoning_effort": "high",
+                },
+                "tool_choice": "auto",
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=parser_name,
+        )
+
         assert result.force_reasoning is True
 
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
@@ -2343,6 +3189,75 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         assert "think about this" in reasoning
         assert "42" in content
 
+    @pytest.mark.parametrize("split_stream", [False, True])
+    def test_nemotron_force_nonempty_moves_terminal_reasoning_to_content(
+        self, tokenizer, split_stream
+    ):
+        _, reasoning_parser = create_parsers(
+            {
+                "tool_choice": "auto",
+                "chat_template_kwargs": {"force_nonempty_content": True},
+            },
+            tool_call_parser_name=None,
+            reasoning_parser_name="nemotron_v3",
+            force_reasoning=True,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=reasoning_parser,
+            reasoning_parser_name="nemotron_v3",
+        )
+        chunks = (
+            ["terminal thought", "</think>"]
+            if split_stream
+            else ["terminal thought</think>"]
+        )
+        choices = []
+        for index, chunk in enumerate(chunks):
+            choice = post.process_output(
+                {
+                    "token_ids": tokenizer.encode(chunk),
+                    "finish_reason": "stop" if index == len(chunks) - 1 else None,
+                }
+            )
+            if choice:
+                choices.append(choice)
+
+        content = "".join(c["delta"].get("content", "") for c in choices)
+        reasoning = "".join(c["delta"].get("reasoning_content", "") for c in choices)
+        assert content == "terminal thought"
+        assert reasoning == ""
+
+    def test_nemotron_force_nonempty_keeps_reasoning_when_answer_exists(
+        self, tokenizer
+    ):
+        _, reasoning_parser = create_parsers(
+            {
+                "tool_choice": "auto",
+                "chat_template_kwargs": {"force_nonempty_content": True},
+            },
+            tool_call_parser_name=None,
+            reasoning_parser_name="nemotron_v3",
+            force_reasoning=True,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=reasoning_parser,
+            reasoning_parser_name="nemotron_v3",
+        )
+
+        choice = post.process_output(
+            {
+                "token_ids": tokenizer.encode("thought</think>answer"),
+                "finish_reason": "stop",
+            }
+        )
+
+        assert choice["delta"]["reasoning_content"] == "thought"
+        assert choice["delta"]["content"] == "answer"
+
 
 # ---------------------------------------------------------------------------
 # Utility functions
@@ -2520,3 +3435,15 @@ class TestChatTemplateKwargsForwarding:
             tokenizer,
         )
         assert think.prompt_token_ids != no_think.prompt_token_ids
+
+
+@pytest.mark.parametrize("parser_name", ["gpt_oss", "gemma4", "mistral", "minimax_m3"])
+def test_sglang_postprocessor_preserves_reasoning_special_tokens(parser_name):
+    post = SglangStreamingPostProcessor(
+        tokenizer=types.SimpleNamespace(),
+        tool_call_parser=None,
+        reasoning_parser=types.SimpleNamespace(),
+        reasoning_parser_name=parser_name,
+    )
+
+    assert post._skip_special_tokens is False

@@ -38,6 +38,7 @@ class SamplingOptions(BaseModel):
     use_beam_search: Optional[bool] = None
     length_penalty: Optional[float] = None
     seed: Optional[int] = None
+    guided_decoding: Optional[dict[str, Any]] = None
 
 
 class PreprocessedRequest(BaseModel):
@@ -47,6 +48,10 @@ class PreprocessedRequest(BaseModel):
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
     mdc_sum: Optional[str] = None
     annotations: List[str] = Field(default_factory=list)
+    extra_args: dict[str, Any] = Field(default_factory=dict)
+    reasoning_ended: Optional[bool] = None
+    reasoning_parser_kwargs: Optional[dict[str, Any]] = None
+    reasoning_effort: Optional[str] = None
 
 
 EmbeddingInput = Union[str, List[str], List[int], List[List[int]]]

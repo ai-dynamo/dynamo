@@ -34,6 +34,7 @@ from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
+    ModelRuntimeConfig,
     ModelType,
     WorkerMetricsPublisher,
     WorkerType,
@@ -46,6 +47,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.reasoning import publish_reasoning_aware_guided_decoding
 
 logger = logging.getLogger(__name__)
 
@@ -410,8 +412,68 @@ class LoraMixin:
                                 else:
                                     lora_worker_type = WorkerType.Aggregated
                                     lora_needs = []
+
+                            runtime_config = ModelRuntimeConfig()
+                            context_length = getattr(
+                                self.config.server_args, "context_length", None
+                            )
+                            if isinstance(context_length, int) and not isinstance(
+                                context_length, bool
+                            ):
+                                runtime_config.context_length = context_length
+                            text_mode = getattr(self, "use_sglang_tokenizer", False)
+                            if not text_mode:
+                                runtime_config.tool_call_parser = getattr(
+                                    self.config.dynamo_args,
+                                    "dyn_tool_call_parser",
+                                    None,
+                                )
+                                runtime_config.reasoning_parser = getattr(
+                                    self.config.dynamo_args,
+                                    "dyn_reasoning_parser",
+                                    None,
+                                )
+                            runtime_config.exclude_tools_when_tool_choice_none = (
+                                getattr(
+                                    self.config.dynamo_args,
+                                    "exclude_tools_when_tool_choice_none",
+                                    True,
+                                )
+                            )
+                            runtime_config.set_structural_tag_mode(
+                                "on"
+                                if getattr(
+                                    self.config.dynamo_args,
+                                    "dyn_enable_structural_tag",
+                                    False,
+                                )
+                                else "off"
+                            )
+                            runtime_config.set_structural_tag_scope(
+                                getattr(
+                                    self.config.dynamo_args,
+                                    "dyn_structural_tag_scope",
+                                    "auto",
+                                )
+                            )
+                            runtime_config.set_structural_tag_schema(
+                                getattr(
+                                    self.config.dynamo_args,
+                                    "dyn_structural_tag_schema",
+                                    "auto",
+                                )
+                            )
+                            if lora_worker_type != WorkerType.Prefill and not text_mode:
+                                publish_reasoning_aware_guided_decoding(
+                                    runtime_config,
+                                    self.engine,
+                                    self.config.server_args,
+                                    self.config.dynamo_args,
+                                )
                             await register_llm(
-                                model_input=ModelInput.Tokens,
+                                model_input=(
+                                    ModelInput.Text if text_mode else ModelInput.Tokens
+                                ),
                                 model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.server_args.model_path,
@@ -419,6 +481,7 @@ class LoraMixin:
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.server_args.model_path,
+                                runtime_config=runtime_config,
                                 worker_type=lora_worker_type,
                                 needs=lora_needs,
                                 # Publish the worker's per-worker LoRA slot budget so the frontend

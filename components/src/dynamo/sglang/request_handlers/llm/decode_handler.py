@@ -18,6 +18,7 @@ from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.reasoning import request_reasoning_kwargs
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     IMAGE_URL_KEY,
@@ -341,6 +342,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        reasoning_kwargs = request_reasoning_kwargs(self.engine, request)
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
         metadata_uploader = self._metadata_uploader_from_request(request)
@@ -395,6 +397,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **reasoning_kwargs,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
@@ -463,6 +466,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **reasoning_kwargs,
                 **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,

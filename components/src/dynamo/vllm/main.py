@@ -58,6 +58,7 @@ from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
+    publish_reasoning_aware_guided_decoding,
 )
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
@@ -764,14 +765,19 @@ async def register_vllm_model(
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off
     # `worker_type` to skip them.
-    if worker_type != WorkerType.Prefill:
+    if worker_type != WorkerType.Prefill and model_input == ModelInput.Tokens:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
+        publish_reasoning_aware_guided_decoding(
+            runtime_config, vllm_config, config.dyn_reasoning_parser
+        )
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
     )
     runtime_config.set_structural_tag_mode(
-        "on" if config.dyn_enable_structural_tag else "off"
+        "on"
+        if model_input == ModelInput.Tokens and config.dyn_enable_structural_tag
+        else "off"
     )
     runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
     runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)

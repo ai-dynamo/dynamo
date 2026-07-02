@@ -129,8 +129,8 @@ pub struct NvCreateChatCompletionRequest {
 }
 
 impl NvCreateChatCompletionRequest {
-    /// Normalize OpenAI-style DS-V4 reasoning controls into the template kwargs
-    /// consumed by the SGLang/DeepSeek-V4 prompt formatter.
+    /// Normalize OpenAI-style reasoning controls into the template aliases
+    /// consumed across supported model-family prompt formatters.
     pub fn normalize_reasoning_template_args(&mut self) -> anyhow::Result<()> {
         let thinking_mode = self
             .thinking
@@ -153,6 +153,7 @@ impl NvCreateChatCompletionRequest {
             match mode {
                 OpenAiThinkingMode::Enabled => {
                     args.insert("thinking".to_string(), serde_json::Value::Bool(true));
+                    args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("enabled".to_string()),
@@ -161,11 +162,20 @@ impl NvCreateChatCompletionRequest {
                 OpenAiThinkingMode::Disabled => {
                     args.insert("thinking".to_string(), serde_json::Value::Bool(false));
                     args.insert(
+                        "enable_thinking".to_string(),
+                        serde_json::Value::Bool(false),
+                    );
+                    args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("disabled".to_string()),
                     );
                 }
                 OpenAiThinkingMode::Adaptive => {
+                    // Adaptive has no faithful boolean representation. Remove
+                    // stale aliases so downstream precedence rules cannot
+                    // override the explicit top-level policy.
+                    args.remove("thinking");
+                    args.remove("enable_thinking");
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("adaptive".to_string()),
@@ -174,6 +184,23 @@ impl NvCreateChatCompletionRequest {
             }
         }
         if let Some(effort) = reasoning_effort {
+            let has_explicit_template_toggle = ["thinking", "enable_thinking", "thinking_mode"]
+                .iter()
+                .any(|key| args.contains_key(*key));
+            if !has_explicit_template_toggle {
+                let enabled = effort.as_str() != Some("none");
+                args.insert("thinking".to_string(), serde_json::Value::Bool(enabled));
+                args.insert(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(enabled),
+                );
+                args.insert(
+                    "thinking_mode".to_string(),
+                    serde_json::Value::String(
+                        if enabled { "enabled" } else { "disabled" }.to_string(),
+                    ),
+                );
+            }
             args.insert("reasoning_effort".to_string(), effort);
         }
 
@@ -1112,8 +1139,107 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(true)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(true)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("enabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("max")));
+    }
+
+    #[test]
+    fn test_openai_thinking_normalizes_enable_thinking_for_required_and_auto_tools() {
+        for (tool_choice, thinking_type, expected) in
+            [("required", "enabled", true), ("auto", "disabled", false)]
+        {
+            let json_str = json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Use the weather tool"}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }],
+                "tool_choice": tool_choice,
+                "thinking": {"type": thinking_type}
+            });
+
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(json_str).expect("request should deserialize");
+            request
+                .normalize_reasoning_template_args()
+                .expect("thinking payload should normalize");
+
+            let args = request
+                .chat_template_args
+                .as_ref()
+                .expect("chat_template_args should be populated");
+            assert_eq!(
+                args.get("enable_thinking"),
+                Some(&json!(expected)),
+                "tool_choice={tool_choice}"
+            );
+            assert_eq!(
+                args.get("thinking"),
+                Some(&json!(expected)),
+                "tool_choice={tool_choice}"
+            );
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&json!(if expected { "enabled" } else { "disabled" })),
+                "tool_choice={tool_choice}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_reasoning_effort_derives_enable_thinking_for_required_and_auto_tools() {
+        for (tool_choice, effort, explicit_toggle, expected) in [
+            ("required", "high", None, true),
+            ("auto", "none", None, false),
+            ("required", "high", Some(false), false),
+            ("auto", "none", Some(true), true),
+        ] {
+            let mut json_value = json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Use the weather tool"}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }],
+                "tool_choice": tool_choice,
+                "reasoning_effort": effort
+            });
+            if let Some(explicit_toggle) = explicit_toggle {
+                json_value["chat_template_args"] = json!({"enable_thinking": explicit_toggle});
+            }
+
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(json_value).expect("request should deserialize");
+            request
+                .normalize_reasoning_template_args()
+                .expect("reasoning effort should normalize");
+
+            let args = request
+                .chat_template_args
+                .as_ref()
+                .expect("chat_template_args should be populated");
+            assert_eq!(
+                args.get("enable_thinking"),
+                Some(&json!(expected)),
+                "tool_choice={tool_choice}, effort={effort}, explicit_toggle={explicit_toggle:?}"
+            );
+            if explicit_toggle.is_none() {
+                assert_eq!(args.get("thinking"), Some(&json!(expected)));
+                assert_eq!(
+                    args.get("thinking_mode"),
+                    Some(&json!(if expected { "enabled" } else { "disabled" }))
+                );
+            }
+            assert_eq!(args.get("reasoning_effort"), Some(&json!(effort)));
+        }
     }
 
     #[test]
@@ -1123,6 +1249,11 @@ mod tests {
             "messages": [
                 {"role": "user", "content": "Hello"}
             ],
+            "chat_template_args": {
+                "thinking": false,
+                "enable_thinking": false,
+                "thinking_mode": "disabled"
+            },
             "thinking": {"type": "adaptive"}
         });
 
@@ -1138,6 +1269,7 @@ mod tests {
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking_mode"), Some(&json!("adaptive")));
         assert_eq!(args.get("thinking"), None);
+        assert_eq!(args.get("enable_thinking"), None);
         assert!(request.thinking.is_none());
     }
 
@@ -1162,6 +1294,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
     }
 
@@ -1174,6 +1307,7 @@ mod tests {
             ],
             "chat_template_args": {
                 "thinking": true,
+                "enable_thinking": true,
                 "thinking_mode": "thinking",
                 "reasoning_effort": "high"
             },
@@ -1192,6 +1326,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
         assert!(request.thinking.is_none());

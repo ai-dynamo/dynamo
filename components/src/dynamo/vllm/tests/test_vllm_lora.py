@@ -22,6 +22,9 @@ from dynamo.common.constants import DisaggregationMode  # noqa: E402
 from dynamo.common.lora.manager import LoRAInfo  # noqa: E402
 from dynamo.llm import ModelType, WorkerType  # noqa: E402
 from dynamo.vllm import llm_engine as llm_engine_mod  # noqa: E402
+from dynamo.vllm.capacity import (  # noqa: E402
+    REASONING_AWARE_GUIDED_DECODING_RUNTIME_KEY,
+)
 from dynamo.vllm.llm_engine import VllmLLMEngine  # noqa: E402
 
 pytestmark = [
@@ -322,6 +325,15 @@ async def test_load_lora_publishes_disagg_topology(
     engine.disaggregation_mode = mode
     engine._dyn_tool_call_parser = "hermes"
     engine._dyn_reasoning_parser = "deepseek_r1"
+    engine._exclude_tools_when_tool_choice_none = False
+    engine._dyn_enable_structural_tag = True
+    engine._dyn_structural_tag_scope = "always"
+    engine._dyn_structural_tag_schema = "strict"
+    engine._vllm_config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(
+            reasoning_parser="deepseek_r1", enable_in_reasoning=False
+        )
+    )
     register, _ = _patch_discovery(monkeypatch)
 
     result = await engine.load_lora(
@@ -336,6 +348,17 @@ async def test_load_lora_publishes_disagg_topology(
     assert str(kwargs["model_type"]) == str(expected_model_type)
     assert kwargs["worker_type"] == expected_worker_type
     assert kwargs["needs"] == expected_needs
+    runtime_config = kwargs["runtime_config"]
+    assert runtime_config.exclude_tools_when_tool_choice_none is False
+    runtime_config.set_structural_tag_mode.assert_called_once_with("on")
+    runtime_config.set_structural_tag_scope.assert_called_once_with("always")
+    runtime_config.set_structural_tag_schema.assert_called_once_with("strict")
+    if expected_worker_type == WorkerType.Prefill:
+        runtime_config.set_engine_specific.assert_not_called()
+    else:
+        runtime_config.set_engine_specific.assert_called_once_with(
+            REASONING_AWARE_GUIDED_DECODING_RUNTIME_KEY, "true"
+        )
 
 
 @pytest.mark.asyncio

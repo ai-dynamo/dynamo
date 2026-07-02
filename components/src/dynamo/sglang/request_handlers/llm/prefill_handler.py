@@ -11,6 +11,7 @@ from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.reasoning import request_reasoning_kwargs
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -133,6 +134,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
+        reasoning_kwargs = request_reasoning_kwargs(self.engine, inner_request)
 
         # Prefill encodes the media so the KV it transfers carries the vision
         # context; decode extracts the same URLs to match the token layout.
@@ -166,6 +168,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             external_trace_header=trace_header,
             rid=trace_id,
             data_parallel_rank=dp_rank,
+            **reasoning_kwargs,
             **self._session_kwargs(inner_request),
             lora_path=lora_path,
             **self._priority_kwargs(priority),

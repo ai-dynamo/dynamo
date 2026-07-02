@@ -24,6 +24,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.capacity import reasoning_parsers_compatible
 from dynamo.vllm.constants import DisaggregationMode
 
 from . import envs
@@ -140,6 +141,17 @@ def cross_validate_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
     """Validate dynamo and engine config together. This should not modify the configs."""
+
+    native_reasoning_parser = getattr(engine_config, "reasoning_parser", None)
+    if not reasoning_parsers_compatible(
+        native_reasoning_parser, dynamo_config.dyn_reasoning_parser
+    ):
+        raise ValueError(
+            "Incompatible reasoning parsers: "
+            f"--reasoning-parser={native_reasoning_parser!r} and "
+            f"--dyn-reasoning-parser={dynamo_config.dyn_reasoning_parser!r} "
+            "do not parse the same wire format"
+        )
 
     if hasattr(engine_config, "stream_interval") and engine_config.stream_interval != 1:
         logger.info(

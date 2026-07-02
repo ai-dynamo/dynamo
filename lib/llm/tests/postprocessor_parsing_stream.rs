@@ -8,12 +8,17 @@ use std::sync::Arc;
 
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+use dynamo_llm::protocols::openai::{
+    ParsingOptions,
+    chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+        NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
+    },
 };
 use dynamo_protocols::types::{
-    ChatCompletionMessageContent, ChatCompletionNamedToolChoice, ChatCompletionTool,
-    ChatCompletionToolChoiceOption, ChatCompletionToolType, FinishReason, FunctionName,
+    ChatCompletionMessageContent, ChatCompletionNamedToolChoice, ChatCompletionResponseContentPart,
+    ChatCompletionResponseContentPartText, ChatCompletionTool, ChatCompletionToolChoiceOption,
+    ChatCompletionToolType, FinishReason, FunctionName,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{StreamExt, stream};
@@ -30,6 +35,21 @@ fn build_preprocessor(
     let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
     mdc.runtime_config.reasoning_parser = reasoning_parser.map(ToString::to_string);
     mdc.runtime_config.tool_call_parser = tool_call_parser.map(ToString::to_string);
+    OpenAIPreprocessor::new(mdc).unwrap()
+}
+
+fn build_preprocessor_with_reasoning_aware_guided_decoding(
+    reasoning_parser: Option<&str>,
+    tool_call_parser: Option<&str>,
+) -> Arc<OpenAIPreprocessor> {
+    let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+    let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+    mdc.runtime_config.reasoning_parser = reasoning_parser.map(ToString::to_string);
+    mdc.runtime_config.tool_call_parser = tool_call_parser.map(ToString::to_string);
+    mdc.runtime_config
+        .set_engine_specific("reasoning_aware_guided_decoding", true)
+        .unwrap();
     OpenAIPreprocessor::new(mdc).unwrap()
 }
 
@@ -180,7 +200,7 @@ async fn postprocessor_parsing_stream_replays_interval_20_fixture() {
 
     let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
     let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
         .expect("postprocessor_parsing_stream should build");
 
     let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
@@ -393,12 +413,16 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
 
 /// Construct a terminal `finish_reason=Stop` chunk with no content.
 fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
+    mock_final_chunk_for(0)
+}
+
+fn mock_final_chunk_for(index: u32) -> NvCreateChatCompletionStreamResponse {
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
     };
     #[allow(deprecated)]
     let choice = ChatChoiceStream {
-        index: 0,
+        index,
         delta: ChatCompletionStreamResponseDelta {
             role: None,
             content: None,
@@ -613,10 +637,9 @@ async fn postprocessor_parsing_stream_nemotron_v3_enable_thinking_false_returns_
     assert_eq!(content, "This is plain content");
 }
 
-/// vLLM parity: `chat_template_kwargs={"force_nonempty_content": true}` turns
-/// a leading `<think>...` response into normal content instead of reasoning.
-/// Dynamo checks this in the postprocessor because request flags are applied
-/// before stream parsing, not inside the raw reasoning parser.
+/// vLLM parity: `chat_template_kwargs={"force_nonempty_content": true}` moves
+/// reasoning into content only when the completed choice has no direct content
+/// or tool call. This reasoning-only stream exercises that terminal fallback.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_token() {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
@@ -753,14 +776,9 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial
     assert_eq!(content, "<thi");
 }
 
-/// Dynamo already represents streamed responses as `choices: Vec<_>`, so this
-/// test is not adding new `n > 1` behavior. It verifies that the Nemotron v3
-/// `force_nonempty_content=true` path does not use one shared strip buffer for
-/// all choices. Both choices receive a split `<think>` prefix (`"<thi"` then
-/// `"nk>..."`). If the helper keeps only one global buffer/decided flag, choice
-/// 0 can consume the prefix state and choice 1 can leak `<think>` or lose text.
-/// The expected behavior is that each `choice.index` strips its own leading
-/// prefix independently and returns only normal content.
+/// Verify that the Nemotron terminal fallback tracks parser and buffered
+/// reasoning state per choice. Both choices receive a split `<think>` prefix;
+/// each must independently fall back to its own content at EOF.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_tracks_prefix_per_choice() {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
@@ -809,6 +827,125 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_tracks_prefix_p
         content_by_choice.get(&1).map(String::as_str),
         Some("Second")
     );
+}
+
+#[tokio::test]
+async fn nemotron_force_nonempty_keeps_reasoning_separate_when_direct_content_exists() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"force_nonempty_content": true})).unwrap());
+    let output = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter(
+                vec![
+                    mock_content_chunk("<think>Need a concise answer."),
+                    mock_content_chunk("</think>Final answer."),
+                    mock_final_chunk(),
+                ]
+                .into_iter()
+                .map(Annotated::from_data),
+            ),
+            &request,
+            false,
+            false,
+        )
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(stream::iter(output.clone())).await;
+
+    assert_eq!(reasoning, "Need a concise answer.");
+    assert_eq!(content, "Final answer.");
+    assert!(!reasoning.contains("<think"));
+    assert!(!content.contains("</think>"));
+
+    let aggregate = NvCreateChatCompletionResponse::from_annotated_stream(
+        stream::iter(output),
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("stream aggregation should succeed");
+    let message = &aggregate.inner.choices[0].message;
+    assert_eq!(
+        message.reasoning_content.as_deref(),
+        Some("Need a concise answer.")
+    );
+    assert_eq!(
+        message.content.as_ref().map(get_text),
+        Some("Final answer.")
+    );
+}
+
+#[tokio::test]
+async fn nemotron_force_nonempty_required_keeps_reasoning_and_tool_call() {
+    let preprocessor = build_preprocessor_with_reasoning_aware_guided_decoding(
+        Some("nemotron_v3"),
+        Some("nemotron_nano"),
+    );
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"force_nonempty_content": true})).unwrap());
+    let guided_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let output = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter(
+                vec![
+                    mock_content_chunk("<think>Need weather data."),
+                    mock_content_chunk("</think>"),
+                    mock_content_chunk(guided_json),
+                    mock_final_chunk(),
+                ]
+                .into_iter()
+                .map(Annotated::from_data),
+            ),
+            &request,
+            false,
+            false,
+        )
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(stream::iter(output.clone())).await;
+
+    assert_eq!(reasoning, "Need weather data.");
+    assert_clean_tool_call(
+        "Nemotron force_nonempty required",
+        &content,
+        &tool_calls,
+        "San Francisco",
+    );
+    assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+    assert!(!reasoning.contains("<think"));
+    assert!(!content.contains("</think>"));
+
+    let aggregate = NvCreateChatCompletionResponse::from_annotated_stream(
+        stream::iter(output),
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("stream aggregation should succeed");
+    let choice = &aggregate.inner.choices[0];
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Need weather data.")
+    );
+    assert!(
+        choice
+            .message
+            .content
+            .as_ref()
+            .is_none_or(|content| { get_text(content).is_empty() })
+    );
+    assert_eq!(choice.message.tool_calls.as_ref().map(Vec::len), Some(1));
+    assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
 }
 
 /// Regression: MiniMax + tool_choice=required + SGLang guided decoding.
@@ -1397,6 +1534,820 @@ async fn tool_choice_matrix_force_reasoning_named_bare_json() {
     assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
 }
 
+/// A reasoning-aware backend delays its guided-decoding grammar until the
+/// native reasoner reaches `</think>`. Force-start parsers must therefore stay
+/// active for both required and named tool choice; only the post-reasoning JSON
+/// belongs in the tool jail.
+#[tokio::test]
+async fn tool_choice_force_reasoning_aware_guided_decoding_preserves_reasoning() {
+    for prompt_injected in [false, true] {
+        for (case, tool_choice, guided_json) in [
+            (
+                "required",
+                ChatCompletionToolChoiceOption::Required,
+                r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#,
+            ),
+            (
+                "named",
+                ChatCompletionToolChoiceOption::Named("get_weather".to_string().into()),
+                r#"{"location":"San Francisco"}"#,
+            ),
+        ] {
+            let preprocessor = build_preprocessor_with_reasoning_aware_guided_decoding(
+                Some("nemotron_v3"),
+                Some("nemotron_nano"),
+            );
+            let request = streaming_tool_request(tool_choice);
+            let input_stream = stream::iter(
+                vec![
+                    mock_content_chunk("Need weather data."),
+                    mock_content_chunk("</think>"),
+                    mock_content_chunk(guided_json),
+                    mock_final_chunk(),
+                ]
+                .into_iter()
+                .map(Annotated::from_data),
+            );
+            let output_stream = preprocessor
+                .postprocessor_parsing_stream(input_stream, &request, prompt_injected, false)
+                .expect("postprocessor_parsing_stream should build");
+            let output_chunks: Vec<_> = output_stream.collect().await;
+            let DrainOutput {
+                reasoning,
+                content,
+                tool_calls,
+                finish_reasons,
+            } = drain_stream(stream::iter(output_chunks.clone())).await;
+
+            assert_eq!(
+                reasoning.trim(),
+                "Need weather data.",
+                "{case}, prompt_injected={prompt_injected}: reasoning was dropped or misclassified"
+            );
+            assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+            assert!(
+                finish_reasons.contains(&FinishReason::ToolCalls),
+                "{case}, prompt_injected={prompt_injected}: expected ToolCalls finish reason, got {finish_reasons:?}"
+            );
+
+            let response = NvCreateChatCompletionResponse::from_annotated_stream(
+                stream::iter(output_chunks),
+                ParsingOptions::default(),
+            )
+            .await
+            .expect("stream aggregation should succeed");
+            let choice = &response.inner.choices[0];
+            assert_eq!(
+                choice.message.reasoning_content.as_deref(),
+                Some("Need weather data."),
+                "{case}, prompt_injected={prompt_injected}: aggregate reasoning was dropped"
+            );
+            if let Some(content) = &choice.message.content {
+                assert!(
+                    get_text(content).is_empty(),
+                    "{case}, prompt_injected={prompt_injected}: aggregate content leaked: {content:?}"
+                );
+            }
+            assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
+            let aggregate_tool_calls = choice
+                .message
+                .tool_calls
+                .as_ref()
+                .expect("aggregate response should contain tool_calls");
+            assert_eq!(aggregate_tool_calls.len(), 1);
+            assert_eq!(aggregate_tool_calls[0].function.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<Value>(&aggregate_tool_calls[0].function.arguments).unwrap(),
+                serde_json::json!({"location": "San Francisco"})
+            );
+        }
+    }
+}
+
+/// The runtime capability says the backend can defer its grammar while
+/// reasoning is active; it does not override a request that disables
+/// reasoning. Such requests still emit guided JSON from token zero and must
+/// bypass the force-start frontend parser.
+#[tokio::test]
+async fn tool_choice_reasoning_aware_backend_respects_request_disable() {
+    let preprocessor = build_preprocessor_with_reasoning_aware_guided_decoding(
+        Some("nemotron_v3"),
+        Some("nemotron_nano"),
+    );
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"enable_thinking": false})).unwrap());
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    assert!(reasoning.is_empty());
+    assert_clean_tool_call(
+        "reasoning-aware backend with reasoning disabled",
+        &content,
+        &tool_calls,
+        "San Francisco",
+    );
+    assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+}
+
+#[tokio::test]
+async fn reasoning_aware_backend_receives_request_reasoning_metadata() {
+    for enabled in [true, false] {
+        let preprocessor = build_preprocessor_with_reasoning_aware_guided_decoding(
+            Some("nemotron_v3"),
+            Some("nemotron_nano"),
+        );
+        let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+        request.chat_template_args =
+            Some(serde_json::from_value(serde_json::json!({"enable_thinking": enabled})).unwrap());
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .expect("preprocessing should succeed");
+        let extra_args = preprocessed
+            .extra_args
+            .expect("reasoning-aware backend metadata should be present");
+
+        assert_eq!(
+            extra_args["reasoning_parser_kwargs"]["chat_template_kwargs"]["enable_thinking"],
+            enabled
+        );
+        if enabled {
+            assert!(extra_args.get("reasoning_ended").is_none());
+        } else {
+            assert_eq!(extra_args["reasoning_ended"], true);
+        }
+    }
+
+    let preprocessor = build_preprocessor_with_reasoning_aware_guided_decoding(
+        Some("nemotron_v3"),
+        Some("nemotron_nano"),
+    );
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"force_nonempty_content": true})).unwrap());
+    let (preprocessed, _, _) = preprocessor
+        .preprocess_request(&request, None)
+        .await
+        .expect("preprocessing should succeed");
+    let extra_args = preprocessed
+        .extra_args
+        .expect("reasoning-aware backend metadata should be present");
+    assert_eq!(
+        extra_args["reasoning_parser_kwargs"]["chat_template_kwargs"]["force_nonempty_content"],
+        true
+    );
+    assert!(
+        extra_args.get("reasoning_ended").is_none(),
+        "force_nonempty_content only changes final response parsing; the backend must still gate guided decoding on reasoning"
+    );
+
+    for (case, args, expected_enabled) in [
+        ("default", None, true),
+        (
+            "legacy chat mode",
+            Some(serde_json::json!({"thinking_mode": "chat"})),
+            false,
+        ),
+        (
+            "legacy thinking mode",
+            Some(serde_json::json!({"thinking_mode": "thinking"})),
+            true,
+        ),
+        (
+            "conflicting aliases follow formatter precedence",
+            Some(serde_json::json!({
+                "thinking": false,
+                "enable_thinking": true
+            })),
+            false,
+        ),
+    ] {
+        let preprocessor = build_preprocessor_with_reasoning_aware_guided_decoding(
+            Some("deepseek_v4"),
+            Some("deepseek_v4"),
+        );
+        let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+        request.chat_template_args = args.map(|args| serde_json::from_value(args).unwrap());
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .expect("preprocessing should succeed");
+        let extra_args = preprocessed
+            .extra_args
+            .expect("reasoning-aware backend metadata should be present");
+        let backend_kwargs = &extra_args["reasoning_parser_kwargs"]["chat_template_kwargs"];
+        assert_eq!(backend_kwargs["thinking"], expected_enabled, "{case}");
+        assert_eq!(
+            backend_kwargs["enable_thinking"], expected_enabled,
+            "{case}"
+        );
+        if expected_enabled {
+            assert!(
+                extra_args.get("reasoning_ended").is_none(),
+                "{case}: backend reasoner should remain active"
+            );
+        } else {
+            assert_eq!(
+                extra_args["reasoning_ended"], true,
+                "{case}: backend grammar should start immediately"
+            );
+        }
+    }
+}
+
+/// Optional reasoning parsers must still recognize a model-generated opener
+/// under tool_choice=auto when the prompt itself did not end in `<think>`.
+/// Auto guidance is intentionally left inactive in this state so the opener
+/// can reach this response parser.
+#[tokio::test]
+async fn optional_reasoning_auto_parses_generated_start_marker() {
+    for parser in ["basic", "nemotron_deci"] {
+        let preprocessor = build_preprocessor(Some(parser), Some("nemotron_deci"));
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        let input_stream = stream::iter(
+            vec![
+                mock_content_chunk("<think>Need weather data."),
+                mock_content_chunk("</think>It is sunny."),
+                mock_final_chunk(),
+            ]
+            .into_iter()
+            .map(Annotated::from_data),
+        );
+        let output = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, false, false)
+            .expect("postprocessor stream should build");
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            ..
+        } = drain_stream(output).await;
+
+        assert_eq!(reasoning, "Need weather data.", "parser={parser}");
+        assert_eq!(content, "It is sunny.", "parser={parser}");
+        assert!(tool_calls.is_empty(), "parser={parser}");
+        assert!(!reasoning.contains("<think>"), "parser={parser}");
+        assert!(!content.contains("</think>"), "parser={parser}");
+    }
+}
+
+#[tokio::test]
+async fn reasoning_parser_state_is_isolated_per_choice() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    let input_stream = stream::iter(
+        vec![
+            mock_multi_choice_content_chunk(&[(0, "zero reasoning"), (1, "one reasoning")]),
+            mock_multi_choice_content_chunk(&[(0, "</think>answer zero"), (1, " continues")]),
+            mock_multi_choice_content_chunk(&[(1, "</think>answer one")]),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+    let output = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut reasoning = BTreeMap::<u32, String>::new();
+    let mut content = BTreeMap::<u32, String>::new();
+    for response in output.into_iter().filter_map(|response| response.data) {
+        for choice in response.inner.choices {
+            if let Some(delta) = choice.delta.reasoning_content {
+                reasoning.entry(choice.index).or_default().push_str(&delta);
+            }
+            if let Some(ChatCompletionMessageContent::Text(delta)) = choice.delta.content {
+                content.entry(choice.index).or_default().push_str(&delta);
+            }
+        }
+    }
+
+    assert_eq!(
+        reasoning.get(&0).map(String::as_str),
+        Some("zero reasoning")
+    );
+    assert_eq!(
+        reasoning.get(&1).map(String::as_str),
+        Some("one reasoning continues")
+    );
+    assert_eq!(content.get(&0).map(String::as_str), Some("answer zero"));
+    assert_eq!(content.get(&1).map(String::as_str), Some("answer one"));
+}
+
+#[tokio::test]
+async fn reasoning_parser_finalizes_each_choice_on_finish_and_eof() {
+    let input = stream::iter([
+        Annotated::from_data(mock_multi_choice_content_chunk(&[
+            (0, "zero</thi"),
+            (1, "one</thi"),
+        ])),
+        Annotated::from_data(mock_final_chunk_for(0)),
+    ]);
+    let output =
+        OpenAIPreprocessor::parse_reasoning_content_from_stream(input, "qwen3".to_string(), true)
+            .collect::<Vec<_>>()
+            .await;
+
+    let mut reasoning = BTreeMap::<u32, String>::new();
+    let mut finish_reasons = BTreeMap::<u32, Vec<FinishReason>>::new();
+    for response in output.into_iter().filter_map(|response| response.data) {
+        for choice in response.inner.choices {
+            if let Some(delta) = choice.delta.reasoning_content {
+                reasoning.entry(choice.index).or_default().push_str(&delta);
+            }
+            if let Some(finish_reason) = choice.finish_reason {
+                finish_reasons
+                    .entry(choice.index)
+                    .or_default()
+                    .push(finish_reason);
+            }
+        }
+    }
+
+    assert_eq!(reasoning.get(&0).map(String::as_str), Some("zero</thi"));
+    assert_eq!(reasoning.get(&1).map(String::as_str), Some("one</thi"));
+    assert_eq!(finish_reasons.get(&0), Some(&vec![FinishReason::Stop]));
+    assert!(finish_reasons.get(&1).is_none());
+}
+
+#[tokio::test]
+async fn reasoning_parser_flushes_partial_marker_before_error() {
+    let input = stream::iter([
+        Annotated::from_data(mock_content_chunk("before error</thi")),
+        Annotated::from_error("backend failed"),
+    ]);
+    let output =
+        OpenAIPreprocessor::parse_reasoning_content_from_stream(input, "qwen3".to_string(), true)
+            .collect::<Vec<_>>()
+            .await;
+
+    let reasoning = output
+        .iter()
+        .filter_map(|response| response.data.as_ref())
+        .flat_map(|response| &response.inner.choices)
+        .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+        .collect::<String>();
+    assert_eq!(reasoning, "before error</thi");
+    assert!(output.last().is_some_and(Annotated::is_error));
+}
+
+#[tokio::test]
+async fn reasoning_aware_backend_does_not_bypass_json_leading_reasoning() {
+    let preprocessor = build_preprocessor_with_reasoning_aware_guided_decoding(
+        Some("deepseek_v4"),
+        Some("nemotron_nano"),
+    );
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let guided_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let input_stream = stream::iter(
+        vec![
+            mock_content_chunk(r#"{"hypothesis":"check the tool"}"#),
+            mock_content_chunk("</think>"),
+            mock_content_chunk(guided_json),
+            mock_final_chunk(),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+    let output = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .unwrap();
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        ..
+    } = drain_stream(output).await;
+
+    assert_eq!(reasoning, r#"{"hypothesis":"check the tool"}"#);
+    assert_clean_tool_call(
+        "reasoning-aware JSON-leading reasoning",
+        &content,
+        &tool_calls,
+        "San Francisco",
+    );
+}
+
+#[tokio::test]
+async fn reasoning_aware_force_parsers_respect_disabled_request_policies() {
+    let cases = [
+        ("mistral", serde_json::json!({})),
+        ("mistral", serde_json::json!({"reasoning_effort": "none"})),
+        ("deepseek_v3", serde_json::json!({})),
+        ("deepseek_v3_1", serde_json::json!({})),
+        ("deepseek_v3_2", serde_json::json!({})),
+        ("deepseek_v3", serde_json::json!({"thinking": false})),
+        ("deepseek_v3_1", serde_json::json!({"thinking": false})),
+        ("deepseek_v3_2", serde_json::json!({"thinking": false})),
+    ];
+    let guided_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+
+    for (parser, args) in cases {
+        let preprocessor = build_preprocessor_with_reasoning_aware_guided_decoding(
+            Some(parser),
+            Some("nemotron_nano"),
+        );
+        let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+        request.chat_template_args = Some(serde_json::from_value(args).unwrap());
+        let output = preprocessor
+            .postprocessor_parsing_stream(
+                stream::iter(
+                    vec![mock_content_chunk(guided_json), mock_final_chunk()]
+                        .into_iter()
+                        .map(Annotated::from_data),
+                ),
+                &request,
+                false,
+                false,
+            )
+            .unwrap();
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            ..
+        } = drain_stream(output).await;
+
+        assert!(reasoning.is_empty(), "{parser}: bare JSON became reasoning");
+        assert_clean_tool_call(parser, &content, &tool_calls, "San Francisco");
+    }
+}
+
+#[tokio::test]
+async fn deepseek_v3_force_aliases_default_to_direct_content_for_auto() {
+    for parser in ["deepseek_v3", "deepseek_v3_1", "deepseek_v3_2"] {
+        let preprocessor = build_preprocessor_with_reasoning_aware_guided_decoding(
+            Some(parser),
+            Some("nemotron_nano"),
+        );
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        let output = preprocessor
+            .postprocessor_parsing_stream(
+                stream::iter(
+                    vec![mock_content_chunk("Direct answer"), mock_final_chunk()]
+                        .into_iter()
+                        .map(Annotated::from_data),
+                ),
+                &request,
+                false,
+                false,
+            )
+            .unwrap();
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            ..
+        } = drain_stream(output).await;
+
+        assert!(
+            reasoning.is_empty(),
+            "{parser}: direct answer became reasoning"
+        );
+        assert_eq!(content, "Direct answer", "{parser}: direct answer was lost");
+        assert!(tool_calls.is_empty(), "{parser}: unexpected tool call");
+    }
+}
+
+#[tokio::test]
+async fn deepseek_v3_force_aliases_parse_reasoning_when_explicitly_enabled() {
+    let guided_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    for parser in ["deepseek_v3", "deepseek_v3_1", "deepseek_v3_2"] {
+        let preprocessor = build_preprocessor_with_reasoning_aware_guided_decoding(
+            Some(parser),
+            Some("nemotron_nano"),
+        );
+        let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+        request.chat_template_args =
+            Some(serde_json::from_value(serde_json::json!({"thinking": true})).unwrap());
+        let output = preprocessor
+            .postprocessor_parsing_stream(
+                stream::iter(
+                    vec![
+                        mock_content_chunk("Need the weather."),
+                        mock_content_chunk("</think>"),
+                        mock_content_chunk(guided_json),
+                        mock_final_chunk(),
+                    ]
+                    .into_iter()
+                    .map(Annotated::from_data),
+                ),
+                &request,
+                false,
+                false,
+            )
+            .unwrap();
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            ..
+        } = drain_stream(output).await;
+
+        assert_eq!(
+            reasoning, "Need the weather.",
+            "{parser}: reasoning was lost"
+        );
+        assert_clean_tool_call(parser, &content, &tool_calls, "San Francisco");
+    }
+}
+
+#[tokio::test]
+async fn deepseek_v3_force_aliases_bypass_token_zero_guided_json_without_capability() {
+    let guided_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    for parser in ["deepseek_v3", "deepseek_v3_1", "deepseek_v3_2"] {
+        let preprocessor = build_preprocessor(Some(parser), Some("nemotron_nano"));
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+        let output = preprocessor
+            .postprocessor_parsing_stream(
+                stream::iter(
+                    vec![mock_content_chunk(guided_json), mock_final_chunk()]
+                        .into_iter()
+                        .map(Annotated::from_data),
+                ),
+                &request,
+                false,
+                false,
+            )
+            .unwrap();
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            ..
+        } = drain_stream(output).await;
+
+        assert!(reasoning.is_empty(), "{parser}: bare JSON became reasoning");
+        assert_clean_tool_call(parser, &content, &tool_calls, "San Francisco");
+    }
+}
+
+#[tokio::test]
+async fn tool_choice_auto_tool_boundary_whitespace_is_not_content() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("nemotron_nano"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    let tool_call = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
+    let input_stream = stream::iter(
+        vec![
+            mock_content_chunk("Need weather data."),
+            mock_content_chunk("</think>"),
+            mock_content_chunk("\n"),
+            mock_content_chunk(tool_call),
+            mock_content_chunk("\n"),
+            mock_final_chunk(),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<_> = output_stream.collect().await;
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(stream::iter(output_chunks.clone())).await;
+
+    assert_eq!(reasoning, "Need weather data.");
+    assert!(content.is_empty(), "tool separators leaked: {content:?}");
+    assert_clean_tool_call("auto tool-only", &content, &tool_calls, "San Francisco");
+    assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        stream::iter(output_chunks),
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("stream aggregation should succeed");
+    let message = &response.inner.choices[0].message;
+    assert_eq!(
+        message.reasoning_content.as_deref(),
+        Some("Need weather data.")
+    );
+    assert!(message.content.is_none());
+    assert_eq!(message.tool_calls.as_ref().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn tool_boundary_whitespace_content_parts_are_not_content() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("nemotron_nano"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    let tool_call = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
+    let mut whitespace = mock_content_chunk("");
+    whitespace.inner.choices[0].delta.content = Some(ChatCompletionMessageContent::Parts(vec![
+        ChatCompletionResponseContentPart::Text(ChatCompletionResponseContentPartText {
+            text: "\n".to_string(),
+        }),
+    ]));
+    let output = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter(
+                vec![
+                    mock_content_chunk("Need weather data."),
+                    mock_content_chunk("</think>"),
+                    whitespace,
+                    mock_content_chunk(tool_call),
+                    mock_final_chunk(),
+                ]
+                .into_iter()
+                .map(Annotated::from_data),
+            ),
+            &request,
+            true,
+            false,
+        )
+        .unwrap();
+    let DrainOutput {
+        content,
+        tool_calls,
+        ..
+    } = drain_stream(output).await;
+
+    assert_clean_tool_call(
+        "auto tool-only content parts",
+        &content,
+        &tool_calls,
+        "San Francisco",
+    );
+}
+
+#[tokio::test]
+async fn deferred_whitespace_flushes_every_choice_at_eof() {
+    let preprocessor = build_preprocessor(None, Some("nemotron_nano"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    let output = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter([Annotated::from_data(mock_multi_choice_content_chunk(&[
+                (0, "\n"),
+                (1, "\t"),
+            ]))]),
+            &request,
+            false,
+            false,
+        )
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+
+    let mut content = BTreeMap::<u32, String>::new();
+    for response in output.into_iter().filter_map(|response| response.data) {
+        for choice in response.inner.choices {
+            if let Some(ChatCompletionMessageContent::Text(delta)) = choice.delta.content {
+                content.entry(choice.index).or_default().push_str(&delta);
+            }
+        }
+    }
+    assert_eq!(content.get(&0).map(String::as_str), Some("\n"));
+    assert_eq!(content.get(&1).map(String::as_str), Some("\t"));
+}
+
+#[tokio::test]
+async fn deferred_whitespace_preserves_large_multi_choice_metadata_and_per_choice_order() {
+    let preprocessor = build_preprocessor(None, Some("nemotron_nano"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    let mut owned_choices = vec![(0, "\n".to_string())];
+    owned_choices.extend((1..=64).map(|index| (index, format!("choice-{index}"))));
+    let choice_refs = owned_choices
+        .iter()
+        .map(|(index, content)| (*index, content.as_str()))
+        .collect::<Vec<_>>();
+
+    let mut packed = Annotated::from_data(mock_multi_choice_content_chunk(&choice_refs));
+    packed.id = Some("packed-id".to_string());
+    packed.event = Some("packed-event".to_string());
+    packed.comment = Some(vec!["packed-comment".to_string()]);
+    packed
+        .data
+        .as_mut()
+        .expect("packed response has data")
+        .nvext = Some(serde_json::json!({"owner": "first-choice"}));
+    let standalone = Annotated::from_annotation("standalone", &"marker").unwrap();
+    let late_choice_zero = Annotated::from_data(mock_content_chunk("choice-0"));
+
+    let output = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter([packed, standalone, late_choice_zero]),
+            &request,
+            false,
+            false,
+        )
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+
+    let packed_owner_position = output
+        .iter()
+        .position(|response| response.id.as_deref() == Some("packed-id"))
+        .expect("choice zero whitespace should retain packed metadata");
+    let packed_owner = &output[packed_owner_position];
+    assert_eq!(packed_owner.event.as_deref(), Some("packed-event"));
+    assert_eq!(
+        packed_owner.comment.as_deref(),
+        Some(&["packed-comment".to_string()][..])
+    );
+    assert_eq!(
+        packed_owner
+            .data
+            .as_ref()
+            .and_then(|data| data.nvext.as_ref()),
+        Some(&serde_json::json!({"owner": "first-choice"}))
+    );
+    assert!(
+        output
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| *position != packed_owner_position)
+            .all(|(_, response)| {
+                response.id.as_deref() != Some("packed-id")
+                    && response.event.as_deref() != Some("packed-event")
+                    && response
+                        .data
+                        .as_ref()
+                        .is_none_or(|data| data.nvext.is_none())
+            })
+    );
+
+    let mut observed = Vec::new();
+    for response in &output {
+        if let Some(data) = &response.data {
+            for choice in &data.inner.choices {
+                if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content {
+                    observed.push(format!("choice:{}:{content}", choice.index));
+                }
+            }
+        } else if response.event.as_deref() == Some("standalone") {
+            observed.push("standalone".to_string());
+        }
+    }
+
+    let mut expected = (1..=64)
+        .map(|index| format!("choice:{index}:choice-{index}"))
+        .collect::<Vec<_>>();
+    expected.push("standalone".to_string());
+    expected.push("choice:0:\n".to_string());
+    expected.push("choice:0:choice-0".to_string());
+    assert_eq!(observed, expected);
+}
+
+#[tokio::test]
+async fn tool_boundary_whitespace_preserves_direct_text_and_tool_narration() {
+    let tool_call = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
+
+    for (case, normal_chunks, expected_content, expect_tool) in [
+        (
+            "direct answer",
+            vec!["\n", "The sky is blue."],
+            "\nThe sky is blue.",
+            false,
+        ),
+        (
+            "narration before tool",
+            vec!["I will call", " ", tool_call, "\n"],
+            "I will call ",
+            true,
+        ),
+    ] {
+        let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("nemotron_nano"));
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        let mut input_chunks = vec![
+            mock_content_chunk("Need weather data."),
+            mock_content_chunk("</think>"),
+        ];
+        input_chunks.extend(normal_chunks.into_iter().map(mock_content_chunk));
+        input_chunks.push(mock_final_chunk());
+        let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, false)
+            .expect("postprocessor_parsing_stream should build");
+        let DrainOutput {
+            content,
+            tool_calls,
+            ..
+        } = drain_stream(output_stream).await;
+
+        assert_eq!(content, expected_content, "{case}");
+        assert_eq!(!tool_calls.is_empty(), expect_tool, "{case}");
+    }
+}
+
 /// Non-force parser + required + no prompt injection + bare JSON: parser
 /// runs in non-reasoning mode and passes JSON through.
 #[tokio::test]
@@ -1460,18 +2411,15 @@ async fn tool_choice_matrix_non_force_required_prompt_injected_with_close_marker
 }
 
 /// CASE 5 — non-force parser + required + `prompt_injected_reasoning=true`
-/// + bare JSON (no `</think>`). Documents the **backend contract** rather
-/// than asserting recovery: when `--dyn-reasoning-parser X` is set, vLLM's
-/// auto-forward in `components/src/dynamo/vllm/main.py:506-507` instantiates
-/// a reasoner whose `should_fill_bitmask` gate (vLLM
-/// `v1/structured_output/__init__.py:301`) keeps the xgrammar bitmask off
-/// until `</think>` appears in the output. Consequently any "bare guided
-/// JSON" emitted before `</think>` was never grammar-constrained — it's a
-/// backend-bug shape, not a normal production output.
+/// + bare JSON (no `</think>`). The Dynamo and native backend reasoning
+/// parsers are independent settings. A deployment with only the Dynamo parser
+/// can therefore constrain from token zero even though the frontend believes
+/// the prompt opened reasoning. For this non-force parser there is no safe
+/// marker-free distinction between JSON-looking reasoning and the tool payload.
 ///
-/// This test pins the current behavior so future regressions are loud: if
-/// we later add an EOF fallback to `BasicReasoningParser` to flush
-/// accumulated reasoning as content, this assertion needs to flip.
+/// This test pins that incompatible/misconfigured shape without leaking JSON
+/// into content. Reasoning-aware backends must configure their native parser
+/// and advertise the runtime capability exercised by the positive tests above.
 #[tokio::test]
 async fn tool_choice_matrix_non_force_required_prompt_injected_bare_json_contract() {
     let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
@@ -1542,6 +2490,128 @@ async fn tool_choice_deepseek_v4_required_prompt_injected_bare_json_recovers() {
     assert!(
         finish_reasons.contains(&FinishReason::ToolCalls),
         "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// Harmony's reasoning parser consumes channel-tagged text, but a backend
+/// without reasoning-aware guided decoding can still emit required bare JSON
+/// from token zero without Harmony channel tags. The JSON must bypass the
+/// Harmony reasoner and reach the immediate tool jail intact.
+#[tokio::test]
+async fn tool_choice_gpt_oss_required_prompt_injected_bare_json_recovers() {
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(Some("gpt_oss"), Some("harmony"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "GPT-OSS required + prompt_injected=false + bare JSON";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not be classified as reasoning_content, got: {reasoning:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+#[tokio::test]
+async fn tool_choice_prompt_injected_bare_json_waits_through_leading_whitespace() {
+    for (case, tool_choice, guided_json) in [
+        (
+            "required array",
+            ChatCompletionToolChoiceOption::Required,
+            r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#,
+        ),
+        (
+            "named object",
+            ChatCompletionToolChoiceOption::Named("get_weather".to_string().into()),
+            r#"{"location":"San Francisco"}"#,
+        ),
+    ] {
+        let preprocessor = build_preprocessor(Some("deepseek_v4"), Some("deepseek_v4"));
+        let request = streaming_tool_request(tool_choice);
+        let output = preprocessor
+            .postprocessor_parsing_stream(
+                stream::iter(
+                    vec![
+                        mock_content_chunk("\n"),
+                        mock_content_chunk(guided_json),
+                        mock_final_chunk(),
+                    ]
+                    .into_iter()
+                    .map(Annotated::from_data),
+                ),
+                &request,
+                true,
+                false,
+            )
+            .unwrap();
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            finish_reasons,
+        } = drain_stream(output).await;
+
+        assert!(
+            reasoning.is_empty(),
+            "{case}: undecided leading whitespace leaked into reasoning: {reasoning:?}"
+        );
+        assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+        assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+    }
+}
+
+#[tokio::test]
+async fn prompt_injected_non_json_after_whitespace_preserves_reasoning() {
+    let preprocessor = build_preprocessor(Some("deepseek_v4"), Some("deepseek_v4"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let guided_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let output = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter(
+                vec![
+                    mock_content_chunk("\n"),
+                    mock_content_chunk("Need weather data.</think>"),
+                    mock_content_chunk(guided_json),
+                    mock_final_chunk(),
+                ]
+                .into_iter()
+                .map(Annotated::from_data),
+            ),
+            &request,
+            true,
+            false,
+        )
+        .unwrap();
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        ..
+    } = drain_stream(output).await;
+
+    assert_eq!(reasoning, "\nNeed weather data.");
+    assert_clean_tool_call(
+        "prompt-injected reasoning after whitespace",
+        &content,
+        &tool_calls,
+        "San Francisco",
     );
 }
 
@@ -1871,6 +2941,50 @@ async fn tool_choice_structural_tag_keeps_prompt_injected_reasoning_parser() {
             "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
         );
     }
+}
+
+/// Structural-tag grammars that own the prompt-injected reasoning prefix do
+/// not emit bare JSON from token zero. Even without a backend capability bit,
+/// a force-start parser must remain active until the grammar's `</think>`.
+#[tokio::test]
+async fn tool_choice_structural_tag_does_not_take_force_parser_bare_json_skip() {
+    let preprocessor = build_preprocessor(Some("deepseek_v3_2"), Some("deepseek_v3_2"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"thinking": true})).unwrap());
+    let structural_tool_call = "<｜DSML｜function_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"location\" string=\"true\">San Francisco</｜DSML｜parameter>\n\
+</｜DSML｜invoke>\n\
+</｜DSML｜function_calls>";
+    let stream_text = format!("Need weather data.</think>{structural_tool_call}");
+    let output = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter(
+                vec![mock_content_chunk(&stream_text), mock_final_chunk()]
+                    .into_iter()
+                    .map(Annotated::from_data),
+            ),
+            &request,
+            true,
+            true,
+        )
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output).await;
+
+    assert_eq!(reasoning, "Need weather data.");
+    assert_clean_tool_call(
+        "DeepSeek V3.2 force parser + structural tag",
+        &content,
+        &tool_calls,
+        "San Francisco",
+    );
+    assert!(finish_reasons.contains(&FinishReason::ToolCalls));
 }
 
 /// CASE 6 — Immediate jail mode + first chunk has only `reasoning_content`

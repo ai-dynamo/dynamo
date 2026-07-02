@@ -311,6 +311,39 @@ async def test_tool_call_parser_invalid_with_dynamo_tokenizer(mock_sglang_cli):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "parser_flag",
+    ["--dyn-tool-call-parser", "--dyn-reasoning-parser"],
+)
+async def test_dynamo_parsers_rejected_with_sglang_text_mode(
+    mock_sglang_cli, parser_flag
+):
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--use-sglang-tokenizer",
+        parser_flag,
+        "qwen3",
+    )
+
+    with pytest.raises(SystemExit):
+        await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_structural_tags_rejected_with_sglang_text_mode(mock_sglang_cli):
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--use-sglang-tokenizer",
+        "--dyn-enable-structural-tag",
+    )
+
+    with pytest.raises(SystemExit):
+        await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
 async def test_tool_call_parser_both_flags_error(mock_sglang_cli):
     """Setting both --dyn-tool-call-parser and --tool-call-parser exits with error."""
     mock_sglang_cli(
@@ -324,6 +357,60 @@ async def test_tool_call_parser_both_flags_error(mock_sglang_cli):
 
     with pytest.raises(SystemExit):
         await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_incompatible_native_and_dynamo_reasoning_parsers_error(
+    mock_sglang_cli,
+):
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--reasoning-parser",
+        "qwen3",
+        "--dyn-reasoning-parser",
+        "gpt_oss",
+    )
+
+    with pytest.raises(SystemExit):
+        await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_compatible_native_and_dynamo_reasoning_parsers_allowed(
+    mock_sglang_cli,
+):
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--reasoning-parser",
+        "qwen3",
+        "--dyn-reasoning-parser",
+        "qwen3",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.reasoning_parser == "qwen3"
+    assert config.dynamo_args.dyn_reasoning_parser == "qwen3"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_parser_both_flags_allowed(mock_sglang_cli):
+    """Native reasoning guides SGLang while Dynamo parses the response."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--dyn-reasoning-parser",
+        "nemotron_v3",
+        "--reasoning-parser",
+        "nemotron_3",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.dynamo_args.dyn_reasoning_parser == "nemotron_v3"
+    assert config.server_args.reasoning_parser == "nemotron_3"
 
 
 @pytest.mark.asyncio
@@ -679,6 +766,111 @@ def test_should_fetch_model_keeps_default_non_local_fetch():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("disaggregation_mode", "expected_publish"),
+    [("null", True), ("decode", True), ("prefill", False)],
+)
+async def test_runtime_config_publishes_reasoning_aware_guided_decoding(
+    monkeypatch, disaggregation_mode, expected_publish
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    published = []
+
+    monkeypatch.setattr(
+        sglang_register,
+        "publish_reasoning_aware_guided_decoding",
+        lambda *args: published.append(args),
+    )
+    monkeypatch.setattr(
+        sglang_register,
+        "_get_bootstrap_info_for_config",
+        lambda engine: (None, None),
+    )
+
+    engine = SimpleNamespace(
+        _scheduler_init_result=SimpleNamespace(scheduler_infos=[{}])
+    )
+    server_args = SimpleNamespace(
+        context_length=4096,
+        disaggregation_mode=disaggregation_mode,
+        speculative_algorithm=None,
+        speculative_num_steps=0,
+        max_prefill_tokens=None,
+        max_running_requests=None,
+        hicache_storage_backend=None,
+        page_size=1,
+        dp_size=1,
+    )
+    dynamo_args = SimpleNamespace(
+        dyn_reasoning_parser="nemotron_v3",
+        dyn_tool_call_parser="nemotron_nano",
+        exclude_tools_when_tool_choice_none=True,
+        dyn_enable_structural_tag=False,
+        dyn_structural_tag_scope="auto",
+        dyn_structural_tag_schema="auto",
+        enable_local_indexer=False,
+    )
+
+    runtime_config = await sglang_register._get_runtime_config(
+        engine, server_args, dynamo_args
+    )
+
+    assert bool(published) is expected_publish
+    if expected_publish:
+        assert published == [(runtime_config, engine, server_args, dynamo_args)]
+
+
+@pytest.mark.asyncio
+async def test_surface_card_without_generation_engine_fails_capability_closed(
+    monkeypatch,
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    published = []
+    monkeypatch.setattr(
+        sglang_register,
+        "publish_reasoning_aware_guided_decoding",
+        lambda *args: published.append(args),
+    )
+    monkeypatch.setattr(
+        sglang_register,
+        "_get_bootstrap_info_for_config",
+        lambda engine: (None, None),
+    )
+    server_args = SimpleNamespace(
+        context_length=4096,
+        disaggregation_mode="null",
+        speculative_algorithm=None,
+        speculative_num_steps=0,
+        max_prefill_tokens=None,
+        max_running_requests=None,
+        hicache_storage_backend=None,
+        page_size=1,
+        dp_size=1,
+    )
+    dynamo_args = SimpleNamespace(
+        dyn_reasoning_parser="nemotron_v3",
+        dyn_tool_call_parser="nemotron_nano",
+        exclude_tools_when_tool_choice_none=True,
+        dyn_enable_structural_tag=False,
+        dyn_structural_tag_scope="auto",
+        dyn_structural_tag_schema="auto",
+        enable_local_indexer=False,
+    )
+
+    runtime_config = await sglang_register._get_runtime_config(
+        None,
+        server_args,
+        dynamo_args,
+    )
+
+    assert published == [(runtime_config, None, server_args, dynamo_args)]
+
+
+@pytest.mark.asyncio
 async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeypatch):
     if sglang_register is None:
         pytest.skip("dynamo.sglang.register is unavailable")
@@ -824,6 +1016,7 @@ async def test_lora_registration_model_type_gate(
 
     # Capture the kwargs passed to register_llm.
     captured: dict = {}
+    capability_publications: list[tuple] = []
 
     async def fake_register_llm(**kw):
         captured.update(kw)
@@ -837,6 +1030,11 @@ async def test_lora_registration_model_type_gate(
     monkeypatch.setattr(handler_base, "register_llm", fake_register_llm)
     monkeypatch.setattr(handler_base, "get_lora_manager", lambda: fake_lora_manager)
     monkeypatch.setattr(handler_base, "lora_name_to_id", lambda name: 12345)
+    monkeypatch.setattr(
+        handler_base,
+        "publish_reasoning_aware_guided_decoding",
+        lambda *args: capability_publications.append(args) or True,
+    )
 
     # Fake SGLang engine — only the LoRA load path is exercised.
     fake_load_result = SimpleNamespace(success=True, error_message=None)
@@ -860,7 +1058,14 @@ async def test_lora_registration_model_type_gate(
     config.serving_mode = DisaggregationMode(serving_mode)
     config.server_args.model_path = "/models/base"
     config.server_args.page_size = 16
+    config.server_args.context_length = 4096
     config.dynamo_args.endpoint_types = endpoint_types
+    config.dynamo_args.dyn_tool_call_parser = "nemotron_nano"
+    config.dynamo_args.dyn_reasoning_parser = "nemotron_v3"
+    config.dynamo_args.exclude_tools_when_tool_choice_none = False
+    config.dynamo_args.dyn_enable_structural_tag = True
+    config.dynamo_args.dyn_structural_tag_scope = "always"
+    config.dynamo_args.dyn_structural_tag_schema = "strict"
     handler.config = config
 
     handler._init_lora_tracking()
@@ -882,3 +1087,19 @@ async def test_lora_registration_model_type_gate(
         str(captured["worker_type"]) == expected_worker_type
     ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
+    runtime_config = captured["runtime_config"]
+    assert runtime_config.context_length == 4096
+    assert runtime_config.tool_call_parser == "nemotron_nano"
+    assert runtime_config.reasoning_parser == "nemotron_v3"
+    assert runtime_config.exclude_tools_when_tool_choice_none is False
+    if expected_worker_type == "prefill":
+        assert capability_publications == []
+    else:
+        assert capability_publications == [
+            (
+                runtime_config,
+                fake_engine,
+                config.server_args,
+                config.dynamo_args,
+            )
+        ]

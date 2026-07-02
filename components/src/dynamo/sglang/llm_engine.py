@@ -74,6 +74,10 @@ from dynamo.sglang.capacity import (
 from dynamo.sglang.logits_processing import activate_logits_processors
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import format_zmq_endpoint
+from dynamo.sglang.reasoning import (
+    reasoning_aware_guided_decoding_runtime_data,
+    request_reasoning_kwargs,
+)
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -91,11 +95,31 @@ def _warmup_enabled() -> bool:
     return raw.strip().lower() not in ("1", "true", "yes", "on")
 
 
-def _get_runtime_data(server_args) -> dict[str, Any] | None:
+def _get_runtime_data(
+    server_args,
+    *,
+    engine: Any | None = None,
+    dynamo_args: Any | None = None,
+    serving_mode: DisaggregationMode | None = None,
+) -> dict[str, Any] | None:
+    runtime_data: dict[str, Any] = {}
     worker_group_id = get_sglang_worker_group_id(server_args)
-    if worker_group_id is None:
-        return None
-    return {SGLANG_WORKER_GROUP_ID_KEY: worker_group_id}
+    if worker_group_id is not None:
+        runtime_data[SGLANG_WORKER_GROUP_ID_KEY] = worker_group_id
+
+    if (
+        engine is not None
+        and dynamo_args is not None
+        and serving_mode is not None
+        and is_generation_stage(serving_mode)
+    ):
+        runtime_data.update(
+            reasoning_aware_guided_decoding_runtime_data(
+                engine, server_args, dynamo_args
+            )
+            or {}
+        )
+    return runtime_data or None
 
 
 def _local_dp_rank_range(server_args) -> tuple[int, int]:
@@ -229,7 +253,12 @@ class SglangLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
-            runtime_data=_get_runtime_data(self.server_args),
+            runtime_data=_get_runtime_data(
+                self.server_args,
+                engine=self.engine,
+                dynamo_args=self.dynamo_args,
+                serving_mode=self.serving_mode,
+            ),
             llm=LlmRegistration(
                 context_length=self.server_args.context_length,
                 kv_cache_block_size=page_size,
@@ -338,6 +367,7 @@ class SglangLLMEngine(LLMEngine):
 
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        reasoning_kwargs = request_reasoning_kwargs(self.engine, request)
         # Prefill discards engine output (it only yields bootstrap info) —
         # asking SGLang to compute logprobs there would be wasted work,
         # especially with prompt_logprobs which forces a full prompt pass.
@@ -396,6 +426,7 @@ class SglangLLMEngine(LLMEngine):
                 enabled=self.enable_trace,
             ),
             **bootstrap_kwargs,
+            **reasoning_kwargs,
             **logits_kwargs,
             **logprob_kwargs,
         )

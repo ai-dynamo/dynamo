@@ -13,9 +13,19 @@ from types import SimpleNamespace
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
+from vllm.reasoning import ReasoningParserManager
+from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
+from vllm.sampling_params import StructuredOutputsParams
+from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
+from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
-from dynamo.frontend.prepost import _prepare_request
+from dynamo.frontend.prepost import StreamingPostProcessor, _prepare_request
 
 # Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -52,6 +62,11 @@ TOOL_REQUEST = {
 @pytest.fixture(scope="module")
 def tokenizer():
     return AutoTokenizer.from_pretrained(MODEL)
+
+
+@pytest.fixture(scope="module")
+def gpt_oss_tokenizer():
+    return AutoTokenizer.from_pretrained("openai/gpt-oss-20b", local_files_only=True)
 
 
 # ---------------------------------------------------------------------------
@@ -138,22 +153,40 @@ class TestReasoningParserMetadata:
             [1, 2, 3],
         ) == (None, None)
 
-    def test_include_reasoning_false_marks_reasoning_ended(self):
+    def test_backend_capability_forwards_kwargs_without_response_parser(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
-        class ParserShouldNotBeBuilt:
-            def __init__(self, *args, **kwargs):
-                raise AssertionError("parser should not be constructed")
+        assert _build_reasoning_parser_metadata(
+            None,
+            object(),
+            {"thinking": True},
+            SimpleNamespace(include_reasoning=True),
+            [1, 2, 3],
+            reasoning_aware_guided_decoding=True,
+        ) == (None, {"chat_template_kwargs": {"thinking": True}})
+
+    def test_include_reasoning_false_preserves_backend_reasoning_state(self):
+        from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
+
+        class FakeReasoningParser:
+            def __init__(self, tokenizer, *, chat_template_kwargs):
+                pass
+
+            def is_reasoning_end(self, prompt_token_ids):
+                return False
 
         reasoning_ended, parser_kwargs = _build_reasoning_parser_metadata(
-            ParserShouldNotBeBuilt,
+            FakeReasoningParser,
             object(),
             {"reasoning_effort": "low"},
             SimpleNamespace(include_reasoning=False),
             [1, 2, 3],
         )
 
-        assert reasoning_ended is True
+        # include_reasoning controls response visibility, not whether the model
+        # reasons. The backend must still delay a guided grammar until the
+        # parser observes the real reasoning boundary.
+        assert reasoning_ended is False
         assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "low"}}
 
     def test_parser_receives_chat_template_kwargs(self):
@@ -200,6 +233,107 @@ class TestReasoningParserMetadata:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
+
+    @pytest.mark.parametrize("policy_name", ["basic", "nemotron_deci"])
+    def test_non_force_alias_uses_explicit_marker_parser(self, tokenizer, policy_name):
+        from dynamo.frontend.vllm_processor import _reasoning_parser_class
+
+        parser_class = _reasoning_parser_class(policy_name, "qwen3")
+        parser = parser_class(tokenizer, chat_template_kwargs={})
+
+        assert parser.is_reasoning_end([]) is True
+        assert parser.extract_reasoning(
+            '[{"name":"get_weather","arguments":{}}]',
+            SimpleNamespace(),
+        ) == (None, '[{"name":"get_weather","arguments":{}}]')
+        assert parser.extract_reasoning(
+            "<think>reason</think>answer", SimpleNamespace()
+        ) == ("reason", "answer")
+
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=SimpleNamespace(
+                tool_choice="auto", include_reasoning=True
+            ),
+            sampling_params=SimpleNamespace(),
+            prompt_token_ids=[parser.start_token_id],
+            tool_parser=None,
+            reasoning_parser_class=parser_class,
+            chat_template_kwargs={},
+        )
+        completion = "reason</think>answer"
+        choice = post.process_output(
+            SimpleNamespace(
+                text=completion,
+                token_ids=tokenizer.encode(completion, add_special_tokens=False),
+                index=0,
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["delta"]["reasoning_content"] == "reason"
+        assert choice["delta"]["content"] == "answer"
+
+    @pytest.mark.parametrize("policy_name", ["basic", "nemotron_deci"])
+    def test_non_force_alias_detects_generated_marker_from_plain_prompt(
+        self, tokenizer, policy_name
+    ):
+        from dynamo.frontend.vllm_processor import _reasoning_parser_class
+
+        parser_class = _reasoning_parser_class(policy_name, "qwen3")
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=SimpleNamespace(
+                tool_choice="auto",
+                include_reasoning=True,
+                tools=None,
+                messages=[],
+            ),
+            sampling_params=SimpleNamespace(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=parser_class,
+            chat_template_kwargs={},
+        )
+        completion = "<think>reason</think>answer"
+        choice = post.process_output(
+            SimpleNamespace(
+                text=completion,
+                token_ids=tokenizer.encode(completion, add_special_tokens=False),
+                index=0,
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["delta"]["reasoning_content"] == "reason"
+        assert choice["delta"]["content"] == "answer"
+
+    @pytest.mark.parametrize(
+        ("policy_name", "native_name"),
+        [
+            ("minimax_append_think", "minimax_m2_append_think"),
+            ("minimax_m2_append_think", "minimax_m2_append_think"),
+        ],
+    )
+    def test_minimax_append_uses_implicit_start_parser(
+        self, tokenizer, policy_name, native_name
+    ):
+        from dynamo.frontend.vllm_processor import _reasoning_parser_class
+
+        parser_class = _reasoning_parser_class(policy_name, native_name)
+        parser = parser_class(tokenizer, chat_template_kwargs={})
+
+        assert parser.extract_reasoning(
+            "implicit reason</think>answer", SimpleNamespace()
+        ) == ("implicit reason", "answer")
+        assert "<think>" not in "".join(
+            part or ""
+            for part in parser.extract_reasoning(
+                "implicit reason</think>answer", SimpleNamespace()
+            )
+        )
 
 
 class _FakeOutputProcessor:
@@ -502,6 +636,87 @@ class TestChatTemplateKwargsForwarding:
         )
         assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
 
+    @pytest.mark.parametrize(
+        ("reasoning_effort", "expected"),
+        [("none", False), ("low", True), ("high", True)],
+    )
+    def test_reasoning_effort_derives_enable_thinking(
+        self, tokenizer, reasoning_effort, expected
+    ):
+        chat_params, _ = self._prepare(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "reasoning_effort": reasoning_effort,
+            },
+            tokenizer,
+        )
+
+        assert chat_params.chat_template_kwargs["enable_thinking"] is expected
+
+    @pytest.mark.parametrize(
+        ("explicit_kwargs", "reasoning_effort"),
+        [
+            ({"enable_thinking": True}, "none"),
+            ({"thinking": False}, "high"),
+            ({"thinking_mode": "disabled"}, "high"),
+        ],
+    )
+    def test_any_explicit_thinking_alias_overrides_reasoning_effort(
+        self, tokenizer, explicit_kwargs, reasoning_effort
+    ):
+        chat_params, _ = self._prepare(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "reasoning_effort": reasoning_effort,
+                "chat_template_kwargs": explicit_kwargs,
+            },
+            tokenizer,
+        )
+
+        for key, value in explicit_kwargs.items():
+            assert chat_params.chat_template_kwargs[key] == value
+        absent_aliases = {
+            "thinking",
+            "enable_thinking",
+            "thinking_mode",
+        } - explicit_kwargs.keys()
+        assert absent_aliases.isdisjoint(chat_params.chat_template_kwargs)
+
+    def test_nested_reasoning_effort_survives_when_root_is_absent(self, tokenizer):
+        chat_params, _ = self._prepare(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"reasoning_effort": "high"},
+            },
+            tokenizer,
+        )
+
+        assert chat_params.chat_template_kwargs["reasoning_effort"] == "high"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "enabled"),
+        [({}, True), ({"thinking": False}, False), ({"enable_thinking": True}, True)],
+    )
+    def test_deepseek_v4_normalizes_effective_thinking(
+        self, tokenizer, kwargs, enabled
+    ):
+        _, _, normalized, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": kwargs,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            reasoning_policy_name="deepseek_v4",
+        )
+
+        assert normalized["thinking"] is enabled
+        assert normalized["enable_thinking"] is enabled
+
 
 @pytest.mark.parametrize(
     ("runtime_config", "expected"),
@@ -520,3 +735,930 @@ def test_runtime_config_context_length(vllm_processor_module, runtime_config, ex
     mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
 
     assert vllm_processor_module._runtime_config_context_length(mdc) == expected
+
+
+class TestGuidedReasoningResponsePolicy:
+    class FakeReasoningParser:
+        pass
+
+    @staticmethod
+    def _request(tool_choice, *, structural_tag=None, grammar_from_parser=False):
+        request = SimpleNamespace(
+            tool_choice=tool_choice,
+            structured_outputs=SimpleNamespace(structural_tag=structural_tag),
+        )
+        request._grammar_from_tool_parser = grammar_from_parser
+        return request
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        [
+            "required",
+            {"type": "function", "function": {"name": "get_weather"}},
+        ],
+    )
+    def test_force_parser_disabled_for_bare_guided_json(self, tool_choice):
+        from dynamo.frontend.vllm_processor import _response_reasoning_parser_class
+
+        assert (
+            _response_reasoning_parser_class(
+                self._request(tool_choice),
+                self.FakeReasoningParser,
+                reasoning_ended=False,
+                reasoning_aware_guided_decoding=False,
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        ("request_obj", "reasoning_ended", "capability"),
+        [
+            (SimpleNamespace(tool_choice="auto"), False, False),
+            (SimpleNamespace(tool_choice="required"), True, False),
+            (SimpleNamespace(tool_choice="required"), False, True),
+        ],
+    )
+    def test_parser_preserved_when_guidance_cannot_conflict(
+        self, request_obj, reasoning_ended, capability
+    ):
+        from dynamo.frontend.vllm_processor import _response_reasoning_parser_class
+
+        assert (
+            _response_reasoning_parser_class(
+                request_obj,
+                self.FakeReasoningParser,
+                reasoning_ended=reasoning_ended,
+                reasoning_aware_guided_decoding=capability,
+            )
+            is self.FakeReasoningParser
+        )
+
+    @pytest.mark.parametrize("grammar_from_parser", [False, True])
+    def test_parser_preserved_for_structural_or_custom_grammar(
+        self, grammar_from_parser
+    ):
+        from dynamo.frontend.vllm_processor import _response_reasoning_parser_class
+
+        request = self._request(
+            "required",
+            structural_tag=None if grammar_from_parser else {"type": "object"},
+            grammar_from_parser=grammar_from_parser,
+        )
+        assert (
+            _response_reasoning_parser_class(
+                request,
+                self.FakeReasoningParser,
+                reasoning_ended=False,
+                reasoning_aware_guided_decoding=False,
+            )
+            is self.FakeReasoningParser
+        )
+
+    def test_kimi_k25_tool_continuation_disables_frontend_and_backend_reasoning(
+        self,
+    ):
+        from dynamo.frontend.vllm_processor import _request_reasoning_policy
+
+        reasoning_ended, parser_class = _request_reasoning_policy(
+            "kimi_k25",
+            {
+                "messages": [
+                    {"role": "user", "content": "Run it"},
+                    {"role": "tool", "content": "done"},
+                ]
+            },
+            SimpleNamespace(tool_choice="auto"),
+            self.FakeReasoningParser,
+            reasoning_ended=False,
+            reasoning_aware_guided_decoding=True,
+        )
+
+        assert reasoning_ended is True
+        assert parser_class is None
+
+    @pytest.mark.parametrize(
+        ("reasoning_effort", "expected_ended", "expected_parser"),
+        [
+            (None, True, None),
+            ("none", True, None),
+            ("high", False, FakeReasoningParser),
+        ],
+    )
+    def test_mistral_reasoning_effort_policy(
+        self, reasoning_effort, expected_ended, expected_parser
+    ):
+        from dynamo.frontend.vllm_processor import _request_reasoning_policy
+
+        request = {"messages": [{"role": "user", "content": "hello"}]}
+        if reasoning_effort is not None:
+            request["reasoning_effort"] = reasoning_effort
+        reasoning_ended, parser_class = _request_reasoning_policy(
+            "mistral",
+            request,
+            SimpleNamespace(tool_choice="auto"),
+            self.FakeReasoningParser,
+            reasoning_ended=False,
+            reasoning_aware_guided_decoding=True,
+        )
+
+        assert reasoning_ended is expected_ended
+        assert parser_class is expected_parser
+
+    @pytest.mark.parametrize("parser_name", ["deepseek_r1", "minimax_m3"])
+    def test_disabled_policy_marks_backend_reasoning_ended(self, parser_name):
+        from dynamo.frontend.vllm_processor import _request_reasoning_policy
+
+        reasoning_ended, parser_class = _request_reasoning_policy(
+            parser_name,
+            {"messages": [{"role": "user", "content": "hello"}]},
+            SimpleNamespace(tool_choice="required"),
+            self.FakeReasoningParser,
+            reasoning_ended=False,
+            reasoning_aware_guided_decoding=True,
+            normalized_template_kwargs={
+                "enable_thinking": False,
+                "thinking_mode": "disabled",
+            },
+        )
+
+        assert reasoning_ended is True
+        assert parser_class is None
+
+
+class TestVllmReasoningCapabilityOverride:
+    @staticmethod
+    def _mdc(reasoning_parser="nemotron_v3"):
+        return SimpleNamespace(
+            runtime_config=lambda: {
+                "reasoning_parser": reasoning_parser,
+                "runtime_data": {"reasoning_aware_guided_decoding": True},
+            }
+        )
+
+    def test_compatible_frontend_alias_is_accepted(self):
+        from dynamo.frontend.vllm_processor import (
+            _validated_reasoning_aware_guided_decoding,
+        )
+
+        assert _validated_reasoning_aware_guided_decoding(self._mdc(), "nemotron_nano")
+
+    def test_incompatible_frontend_override_is_rejected(self):
+        from dynamo.frontend.vllm_processor import (
+            _validated_reasoning_aware_guided_decoding,
+        )
+
+        with pytest.raises(ValueError, match="incompatible"):
+            _validated_reasoning_aware_guided_decoding(self._mdc(), "qwen3")
+
+    def test_missing_worker_parser_fails_closed(self):
+        from dynamo.frontend.vllm_processor import (
+            _validated_reasoning_aware_guided_decoding,
+        )
+
+        assert not _validated_reasoning_aware_guided_decoding(
+            self._mdc(reasoning_parser=None), "nemotron_v3"
+        )
+
+    def test_factory_resolution_preserves_worker_kimi_policy_with_native_override(
+        self,
+    ):
+        from dynamo.frontend.vllm_processor import _resolve_reasoning_parser_names
+
+        policy_name, effective_name, native_name = _resolve_reasoning_parser_names(
+            "kimi_k25", "kimi_k2"
+        )
+
+        assert policy_name == "kimi_k25"
+        assert effective_name == "kimi_k2"
+        assert native_name == "kimi_k2"
+
+
+class _BoundaryToolParser:
+    def extract_tool_calls_streaming(self, **kwargs):
+        delta_text = kwargs["delta_text"]
+        if delta_text == "TOOL":
+            return DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        type="function",
+                        id="call-1",
+                        function=DeltaFunctionCall(
+                            name="get_weather", arguments='{"city":"SF"}'
+                        ),
+                    )
+                ]
+            )
+        if delta_text:
+            return DeltaMessage(content=delta_text)
+        return None
+
+    def extract_tool_calls(self, text, request):
+        del text, request
+        return SimpleNamespace(
+            tools_called=True,
+            content="\n\n",
+            tool_calls=[
+                SimpleNamespace(
+                    id="call-1",
+                    function=SimpleNamespace(
+                        name="get_weather", arguments='{"city":"SF"}'
+                    ),
+                )
+            ],
+        )
+
+
+def _boundary_postprocessor(*, stream_response=True, tool_choice="auto"):
+    return StreamingPostProcessor(
+        tokenizer=SimpleNamespace(all_special_tokens=[]),
+        request_for_sampling=SimpleNamespace(
+            tool_choice=tool_choice, include_reasoning=True
+        ),
+        sampling_params=SimpleNamespace(),
+        prompt_token_ids=[],
+        tool_parser=_BoundaryToolParser(),
+        reasoning_parser_class=None,
+        chat_template_kwargs={},
+        stream_response=stream_response,
+    )
+
+
+def _output(text, *, finish_reason=None):
+    return SimpleNamespace(
+        text=text,
+        token_ids=[1] if text else [],
+        index=0,
+        finish_reason=finish_reason,
+        logprobs=None,
+    )
+
+
+class TestVllmToolBoundaryContent:
+    def test_streaming_tool_only_discards_separator_after_tool_delta(self):
+        post = _boundary_postprocessor()
+
+        assert post.process_output(_output("TOOL")) is None
+        tool_choice = post.process_output(_output("\n"))
+        finish_choice = post.process_output(_output("\n", finish_reason="stop"))
+
+        assert tool_choice["delta"].get("tool_calls")
+        assert "content" not in tool_choice["delta"]
+        assert finish_choice["finish_reason"] == "tool_calls"
+        assert "content" not in finish_choice["delta"]
+
+    def test_streaming_direct_answer_preserves_leading_whitespace(self):
+        post = _boundary_postprocessor()
+
+        assert post.process_output(_output("\n")) is None
+        choice = post.process_output(_output("Blue", finish_reason="stop"))
+
+        assert choice["delta"]["content"] == "\nBlue"
+        assert choice["finish_reason"] == "stop"
+
+    def test_streaming_narration_before_tool_preserves_trailing_space(self):
+        post = _boundary_postprocessor()
+
+        narration = post.process_output(_output("I will call"))
+        separator = post.process_output(_output(" "))
+        tool_choice = post.process_output(_output("TOOL", finish_reason="stop"))
+
+        assert narration["delta"]["content"] == "I will call"
+        assert separator["delta"]["content"] == " "
+        assert tool_choice["delta"].get("tool_calls")
+        assert "content" not in tool_choice["delta"]
+
+    def test_non_streaming_tool_only_discards_parser_separator(self):
+        post = _boundary_postprocessor(stream_response=False)
+
+        choice = post.process_output(_output("ignored", finish_reason="stop"))
+
+        assert choice["delta"].get("tool_calls")
+        assert "content" not in choice["delta"]
+        assert choice["finish_reason"] == "tool_calls"
+
+    def test_length_finish_is_preserved_after_tool_delta(self):
+        post = _boundary_postprocessor()
+
+        choice = post.process_output(_output("TOOL", finish_reason="length"))
+
+        assert choice["delta"].get("tool_calls")
+        assert choice["finish_reason"] == "length"
+
+    def test_named_tool_stop_finish_is_remapped(self):
+        post = _boundary_postprocessor(
+            tool_choice={
+                "type": "function",
+                "function": {"name": "get_weather"},
+            }
+        )
+
+        choice = post.process_output(_output("TOOL", finish_reason="stop"))
+
+        assert choice["delta"].get("tool_calls")
+        assert choice["finish_reason"] == "tool_calls"
+
+
+def _guided_json_postprocessor(
+    tokenizer,
+    tool_parser_class,
+    *,
+    tool_choice="required",
+    reasoning_parser_class=None,
+    prompt_token_ids=(),
+    stream_response=True,
+    tool_call_id_type="random",
+):
+    request = {**TOOL_REQUEST, "tool_choice": tool_choice}
+    request_for_sampling, tool_parser, kwargs, _, _ = _prepare_request(
+        request,
+        tokenizer=tokenizer,
+        tool_parser_class=tool_parser_class,
+        reasoning_parser_class=reasoning_parser_class,
+    )
+    # Exercise the standard bare-JSON response shape independently of strict
+    # structural-tag mode. Backends and parser versions may select either.
+    request_for_sampling.structured_outputs = StructuredOutputsParams(
+        json={"type": "array"}
+    )
+    return StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=SimpleNamespace(),
+        prompt_token_ids=list(prompt_token_ids),
+        tool_parser=tool_parser,
+        reasoning_parser_class=reasoning_parser_class,
+        chat_template_kwargs=kwargs,
+        stream_response=stream_response,
+        tool_call_id_type=tool_call_id_type,
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_parser_class", [Hermes2ProToolParser, Qwen3EngineToolParser]
+)
+@pytest.mark.parametrize("stream_response", [False, True])
+def test_required_standard_guided_json_uses_generic_parser(
+    tokenizer, tool_parser_class, stream_response
+):
+    post = _guided_json_postprocessor(
+        tokenizer,
+        tool_parser_class,
+        stream_response=stream_response,
+    )
+    text = '[{"name":"get_weather","parameters":{"city":"SF"}}]'
+    choice = post.process_output(
+        SimpleNamespace(
+            text=text,
+            token_ids=tokenizer.encode(text, add_special_tokens=False),
+            index=0,
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    assert choice["finish_reason"] == "tool_calls"
+    assert "content" not in choice["delta"]
+    tool_call = choice["delta"]["tool_calls"][0]
+    assert tool_call["function"]["name"] == "get_weather"
+    assert json.loads(tool_call["function"]["arguments"]) == {"city": "SF"}
+
+
+def test_required_standard_guided_json_large_delta_has_no_array_suffix(tokenizer):
+    post = _guided_json_postprocessor(
+        tokenizer,
+        Hermes2ProToolParser,
+        stream_response=True,
+    )
+    text = '[{"name":"get_weather","parameters":{"city":"SF"}}]'
+    choice = post.process_output(
+        SimpleNamespace(
+            text=text,
+            token_ids=tokenizer.encode(text, add_special_tokens=False),
+            index=0,
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    arguments = choice["delta"]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(arguments) == {"city": "SF"}
+    assert not arguments.endswith("]")
+
+
+def test_required_standard_guided_json_streams_split_name_and_arguments(tokenizer):
+    post = _guided_json_postprocessor(
+        tokenizer,
+        Hermes2ProToolParser,
+        stream_response=True,
+    )
+    chunks = (
+        ('[{"name":"get_', None),
+        ('weather","parameters":{"city":"', None),
+        ('SF"}}]', "stop"),
+    )
+
+    choices = [
+        post.process_output(
+            SimpleNamespace(
+                text=text,
+                token_ids=tokenizer.encode(text, add_special_tokens=False),
+                index=0,
+                finish_reason=finish_reason,
+                logprobs=None,
+            )
+        )
+        for text, finish_reason in chunks
+    ]
+    calls = [choice["delta"]["tool_calls"][0] for choice in choices]
+
+    assert calls[0]["id"].startswith("chatcmpl-tool-")
+    assert calls[0]["type"] == "function"
+    assert "id" not in calls[1]
+    assert "type" not in calls[1]
+    assert "".join(call["function"].get("name", "") for call in calls) == (
+        "get_weather"
+    )
+    assert "".join(call["function"].get("arguments", "") for call in calls) == (
+        '{"city":"SF"}'
+    )
+    assert choices[-1]["finish_reason"] == "tool_calls"
+
+
+def test_required_standard_guided_json_waits_for_name_derived_id(tokenizer):
+    post = _guided_json_postprocessor(
+        tokenizer,
+        Hermes2ProToolParser,
+        stream_response=True,
+        tool_call_id_type="kimi_k2",
+    )
+    partial_name = '[{"name":"get_'
+    complete_name = 'weather","parameters":{'
+
+    assert (
+        post.process_output(
+            SimpleNamespace(
+                text=partial_name,
+                token_ids=tokenizer.encode(partial_name, add_special_tokens=False),
+                index=0,
+                finish_reason=None,
+                logprobs=None,
+            )
+        )
+        is None
+    )
+    choice = post.process_output(
+        SimpleNamespace(
+            text=complete_name,
+            token_ids=tokenizer.encode(complete_name, add_special_tokens=False),
+            index=0,
+            finish_reason="length",
+            logprobs=None,
+        )
+    )
+
+    tool_call = choice["delta"]["tool_calls"][0]
+    assert tool_call["id"] == "functions.get_weather:0"
+    assert tool_call["function"]["name"] == "get_weather"
+    assert tool_call["function"]["arguments"] == "{"
+    assert choice["finish_reason"] == "length"
+
+
+def test_named_standard_guided_json_streams_nested_arguments(tokenizer):
+    post = _guided_json_postprocessor(
+        tokenizer,
+        Hermes2ProToolParser,
+        tool_choice={
+            "type": "function",
+            "function": {"name": "get_weather"},
+        },
+        stream_response=True,
+    )
+    chunks = (
+        ('{"nested":{"values":[1,', None),
+        ('2]},"city":"S', None),
+        ('F"}', "stop"),
+    )
+
+    choices = [
+        post.process_output(
+            SimpleNamespace(
+                text=text,
+                token_ids=tokenizer.encode(text, add_special_tokens=False),
+                index=0,
+                finish_reason=finish_reason,
+                logprobs=None,
+            )
+        )
+        for text, finish_reason in chunks
+    ]
+    calls = [choice["delta"]["tool_calls"][0] for choice in choices]
+
+    assert calls[0]["function"]["name"] == "get_weather"
+    assert all("name" not in call["function"] for call in calls[1:])
+    arguments = "".join(call["function"].get("arguments", "") for call in calls)
+    assert json.loads(arguments) == {
+        "nested": {"values": [1, 2]},
+        "city": "SF",
+    }
+    assert choices[-1]["finish_reason"] == "tool_calls"
+
+
+def test_required_standard_guided_json_nested_array_and_multiple_calls(tokenizer):
+    post = _guided_json_postprocessor(
+        tokenizer,
+        Hermes2ProToolParser,
+        stream_response=True,
+    )
+    first = '[{"name":"get_weather","parameters":{"xs":[1,2]'
+    second = '}},{"name":"get_weather","parameters":{"city":"SF"}}]'
+
+    first_choice = post.process_output(
+        SimpleNamespace(
+            text=first,
+            token_ids=tokenizer.encode(first, add_special_tokens=False),
+            index=0,
+            finish_reason=None,
+            logprobs=None,
+        )
+    )
+    tool_choice = post.process_output(
+        SimpleNamespace(
+            text=second,
+            token_ids=tokenizer.encode(second, add_special_tokens=False),
+            index=0,
+            finish_reason=None,
+            logprobs=None,
+        )
+    )
+    finish_choice = post.process_output(
+        SimpleNamespace(
+            text="",
+            token_ids=[],
+            index=0,
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    first_call = first_choice["delta"]["tool_calls"][0]
+    calls = tool_choice["delta"]["tool_calls"]
+    assert first_call["index"] == calls[0]["index"] == 0
+    assert json.loads(
+        first_call["function"]["arguments"] + calls[0]["function"]["arguments"]
+    ) == {"xs": [1, 2]}
+    assert calls[1]["index"] == 1
+    assert json.loads(calls[1]["function"]["arguments"]) == {"city": "SF"}
+    assert finish_choice["finish_reason"] == "tool_calls"
+    assert "tool_calls" not in finish_choice["delta"]
+
+
+def test_required_standard_guided_json_preserves_partial_call_on_length(tokenizer):
+    post = _guided_json_postprocessor(
+        tokenizer,
+        Hermes2ProToolParser,
+        stream_response=True,
+    )
+    first = '[{"name":"get_wea'
+    second = 'ther","parameters":{"city":"S'
+
+    first_choice = post.process_output(
+        SimpleNamespace(
+            text=first,
+            token_ids=tokenizer.encode(first, add_special_tokens=False),
+            index=0,
+            finish_reason=None,
+            logprobs=None,
+        )
+    )
+    length_choice = post.process_output(
+        SimpleNamespace(
+            text=second,
+            token_ids=tokenizer.encode(second, add_special_tokens=False),
+            index=0,
+            finish_reason="length",
+            logprobs=None,
+        )
+    )
+
+    calls = [
+        first_choice["delta"]["tool_calls"][0],
+        length_choice["delta"]["tool_calls"][0],
+    ]
+    assert "".join(call["function"].get("name", "") for call in calls) == (
+        "get_weather"
+    )
+    assert "".join(call["function"].get("arguments", "") for call in calls) == (
+        '{"city":"S'
+    )
+    assert length_choice["finish_reason"] == "length"
+
+
+def test_nemotron_v3_streams_reasoning_before_required_guided_json(tokenizer):
+    reasoning_parser_class = ReasoningParserManager.get_reasoning_parser("nemotron_v3")
+    post = _guided_json_postprocessor(
+        tokenizer,
+        Qwen3EngineToolParser,
+        reasoning_parser_class=reasoning_parser_class,
+        stream_response=True,
+    )
+    reasoning_text = "I should check the requested city.</think>"
+    reasoning_choice = post.process_output(
+        SimpleNamespace(
+            text=reasoning_text,
+            token_ids=tokenizer.encode(reasoning_text, add_special_tokens=False),
+            index=0,
+            finish_reason=None,
+            logprobs=None,
+        )
+    )
+    json_text = '[{"name":"get_weather","parameters":{"city":"SF"}}]'
+    tool_choice = post.process_output(
+        SimpleNamespace(
+            text=json_text,
+            token_ids=tokenizer.encode(json_text, add_special_tokens=False),
+            index=0,
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    assert reasoning_choice["delta"]["reasoning_content"] == (
+        "I should check the requested city."
+    )
+    assert "content" not in reasoning_choice["delta"]
+    assert tool_choice["delta"]["tool_calls"][0]["function"]["name"] == ("get_weather")
+    assert "content" not in tool_choice["delta"]
+    assert tool_choice["finish_reason"] == "tool_calls"
+
+
+def test_minimax_append_streams_reasoning_before_required_guided_json(tokenizer):
+    from dynamo.frontend.vllm_processor import _reasoning_parser_class
+
+    reasoning_parser_class = _reasoning_parser_class(
+        "minimax_append_think", "minimax_m2_append_think"
+    )
+    post = _guided_json_postprocessor(
+        tokenizer,
+        Qwen3EngineToolParser,
+        reasoning_parser_class=reasoning_parser_class,
+        stream_response=True,
+    )
+    reasoning_text = "I should inspect the request.</think>"
+    reasoning_choice = post.process_output(
+        SimpleNamespace(
+            text=reasoning_text,
+            token_ids=tokenizer.encode(reasoning_text, add_special_tokens=False),
+            index=0,
+            finish_reason=None,
+            logprobs=None,
+        )
+    )
+    json_text = '[{"name":"get_weather","parameters":{"city":"SF"}}]'
+    tool_choice = post.process_output(
+        SimpleNamespace(
+            text=json_text,
+            token_ids=tokenizer.encode(json_text, add_special_tokens=False),
+            index=0,
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    assert reasoning_choice["delta"] == {
+        "role": "assistant",
+        "reasoning_content": "I should inspect the request.",
+    }
+    assert tool_choice["delta"]["tool_calls"][0]["function"]["name"] == ("get_weather")
+    assert "content" not in tool_choice["delta"]
+    assert tool_choice["finish_reason"] == "tool_calls"
+
+
+def test_minimax_append_auto_direct_answer_splits_reasoning_and_content(tokenizer):
+    from dynamo.frontend.vllm_processor import _reasoning_parser_class
+
+    reasoning_parser_class = _reasoning_parser_class(
+        "minimax_append_think", "minimax_m2_append_think"
+    )
+    request_for_sampling, tool_parser, kwargs, _, _ = _prepare_request(
+        {**TOOL_REQUEST, "tool_choice": "auto"},
+        tokenizer=tokenizer,
+        tool_parser_class=Qwen3EngineToolParser,
+        reasoning_parser_class=reasoning_parser_class,
+    )
+    post = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=SimpleNamespace(),
+        prompt_token_ids=[],
+        tool_parser=tool_parser,
+        reasoning_parser_class=reasoning_parser_class,
+        chat_template_kwargs=kwargs,
+        stream_response=True,
+    )
+    choice = post.process_output(
+        SimpleNamespace(
+            text="Think first.</think>Visible answer",
+            token_ids=tokenizer.encode(
+                "Think first.</think>Visible answer", add_special_tokens=False
+            ),
+            index=0,
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    assert choice["delta"]["reasoning_content"] == "Think first."
+    assert choice["delta"]["content"] == "Visible answer"
+    assert "tool_calls" not in choice["delta"]
+
+
+def test_required_guided_json_honors_include_reasoning_false(tokenizer):
+    reasoning_parser_class = ReasoningParserManager.get_reasoning_parser("nemotron_v3")
+    post = _guided_json_postprocessor(
+        tokenizer,
+        Qwen3EngineToolParser,
+        reasoning_parser_class=reasoning_parser_class,
+        stream_response=True,
+    )
+    post.request_for_sampling.include_reasoning = False
+    reasoning_text = "Hidden reasoning.</think>"
+    assert (
+        post.process_output(
+            SimpleNamespace(
+                text=reasoning_text,
+                token_ids=tokenizer.encode(reasoning_text, add_special_tokens=False),
+                index=0,
+                finish_reason=None,
+                logprobs=None,
+            )
+        )
+        is None
+    )
+    json_text = '[{"name":"get_weather","parameters":{"city":"SF"}}]'
+    choice = post.process_output(
+        SimpleNamespace(
+            text=json_text,
+            token_ids=tokenizer.encode(json_text, add_special_tokens=False),
+            index=0,
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    assert "reasoning_content" not in choice["delta"]
+    assert choice["delta"]["tool_calls"]
+
+
+@pytest.mark.parametrize("stream_response", [False, True])
+def test_harmony_reasoning_then_required_guided_json(
+    gpt_oss_tokenizer, stream_response
+):
+    post = _guided_json_postprocessor(
+        gpt_oss_tokenizer,
+        GptOssToolParser,
+        reasoning_parser_class=GptOssReasoningParser,
+        stream_response=stream_response,
+    )
+    raw_text = (
+        "<|channel|>analysis<|message|>Need weather.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>"
+        '[{"name":"get_weather","parameters":{"city":"SF"}}]'
+    )
+    token_ids = gpt_oss_tokenizer.encode(raw_text, add_special_tokens=False) + [
+        gpt_oss_tokenizer.eos_token_id
+    ]
+    # vLLM retains a terminal stop ID while its output text has special
+    # Harmony markers and the stop token stripped.
+    text = gpt_oss_tokenizer.decode(token_ids, skip_special_tokens=True)
+    choice = post.process_output(
+        SimpleNamespace(
+            text=text,
+            token_ids=token_ids,
+            index=0,
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    assert choice["delta"]["reasoning_content"] == "Need weather."
+    assert "content" not in choice["delta"]
+    tool_call = choice["delta"]["tool_calls"][0]
+    assert tool_call["function"]["name"] == "get_weather"
+    assert json.loads(tool_call["function"]["arguments"]) == {"city": "SF"}
+    assert choice["finish_reason"] == "tool_calls"
+
+
+def test_harmony_rejects_reasoning_effort_none(gpt_oss_tokenizer):
+    with pytest.raises(ValueError, match="not supported for Harmony"):
+        _prepare_request(
+            {
+                **TOOL_REQUEST,
+                "reasoning_effort": "none",
+                "tool_choice": "required",
+            },
+            tokenizer=gpt_oss_tokenizer,
+            tool_parser_class=GptOssToolParser,
+            reasoning_parser_class=GptOssReasoningParser,
+            reasoning_policy_name="gpt_oss",
+        )
+
+
+def test_harmony_streams_reasoning_before_guided_json(gpt_oss_tokenizer):
+    post = _guided_json_postprocessor(
+        gpt_oss_tokenizer,
+        GptOssToolParser,
+        reasoning_parser_class=GptOssReasoningParser,
+        stream_response=True,
+    )
+    reasoning_raw = (
+        "<|channel|>analysis<|message|>Need weather.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>"
+    )
+    reasoning_ids = gpt_oss_tokenizer.encode(reasoning_raw, add_special_tokens=False)
+    reasoning_choice = post.process_output(
+        SimpleNamespace(
+            text=gpt_oss_tokenizer.decode(reasoning_ids, skip_special_tokens=True),
+            token_ids=reasoning_ids,
+            index=0,
+            finish_reason=None,
+            logprobs=None,
+        )
+    )
+    json_raw = '[{"name":"get_weather","parameters":{"city":"SF"}}]'
+    json_ids = gpt_oss_tokenizer.encode(json_raw, add_special_tokens=False) + [
+        gpt_oss_tokenizer.eos_token_id
+    ]
+    tool_choice = post.process_output(
+        SimpleNamespace(
+            text=gpt_oss_tokenizer.decode(json_ids, skip_special_tokens=True),
+            token_ids=json_ids,
+            index=0,
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    assert reasoning_choice["delta"]["reasoning_content"] == "Need weather."
+    assert "tool_calls" not in reasoning_choice["delta"]
+    assert tool_choice["delta"]["tool_calls"][0]["function"]["name"] == ("get_weather")
+    assert "reasoning_content" not in tool_choice["delta"]
+
+
+@pytest.mark.parametrize("stream_response", [False, True])
+def test_harmony_truncated_reasoning_is_not_dropped_or_leaked(
+    gpt_oss_tokenizer, stream_response
+):
+    post = _guided_json_postprocessor(
+        gpt_oss_tokenizer,
+        GptOssToolParser,
+        reasoning_parser_class=GptOssReasoningParser,
+        stream_response=stream_response,
+    )
+    raw = "<|channel|>analysis<|message|>Need more time"
+    token_ids = gpt_oss_tokenizer.encode(raw, add_special_tokens=False)
+    choice = post.process_output(
+        SimpleNamespace(
+            text=gpt_oss_tokenizer.decode(token_ids, skip_special_tokens=True),
+            token_ids=token_ids,
+            index=0,
+            finish_reason="length",
+            logprobs=None,
+        )
+    )
+
+    assert choice["delta"]["reasoning_content"] == "Need more time"
+    assert "content" not in choice["delta"]
+    assert "tool_calls" not in choice["delta"]
+    assert choice["finish_reason"] == "length"
+
+
+def test_harmony_truncated_guided_json_does_not_leak_content(gpt_oss_tokenizer):
+    post = _guided_json_postprocessor(
+        gpt_oss_tokenizer,
+        GptOssToolParser,
+        reasoning_parser_class=GptOssReasoningParser,
+        stream_response=True,
+    )
+    raw = (
+        "<|channel|>analysis<|message|>Need weather.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>"
+        '[{"name":"get_weather","parameters":{"city":"S'
+    )
+    token_ids = gpt_oss_tokenizer.encode(raw, add_special_tokens=False)
+    choice = post.process_output(
+        SimpleNamespace(
+            text=gpt_oss_tokenizer.decode(token_ids, skip_special_tokens=True),
+            token_ids=token_ids,
+            index=0,
+            finish_reason="length",
+            logprobs=None,
+        )
+    )
+
+    assert choice["delta"]["reasoning_content"] == "Need weather."
+    assert "content" not in choice["delta"]
+    tool_call = choice["delta"]["tool_calls"][0]
+    assert tool_call["function"]["name"] == "get_weather"
+    assert tool_call["function"]["arguments"] == '{"city":"S'
+    assert choice["finish_reason"] == "length"

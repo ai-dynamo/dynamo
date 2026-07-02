@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Asserts ``VllmLLMEngine.generate`` forwards ``trace_headers`` to
-``engine_client.generate``."""
+"""Unified vLLM request-metadata forwarding tests."""
 
 from __future__ import annotations
 
@@ -65,8 +64,12 @@ def _make_engine(engine_client) -> VllmLLMEngine:
     return engine
 
 
-async def _drain(engine: VllmLLMEngine, ctx: _FakeContext) -> None:
-    async for _ in engine.generate({"token_ids": [1, 2, 3]}, ctx):
+async def _drain(
+    engine: VllmLLMEngine,
+    ctx: _FakeContext,
+    request: dict | None = None,
+) -> None:
+    async for _ in engine.generate(request or {"token_ids": [1, 2, 3]}, ctx):
         pass
 
 
@@ -106,3 +109,77 @@ async def test_omits_trace_headers_when_no_trace_context(mock_build_sampling):
 
     # kwarg omitted (engine_trace_kwargs returns {}).
     assert "trace_headers" not in captured
+
+
+@pytest.mark.parametrize(
+    ("reasoning_ended", "chat_template_kwargs"),
+    [
+        (False, {"enable_thinking": True}),
+        (True, {"enable_thinking": False}),
+    ],
+)
+@patch("dynamo.vllm.llm_engine.build_sampling_params")
+async def test_forwards_request_reasoning_metadata(
+    mock_build_sampling,
+    reasoning_ended,
+    chat_template_kwargs,
+):
+    mock_build_sampling.return_value = SimpleNamespace()
+    captured: dict = {}
+
+    def fake_generate(prompt, sampling_params, request_id, **kwargs):
+        captured.update(kwargs)
+        return _empty_async_iter()
+
+    await _drain(
+        _make_engine(SimpleNamespace(generate=fake_generate)),
+        _FakeContext(),
+        {
+            "token_ids": [1, 2, 3],
+            "extra_args": {
+                "reasoning_ended": reasoning_ended,
+                "reasoning_parser_kwargs": {
+                    "chat_template_kwargs": chat_template_kwargs
+                },
+            },
+        },
+    )
+
+    assert captured["reasoning_ended"] is reasoning_ended
+    assert captured["reasoning_parser_kwargs"] == {
+        "chat_template_kwargs": chat_template_kwargs
+    }
+
+
+@patch("dynamo.vllm.llm_engine.build_sampling_params")
+async def test_drops_request_reasoning_metadata_for_old_vllm(mock_build_sampling):
+    mock_build_sampling.return_value = SimpleNamespace()
+    called = False
+
+    def fake_generate(
+        prompt,
+        sampling_params,
+        request_id,
+        *,
+        data_parallel_rank=None,
+        lora_request=None,
+    ):
+        nonlocal called
+        called = True
+        return _empty_async_iter()
+
+    await _drain(
+        _make_engine(SimpleNamespace(generate=fake_generate)),
+        _FakeContext(),
+        {
+            "token_ids": [1, 2, 3],
+            "extra_args": {
+                "reasoning_ended": False,
+                "reasoning_parser_kwargs": {
+                    "chat_template_kwargs": {"enable_thinking": True}
+                },
+            },
+        },
+    )
+
+    assert called
