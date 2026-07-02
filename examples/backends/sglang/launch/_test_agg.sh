@@ -8,7 +8,7 @@
 #
 # Same shape as agg_router.sh (2 workers, KV routing, KV events) but with:
 #   - --enable-hierarchical-cache              -> HiCache row populates
-#   - --enable-session-radix-cache             -> session-tagged radix KV
+#   - session-aware radix ownership             -> session-tagged radix KV
 #   - --enable-metrics-for-all-schedulers      -> per-scheduler metrics
 #   - --enable-mfu-metrics                     -> model FLOPs utilization
 #   - --mem-fraction-static 0.92               -> larger KV pool per worker
@@ -141,7 +141,6 @@ WORKER_COMMON_ARGS=(
   --enable-mfu-metrics
   --enable-hierarchical-cache
   --hicache-ratio "$HICACHE_RATIO"
-  --enable-session-radix-cache
   --radix-eviction-policy priority
   --mem-fraction-static "$MEM_FRACTION"
   --max-running-requests "$MAX_RUNNING"

@@ -15,14 +15,16 @@ use utils::{KubeDiscoveryMode, PodInfo};
 
 use crate::CancellationToken;
 use crate::discovery::{
-    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
-    DiscoveryQuery, DiscoverySpec, DiscoveryStream, MetadataSnapshot,
+    ClaimCloseOutcome, ClaimOutcome, ClaimPayloadFuture, Discovery, DiscoveryEvent,
+    DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata, DiscoveryQuery, DiscoverySpec,
+    DiscoveryStream, MetadataSnapshot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use kube::{Api, Client as KubeClient, api::DeleteParams};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 
 /// Kubernetes-based discovery client
@@ -33,6 +35,7 @@ pub struct KubeDiscoveryClient {
     metadata_watch: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
     kube_client: KubeClient,
     pod_info: PodInfo,
+    claim_warning_emitted: Arc<AtomicBool>,
 }
 
 impl KubeDiscoveryClient {
@@ -104,7 +107,18 @@ impl KubeDiscoveryClient {
             metadata_watch: watch_rx,
             kube_client,
             pod_info,
+            claim_warning_emitted: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    fn warn_claims_unsupported(&self) {
+        if self.claim_warning_emitted.swap(true, Ordering::Relaxed) {
+            return;
+        }
+
+        tracing::warn!(
+            "Kubernetes discovery does not coordinate session affinity across frontend processes; using process-local affinity"
+        );
     }
 }
 
@@ -495,5 +509,19 @@ impl Discovery for KubeDiscoveryClient {
         // Convert receiver to stream
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
         Ok(Box::pin(stream))
+    }
+
+    async fn create_or_get_claim(
+        &self,
+        _key: &str,
+        _proposed_payload: &mut ClaimPayloadFuture<'_>,
+    ) -> Result<ClaimOutcome> {
+        self.warn_claims_unsupported();
+        Ok(ClaimOutcome::Unsupported)
+    }
+
+    async fn close_claim(&self, _key: &str) -> Result<ClaimCloseOutcome> {
+        self.warn_claims_unsupported();
+        Ok(ClaimCloseOutcome::Unsupported)
     }
 }

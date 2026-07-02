@@ -147,7 +147,7 @@ Edit the `env` block on the Job:
 | `CONCURRENCY` | `18` | Single value; see [Running a Concurrency Sweep](#running-a-concurrency-sweep) |
 | `TARGET_MODEL` | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` | Must match the served model name on the DGD frontend |
 | `TOKENIZER_PATH` | `/opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` | Used by AIPerf tokenization |
-| `AIPERF_VERSION` | `0.8.0` | Matches the saved Ultra benchmark profile exports |
+| `AIPERF_VERSION` | `0.10.0` | aiperf version used for benchmarking |
 | `ROOT_ARTIFACT_DIR` | `/opt/models/perf` | Shared PVC artifact root |
 
 ## Artifacts
