@@ -481,7 +481,7 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
                             "prompt_tokens": 2,
                             "completion_tokens": 3,
                         },
-                    }
+                    },
                 ]
             ),
             _Context(),

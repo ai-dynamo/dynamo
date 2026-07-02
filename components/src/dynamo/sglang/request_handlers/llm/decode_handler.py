@@ -593,9 +593,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             "total_tokens": input_tokens + completion_tokens,
                         }
                         if prefill_prompt_tokens_details is not None:
-                            completion_usage["prompt_tokens_details"] = (
-                                prefill_prompt_tokens_details
-                            )
+                            completion_usage[
+                                "prompt_tokens_details"
+                            ] = prefill_prompt_tokens_details
                         out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:
