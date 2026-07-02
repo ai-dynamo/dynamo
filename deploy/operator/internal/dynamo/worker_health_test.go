@@ -115,7 +115,7 @@ func TestWorkerHealthCheckDefaultsByBackendMode(t *testing.T) {
 func TestSetWorkerHealthCheckDefaultSkipsNonWorkers(t *testing.T) {
 	container := workerHealthBaseContainer()
 
-	setWorkerHealthCheckDefault(&container, workerHealthComponent(v1beta1.ComponentTypeFrontend), true)
+	setWorkerHealthCheckDefault(&container, workerHealthComponent(v1beta1.ComponentTypeFrontend))
 
 	assert.Equal(t, envValueFalse, workerHealthEnvValue(container, dynHealthCheckEnabledEnv))
 }

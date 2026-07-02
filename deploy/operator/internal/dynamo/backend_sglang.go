@@ -27,7 +27,7 @@ func isPythonCommand(cmd string) bool {
 }
 
 func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	setWorkerHealthCheckDefault(container, component, true)
+	setWorkerHealthCheckDefault(container, component)
 
 	if component.CompilationCache != nil {
 		logger := log.Log.WithName("sglang-backend")

@@ -30,7 +30,7 @@ type VLLMBackend struct {
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	setWorkerHealthCheckDefault(container, component, true)
+	setWorkerHealthCheckDefault(container, component)
 
 	// The inter-pod GMS layout (with or without failover) requires the engine
 	// to load weights from the dedicated GMS weight-server pod rather than

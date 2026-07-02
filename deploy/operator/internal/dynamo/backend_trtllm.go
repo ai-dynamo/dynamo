@@ -21,7 +21,7 @@ type TRTLLMBackend struct {
 // keypair secret and injects the appropriate SSH setup and launch commands for
 // leader (mpirun) and worker (sshd) roles.
 func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	setWorkerHealthCheckDefault(container, component, true)
+	setWorkerHealthCheckDefault(container, component)
 
 	if component.CompilationCache != nil {
 		logger := log.Log.WithName("trtllm-backend")

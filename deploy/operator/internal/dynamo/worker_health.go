@@ -16,21 +16,14 @@ const (
 	envValueTrue             = "true"
 )
 
-func setWorkerHealthCheckDefault(container *corev1.Container, component *v1beta1.DynamoComponentDeploymentSharedSpec, enabled bool) {
+func setWorkerHealthCheckDefault(container *corev1.Container, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	if container == nil || component == nil || !IsWorkerComponent(string(component.ComponentType)) {
 		return
 	}
 	if main := GetMainContainer(component); main != nil && hasEnvVarNamed(main.Env, dynHealthCheckEnabledEnv) {
 		return
 	}
-	setEnvVar(container, dynHealthCheckEnabledEnv, boolString(enabled))
-}
-
-func boolString(value bool) string {
-	if value {
-		return envValueTrue
-	}
-	return envValueFalse
+	setEnvVar(container, dynHealthCheckEnabledEnv, envValueTrue)
 }
 
 func setEnvVar(container *corev1.Container, name, value string) {
