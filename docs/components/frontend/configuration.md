@@ -183,6 +183,10 @@ The admin API does not add an HTTP authentication layer. Expose these routes onl
 network or behind an external access-control boundary. Manual worker drain state is stored in the
 frontend process and is not persisted across frontend restarts.
 
+Worker drain/resume requests require a JSON body with `model`. When the same worker ID appears in
+multiple worker sets, include `namespace` and/or `worker_type` to select exactly one worker set;
+otherwise the request is rejected with `409 Conflict` and no drain state is changed.
+
 ### Endpoint Path Customization
 
 All endpoint paths can be overridden via environment variables:

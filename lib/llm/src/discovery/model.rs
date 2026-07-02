@@ -53,6 +53,34 @@ pub struct WorkerStatus {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct WorkerDrainSelector {
+    pub namespace: Option<String>,
+    pub worker_type: Option<String>,
+}
+
+impl WorkerDrainSelector {
+    fn matches(&self, worker_set: &WorkerSet) -> bool {
+        if let Some(namespace) = self.namespace.as_deref()
+            && worker_set.namespace() != namespace
+        {
+            return false;
+        }
+
+        if let Some(worker_type) = self.worker_type.as_deref() {
+            let Some(set_worker_type) = worker_set.card().worker_type.map(|ty| ty.to_string())
+            else {
+                return false;
+            };
+            if set_worker_type != worker_type {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
 /// worker with no declared `worker_type`). Logged once per process to avoid
@@ -706,11 +734,15 @@ impl Model {
     pub fn set_worker_drained(
         &self,
         worker_id: u64,
+        selector: &WorkerDrainSelector,
         drained: bool,
     ) -> Result<(), ModelManagerError> {
-        let mut matched = false;
+        let mut matches = Vec::new();
         for entry in self.worker_sets.iter() {
             let worker_set = entry.value();
+            if !selector.matches(worker_set) {
+                continue;
+            }
             let Some(client) = worker_set.routing_client() else {
                 continue;
             };
@@ -719,21 +751,44 @@ impl Model {
                 || snapshot.routable_ids.contains(&worker_id)
                 || snapshot.drained_ids.contains(&worker_id)
             {
+                let worker_type = worker_set
+                    .card()
+                    .worker_type
+                    .map(|ty| ty.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                matches.push((
+                    format!("{}/{}", worker_set.namespace(), worker_type),
+                    client.clone(),
+                ));
+            }
+        }
+
+        match matches.len() {
+            0 => Err(ModelManagerError::ModelUnavailable(format!(
+                "worker {worker_id} not found for model {}",
+                self.name
+            ))),
+            1 => {
+                let (_, client) = matches.remove(0);
                 if drained {
                     client.drain_instance(worker_id);
                 } else {
                     client.resume_instance(worker_id);
                 }
-                matched = true;
+                Ok(())
             }
-        }
-        if matched {
-            Ok(())
-        } else {
-            Err(ModelManagerError::ModelUnavailable(format!(
-                "worker {worker_id} not found for model {}",
-                self.name
-            )))
+            _ => {
+                let mut matched_sets = matches
+                    .into_iter()
+                    .map(|(worker_set, _)| worker_set)
+                    .collect::<Vec<_>>();
+                matched_sets.sort();
+                Err(ModelManagerError::WorkerSelectionConflict(format!(
+                    "worker {worker_id} for model {} matches multiple worker sets: {}; specify namespace or worker_type",
+                    self.name,
+                    matched_sets.join(", ")
+                )))
+            }
         }
     }
 
@@ -856,6 +911,8 @@ impl Model {
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
+    use crate::worker_type::WorkerType;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
@@ -880,6 +937,26 @@ mod tests {
         );
         ws.set_instance_watcher(rx);
         (Arc::new(ws), tx)
+    }
+
+    async fn make_worker_set_with_routing_client(
+        drt: &DistributedRuntime,
+        namespace: &str,
+        worker_type: WorkerType,
+        drained_worker_id: u64,
+    ) -> (Arc<WorkerSet>, dynamo_runtime::component::Client) {
+        let ns = drt.namespace(namespace.to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint(format!("test_endpoint_{worker_type}"));
+        let client = endpoint.client().await.unwrap();
+        client.drain_instance(drained_worker_id);
+
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(worker_type);
+        let mut ws = WorkerSet::new(namespace.to_string(), "mdcsum".to_string(), card);
+        ws.routing_client = Some(client);
+        let client = ws.routing_client.clone().unwrap();
+        (Arc::new(ws), client)
     }
 
     #[test]
@@ -920,6 +997,75 @@ mod tests {
         assert_eq!(retrieved.unwrap().namespace(), "ns1");
 
         assert!(model.get_worker_set("ns2").is_none());
+    }
+
+    #[tokio::test]
+    async fn set_worker_drained_rejects_ambiguous_worker_id_without_selector() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let worker_id = 7;
+        let model = Model::new("llama".to_string());
+        let (ws1, client1) =
+            make_worker_set_with_routing_client(&drt, "ns1", WorkerType::Decode, worker_id).await;
+        let (ws2, client2) =
+            make_worker_set_with_routing_client(&drt, "ns2", WorkerType::Decode, worker_id).await;
+        model.add_worker_set("ns1".to_string(), ws1);
+        model.add_worker_set("ns2".to_string(), ws2);
+
+        let error = model
+            .set_worker_drained(worker_id, &WorkerDrainSelector::default(), false)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ModelManagerError::WorkerSelectionConflict(_)
+        ));
+
+        assert_eq!(
+            client1.drained_instance_ids(),
+            HashSet::from([worker_id]),
+            "ambiguous resume must not modify the first worker set"
+        );
+        assert_eq!(
+            client2.drained_instance_ids(),
+            HashSet::from([worker_id]),
+            "ambiguous resume must not modify any worker set"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn set_worker_drained_selector_targets_one_worker_set() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let worker_id = 7;
+        let model = Model::new("llama".to_string());
+        let (ws1, client1) =
+            make_worker_set_with_routing_client(&drt, "ns1", WorkerType::Decode, worker_id).await;
+        let (ws2, client2) =
+            make_worker_set_with_routing_client(&drt, "ns2", WorkerType::Decode, worker_id).await;
+        model.add_worker_set("ns1".to_string(), ws1);
+        model.add_worker_set("ns2".to_string(), ws2);
+
+        model
+            .set_worker_drained(
+                worker_id,
+                &WorkerDrainSelector {
+                    namespace: Some("ns1".to_string()),
+                    worker_type: None,
+                },
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(client1.drained_instance_ids(), HashSet::new());
+        assert_eq!(client2.drained_instance_ids(), HashSet::from([worker_id]));
+
+        rt.shutdown();
     }
 
     #[test]
@@ -1321,8 +1467,6 @@ mod tests {
     // on their cards and verify DNF readiness math, including the encode
     // worker's two-alternative needs and the rejection of cards with no
     // declared `worker_type`.
-
-    use crate::worker_type::WorkerType;
 
     /// Build a WorkerSet with an explicit worker_type / needs and a live
     /// worker count (via a watch channel).

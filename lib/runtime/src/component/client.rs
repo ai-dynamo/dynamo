@@ -261,6 +261,10 @@ impl RoutingInstances {
         self.overloaded_ids.contains(&instance_id)
     }
 
+    pub(crate) fn is_drained(&self, instance_id: u64) -> bool {
+        self.drained_ids.contains(&instance_id)
+    }
+
     fn overloaded_ids(&self) -> Option<HashSet<u64>> {
         if self.overloaded_ids.is_empty() {
             return None;

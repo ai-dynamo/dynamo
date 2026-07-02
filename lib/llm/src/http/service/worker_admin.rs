@@ -13,7 +13,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::{RouteDoc, service_v2};
-use crate::discovery::{ModelManagerError, WorkerStatus};
+use crate::discovery::{ModelManagerError, WorkerDrainSelector, WorkerStatus};
 
 #[derive(Debug, Deserialize)]
 struct WorkerQuery {
@@ -23,6 +23,8 @@ struct WorkerQuery {
 #[derive(Debug, Deserialize)]
 struct WorkerActionRequest {
     model: String,
+    namespace: Option<String>,
+    worker_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,7 +72,7 @@ async fn drain_worker(
     Path(worker_id): Path<u64>,
     Json(request): Json<WorkerActionRequest>,
 ) -> Response {
-    set_worker_drained(state, worker_id, request.model, true).await
+    set_worker_drained(state, worker_id, request, true).await
 }
 
 async fn resume_worker(
@@ -78,23 +80,27 @@ async fn resume_worker(
     Path(worker_id): Path<u64>,
     Json(request): Json<WorkerActionRequest>,
 ) -> Response {
-    set_worker_drained(state, worker_id, request.model, false).await
+    set_worker_drained(state, worker_id, request, false).await
 }
 
 async fn set_worker_drained(
     state: Arc<service_v2::State>,
     worker_id: u64,
-    model: String,
+    request: WorkerActionRequest,
     drained: bool,
 ) -> Response {
-    let model = model.trim();
+    let model = request.model.trim();
     if model.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "model must not be empty");
     }
+    let selector = WorkerDrainSelector {
+        namespace: normalize_selector(request.namespace),
+        worker_type: normalize_selector(request.worker_type),
+    };
 
     if let Err(error) = state
         .manager()
-        .set_worker_drained(model, worker_id, drained)
+        .set_worker_drained(model, worker_id, &selector, drained)
     {
         return model_error_response(error);
     }
@@ -102,7 +108,7 @@ async fn set_worker_drained(
         .manager()
         .worker_statuses(Some(model))
         .into_iter()
-        .find(|worker| worker.worker_id == worker_id)
+        .find(|worker| worker_matches(worker, worker_id, &selector))
     else {
         return json_error(
             StatusCode::NOT_FOUND,
@@ -116,12 +122,37 @@ async fn set_worker_drained(
     .into_response()
 }
 
+fn normalize_selector(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn worker_matches(worker: &WorkerStatus, worker_id: u64, selector: &WorkerDrainSelector) -> bool {
+    if worker.worker_id != worker_id {
+        return false;
+    }
+    if let Some(namespace) = selector.namespace.as_deref()
+        && worker.namespace != namespace
+    {
+        return false;
+    }
+    if let Some(worker_type) = selector.worker_type.as_deref()
+        && worker.worker_type.as_deref() != Some(worker_type)
+    {
+        return false;
+    }
+    true
+}
+
 fn model_error_response(error: ModelManagerError) -> Response {
     match error {
         ModelManagerError::ModelNotFound(_) | ModelManagerError::ModelUnavailable(_) => {
             json_error(StatusCode::NOT_FOUND, error)
         }
-        ModelManagerError::ModelAlreadyExists(_) => json_error(StatusCode::CONFLICT, error),
+        ModelManagerError::WorkerSelectionConflict(_)
+        | ModelManagerError::ModelAlreadyExists(_) => json_error(StatusCode::CONFLICT, error),
     }
 }
 
