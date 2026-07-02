@@ -16,7 +16,7 @@ The corresponding native `vllm serve` deployment, in the same vLLM environment a
 
 The long-term fix makes grammar/reasoning coordination an explicit backend capability instead of inferring it from a frontend parser name. Compatible vLLM and SGLang workers publish `reasoning_aware_guided_decoding`; the frontend sends request-local reasoning state and parser kwargs; the backend delays tool grammar until reasoning ends; and the response path independently parses reasoning, content, and tools. Unsupported, incompatible, or unverifiable combinations fail closed.
 
-The work also closes adjacent correctness gaps found during strict review: `tool_choice=auto` separator leakage, optional-reasoner state, MiniMax append-think classification, Nemotron `force_nonempty_content`, special-token preservation, parser alias compatibility, finish reasons, malformed/truncated tool JSON, and structural-tag ownership.
+The work also closes adjacent correctness gaps found during strict review: `tool_choice=auto` separator leakage, optional-reasoner state, MiniMax append-think classification, Nemotron `force_nonempty_content`, special-token preservation, parser alias compatibility, malformed/truncated tool JSON, and structural-tag ownership. Finish-reason behavior was covered explicitly and its pre-existing stream/unary distinction is recorded below.
 
 ## Reproduction and native references
 
@@ -133,7 +133,7 @@ Required/named structural tags own reasoning only when their grammar actually co
 - SGLang uses native reasoner/tool detectors where their structural contract is sufficient and a generic JSON-array parser for required/named fallback.
 - Required/named bare JSON is incrementally decoded without leaking partial or malformed JSON into `content`; nested arguments and multiple calls are supported.
 - Separator-only text is deferred until the next semantic event: discarded for tool-only output, retained for direct answers and narration.
-- Finish reasons become `tool_calls` only after a tool is emitted; backend errors and truncation remain distinguishable.
+- Streaming rewrites `stop` to `tool_calls` only after a tool is emitted and preserves non-stop backend terminal reasons. The pre-existing unary aggregator normalizes any completed tool call, including one ending at `length`, to `tool_calls`; malformed/incomplete calls retain their backend terminal reason.
 - Parser-dependent special tokens remain visible to parsers but are removed from OpenAI response fields.
 
 ## Parser/backend coverage
@@ -206,9 +206,9 @@ Dynamo was validated against this commit through a temporary local `[patch.crate
 | SGLang frontend/backend changed suites | **367 passed** |
 | vLLM frontend/backend changed suites | **340 passed, 9 pre-existing skips** |
 | Rust postprocessor stream suite | **51 passed** |
-| Rust full test compile plus latest reasoning-effort units | **`cargo check --tests` passed; 2 passed** |
+| Rust full test compile plus focused request-control units | **`cargo check --tests` passed; 7 passed** |
 | frontend-crates parser suite for commit `1da1b02` | **633 passed, 4 ignored; doctest ignored** |
-| Static validation | **Ruff lint/format, Python compileall, Cargo fmt, and `git diff --check` passed** |
+| Static validation | **isort, Black, flake8, Ruff lint, Python compileall, Cargo fmt, and `git diff --check` passed** |
 
 Focused regressions cover required, named, auto-tool, auto-direct, stream/non-stream, prompt-injected and generated-start reasoning, disabled reasoning, post-tool continuation, special-token decoding, nested/multiple JSON calls, malformed/truncated output, terminal flushing, multi-choice state, finish reasons, and no-tag-leak assertions.
 
@@ -246,6 +246,19 @@ export TMPDIR=/dev/shm/dynamo-tmp
 export CARGO_TARGET_DIR=/dev/shm/dynamo-reasoning-target
 export CARGO_INCREMENTAL=0
 export CARGO_BUILD_JOBS=2
+mkdir -p "$TMPDIR"
+```
+
+The two backend environments were created separately so vLLM and SGLang could not
+replace each other's dependencies:
+
+```bash
+cd /home/rmccormick/dynamo/codex/dynamo
+uv venv --python 3.12 --seed .venv-vllm-reasoning
+uv venv --python 3.12 --seed .venv-sglang-reasoning
+uv pip install --python .venv-vllm-reasoning/bin/python -e '.[vllm]'
+uv pip install --prerelease=allow \
+  --python .venv-sglang-reasoning/bin/python -e '.[sglang]'
 ```
 
 The Dynamo extension and editable package were installed independently into both backend venvs:
@@ -272,6 +285,63 @@ During parser integration validation, this temporary root `Cargo.toml` override 
 [patch.crates-io]
 dynamo-parsers = { path = "../frontend-crates-reasoning/parsers" }
 ```
+
+### Pinned clean-main reproduction
+
+The original failure was recorded at
+`3ee35fc8c3260208ee6afb8c5e14279a51174740`. A detached worktree makes that
+historical comparison reproducible without treating today's `origin/main` as the
+same baseline:
+
+```bash
+export DYNAMO_SOURCE=/home/rmccormick/dynamo/codex/dynamo
+export CLEAN_MAIN_ROOT=/home/rmccormick/dynamo/codex/dynamo-reasoning-clean-main
+git -C "$DYNAMO_SOURCE" fetch origin main
+git -C "$DYNAMO_SOURCE" worktree add --detach \
+  "$CLEAN_MAIN_ROOT" \
+  3ee35fc8c3260208ee6afb8c5e14279a51174740
+```
+
+Build and launch clean main inside a subshell so the fixed-root variable cannot leak
+into the second phase:
+
+```bash
+(
+  export DYNAMO_ROOT="$CLEAN_MAIN_ROOT"
+  source "$VLLM_VENV/bin/activate"
+  cd "$DYNAMO_ROOT/lib/bindings/python"
+  maturin develop --uv
+  cd "$DYNAMO_ROOT"
+  uv pip install --no-deps -e .
+
+  export DYN_HTTP_PORT=28000
+  export DYN_SYSTEM_PORT=28001
+  export ETCD_UNSAFE_NO_FSYNC=true
+  export MAX_MODEL_LEN=4096
+  export MAX_CONCURRENT_SEQS=2
+  export _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES=920126000
+  bash examples/backends/vllm/launch/agg.sh \
+    --model "$MODEL" \
+    --dyn-tool-call-parser nemotron_nano \
+    --dyn-reasoning-parser nemotron_v3 \
+    --reasoning-parser nemotron_v3
+)
+```
+
+After recording the clean-main response and stopping that server, the parent shell
+still has the fixed `DYNAMO_ROOT`. Reinstall it before running the fixed launch below:
+
+```bash
+source "$VLLM_VENV/bin/activate"
+cd "$DYNAMO_ROOT/lib/bindings/python"
+maturin develop --uv
+cd "$DYNAMO_ROOT"
+uv pip install --no-deps -e .
+deactivate
+```
+
+The clean-main required-tool response has a valid call but empty
+`reasoning_content`; the fixed launch below is the controlled after case.
 
 ### Native vLLM 0.24.0
 
@@ -354,19 +424,65 @@ bash examples/backends/sglang/launch/agg.sh \
 
 As with vLLM, the native SGLang reasoner controls grammar activation while Dynamo owns response tool parsing. Passing both native and Dynamo tool parsers is rejected because it would create two response-parser owners.
 
+### Earlier clean-main Qwen3.5 parser-argument A/B
+
+Before the exact-model Nemotron run, clean main was tested twice with
+`Qwen/Qwen3.5-0.8B` to isolate the effect of configuring vLLM's native reasoner.
+The servers were started separately in the same vLLM environment and exercised with
+the same required/auto, streaming/non-streaming request matrix:
+
+```bash
+source "$VLLM_VENV/bin/activate"
+cd "$CLEAN_MAIN_ROOT/lib/bindings/python"
+maturin develop --uv
+cd "$CLEAN_MAIN_ROOT"
+uv pip install --no-deps -e .
+
+# Dynamo response parsers only: reasoning_content remained empty.
+bash examples/backends/vllm/launch/agg.sh \
+  --model Qwen/Qwen3.5-0.8B \
+  --dyn-tool-call-parser qwen3_coder \
+  --dyn-reasoning-parser qwen3
+
+# Stop the first server with Ctrl-C before starting this second clean-main run.
+
+# Same clean main plus vLLM's native reasoner: guided decoding waited for
+# reasoning, so reasoning_content was populated. Auto-tool separator content
+# still required the Dynamo fix.
+bash examples/backends/vllm/launch/agg.sh \
+  --model Qwen/Qwen3.5-0.8B \
+  --dyn-tool-call-parser qwen3_coder \
+  --dyn-reasoning-parser qwen3 \
+  --reasoning-parser qwen3
+
+# Stop the second server, then restore the fixed editable package and extension.
+cd "$DYNAMO_ROOT/lib/bindings/python"
+maturin develop --uv
+cd "$DYNAMO_ROOT"
+uv pip install --no-deps -e .
+deactivate
+```
+
+The Dynamo vLLM worker does not expose vLLM's OpenAI-server
+`--tool-call-parser`; `--dyn-tool-call-parser` remains the single response tool
+parser in these two launches. The native `--tool-call-parser` applies to the
+standalone `vllm serve` command above.
+
 ### Health and six-case request matrix
 
 The endpoint ports were `28010` (native vLLM), `28000` (Dynamo+vLLM), `28020` (native SGLang), and `28030` (Dynamo+SGLang):
 
 ```bash
-curl -sS "http://127.0.0.1:${PORT}/health"
+PORT=28000  # choose 28010, 28000, 28020, or 28030 from the map above
+curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health"
 ```
 
 This request function reproduces every matrix cell. It emits ordinary JSON when `STREAM=false` and SSE when `STREAM=true`:
 
 ```bash
 run_case() {
-  curl -sS -N "http://127.0.0.1:${PORT}/v1/chat/completions" \
+  curl -sS -N --fail-with-body --max-time 240 \
+    "http://127.0.0.1:${PORT}/v1/chat/completions" \
     -H 'Content-Type: application/json' \
     -d @- <<JSON
 {
@@ -395,6 +511,7 @@ run_case() {
 JSON
 }
 
+PORT=28000
 TOOL_CHOICE=required STREAM=false \
   PROMPT='What is the weather in San Francisco? You must use get_weather.' run_case
 TOOL_CHOICE=required STREAM=true \
@@ -409,21 +526,99 @@ TOOL_CHOICE=auto STREAM=true \
   PROMPT='What is 37 multiplied by 19? Answer directly and do not use a tool.' run_case
 ```
 
-The final assertion harness aggregated streaming deltas, parsed tool arguments, checked finish reasons and field ownership, and rejected reasoning/tool tag leakage. These were the exact invocations:
+Change `PORT` to `28010`, `28020`, or `28030` for the other three deployments.
+
+The standalone required-tool request used for the live handoff was:
 
 ```bash
-python /dev/shm/nemotron_matrix.py \
+curl -fsS --max-time 240 \
+  http://127.0.0.1:28000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+    "messages":[{"role":"user","content":"What is the weather in San Francisco? You must use get_weather."}],
+    "tools":[{
+      "type":"function",
+      "function":{
+        "name":"get_weather",
+        "description":"Get the current weather for a location.",
+        "parameters":{
+          "type":"object",
+          "properties":{"location":{"type":"string"}},
+          "required":["location"],
+          "additionalProperties":false
+        }
+      }
+    }],
+    "tool_choice":"required",
+    "parallel_tool_calls":false,
+    "temperature":0,
+    "max_tokens":1024,
+    "stream":false,
+    "chat_template_kwargs":{"enable_thinking":true}
+  }' | jq '{
+    reasoning_content:.choices[0].message.reasoning_content,
+    content:.choices[0].message.content,
+    tool_calls:.choices[0].message.tool_calls,
+    finish_reason:.choices[0].finish_reason,
+    usage
+  }'
+```
+
+The checked-in assertion harness aggregates streaming deltas, validates that reasoning
+precedes tool deltas, parses the complete tool envelope, checks finish reasons and field
+ownership, requires a terminal SSE event plus `[DONE]`, and rejects reasoning/tool tag
+leakage. The native SGLang reference was originally run with the same logic in an
+inline Python heredoc; the reusable harness was then used for the other three artifacts.
+
+Each launch command above is foreground and each server was run alone on the GPU. For
+each phase: start only the named server in one terminal, wait for its health check, run
+the matching block below from a second terminal, then stop the server with `Ctrl-C` and
+verify GPU release before starting the next phase. `set -euo pipefail` makes an assertion
+failure propagate through `tee`.
+
+#### Native SGLang replay
+
+```bash
+set -euo pipefail
+"$SGLANG_VENV/bin/python" \
+  "$DYNAMO_ROOT/debug-nemotron-guided-reasoning-matrix.py" \
   --url http://127.0.0.1:28020/v1/chat/completions \
-  --label native-sglang-0.5.14
-python /dev/shm/nemotron_matrix.py \
+  --label native-sglang-0.5.14 \
+  | tee /dev/shm/native-sglang-nemotron-final.json
+```
+
+#### Dynamo+SGLang replay
+
+```bash
+set -euo pipefail
+"$SGLANG_VENV/bin/python" \
+  "$DYNAMO_ROOT/debug-nemotron-guided-reasoning-matrix.py" \
   --url http://127.0.0.1:28030/v1/chat/completions \
-  --label dynamo-sglang-0.5.14
-python /dev/shm/nemotron_matrix.py \
+  --label dynamo-sglang-0.5.14 \
+  | tee /dev/shm/dynamo-sglang-nemotron-final.json
+```
+
+#### Native vLLM replay
+
+```bash
+set -euo pipefail
+"$VLLM_VENV/bin/python" \
+  "$DYNAMO_ROOT/debug-nemotron-guided-reasoning-matrix.py" \
   --url http://127.0.0.1:28010/v1/chat/completions \
-  --label native-vllm-0.24.0
-python /dev/shm/nemotron_matrix.py \
+  --label native-vllm-0.24.0 \
+  | tee /dev/shm/native-vllm-nemotron-final.json
+```
+
+#### Dynamo+vLLM replay
+
+```bash
+set -euo pipefail
+"$VLLM_VENV/bin/python" \
+  "$DYNAMO_ROOT/debug-nemotron-guided-reasoning-matrix.py" \
   --url http://127.0.0.1:28000/v1/chat/completions \
-  --label dynamo-vllm-0.24.0
+  --label dynamo-vllm-0.24.0 \
+  | tee /dev/shm/dynamo-vllm-nemotron-final.json
 ```
 
 ### Automated tests and static checks
@@ -453,10 +648,32 @@ deactivate
 cd "$DYNAMO_ROOT"
 cargo test -p dynamo-llm --test postprocessor_parsing_stream
 cargo check -p dynamo-llm --tests
+cargo test -p dynamo-llm --lib test_reasoning_effort --no-fail-fast
+cargo test -p dynamo-llm --lib test_openai_thinking --no-fail-fast
 cargo fmt --package dynamo-llm -- --check
-git diff --check
+
+BASE=$(git merge-base origin/main HEAD)
+mapfile -t PY_FILES < <(git diff --name-only "$BASE"...HEAD -- '*.py')
+pre-commit run isort --files "${PY_FILES[@]}"
+pre-commit run black --files "${PY_FILES[@]}"
+pre-commit run flake8 --files "${PY_FILES[@]}"
+pre-commit run ruff --files "${PY_FILES[@]}"
+
+source "$VLLM_VENV/bin/activate"
+python -m compileall -q \
+  components/src/dynamo/frontend components/src/dynamo/vllm
+deactivate
+
+source "$SGLANG_VENV/bin/activate"
+python -m compileall -q \
+  components/src/dynamo/frontend components/src/dynamo/sglang
+deactivate
+
+git diff --check "$BASE"...HEAD
 
 cd "$FRONTEND_CRATES_ROOT"
+CARGO_TARGET_DIR=/dev/shm/frontend-crates-reasoning-target \
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 \
 cargo test -p dynamo-parsers
 ```
 
@@ -472,7 +689,12 @@ nvidia-smi \
 
 All four final deployments must use isolated backend environments. Dynamo+vLLM and native vLLM must share the vLLM venv; Dynamo+SGLang and native SGLang must share the separate SGLang venv. Use the exact Nemotron model and `parallel_tool_calls=false` for deterministic required-tool comparison.
 
-For every tool case verify non-empty reasoning, exactly one `get_weather` call, null/empty content unless there is real narration, `finish_reason=tool_calls`, and no tags. For direct cases verify non-empty reasoning, visible answer content, no tool calls, `finish_reason=stop`, and no tags.
+For every Dynamo tool case verify non-empty reasoning, exactly one `get_weather`
+call, empty content, `finish_reason=tool_calls`, and no tags. Native references
+must satisfy the same field ownership except for the explicitly recorded SGLang
+separator-only auto-tool content and vLLM required-stream delimiter/finish quirks
+below. For direct cases verify non-empty reasoning, visible answer content, no tool
+calls, `finish_reason=stop`, and no tags.
 
 Final deployments used GPU 1 (`NVIDIA RTX 5880 Ada Generation`). Native and Dynamo vLLM shared the isolated vLLM 0.24.0 venv; native and Dynamo SGLang shared the separate SGLang 0.5.14 venv. The Dynamo+vLLM deployment remains live at `127.0.0.1:28000`.
 
