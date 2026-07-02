@@ -75,12 +75,20 @@ class DynamoSnapshotBackend(SleepModeBackend):
         self._state = "RUNNING"
 
     @classmethod
+    def preserves_nccl(cls) -> bool:
+        return True
+
+    @classmethod
     def preserves_communicators(cls) -> bool:
+        return cls.preserves_nccl()
+
+    @classmethod
+    def preserves_graphs_with_nccl(cls) -> bool:
         return True
 
     @classmethod
     def preserves_graphs_with_communicators(cls) -> bool:
-        return True
+        return cls.preserves_graphs_with_nccl()
 
 
 def register_dynamo_snapshot_backend() -> None:
