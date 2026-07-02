@@ -4,6 +4,7 @@
 """Unit tests for resolve_model_path() and the rapid.py / thorough.py call
 sites that feed its result into aiconfigurator."""
 
+import copy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -23,10 +24,12 @@ try:
         _run_default_sim,
     )
     from dynamo.profiler.thorough import run_thorough
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
         ModelCacheSpec,
+        OverridesSpec,
         SLASpec,
         WorkloadSpec,
     )
@@ -400,6 +403,117 @@ class TestThoroughResolvesModelPath:
         mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
 
         assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+
+    async def test_candidates_keep_hf_name_and_pvc_runtime_path(self, tmp_path):
+        """Every sweep candidate separates API identity from PVC load path."""
+        pvc_root = tmp_path / "pvc"
+        local_dir = pvc_root / "model"
+        _make_model_dir(local_dir)
+        modifier = CONFIG_MODIFIERS["vllm"]
+        candidate_config = modifier.build_dgd_config(
+            mode="agg",
+            model_name=str(local_dir),
+            image="example/vllm:base",
+            agg_cli_args=[],
+            agg_replicas=1,
+            agg_gpus=1,
+            pvc_name="model-cache",
+            pvc_mount_path=str(pvc_root),
+            model_path=str(local_dir),
+        )
+        worker_name = next(
+            name
+            for name in candidate_config["spec"]["services"]
+            if name not in {"Frontend", "Planner"}
+        )
+        dgdr = _make_dgdr(
+            backend="vllm",
+            modelCache=_pvc_model_cache(str(pvc_root), "model"),
+            overrides=OverridesSpec(
+                dgd={
+                    "spec": {
+                        "services": {
+                            worker_name: {
+                                "extraPodSpec": {
+                                    "mainContainer": {
+                                        "image": "example/vllm:override",
+                                        "args": [
+                                            "--model=/stale/path",
+                                            "--served-model-name=stale/model",
+                                        ],
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        prefill = MagicMock(dgd_config=copy.deepcopy(candidate_config))
+        decode = MagicMock(dgd_config=copy.deepcopy(candidate_config))
+        ops = ProfilerOperationalConfig(output_dir=str(tmp_path))
+
+        with (
+            patch(
+                "dynamo.profiler.thorough.enumerate_profiling_configs",
+                return_value=([prefill], [decode], True, 1),
+            ),
+            patch(
+                "dynamo.profiler.thorough._benchmark_prefill_candidates",
+                new=AsyncMock(return_value=pd.DataFrame()),
+            ),
+            patch(
+                "dynamo.profiler.thorough._benchmark_decode_candidates",
+                new=AsyncMock(return_value=pd.DataFrame()),
+            ),
+        ):
+            await run_thorough(
+                dgdr,
+                ops,
+                "default",
+                _HF_ID,
+                "h200_sxm",
+                "vllm",
+                8,
+                4000,
+                1000,
+                2000.0,
+                50.0,
+                None,
+                [],
+            )
+
+        for candidate in (prefill, decode):
+            assert modifier.get_model_name(candidate.dgd_config) == (
+                _HF_ID,
+                str(local_dir),
+            )
+            services = candidate.dgd_config["spec"]["services"]
+            worker = services[worker_name]
+            args = worker["extraPodSpec"]["mainContainer"]["args"]
+            assert worker["extraPodSpec"]["mainContainer"]["image"] == (
+                "example/vllm:override"
+            )
+            assert [
+                arg for arg in args if arg == "--model" or arg.startswith("--model=")
+            ] == ["--model"]
+            assert [
+                arg
+                for arg in args
+                if arg == "--served-model-name"
+                or arg.startswith("--served-model-name=")
+            ] == ["--served-model-name"]
+            frontend_args = services["Frontend"]["extraPodSpec"]["mainContainer"][
+                "args"
+            ]
+            assert frontend_args[frontend_args.index("--model-name") + 1] == _HF_ID
+            assert frontend_args[frontend_args.index("--model-path") + 1] == str(
+                local_dir
+            )
+            assert all(
+                any(vm.get("name") == "model-cache" for vm in service["volumeMounts"])
+                for service in services.values()
+            )
 
     async def _capture_task_config(self, dgdr, output_dir) -> MagicMock:
         """The benchmark stages return non-empty DataFrames so run_thorough gets

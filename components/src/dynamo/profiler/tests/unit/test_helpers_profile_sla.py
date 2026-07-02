@@ -29,6 +29,7 @@ try:
         PlannerPreDeploymentSweepMode,
     )
     from dynamo.profiler.profile_sla import (
+        _check_dgdr_aic_support,
         _extract_profiler_params,
         _write_final_output,
     )
@@ -45,6 +46,7 @@ try:
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
         HardwareSpec,
+        ModelCacheSpec,
         MockerSpec,
         SLASpec,
         WorkloadSpec,
@@ -101,6 +103,29 @@ def _make_ops(tmp_path, **kwargs) -> ProfilerOperationalConfig:
         output_dir=str(tmp_path / "out"),
         **kwargs,
     )
+
+
+def test_aic_support_check_uses_local_pvc_config(tmp_path) -> None:
+    """Preflight support checks avoid Hugging Face when PVC config is present."""
+    local_dir = tmp_path / "model"
+    local_dir.mkdir()
+    (local_dir / "config.json").write_text("{}")
+    dgdr = _make_dgdr(
+        backend="vllm",
+        modelCache=ModelCacheSpec(
+            pvcName="model-cache",
+            pvcMountPath=str(tmp_path),
+            pvcModelPath="model",
+        ),
+    )
+
+    with patch(
+        "dynamo.profiler.profile_sla.check_model_hardware_support",
+        return_value=True,
+    ) as mock_check:
+        assert _check_dgdr_aic_support(dgdr, "vllm", "h200_sxm")
+
+    mock_check.assert_called_once_with(str(local_dir), "h200_sxm", "vllm")
 
 
 # ---------------------------------------------------------------------------

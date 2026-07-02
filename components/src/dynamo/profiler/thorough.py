@@ -57,6 +57,26 @@ from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler
 logger = logging.getLogger(__name__)
 
 
+def _normalize_candidate_model_identity(
+    candidates,
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    model_cache: ModelCacheSpec,
+    config_modifier,
+) -> None:
+    """Keep the DGDR model name separate from its PVC runtime path."""
+    if not model_cache.pvcName:
+        return
+
+    for candidate in candidates:
+        candidate.dgd_config = config_modifier.update_model_from_pvc(
+            candidate.dgd_config,
+            model_name=dgdr.model,
+            pvc_name=model_cache.pvcName,
+            pvc_mount_path=model_cache.pvcMountPath,
+            pvc_path=model_cache.pvcModelPath or "",
+        )
+
+
 async def _benchmark_prefill_candidates(
     prefill_candidates,
     ops: ProfilerOperationalConfig,
@@ -410,6 +430,12 @@ async def run_thorough(
         )
 
     config_modifier = CONFIG_MODIFIERS[backend]
+    _normalize_candidate_model_identity(
+        prefill_candidates, dgdr, model_cache, config_modifier
+    )
+    _normalize_candidate_model_identity(
+        decode_candidates, dgdr, model_cache, config_modifier
+    )
     if backend == "vllm" and hasattr(
         config_modifier, "apply_model_runtime_constraints"
     ):
