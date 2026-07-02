@@ -11,7 +11,6 @@ import json
 import os
 import subprocess
 import sys
-from importlib.machinery import PathFinder
 from pathlib import Path
 from typing import Any
 
@@ -74,15 +73,28 @@ def native_vllm_state(package_dir: Path) -> dict[str, str]:
     }
 
 
+def vllm_extension(package_dir: Path) -> Path:
+    candidates = sorted(
+        path.resolve()
+        for path in package_dir.glob("_C*.so")
+        if path.name.startswith("_C.")
+    )
+    if len(candidates) != 1:
+        native_files = sorted(path.name for path in package_dir.glob("*.so"))
+        raise RuntimeError(
+            "Expected one nightly vllm._C extension, found "
+            f"{[str(path) for path in candidates]}; "
+            f"top-level native files are {native_files}"
+        )
+    return candidates[0]
+
+
 def capture_state() -> dict[str, Any]:
     import torch
 
     vllm_dist = distribution("vllm")
     vllm_package = Path(vllm_dist.locate_file("vllm")).resolve()
-    extension_spec = PathFinder.find_spec("vllm._C", [str(vllm_package)])
-    if extension_spec is None or extension_spec.origin is None:
-        raise RuntimeError("The nightly vllm._C extension is missing")
-    vllm_c = Path(extension_spec.origin).resolve()
+    vllm_c = vllm_extension(vllm_package)
 
     torch_dist = distribution("torch")
     torch_spec = importlib.util.find_spec("torch._C")
