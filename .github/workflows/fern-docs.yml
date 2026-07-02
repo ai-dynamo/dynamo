@@ -528,14 +528,21 @@ jobs:
             <(cd source-checkout/docs && find . -type f ! -path './digest/*' ! -name 'index.yml' -print | sort) \
             <(cd "docs-checkout/fern/pages-$TAG" && find . -type f -print | sort)
 
-          # Verify every local path in the generated nav resolves in the
-          # docs-website checkout before committing it.
+          # Versioned pages are part of this release and must resolve. Digest
+          # is shared with dev and synced independently from main, so a tag's
+          # frozen Digest navigation can drift; report it without blocking the
+          # otherwise-valid tagged snapshot.
           while IFS= read -r path; do
             case "$path" in
-              ../pages-$TAG/*|../digest/*)
+              ../pages-$TAG/*)
                 if [ ! -e "docs-checkout/fern/versions/$path" ]; then
                   echo "::error::Version navigation target does not exist: $path"
                   exit 1
+                fi
+                ;;
+              ../digest/*)
+                if [ ! -e "docs-checkout/fern/versions/$path" ]; then
+                  echo "::warning::Shared Digest navigation target does not exist in docs-website: $path"
                 fi
                 ;;
             esac

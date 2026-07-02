@@ -171,10 +171,15 @@ diff -u \
 echo "Verifying version navigation targets ..."
 while IFS= read -r path; do
   case "$path" in
-    ../pages-$TAG/*|../digest/*)
+    ../pages-$TAG/*)
       if [ ! -e "$DOCS_CHECKOUT/fern/versions/$path" ]; then
         echo "error: version navigation target does not exist: $path" >&2
         exit 1
+      fi
+      ;;
+    ../digest/*)
+      if [ ! -e "$DOCS_CHECKOUT/fern/versions/$path" ]; then
+        echo "warning: shared Digest navigation target does not exist in docs-website: $path" >&2
       fi
       ;;
   esac

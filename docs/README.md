@@ -255,8 +255,8 @@ manual `workflow_dispatch` with a tag specified.
    - Inserts new version right after the "dev" entry
    - Sets the product's default `path` to the new version
    - Updates the "Latest" display-name to `"Latest (vX.Y.Z)"`
-9. Verifies the tagged file inventory, generated navigation targets, and Fern
-   configuration
+9. Verifies the tagged file inventory, versioned navigation targets, and Fern
+   configuration; missing shared Digest targets produce warnings
 10. Commits and pushes to `docs-website`
 11. Publishes to Fern via `fern generate --docs`
 
