@@ -25,7 +25,7 @@ If you would like to use a different region, modify the `AWS_REGION` variable
 export AWS_REGION="us-east-1"
 export CLUSTER_NAME="ai-dynamo"
 export DYNAMO_NAMESPACE="dynamo-system"
-export DYNAMO_RELEASE_VERSION="1.2.1"
+export DYNAMO_RELEASE_VERSION="1.2.1" # match a version from https://github.com/ai-dynamo/dynamo/releases
 ```
 
 

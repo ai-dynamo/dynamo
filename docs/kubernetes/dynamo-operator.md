@@ -189,7 +189,7 @@ For complete setup instructions and metrics reference, see:
 ```bash
 # Set environment
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
+export RELEASE_VERSION=1.2.1 # match a version from https://github.com/ai-dynamo/dynamo/releases
 
 # Install Platform (includes operator)
 helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
