@@ -5,7 +5,7 @@ title: ThunderAgent Program Scheduler
 subtitle: Program-level scheduling with tool-boundary pause/resume on top of KV-aware routing
 ---
 
-> **Experimental — not a released component.** Run it from a source checkout, not from a `pip install ai-dynamo`. The CLI flags, session headers, and lifecycle hooks are all unstable and will change. Build and launch specifics live next to the code in [`components/src/dynamo/thunderagent_router/README.md`](../../components/src/dynamo/thunderagent_router/README.md).
+> **Experimental — not a released component.** Run it from a source checkout, not from a `pip install ai-dynamo`. The CLI flags, session headers, and lifecycle hooks are all unstable and will change.
 
 `dynamo.thunderagent_router` is a standalone Dynamo router that schedules at the granularity of an agent run — the whole `LLM turn → tool call → next turn` loop — instead of individual requests. It wraps Dynamo's native KV router and adds a program-level scheduler with tool-boundary pause/resume on top of KV-aware routing, porting the scheduler from the [ThunderAgent](https://arxiv.org/abs/2602.13692) paper (Kang et al., 2026).
 
@@ -64,7 +64,7 @@ Pause/resume is driven by per-worker utilization — the program working set as 
 
 > **Constraint:** `pause-target <= pause-threshold`. The service rejects configs that violate it (along with `0 <= resume-hysteresis <= pause-threshold` and `0 <= soft-demote-threshold <= pause-threshold`).
 
-All `KvRouter` flags from `dynamo.router` (`--router-temperature`, `--use-kv-events`, `--router-track-output-blocks`, …) are also accepted and forwarded. See the [folder README](../../components/src/dynamo/thunderagent_router/README.md) for the remaining service flags (`--endpoint`, `--model-name`, `--model-path`, tool-call and reasoning parsers).
+All `KvRouter` flags from `dynamo.router` (`--router-temperature`, `--use-kv-events`, `--router-track-output-blocks`, …) are also accepted and forwarded.
 
 ## Architecture
 
@@ -128,7 +128,27 @@ For per-request tracing (token counts, cache hits, worker placement), the router
 
 ## Reproducing with Pi
 
-The maintained smoke path is Pi through the Dynamo provider. The complete setup and session-header verification steps live in the [folder README](../../components/src/dynamo/thunderagent_router/README.md#reproducing-with-pi). Run a Harbor/SWE-bench cohort only after that smoke confirms one stable session ID reaches the router.
+The maintained smoke path is Pi through the Dynamo provider. Start a source-checkout deployment with this router and a served model, then wait for the frontend to advertise that model:
+
+```bash
+curl -fsS http://127.0.0.1:8000/v1/models
+```
+
+Install the provider and send one sessionized turn through the frontend:
+
+```bash
+git clone https://github.com/ai-dynamo/agent-plugins.git
+cd agent-plugins/pi-plugin
+npm install && npm run build
+pi install "$PWD"
+
+export DYNAMO_BASE_URL=http://127.0.0.1:8000/v1
+export DYNAMO_API_KEY=dummy
+export DYN_AGENT_SESSION_ID=ta-repro-$(uuidgen)
+pi --model dynamo/<served-model-name> -p 'Reply exactly READY.'
+```
+
+With `DYN_REQUEST_TRACE=1` on the frontend, confirm the trace row carries the same session ID before running a larger Harbor/SWE-bench cohort.
 
 ## References
 
