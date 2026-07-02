@@ -27,6 +27,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.planner,
     pytest.mark.parallel,
+    pytest.mark.timeout(45),
 ]
 
 

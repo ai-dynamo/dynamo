@@ -210,6 +210,10 @@ func main() {
 		setupLog.Error(nil, "--config flag is required")
 		os.Exit(1)
 	}
+	if operatorImage == "" {
+		setupLog.Error(nil, "--operator-image flag is required")
+		os.Exit(1)
+	}
 
 	// Load, default, and validate operator configuration
 	operatorCfg, err := LoadAndValidateOperatorConfig(configFile)
