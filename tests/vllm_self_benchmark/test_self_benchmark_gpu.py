@@ -95,9 +95,9 @@ _GPU_MEMORY_UTILIZATION = "0.45"
 def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
     """Parse the benchmark JSON and assert every point produced a real
     forward-pass measurement (positive ``wall_time``)."""
-    assert output_path.exists(), (
-        f"benchmark JSON missing at {output_path} -- worker never wrote it"
-    )
+    assert (
+        output_path.exists()
+    ), f"benchmark JSON missing at {output_path} -- worker never wrote it"
     data = json.loads(output_path.read_text())
 
     actual_mode = data.get("config", {}).get("mode")
@@ -111,9 +111,9 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
     )
 
     results = data.get("results") or []
-    assert len(results) > 0, (
-        f"benchmark JSON has no result points (mode={expected_mode})"
-    )
+    assert (
+        len(results) > 0
+    ), f"benchmark JSON has no result points (mode={expected_mode})"
 
     for r in results:
         point = r["point"]
@@ -401,9 +401,9 @@ def test_self_benchmark_agg_serves_after_bench(
             # Sanity: agg sweep produces both prefill and decode points,
             # and the decode sweep includes batch>1 (the regression case).
             point_types = {r["point"]["point_type"] for r in data["results"]}
-            assert "prefill" in point_types and "decode" in point_types, (
-                f"agg benchmark missing point types: got {point_types}"
-            )
+            assert (
+                "prefill" in point_types and "decode" in point_types
+            ), f"agg benchmark missing point types: got {point_types}"
             prefill_kv_reads = sorted(
                 r["point"].get("kv_read_tokens", 0)
                 for r in data["results"]
@@ -488,9 +488,9 @@ def test_self_benchmark_disagg_serves_after_bench(
                 # Prefill sweep on the prefill worker must produce
                 # prefill points.
                 p_types = {r["point"]["point_type"] for r in p_data["results"]}
-                assert "prefill" in p_types, (
-                    f"prefill benchmark missing prefill points: {p_types}"
-                )
+                assert (
+                    "prefill" in p_types
+                ), f"prefill benchmark missing prefill points: {p_types}"
                 prefill_kv_reads = sorted(
                     r["point"].get("kv_read_tokens", 0) for r in p_data["results"]
                 )

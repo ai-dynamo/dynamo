@@ -319,9 +319,9 @@ def update_engine_config_with_dynamo(
     if fpm_enabled:
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
-            defaults["scheduler_cls"] = (
-                "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
-            )
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
             logger.info(
                 "Forward pass metrics enabled: scheduler_cls set to InstrumentedScheduler "
                 f"(port={envs.DYN_FORWARDPASS_METRIC_PORT})"
