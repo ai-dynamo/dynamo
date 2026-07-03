@@ -364,7 +364,10 @@ impl OpenAIPreprocessor {
         }
     }
 
-    fn backend_extra_args<R: NvExtProvider>(request: &R) -> Option<serde_json::Value> {
+    fn backend_extra_args<R: OAIChatLikeRequest + NvExtProvider>(
+        request: &R,
+        reasoning_parser_configured: bool,
+    ) -> Option<serde_json::Value> {
         let mut extra_args = serde_json::Map::new();
 
         if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
@@ -378,6 +381,19 @@ impl OpenAIPreprocessor {
             extra_args.insert(
                 "sampling_options".to_string(),
                 serde_json::Value::Object(sampling_passthrough),
+            );
+        }
+
+        // vLLM constructs some native reasoning parsers per request. Forward
+        // the accepted public template arguments through the internal request
+        // so its guided-decoding gate observes the same thinking mode used to
+        // render the prompt.
+        if reasoning_parser_configured
+            && let Some(chat_template_args) = request.chat_template_args()
+        {
+            extra_args.insert(
+                "reasoning_parser_kwargs".to_string(),
+                serde_json::json!({ "chat_template_kwargs": chat_template_args }),
             );
         }
 
@@ -872,7 +888,9 @@ impl OpenAIPreprocessor {
             }));
         }
 
-        if let Some(extra_args) = Self::backend_extra_args(request) {
+        if let Some(extra_args) =
+            Self::backend_extra_args(request, self.runtime_config.reasoning_parser.is_some())
+        {
             builder.extra_args(Some(extra_args));
         }
 
@@ -1269,7 +1287,7 @@ impl OpenAIPreprocessor {
             }
 
             if let Some(serde_json::Value::Object(backend_extra_args)) =
-                Self::backend_extra_args(request)
+                Self::backend_extra_args(request, self.runtime_config.reasoning_parser.is_some())
             {
                 let extra_args_obj = extra_args
                     .as_object_mut()
@@ -2536,7 +2554,17 @@ impl OpenAIPreprocessor {
     /// native-reasoner-gated `reasoning</think>JSON`. These use the stream-shape
     /// detector instead of the historical unconditional guided-JSON bypass.
     fn supports_reasoning_before_guided_json(reasoning_parser: Option<&str>) -> bool {
-        matches!(reasoning_parser, Some("nemotron3" | "nemotron_v3"))
+        matches!(
+            reasoning_parser,
+            Some(
+                "deepseek_r1"
+                    | "step3"
+                    | "kimi_k25"
+                    | "nemotron_nano"
+                    | "nemotron3"
+                    | "nemotron_v3"
+            )
+        )
     }
 
     fn skips_guided_json_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
@@ -3445,6 +3473,30 @@ mod tests {
     }
 
     #[test]
+    fn test_reasoning_before_guided_json_parser_allowlist() {
+        for parser in [
+            "deepseek_r1",
+            "step3",
+            "kimi_k25",
+            "nemotron_nano",
+            "nemotron3",
+            "nemotron_v3",
+        ] {
+            assert!(
+                OpenAIPreprocessor::supports_reasoning_before_guided_json(Some(parser)),
+                "{parser} should inspect guided output shape"
+            );
+        }
+
+        for parser in ["mistral", "minimax_append_think"] {
+            assert!(
+                !OpenAIPreprocessor::supports_reasoning_before_guided_json(Some(parser)),
+                "{parser} must retain the guided-JSON bypass"
+            );
+        }
+    }
+
+    #[test]
     fn test_prompt_injected_reasoning_start_by_parser() {
         let cases = [
             (
@@ -3513,7 +3565,7 @@ mod tests {
         }))
         .unwrap();
 
-        let extra_args = OpenAIPreprocessor::backend_extra_args(&request).unwrap();
+        let extra_args = OpenAIPreprocessor::backend_extra_args(&request, false).unwrap();
 
         assert_eq!(extra_args["nvext"]["cache_salt"], "step_7");
         assert_eq!(
@@ -3535,6 +3587,61 @@ mod tests {
             extra_args["sampling_options"]["bad_words_token_ids"],
             serde_json::json!([[12, 13]])
         );
+    }
+
+    #[test]
+    fn test_backend_extra_args_forwards_reasoning_template_args() {
+        for enable_thinking in [true, false] {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {
+                        "enable_thinking": enable_thinking,
+                        "reasoning_effort": "high"
+                    }
+                }))
+                .unwrap();
+
+            let extra_args = OpenAIPreprocessor::backend_extra_args(&request, true).unwrap();
+
+            assert_eq!(
+                extra_args["reasoning_parser_kwargs"]["chat_template_kwargs"],
+                serde_json::json!({
+                    "enable_thinking": enable_thinking,
+                    "reasoning_effort": "high"
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn test_backend_extra_args_omits_reasoning_metadata_without_configured_parser() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "detokenize": false,
+            "chat_template_kwargs": {
+                "enable_thinking": true
+            }
+        }))
+        .unwrap();
+
+        let extra_args = OpenAIPreprocessor::backend_extra_args(&request, false).unwrap();
+
+        assert_eq!(extra_args["sampling_options"]["detokenize"], false);
+        assert!(extra_args.get("reasoning_parser_kwargs").is_none());
+    }
+
+    #[test]
+    fn test_backend_extra_args_omits_reasoning_metadata_without_template_args() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+
+        assert!(OpenAIPreprocessor::backend_extra_args(&request, true).is_none());
     }
 
     #[test]

@@ -21,6 +21,26 @@ use serde_json::Value;
 
 const REQUEST_JSON: &str = r#"{"messages":[{"role":"user","content":"What is the capital of Tuvalu?"}],"model":"Qwen/Qwen3-0.6B","max_completion_tokens":3000,"stream":true,"stream_options":{"include_usage":true,"continuous_usage_stats":false},"temperature":1.0,"top_p":1.0}"#;
 
+const FORCE_REASONING_PARSERS: &[&str] = &[
+    "deepseek_r1",
+    "step3",
+    "kimi_k25",
+    "mistral",
+    "minimax_append_think",
+    "nemotron_nano",
+    "nemotron3",
+    "nemotron_v3",
+];
+
+const REASONING_BEFORE_GUIDED_JSON_PARSERS: &[&str] = &[
+    "deepseek_r1",
+    "step3",
+    "kimi_k25",
+    "nemotron_nano",
+    "nemotron3",
+    "nemotron_v3",
+];
+
 fn build_preprocessor(
     reasoning_parser: Option<&str>,
     tool_call_parser: Option<&str>,
@@ -1321,7 +1341,7 @@ fn assert_clean_tool_call(
 async fn tool_choice_matrix_force_reasoning_required_bare_json() {
     let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
 
-    for reasoning_parser in ["nemotron_nano", "nemotron3", "nemotron_v3"] {
+    for &reasoning_parser in FORCE_REASONING_PARSERS {
         for (case, prompt_injected) in [
             (
                 "1a: force-reasoning + required + prompt_injected=false",
@@ -1374,7 +1394,7 @@ async fn tool_choice_matrix_force_reasoning_required_bare_json() {
 async fn tool_choice_matrix_force_reasoning_named_bare_json() {
     let bare_params = r#"{"location":"San Francisco"}"#;
 
-    for reasoning_parser in ["nemotron_nano", "nemotron3", "nemotron_v3"] {
+    for &reasoning_parser in FORCE_REASONING_PARSERS {
         let preprocessor = build_preprocessor(Some(reasoning_parser), Some("nemotron_nano"));
         let request = streaming_tool_request(ChatCompletionToolChoiceOption::Named(
             ChatCompletionNamedToolChoice {
@@ -1441,12 +1461,12 @@ async fn tool_choice_nemotron_v3_required_thinking_disabled_keeps_bare_json() {
     assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
 }
 
-/// Nemotron v3 + required + native-vLLM reasoner-gated output. The force
+/// Force-reasoning parser + required + native-vLLM reasoner-gated output. The
 /// parser must split reasoning at `</think>` before the immediate jail sees
 /// the guided JSON. The boundary is split across chunks to match streaming.
 #[tokio::test]
-async fn tool_choice_nemotron_v3_required_keeps_reasoning_before_guided_json() {
-    for reasoning_parser in ["nemotron3", "nemotron_v3"] {
+async fn tool_choice_force_reasoning_required_keeps_reasoning_before_guided_json() {
+    for &reasoning_parser in REASONING_BEFORE_GUIDED_JSON_PARSERS {
         for prompt_injected in [false, true] {
             let preprocessor = build_preprocessor(Some(reasoning_parser), Some("nemotron_nano"));
             let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
@@ -1490,44 +1510,46 @@ async fn tool_choice_nemotron_v3_required_keeps_reasoning_before_guided_json() {
 }
 
 /// Named guided decoding emits only the selected function's parameter object.
-/// Nemotron reasoning before that object must be separated without preventing
-/// the named immediate jail from constructing the tool call.
+/// Reasoning before that object must be separated without preventing the named
+/// immediate jail from constructing the tool call.
 #[tokio::test]
-async fn tool_choice_nemotron_v3_named_keeps_reasoning_before_guided_params() {
-    let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("nemotron_nano"));
-    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Named(
-        "get_weather".to_string().into(),
-    ));
-    let input_stream = stream::iter(
-        vec![
-            mock_content_chunk("Let me check."),
-            mock_content_chunk("</think>"),
-            mock_content_chunk(r#"{"location":"San Francisco"}"#),
-            mock_final_chunk(),
-        ]
-        .into_iter()
-        .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        reasoning,
-        content,
-        tool_calls,
-        finish_reasons,
-    } = drain_stream(output_stream).await;
+async fn tool_choice_force_reasoning_named_keeps_reasoning_before_guided_params() {
+    for &reasoning_parser in REASONING_BEFORE_GUIDED_JSON_PARSERS {
+        let preprocessor = build_preprocessor(Some(reasoning_parser), Some("nemotron_nano"));
+        let request = streaming_tool_request(ChatCompletionToolChoiceOption::Named(
+            "get_weather".to_string().into(),
+        ));
+        let input_stream = stream::iter(
+            vec![
+                mock_content_chunk("Let me check."),
+                mock_content_chunk("</think>"),
+                mock_content_chunk(r#"{"location":"San Francisco"}"#),
+                mock_final_chunk(),
+            ]
+            .into_iter()
+            .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, false)
+            .expect("postprocessor_parsing_stream should build");
+        let DrainOutput {
+            reasoning,
+            content,
+            tool_calls,
+            finish_reasons,
+        } = drain_stream(output_stream).await;
 
-    let case = "Nemotron v3 named + reasoning boundary + guided params";
-    assert_eq!(
-        reasoning, "Let me check.",
-        "{case}: reasoning_content must preserve the pre-</think> text"
-    );
-    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
-    assert!(
-        finish_reasons.contains(&FinishReason::ToolCalls),
-        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
-    );
+        let case = format!("{reasoning_parser} named + reasoning boundary + guided params");
+        assert_eq!(
+            reasoning, "Let me check.",
+            "{case}: reasoning_content must preserve the pre-</think> text"
+        );
+        assert_clean_tool_call(&case, &content, &tool_calls, "San Francisco");
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+        );
+    }
 }
 
 /// Non-force parser + required + no prompt injection + bare JSON: parser
