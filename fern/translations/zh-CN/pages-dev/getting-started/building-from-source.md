@@ -85,7 +85,7 @@ uv pip install -e .
 ```
 
 > [!NOTE]
-> 仅执行基础的 `uv pip install -e .` 只会安装 Dynamo 运行时和前端。后端附加依赖（`[vllm]` 或 `[sglang]`）会安装运行推理 worker 所需的相应框架依赖。对于 TensorRT-LLM 后端，请改用 `tensorrtllm-runtime` 容器，而不是通过 `uv pip` 安装，以确保安装正确的依赖。更多详情请参阅[本地安装](local-installation.zh-CN.md)。
+> 仅执行基础的 `uv pip install -e .` 只会安装 Dynamo 运行时和前端。后端附加依赖（`[vllm]` 或 `[sglang]`）会安装运行推理 worker 所需的相应框架依赖。对于 TensorRT-LLM 后端，请改用 `tensorrtllm-runtime` 容器，而不是通过 `uv pip` 安装，以确保安装正确的依赖。更多详情请参阅[本地安装](local-installation.md)。
 
 ## 8. 验证构建
 
