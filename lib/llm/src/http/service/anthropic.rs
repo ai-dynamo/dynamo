@@ -370,6 +370,19 @@ async fn anthropic_messages(
         request.id(),
     );
 
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge (labeled by `model` here)
+    // so concurrent arrivals cannot slip past the limit.
+    if let Some(message) = super::admission::evaluate_model_concurrency_gate(&state, &model, &model)
+    {
+        inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
+        return Err(anthropic_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded_error",
+            &message,
+        ));
+    }
+
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {

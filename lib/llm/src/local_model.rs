@@ -16,7 +16,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::frontend_config::{AdmissionGateConfig, FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -68,6 +68,7 @@ pub struct LocalModelBuilder {
     http_metrics_port: Option<u16>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    admission_gate_config: AdmissionGateConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
@@ -93,6 +94,7 @@ impl Default for LocalModelBuilder {
             http_metrics_port: None,
             metrics_config: Default::default(),
             frontend_api_config: Default::default(),
+            admission_gate_config: Default::default(),
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
@@ -181,6 +183,14 @@ impl LocalModelBuilder {
 
     pub fn frontend_api_config(&mut self, frontend_api_config: FrontendApiConfig) -> &mut Self {
         self.frontend_api_config = frontend_api_config;
+        self
+    }
+
+    pub fn admission_gate_config(
+        &mut self,
+        admission_gate_config: AdmissionGateConfig,
+    ) -> &mut Self {
+        self.admission_gate_config = admission_gate_config;
         self
     }
 
@@ -359,6 +369,7 @@ impl LocalModelBuilder {
                 http_metrics_port: self.http_metrics_port,
                 metrics_config: self.metrics_config.clone(),
                 frontend_api_config: self.frontend_api_config.clone(),
+                admission_gate_config: self.admission_gate_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
@@ -415,6 +426,7 @@ impl LocalModelBuilder {
             http_metrics_port: self.http_metrics_port,
             metrics_config: self.metrics_config.clone(),
             frontend_api_config: self.frontend_api_config.clone(),
+            admission_gate_config: self.admission_gate_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
@@ -439,6 +451,7 @@ pub struct LocalModel {
     http_metrics_port: Option<u16>,
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    admission_gate_config: AdmissionGateConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
@@ -505,6 +518,10 @@ impl LocalModel {
 
     pub fn frontend_api_config(&self) -> &FrontendApiConfig {
         &self.frontend_api_config
+    }
+
+    pub fn admission_gate_config(&self) -> &AdmissionGateConfig {
+        &self.admission_gate_config
     }
 
     pub fn enable_anthropic_api(&self) -> bool {

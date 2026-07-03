@@ -405,6 +405,11 @@ pub struct Metrics {
     model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
     model_rejection_total: IntCounterVec,
+
+    // Frontend admission gate metrics (DEP: Request Admission and Rejection
+    // Controls). Labeled by gate; `model` is empty for frontend-local gates.
+    admission_rejection_total: IntCounterVec,
+    admission_gate_limit: IntGaugeVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -958,6 +963,25 @@ impl Metrics {
         )
         .unwrap();
 
+        let admission_rejection_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::ADMISSION_REJECTION_TOTAL),
+                "Total number of requests rejected by a configured frontend admission gate \
+                 (model is empty for frontend-local gates)",
+            ),
+            &["gate", "model"],
+        )
+        .unwrap();
+
+        let admission_gate_limit = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::ADMISSION_GATE_LIMIT),
+                "Configured frontend admission gate limit (exported only for enabled gates)",
+            ),
+            &["gate"],
+        )
+        .unwrap();
+
         Metrics {
             request_started_counter,
             request_counter,
@@ -987,6 +1011,8 @@ impl Metrics {
             model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
+            admission_rejection_total,
+            admission_gate_limit,
         }
     }
 
@@ -1148,6 +1174,8 @@ impl Metrics {
         ))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
         registry.register(Box::new(self.model_rejection_total.clone()))?;
+        registry.register(Box::new(self.admission_rejection_total.clone()))?;
+        registry.register(Box::new(self.admission_gate_limit.clone()))?;
 
         Ok(())
     }
@@ -1271,6 +1299,28 @@ impl Metrics {
         self.model_rejection_total
             .with_label_values(&[model, &endpoint.to_string()])
             .get()
+    }
+
+    /// Increment the frontend admission gate rejection counter. `model` is
+    /// empty for frontend-local gates (runtime task / request-plane connection).
+    pub fn inc_admission_rejection(&self, gate: &str, model: &str) {
+        self.admission_rejection_total
+            .with_label_values(&[gate, model])
+            .inc();
+    }
+
+    /// Get the current admission gate rejection count
+    pub fn get_admission_rejection_count(&self, gate: &str, model: &str) -> u64 {
+        self.admission_rejection_total
+            .with_label_values(&[gate, model])
+            .get()
+    }
+
+    /// Export the configured limit for an enabled admission gate
+    pub fn set_admission_gate_limit(&self, gate: &str, limit: u64) {
+        self.admission_gate_limit
+            .with_label_values(&[gate])
+            .set(clamp_u64_to_i64(limit));
     }
 
     /// Create a new [`InflightGuard`] for the given model and annotate if its a streaming request,

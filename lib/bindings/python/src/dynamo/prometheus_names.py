@@ -59,6 +59,10 @@ class frontend_perf:
     TOKENIZE_SECONDS = "tokenize_seconds"
     # Template application time in preprocessor
     TEMPLATE_SECONDS = "template_seconds"
+    # L1 tokenizer cache hits (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
+    TOKENIZER_CACHE_HITS_TOTAL = "tokenizer_cache_hits_total"
+    # L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
+    TOKENIZER_CACHE_MISSES_TOTAL = "tokenizer_cache_misses_total"
     # Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     DETOKENIZE_TOTAL_US = "detokenize_total_us"
     # Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
@@ -98,6 +102,10 @@ class frontend_service:
     KV_HIT_RATE = "kv_hit_rate"
     # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
+    # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    SHARED_CACHE_HIT_RATE = "shared_cache_hit_rate"
+    # Shared cache blocks beyond device overlap for the selected worker
+    SHARED_CACHE_BEYOND_BLOCKS = "shared_cache_beyond_blocks"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -139,13 +147,17 @@ class frontend_service:
     MODEL_MIGRATION_TOTAL = "model_migration_total"
     # Total number of times migration was disabled because the sequence length
     # exceeded the configured max_seq_len limit
-    MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = (
-        "model_migration_max_seq_len_exceeded_total"
-    )
+    MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = "model_migration_max_seq_len_exceeded_total"
     # Total number of request cancellations
     MODEL_CANCELLATION_TOTAL = "model_cancellation_total"
     # Total number of requests rejected due to resource exhaustion
     MODEL_REJECTION_TOTAL = "model_rejection_total"
+    # Total number of requests rejected by a configured frontend admission
+    # gate, labeled by gate and model (model is empty for frontend-local gates)
+    ADMISSION_REJECTION_TOTAL = "admission_rejection_total"
+    # Configured frontend admission gate limit, labeled by gate.
+    # Only exported for gates that are explicitly enabled.
+    ADMISSION_GATE_LIMIT = "admission_gate_limit"
     # Active decode blocks (KV cache blocks) per worker
     # Gauge metric tracking current KV cache block utilization for each worker
     WORKER_ACTIVE_DECODE_BLOCKS = "worker_active_decode_blocks"
@@ -164,7 +176,7 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Number of requests pending in the router's scheduler queue (gauge per worker_type)
     ROUTER_QUEUE_PENDING_REQUESTS = "router_queue_pending_requests"
-    # Number of replicas allocated for a LoRA adapter
+    # Number of replicas allocated for a LoRA adapter (gauge per LoRA)
     LORA_REPLICA_FACTOR = "lora_replica_factor"
     # Whether a LoRA adapter is actively receiving traffic (1=active, 0=inactive)
     LORA_IS_ACTIVE = "lora_is_active"
@@ -252,25 +264,17 @@ class kvindexer:
 
 
 class kvrouter:
+
     # Number of KV cache events applied to the index (including status)
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
 
 
 class kvstats:
+
     # Total number of KV cache blocks available on the worker
     TOTAL_BLOCKS = "total_blocks"
     # GPU cache usage as a percentage (0.0-1.0)
     GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
-    # Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
-    KV_CACHE_HIT_RATE = "kv_cache_hit_rate"
-
-
-class lifecycle:
-    """Worker-lifecycle timing gauges. Set once per worker run by the
-    framework, not by the engine."""
-
-    CLEANUP_TIME_SECONDS = "cleanup_time_seconds"
-    DRAIN_TIME_SECONDS = "drain_time_seconds"
 
 
 class labels:
@@ -304,6 +308,7 @@ class labels:
 
 
 class model_info:
+
     # Model load time in seconds
     LOAD_TIME_SECONDS = "model_load_time_seconds"
 
@@ -328,6 +333,9 @@ class name_prefix:
     TRANSPORT = "dynamo_transport"
     # Prefix for work-handler transport breakdown metrics (backend side)
     WORK_HANDLER = "dynamo_work_handler"
+    # Prefix for request admission/rejection control metrics (e.g.
+    # `dynamo_rejection_request_total`).
+    REJECTION = "dynamo_rejection"
     # Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     TOKIO = "dynamo_tokio"
     # Prefix for per-phase routing overhead latency (hashing, scheduling).
@@ -369,6 +377,10 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    SHARED_CACHE_HIT_RATE = "router_shared_cache_hit_rate"
+    # Shared cache blocks beyond device overlap for the selected worker
+    SHARED_CACHE_BEYOND_BLOCKS = "router_shared_cache_beyond_blocks"
     # Whether the router currently has a worker/dp_rank registered (1 = registered)
     WORKER_REGISTERED = "router_worker_registered"
 
@@ -394,6 +406,10 @@ class routing_overhead:
     SCHEDULING_MS = "overhead_scheduling_ms"
     # Total routing overhead per request
     TOTAL_MS = "overhead_total_ms"
+    # Time spent querying the shared KV cache (Mooncake)
+    SHARED_CACHE_QUERY_MS = "overhead_shared_cache_query_ms"
+    # Total shared cache query errors (timeouts, HTTP failures)
+    SHARED_CACHE_ERRORS_TOTAL = "shared_cache_errors_total"
 
 
 class task_tracker:
@@ -486,8 +502,8 @@ class work_handler:
     # Configured capacity of the bounded work queue (gauge, static)
     QUEUE_CAPACITY = "queue_capacity"
     # Total times enqueuing work failed because the dispatcher channel was closed.
-    # tokio bounded mpsc applies backpressure on full — saturation shows up as
-    # rising QUEUE_DEPTH toward QUEUE_CAPACITY.
+    # Note: tokio bounded mpsc applies backpressure on full — it does NOT increment
+    # this counter. Saturation shows up as rising `QUEUE_DEPTH` toward `QUEUE_CAPACITY`.
     ENQUEUE_REJECTED_TOTAL = "enqueue_rejected_total"
     # Time spent waiting to acquire a worker-pool permit (histogram)
     PERMIT_WAIT_SECONDS = "permit_wait_seconds"

@@ -83,6 +83,21 @@ with a startup warning and no longer gate these thresholds. See
 [Request Rejection](../../fault-tolerance/request-rejection.md#migrate-from-admission-control)
 for migration instructions.
 
+### Frontend Admission Gates
+
+Frontend-owned request rejection gates evaluated before tokenization. Every
+gate is disabled by default and active only when explicitly configured; a
+request over a configured limit is rejected with HTTP 503. Rejections are
+counted in the `dynamo_frontend_admission_rejection_total` metric (labeled by
+`gate` and `model`) and enabled limits are exported as
+`dynamo_frontend_admission_gate_limit`.
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--rejection-frontend-request-concurrency-limit` | `DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT` | disabled | Max concurrent frontend-admitted requests, enforced separately for each served model |
+| `--rejection-frontend-runtime-task-limit` | `DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT` | disabled | Max alive tasks on the frontend runtime (frontend-local self-protection, not per-model) |
+| `--rejection-frontend-request-plane-connection-limit` | `DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT` | disabled | Max in-flight request-plane streams to workers, i.e. outbound transport pressure (frontend-local, not per-model) |
+
 ## Model Discovery
 
 | CLI Argument | Env Var | Default | Description |

@@ -277,6 +277,14 @@ pub mod frontend_service {
     /// Total number of requests rejected due to resource exhaustion
     pub const MODEL_REJECTION_TOTAL: &str = "model_rejection_total";
 
+    /// Total number of requests rejected by a configured frontend admission
+    /// gate, labeled by gate and model (model is empty for frontend-local gates)
+    pub const ADMISSION_REJECTION_TOTAL: &str = "admission_rejection_total";
+
+    /// Configured frontend admission gate limit, labeled by gate.
+    /// Only exported for gates that are explicitly enabled.
+    pub const ADMISSION_GATE_LIMIT: &str = "admission_gate_limit";
+
     /// Active decode blocks (KV cache blocks) per worker
     /// Gauge metric tracking current KV cache block utilization for each worker
     pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";
@@ -367,6 +375,19 @@ pub mod frontend_service {
 
         /// Value for unary requests
         pub const UNARY: &str = "unary";
+    }
+
+    /// Admission gate label values for `admission_rejection_total` /
+    /// `admission_gate_limit`
+    pub mod admission_gate {
+        /// Per-served-model request concurrency gate
+        pub const REQUEST_CONCURRENCY: &str = "request_concurrency";
+
+        /// Frontend-local runtime task pressure gate
+        pub const RUNTIME_TASK: &str = "runtime_task";
+
+        /// Frontend-local request-plane transport pressure gate
+        pub const REQUEST_PLANE_CONNECTION: &str = "request_plane_connection";
     }
 
     /// Error type label values for fine-grained error classification

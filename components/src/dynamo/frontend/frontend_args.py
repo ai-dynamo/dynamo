@@ -87,6 +87,13 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     tokenizer_backend: str
     trust_remote_code: bool
 
+    # Frontend admission gate knobs (DEP: Request Admission and Rejection
+    # Controls). None = gate disabled; gates activate only when explicitly
+    # configured.
+    rejection_frontend_request_concurrency_limit: Optional[int] = None
+    rejection_frontend_runtime_task_limit: Optional[int] = None
+    rejection_frontend_request_plane_connection_limit: Optional[int] = None
+
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
     def validate(self) -> None:
@@ -149,6 +156,25 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--router-prefill-load-model=aic requires "
                     "--router-track-prefill-tokens"
+                )
+        for flag_name, value in (
+            (
+                "--rejection-frontend-request-concurrency-limit",
+                self.rejection_frontend_request_concurrency_limit,
+            ),
+            (
+                "--rejection-frontend-runtime-task-limit",
+                self.rejection_frontend_runtime_task_limit,
+            ),
+            (
+                "--rejection-frontend-request-plane-connection-limit",
+                self.rejection_frontend_request_plane_connection_limit,
+            ),
+        ):
+            if value is not None and not (1 <= value <= _U32_MAX):
+                raise ValueError(
+                    f"{flag_name} must be between 1 and {_U32_MAX} "
+                    "(leave unset to disable the gate)"
                 )
         if self.serve_indexer:
             if self.router_mode != "kv":
@@ -494,6 +520,44 @@ class FrontendArgGroup(ArgGroup):
                 "Decoding always uses HuggingFace. Has no effect on TikToken models."
             ),
             choices=["default", "fastokens"],
+        )
+
+        add_argument(
+            g,
+            flag_name="--rejection-frontend-request-concurrency-limit",
+            env_var="DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT",
+            default=None,
+            arg_type=int,
+            help=(
+                "Frontend admission gate: maximum concurrent frontend-admitted requests "
+                "for each served model, enforced before tokenization. Requests over the "
+                "limit are rejected with HTTP 503. Disabled by default; set to enable."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--rejection-frontend-runtime-task-limit",
+            env_var="DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT",
+            default=None,
+            arg_type=int,
+            help=(
+                "Frontend admission gate: maximum alive tasks on the frontend runtime "
+                "before new requests are rejected with HTTP 503. Frontend-local "
+                "self-protection, not per-model. Disabled by default; set to enable."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--rejection-frontend-request-plane-connection-limit",
+            env_var="DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT",
+            default=None,
+            arg_type=int,
+            help=(
+                "Frontend admission gate: maximum in-flight request-plane streams to "
+                "workers (outbound transport pressure) before new requests are rejected "
+                "with HTTP 503. Frontend-local self-protection, not per-model. Disabled "
+                "by default; set to enable."
+            ),
         )
 
         add_negatable_bool_argument(

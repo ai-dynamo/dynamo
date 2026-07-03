@@ -747,6 +747,16 @@ async fn completions_single(
         &request_id,
     );
 
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge so concurrent arrivals
+    // cannot slip past the limit.
+    if let Err(err_response) =
+        super::admission::check_model_concurrency_gate(&state, &model, &metric_model)
+    {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
@@ -902,6 +912,16 @@ async fn completions_batch(
         streaming,
         &request_id,
     );
+
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge so concurrent arrivals
+    // cannot slip past the limit.
+    if let Err(err_response) =
+        super::admission::check_model_concurrency_gate(&state, &model, &metric_model)
+    {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -1134,6 +1154,16 @@ async fn embeddings(
         streaming,
         &request_id,
     );
+
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge so concurrent arrivals
+    // cannot slip past the limit.
+    if let Err(err_response) =
+        super::admission::check_model_concurrency_gate(&state, model, &metric_model)
+    {
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -1861,6 +1891,16 @@ async fn chat_completions(
         &request_id,
     );
 
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge so concurrent arrivals
+    // cannot slip past the limit.
+    if let Err(err_response) =
+        super::admission::check_model_concurrency_gate(&state, &model, &metric_model)
+    {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -2320,6 +2360,16 @@ async fn responses(
         streaming,
         request.id(),
     );
+
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge so concurrent arrivals
+    // cannot slip past the limit.
+    if let Err(err_response) =
+        super::admission::check_model_concurrency_gate(&state, &model, &metric_model)
+    {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
@@ -3015,6 +3065,16 @@ async fn images(
         &request_id,
     );
 
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge (labeled by `model` here)
+    // so concurrent arrivals cannot slip past the limit.
+    if let Err(err_response) =
+        super::admission::check_model_concurrency_gate(&state, &model, &model)
+    {
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // Issue the generate call on the engine
@@ -3135,6 +3195,16 @@ async fn videos(
         &request_id,
     );
 
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge (labeled by `model` here)
+    // so concurrent arrivals cannot slip past the limit.
+    if let Err(err_response) =
+        super::admission::check_model_concurrency_gate(&state, &model, &model)
+    {
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // issue the generate call on the engine
@@ -3245,6 +3315,16 @@ async fn video_stream(
         state
             .metrics_clone()
             .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
+
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge (labeled by `model` here)
+    // so concurrent arrivals cannot slip past the limit.
+    if let Err(err_response) =
+        super::admission::check_model_concurrency_gate(&state, &model, &model)
+    {
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -3435,6 +3515,16 @@ async fn audio_speech(
         streaming,
         &request_id,
     );
+
+    // Frontend admission gate: per-model request concurrency. Checked after
+    // the guard above increments the inflight gauge (labeled by `model` here)
+    // so concurrent arrivals cannot slip past the limit.
+    if let Err(err_response) =
+        super::admission::check_model_concurrency_gate(&state, &model, &model)
+    {
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 

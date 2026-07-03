@@ -22,7 +22,7 @@ use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
-use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
+use dynamo_llm::frontend_config::{AdmissionGateConfig, FrontendApiConfig, MetricsConfig};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
@@ -524,6 +524,7 @@ pub(crate) struct EntrypointArgs {
     http_metrics_port: Option<u16>,
     metrics_config: Option<MetricsConfig>,
     frontend_api_config: Option<FrontendApiConfig>,
+    admission_gate_config: Option<AdmissionGateConfig>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
@@ -543,7 +544,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, tokenizer_backend=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, tokenizer_backend=None, rejection_frontend_request_concurrency_limit=None, rejection_frontend_runtime_task_limit=None, rejection_frontend_request_plane_connection_limit=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -575,6 +576,9 @@ impl EntrypointArgs {
         enable_streaming_tool_dispatch: Option<bool>,
         enable_streaming_reasoning_dispatch: Option<bool>,
         tokenizer_backend: Option<String>,
+        rejection_frontend_request_concurrency_limit: Option<u64>,
+        rejection_frontend_runtime_task_limit: Option<u64>,
+        rejection_frontend_request_plane_connection_limit: Option<u64>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -635,6 +639,11 @@ impl EntrypointArgs {
                 enable_streaming_tool_dispatch,
                 enable_streaming_reasoning_dispatch,
             ),
+            admission_gate_config: AdmissionGateConfig::from_optional_limits(
+                rejection_frontend_request_concurrency_limit,
+                rejection_frontend_runtime_task_limit,
+                rejection_frontend_request_plane_connection_limit,
+            ),
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
@@ -688,6 +697,9 @@ pub fn make_engine<'p>(
     }
     if let Some(frontend_api_config) = args.frontend_api_config.clone() {
         builder.frontend_api_config(frontend_api_config);
+    }
+    if let Some(admission_gate_config) = args.admission_gate_config.clone() {
+        builder.admission_gate_config(admission_gate_config);
     }
     builder
         .tls_cert_path(args.tls_cert_path.clone())

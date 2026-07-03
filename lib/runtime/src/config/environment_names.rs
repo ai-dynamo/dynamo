@@ -395,6 +395,24 @@ pub mod llm {
     /// EMA smoothing factor (alpha) for the EMA predictor. Range [0.0, 1.0].
     pub const DYN_LORA_ALLOCATION_EMA_ALPHA: &str = "DYN_LORA_ALLOCATION_EMA_ALPHA";
 
+    /// Frontend admission gate: maximum concurrent frontend-admitted requests
+    /// for each served model. Unset disables the gate; must be >= 1 when set.
+    pub const DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT: &str =
+        "DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT";
+
+    /// Frontend admission gate: maximum alive tasks on the frontend tokio
+    /// runtime before new requests are rejected. Frontend-local (not per-model).
+    /// Unset disables the gate; must be >= 1 when set.
+    pub const DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT: &str =
+        "DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT";
+
+    /// Frontend admission gate: maximum in-flight request-plane streams to
+    /// workers (outbound transport pressure) before new requests are rejected.
+    /// Frontend-local (not per-model). Unset disables the gate; must be >= 1
+    /// when set.
+    pub const DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT: &str =
+        "DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")

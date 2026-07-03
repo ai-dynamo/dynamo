@@ -45,7 +45,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::frontend_config::{AdmissionGateConfig, FrontendApiConfig, MetricsConfig};
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -101,6 +101,8 @@ pub struct State {
     cancel_token: CancellationToken,
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
+    // Frontend admission gate limits read by request handlers and middleware.
+    admission_gate_config: AdmissionGateConfig,
     nvext_enabled: bool,
 }
 
@@ -111,6 +113,7 @@ pub struct State {
 struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    admission_gate_config: AdmissionGateConfig,
     nvext_enabled: bool,
 }
 
@@ -372,6 +375,7 @@ impl State {
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
+            admission_gate_config: config.admission_gate_config,
         }
     }
 
@@ -456,6 +460,11 @@ impl State {
     /// Returns true if the Anthropic Messages API is enabled by service config.
     pub fn anthropic_api_enabled(&self) -> bool {
         self.frontend_api_config.anthropic().enabled()
+    }
+
+    /// Frontend admission gate limits (all gates disabled unless configured).
+    pub fn admission_gate_config(&self) -> &AdmissionGateConfig {
+        &self.admission_gate_config
     }
 
     /// Returns true if streaming tool call dispatch is enabled.
@@ -547,6 +556,11 @@ pub struct HttpServiceConfig {
     /// API behavior config retained in HTTP state for route and streaming decisions.
     #[builder(default)]
     frontend_api_config: FrontendApiConfig,
+
+    /// Frontend admission gate limits (DEP: Request Admission and Rejection
+    /// Controls). All gates are disabled unless explicitly configured.
+    #[builder(default)]
+    admission_gate_config: AdmissionGateConfig,
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
@@ -893,6 +907,7 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
         let metrics_config = config.metrics_config.clone();
         let frontend_api_config = config.frontend_api_config.clone();
+        let admission_gate_config = config.admission_gate_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
         let generate_endpoint_enabled =
             config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
@@ -922,9 +937,11 @@ impl HttpServiceConfigBuilder {
             StateConfig {
                 metrics_config,
                 frontend_api_config,
+                admission_gate_config: admission_gate_config.clone(),
                 nvext_enabled,
             },
         ));
+        super::admission::announce_enabled_gates(&admission_gate_config, &state.metrics_clone());
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -1058,6 +1075,19 @@ impl HttpServiceConfigBuilder {
             state.clone(),
             track_inflight_inference,
         ));
+        // Frontend-local admission gates run outermost so rejected requests are
+        // never counted as inflight inference. Layered only when configured, so
+        // the disabled default adds no per-request work.
+        if admission_gate_config.runtime_task_limit().is_some()
+            || admission_gate_config
+                .request_plane_connection_limit()
+                .is_some()
+        {
+            inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                super::admission::enforce_frontend_local_gates,
+            ));
+        }
 
         // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) =
