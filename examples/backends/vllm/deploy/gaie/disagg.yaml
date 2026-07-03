@@ -42,8 +42,8 @@
 #     comfortable headroom; raise this only if you also raise
 #     ``gpu-memory-utilization``.
 #
-#   * ``DYN_ENFORCE_DISAGG=true`` on the EPP prevents fallback to aggregated
-#     serving when one role is unavailable (the test asserts disagg).
+#   * Registered prefill and decode worker types establish disaggregated
+#     serving. Both roles must be available before the model is ready.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -104,8 +104,6 @@ spec:
             value: "16"
           - name: DYN_MODEL_NAME
             value: Qwen/Qwen3-0.6B
-          - name: DYN_ENFORCE_DISAGG
-            value: "true"
           envFrom:
           - secretRef:
               name: hf-token-secret

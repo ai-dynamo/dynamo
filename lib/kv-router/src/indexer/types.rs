@@ -469,10 +469,19 @@ pub enum WorkerTask {
         worker: WorkerWithDpRank,
         anchor: AnchorTask,
     },
-    /// Permanently remove a worker from tracking (keep_worker: false).
-    RemoveWorker(WorkerId),
+    /// Permanently remove a worker from tracking.
+    RemoveWorker {
+        worker_id: WorkerId,
+        /// True for the one shared-state backend task that owns structural cleanup.
+        sweep_tree: bool,
+    },
     /// Remove a single dp_rank for a worker.
-    RemoveWorkerDpRank(WorkerId, DpRank),
+    RemoveWorkerDpRank {
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        /// True for the one shared-state backend task that owns structural cleanup.
+        sweep_tree: bool,
+    },
     /// Best-effort maintenance task for shared-state backends.
     CleanupStaleChildren,
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),

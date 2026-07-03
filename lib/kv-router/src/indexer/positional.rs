@@ -242,10 +242,12 @@ impl SyncIndexer for PositionalIndexer {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker(worker_id) => {
+                WorkerTask::RemoveWorker { worker_id, .. } => {
                     self.remove_or_clear_worker_blocks_impl(&mut worker_blocks, worker_id, false);
                 }
-                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                WorkerTask::RemoveWorkerDpRank {
+                    worker_id, dp_rank, ..
+                } => {
                     self.remove_worker_dp_rank_impl(&mut worker_blocks, worker_id, dp_rank);
                 }
                 WorkerTask::CleanupStaleChildren => {

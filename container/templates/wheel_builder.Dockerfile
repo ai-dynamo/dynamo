@@ -220,10 +220,12 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 # Cache uv downloads; uv handles its own locking for this cache.
+# pyyaml: needed by the compliance NOTICES-bundling steps below (overrides.py
+# imports yaml at module scope); the system python3 doesn't ship it.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
 
@@ -552,11 +554,14 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 # machine-readable inventory); this adds the texts the redistributed wheel's
 # MIT/BSD/Apache attribution clauses require. Best-effort + non-fatal: a failure
 # leaves the wheel with its SBOM intact rather than breaking the build.
+# Must run with the build venv's python: bundle_wheel_notices imports
+# compliance.overrides, which needs pyyaml (installed in the venv above);
+# the bare system python3 lacks it and the step would no-op with a warning.
 COPY container/compliance /opt/compliance
 RUN set -u; injected=0; \
     for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl; do \
         [ -e "$whl" ] || continue; \
-        PYTHONPATH=/opt python3 -m compliance.bundle_wheel_notices \
+        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
             && injected=$((injected+1)) || echo "::warning::wheel NOTICES bundling failed for $whl (SBOM retained)"; \
     done; \
@@ -755,6 +760,8 @@ COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
 # stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder
 # and arrives consolidated above). Harvest kvbm's crate licenses from the cargo
 # registry, then inject into its auditwheel-repaired wheel. Best-effort/non-fatal.
+# Venv python required: compliance.overrides needs pyyaml, absent from the
+# system python3 (see the runtime_wheel_builder bundling step).
 COPY container/compliance /opt/compliance
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     set -u; \
@@ -769,7 +776,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     done; \
     for whl in /opt/dynamo/dist/kvbm*.whl; do \
         [ -e "$whl" ] || continue; \
-        PYTHONPATH=/opt python3 -m compliance.bundle_wheel_notices \
+        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
             || echo "::warning::kvbm wheel NOTICES bundling failed (SBOM retained)"; \
     done; \

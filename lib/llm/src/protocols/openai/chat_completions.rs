@@ -22,7 +22,6 @@ use crate::protocols::common::extensions::{
 
 pub mod aggregator;
 mod delta;
-pub mod jail;
 pub mod tool_parser_v2;
 
 pub use aggregator::DeltaAggregator;

@@ -235,7 +235,6 @@ impl ConcurrentRadixTreeCompressed {
             KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id, counters),
             KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
             KvCacheEventData::Cleared => {
-                lookup.entry(worker).or_default();
                 self.clear_all_blocks(lookup, worker.worker_id);
                 Ok(())
             }

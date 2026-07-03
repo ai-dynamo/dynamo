@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
-from dynamo.vllm.handlers import BaseWorkerHandler
+from dynamo.vllm.handlers import (
+    BaseWorkerHandler,
+    _get_modality_extra_values,
+    _placeholder_range_from_extra_arg,
+)
+from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
 
 pytestmark = [
     pytest.mark.unit,
@@ -314,6 +319,128 @@ async def test_build_prompt_excludes_mm_processor_kwargs_when_none():
 
     assert error is None
     assert "mm_processor_kwargs" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_preserves_grouped_forwarded_hashes_for_fallback():
+    """Forwarded hashes stay un-namespaced; modality is carried by dict keys."""
+    handler = _make_handler()
+
+    prompt, _, error = handler._build_prompt_from_request(
+        {
+            "token_ids": [1, 2, 3],
+            "extra_args": {
+                "mm_hashes": ["legacy_image_hash", "legacy_audio_hash"],
+                "mm_hashes_by_modality": {
+                    "image": ["image_hash"],
+                    "audio": ["audio_hash"],
+                },
+            },
+        },
+        "req-prompt-3",
+        multi_modal_data={"image": object(), "audio": object()},
+    )
+
+    assert error is None
+    assert prompt["multi_modal_uuids"] == {
+        "image": ["image_hash".ljust(64, "0")],
+        "audio": ["audio_hash".ljust(64, "0")],
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_preserves_unified_vision_chunk_fallback_hashes():
+    """Unified vision fallback remaps modality without namespacing hash values."""
+    handler = _make_handler()
+    handler._use_unified_vision_chunk = True
+
+    prompt, _, error = handler._build_prompt_from_request(
+        {
+            "token_ids": [1, 2, 3],
+            "extra_args": {
+                "mm_hashes_by_modality": {
+                    "image": ["image_hash"],
+                },
+            },
+        },
+        "req-prompt-4",
+        multi_modal_data={"vision_chunk": object()},
+    )
+
+    assert error is None
+    assert prompt["multi_modal_uuids"] == {
+        "vision_chunk": ["image_hash".ljust(64, "0")]
+    }
+
+
+def test_build_prompt_skips_computed_image_uuids_with_embedding_loader():
+    """EPD workers rely on forwarded hashes, not local fallback image UUIDs."""
+    handler = _make_handler()
+    handler.embedding_loader = object()
+    image = np.zeros((2, 2, 3), dtype=np.uint8)
+
+    prompt, _, error = handler._build_prompt_from_request(
+        {"token_ids": [1, 2, 3]},
+        "req-prompt-5",
+        multi_modal_data={"image": image},
+    )
+
+    assert error is None
+    assert "multi_modal_uuids" not in prompt
+
+
+def test_build_prompt_computes_image_uuids_for_aggregated_raw_payload():
+    """Aggregated workers compute fallback UUIDs when frontend hashes are absent."""
+    handler = _make_handler()
+    image = np.zeros((2, 2, 3), dtype=np.uint8)
+
+    prompt, _, error = handler._build_prompt_from_request(
+        {"token_ids": [1, 2, 3]},
+        "req-prompt-6",
+        multi_modal_data={"image": image},
+    )
+
+    assert error is None
+    assert prompt["multi_modal_uuids"] == {
+        "image": compute_mm_uuids_from_images([image])
+    }
+
+
+def test_flat_mm_metadata_fallback_is_image_only():
+    """Legacy flat mm metadata must not be reused for audio/video."""
+    extra_args = {
+        "mm_hashes": ["image_hash"],
+        "mm_placeholders": [(4, 8)],
+    }
+
+    assert _get_modality_extra_values(
+        extra_args,
+        "mm_hashes_by_modality",
+        "mm_hashes",
+        "image",
+        "image",
+    ) == ["image_hash"]
+    assert (
+        _get_modality_extra_values(
+            extra_args,
+            "mm_hashes_by_modality",
+            "mm_hashes",
+            "audio",
+            "audio",
+        )
+        is None
+    )
+
+
+def test_forwarded_placeholder_preserves_is_embed_mask():
+    placeholder = _placeholder_range_from_extra_arg(
+        {"offset": 4, "length": 4, "is_embed": [False, True, True, False]}
+    )
+
+    assert placeholder.offset == 4
+    assert placeholder.length == 4
+    assert placeholder.get_num_embeds() == 2
+    assert placeholder.extract_embeds_range() == [(5, 6)]
 
 
 # --- extra_args extraction tests (KV router path) ---

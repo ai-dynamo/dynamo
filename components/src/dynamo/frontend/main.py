@@ -77,12 +77,14 @@ def setup_sglang_engine_factory(
 
     tool_call_parser = getattr(sglang_flags, "tool_call_parser", None)
     reasoning_parser = getattr(sglang_flags, "reasoning_parser", None)
+    chat_template = getattr(sglang_flags, "chat_template", None)
 
     return SglangEngineFactory(
         config,
         debug_perf=config.debug_perf,
         tool_call_parser_name=tool_call_parser,
         reasoning_parser_name=reasoning_parser,
+        chat_template=chat_template,
     )
 
 
@@ -151,6 +153,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
         sglang_parser = argparse.ArgumentParser(add_help=False)
         sglang_parser.add_argument("--tool-call-parser", default=None)
         sglang_parser.add_argument("--reasoning-parser", default=None)
+        sglang_parser.add_argument("--chat-template", default=None)
         sglang_flags, remaining = sglang_parser.parse_known_args(unknown)
         if remaining:
             logger.error(f"Unknown arguments specified: {remaining}")

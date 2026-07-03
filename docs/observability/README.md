@@ -60,6 +60,7 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 | [Tracing](tracing.md) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
 | [Request Replay Tracing](request-tracing.md) | Per-request JSONL capture for direct DynoSim replay | `DYN_REQUEST_TRACE`, `DYN_REQUEST_TRACE_OUTPUT_PATH` |
 | [Logging](logging.md) | Structured logging and OTLP log export to Loki | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`† |
+| [Audit Payload Logging](logging.md#audit-payload-logging-otlp) | Per-request chat-completion payload capture exported over OTLP logs | `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`, `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`†, `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`† |
 
 **Variables marked with † are shared across multiple observability systems.**
 

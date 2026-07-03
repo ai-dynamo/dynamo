@@ -23,7 +23,7 @@
 
 #[cfg(test)]
 mod tests {
-    use dynamo_llm::audit::{bus, handle, sink};
+    use dynamo_llm::audit::{handle, init_from_env_with_shutdown};
     use dynamo_llm::protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     };
@@ -154,23 +154,24 @@ mod tests {
                 let client = create_test_nats_client().await;
                 setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
 
-                bus::init(100);
-                sink::spawn_workers_from_env(tokio_util::sync::CancellationToken::new())
-                    .await
-                    .unwrap();
+                // Drive the full audit lifecycle (bus::init, spawn workers,
+                // mark_capture_active) so `create_handle` succeeds.
+                let shutdown = tokio_util::sync::CancellationToken::new();
+                init_from_env_with_shutdown(shutdown.clone()).await.unwrap();
                 time::sleep(Duration::from_millis(100)).await;
 
-                // Emit audit record
+                // Emit a single combined request+response record.
                 let request = create_test_request("nemotron", true);
-                let mut handle = handle::create_handle(&request, "test-req-1")
+                let handle = handle::create_handle(&request, "test-req-1")
                     .expect("Failed to create audit handle");
-                handle.set_request(Arc::new(request.clone()));
-                handle.set_response(Arc::new(create_test_response("nemotron", "test response")));
-                handle.emit();
+                handle.emit(Some(Arc::new(create_test_response(
+                    "nemotron",
+                    "test response",
+                ))));
 
                 time::sleep(Duration::from_millis(200)).await;
 
-                // Verify message in NATS
+                // Verify the single combined record in NATS.
                 let messages = consume_messages(
                     &client,
                     &stream_name,
@@ -180,8 +181,9 @@ mod tests {
                 )
                 .await;
 
-                assert_eq!(messages.len(), 1, "Should receive exactly one audit record");
+                assert_eq!(messages.len(), 1, "Should receive one combined record");
                 let record = &messages[0];
+
                 assert_eq!(record["schema_version"], 1);
                 assert_eq!(record["request_id"], "test-req-1");
                 assert_eq!(record["model"], "nemotron");
@@ -189,6 +191,7 @@ mod tests {
                 assert!(record["response"].is_object());
 
                 client.jetstream().delete_stream(&stream_name).await.ok();
+                shutdown.cancel();
             },
         )
         .await;
@@ -211,17 +214,16 @@ mod tests {
                 let client = create_test_nats_client().await;
                 setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
 
-                bus::init(100);
-                sink::spawn_workers_from_env(tokio_util::sync::CancellationToken::new())
-                    .await
-                    .unwrap();
+                // Drive the full audit lifecycle (bus::init, spawn workers,
+                // mark_capture_active) so `create_handle` succeeds.
+                let shutdown = tokio_util::sync::CancellationToken::new();
+                init_from_env_with_shutdown(shutdown.clone()).await.unwrap();
                 time::sleep(Duration::from_millis(100)).await;
 
                 // Request with store=true (should be audited)
                 let request_true = create_test_request("nemotron", true);
-                if let Some(mut handle) = handle::create_handle(&request_true, "store-true") {
-                    handle.set_request(Arc::new(request_true.clone()));
-                    handle.emit();
+                if let Some(handle) = handle::create_handle(&request_true, "store-true") {
+                    handle.emit(None);
                 }
 
                 // Request with store=false (should NOT be audited)
@@ -241,10 +243,16 @@ mod tests {
                     Duration::from_secs(2),
                 )
                 .await;
-                assert_eq!(messages.len(), 1, "Should only audit when store=true");
+                assert_eq!(
+                    messages.len(),
+                    1,
+                    "Should only emit the record for the store=true case"
+                );
                 assert_eq!(messages[0]["request_id"], "store-true");
+                assert!(messages[0]["request"].is_object());
 
                 client.jetstream().delete_stream(&stream_name).await.ok();
+                shutdown.cancel();
             },
         )
         .await;

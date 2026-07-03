@@ -7,6 +7,12 @@ use dynamo_runtime::protocols::annotated::Annotated;
 
 pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
 
+/// Marks the audit-only usage chunk. It carries the same `LLMMetricAnnotation`
+/// payload as `ANNOTATION_LLM_METRICS` but on a dedicated tag so the client-path
+/// `EventConverter` can strip it entirely (data included). It exists solely to
+/// carry `usage` to the audit `DeltaAggregator` and is never sent to the client.
+pub const ANNOTATION_AUDIT_USAGE: &str = "audit_usage";
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct LLMMetricAnnotation {
     pub input_tokens: usize,
@@ -51,10 +57,14 @@ impl LLMMetricAnnotation {
     pub fn from_annotation<T>(
         annotation: &Annotated<T>,
     ) -> Result<Option<LLMMetricAnnotation>, Box<dyn std::error::Error>> {
-        if annotation.event.is_none() {
+        // Metrics ride on an event-tagged annotation: `ANNOTATION_LLM_METRICS`
+        // for per-chunk metrics (kept on the client stream as content, comment
+        // stripped) and `ANNOTATION_AUDIT_USAGE` for the audit-only final usage
+        // chunk. Both carry the serialized `LLMMetricAnnotation` as their comment.
+        let Some(event) = annotation.event.as_deref() else {
             return Ok(None);
-        }
-        if annotation.event.as_ref().unwrap() != ANNOTATION_LLM_METRICS {
+        };
+        if event != ANNOTATION_LLM_METRICS && event != ANNOTATION_AUDIT_USAGE {
             return Ok(None);
         }
         let comments = annotation

@@ -35,7 +35,6 @@ const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 struct Config {
     namespace: String,
     component: String,
-    enforce_disagg: bool,
 }
 
 impl Config {
@@ -44,10 +43,15 @@ impl Config {
             .or_else(|| env_or("DYN_NAMESPACE", ""))
             .unwrap_or_else(|| "vllm-agg".to_string());
 
+        if parse_env("DYN_ENFORCE_DISAGG", false) {
+            tracing::warn!(
+                "DYN_ENFORCE_DISAGG is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+            );
+        }
+
         Self {
             namespace,
             component: env_or("DYN_COMPONENT_NAME", "").unwrap_or_else(|| "backend".to_string()),
-            enforce_disagg: parse_env("DYN_ENFORCE_DISAGG", false),
         }
     }
 }
@@ -126,7 +130,6 @@ async fn main() -> Result<()> {
         health_port = HEALTH_PORT,
         namespace = %config.namespace,
         component = %config.component,
-        enforce_disagg = config.enforce_disagg,
         "Starting Dynamo Rust EPP"
     );
 
@@ -145,8 +148,7 @@ async fn main() -> Result<()> {
     );
 
     tracing::info!("Initializing KV-aware router from discovery...");
-    let router =
-        Router::from_discovery(&config.namespace, &config.component, config.enforce_disagg).await?;
+    let router = Router::from_discovery(&config.namespace, &config.component).await?;
 
     // Gate SERVING on pod-reflector readiness. `from_discovery` returns once
     // worker discovery and the model card are ready, but the K8s pod reflector's

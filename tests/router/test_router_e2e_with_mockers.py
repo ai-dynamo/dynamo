@@ -137,10 +137,10 @@ _FAST_SPEEDUP = 100.0
 ROUTER_DISAGG_OVERLOAD_529_CASES = (
     pytest.param(
         {
-            # A single prefill worker is sufficient to verify
-            # overloaded -> no free prefill worker -> 529, and --enforce-disagg
-            # means the model only lists once the prefill router has activated,
-            # so frontend readiness already gates on prefill registration.
+            # A single prefill worker is sufficient to verify overloaded -> no
+            # free prefill worker -> 529. Registered worker types make the model
+            # list only after the prefill router activates, so frontend readiness
+            # already gates on prefill registration.
             "num_prefill": 1,
             "num_decode": 1,
             "max_tokens": 1,

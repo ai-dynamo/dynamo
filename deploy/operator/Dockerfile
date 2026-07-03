@@ -50,13 +50,15 @@ RUN make test
 FROM base AS builder
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cmd/main.go && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o crd-apply ./cmd/crd-apply/main.go
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o crd-apply ./cmd/crd-apply/main.go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o dgd-apply-overrides ./cmd/dgd-apply-overrides
 
 # Runtime stage
 FROM nvcr.io/nvidia/distroless/go:v4.0.3
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/crd-apply .
+COPY --from=builder /workspace/dgd-apply-overrides .
 COPY --from=builder /workspace/config/crd/bases/ /opt/dynamo-operator/crds/
 USER 65532:65532
 

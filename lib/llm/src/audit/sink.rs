@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,12 +20,14 @@ use super::{
     bus,
     config::{self, AuditPolicy},
     handle::AuditRecord,
+    otel_sink::OtelSink,
 };
 
 #[async_trait]
 pub trait AuditSink: Send + Sync {
     fn name(&self) -> &'static str;
     async fn emit(&self, rec: &AuditRecord);
+    async fn shutdown(&self) {}
 }
 
 pub struct StderrSink;
@@ -36,7 +39,9 @@ impl AuditSink for StderrSink {
     async fn emit(&self, rec: &AuditRecord) {
         match serde_json::to_string(rec) {
             Ok(js) => {
-                tracing::info!(target="dynamo_llm::audit", log_type="audit", record=%js, "audit")
+                if let Err(e) = writeln!(std::io::stderr(), "{js}") {
+                    tracing::warn!(error = %e, "audit: stderr write failed");
+                }
             }
             Err(e) => tracing::warn!("audit: serialize failed: {e}"),
         }
@@ -194,6 +199,10 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn AuditSink>>> {
                     Arc::new(JsonlGzipAuditSink::from_policy(policy).await?);
                 out.push(sink);
             }
+            "otel" => {
+                let sink: Arc<dyn AuditSink> = Arc::new(OtelSink::from_policy(policy).await?);
+                out.push(sink);
+            }
             other => tracing::warn!(%other, "audit: unknown sink ignored"),
         }
     }
@@ -205,6 +214,9 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn AuditSink>>> {
 pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Result<()> {
     let sinks = parse_sinks_from_env().await?;
     let sink_count = sinks.len();
+    if sink_count == 0 {
+        anyhow::bail!("audit is enabled but no valid audit sinks were configured");
+    }
     for sink in sinks {
         let name = sink.name();
         let mut rx: broadcast::Receiver<AuditRecord> = bus::subscribe();
@@ -228,6 +240,7 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
                                 ) => break,
                             }
                         }
+                        sink.shutdown().await;
                         return;
                     }
                     msg = rx.recv() => {
@@ -243,6 +256,7 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
                     }
                 }
             }
+            sink.shutdown().await;
         });
     }
     tracing::info!(sinks = sink_count, "Audit sinks ready");
@@ -266,8 +280,11 @@ mod tests {
             request_id: "req-abc".to_string(),
             requested_streaming: false,
             model: "test-model".to_string(),
+            event_time: std::time::SystemTime::now(),
             request: None,
             response: None,
+            audit_complete: true,
+            audit_drop_reason: None,
         }
     }
 
