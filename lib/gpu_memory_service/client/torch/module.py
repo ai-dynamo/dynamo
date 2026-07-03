@@ -221,3 +221,64 @@ def materialize_module_from_gms(
             len(meta_tensors),
             meta_tensors[:10],
         )
+
+
+def rebind_nonparameter_tensors(
+    gms_client_memory_manager: "GMSClientMemoryManager",
+    model: torch.nn.Module,
+) -> int:
+    """Re-bind GMS-resident non-parameter tensors to private clones.
+
+    The publisher builds the whole model inside the GMS memory pool, so
+    buffers and tensor attributes (fp8 KV scales, quantization ranges, ...)
+    land in the same committed allocations as the weights, which are
+    remapped read-only after publish. Unlike parameters, these tensors can
+    be written after load (for example ``init_fp8_kv_scales`` on wake),
+    which faults on the read-only mapping. Cloning them into ordinary CUDA
+    memory gives the publisher the same binding semantics importers get
+    from ``materialize_module_from_gms``: parameters stay on the shared
+    read-only mapping, everything else is private and writable. The GMS
+    copies stay registered so importers can still materialize from them.
+
+    Must run before CUDA graph capture: the clones live at new addresses.
+
+    Returns the number of bytes rebound, i.e. how much memory is duplicated
+    between the read-only GMS copies and the private clones.
+    """
+    mappings = gms_client_memory_manager.mappings
+    rebound_bytes = 0
+    for name, tensor, tensor_type in list(_iter_module_tensors(model)):
+        if tensor_type == "parameter":
+            continue
+        ptr = int(tensor.data_ptr())
+        if not any(
+            va <= ptr < va + mapping.aligned_size
+            for va, mapping in mappings.items()
+        ):
+            # Allocated outside the GMS pool; already private.
+            continue
+
+        mod, attr = _resolve_module_attr(model, name)
+        clone = tensor.detach().clone()
+        if (
+            tensor_type == "buffer"
+            and hasattr(mod, "_buffers")
+            and attr in mod._buffers
+        ):
+            mod._buffers[attr] = clone
+        elif attr.isdigit() and not isinstance(mod, torch.nn.Module):
+            # Element of a tensor list/tuple attribute.
+            if not isinstance(mod, list):
+                logger.debug("[GMS] Cannot rebind immutable container %r", name)
+                continue
+            mod[int(attr)] = clone
+        else:
+            if isinstance(getattr(type(mod), attr, None), property):
+                # Read-only derived attribute; the underlying tensor is
+                # iterated (and rebound) separately.
+                logger.debug("[GMS] Skipping property attribute %r", name)
+                continue
+            setattr(mod, attr, clone)
+        rebound_bytes += clone.numel() * clone.element_size()
+
+    return rebound_bytes
