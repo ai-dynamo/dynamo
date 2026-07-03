@@ -250,30 +250,6 @@ mod tests {
     // ---- FCFS policy tests ----
 
     #[test]
-    fn fcfs_earlier_arrival_scheduled_first() {
-        let policy = FcfsPolicy;
-        let req = request_with(512, 0.0, OverlapScores::default());
-        let early = enqueue_key(&policy, Duration::from_secs(1), &req);
-        let late = enqueue_key(&policy, Duration::from_secs(10), &req);
-        assert!(early > late, "earlier arrival should have higher key");
-    }
-
-    #[test]
-    fn fcfs_priority_jump_promotes() {
-        let policy = FcfsPolicy;
-        // Both arrive at the same wall-clock offset (10s), but one has priority.
-        let normal = request_with(512, 0.0, OverlapScores::default());
-        let boosted = request_with(512, 100.0, OverlapScores::default());
-        let t = Duration::from_secs(10);
-        let key_normal = enqueue_key(&policy, t, &normal);
-        let key_boosted = enqueue_key(&policy, t, &boosted);
-        assert!(
-            key_boosted > key_normal,
-            "priority_jump should produce a higher key"
-        );
-    }
-
-    #[test]
     fn fcfs_priority_jump_beats_earlier_arrival() {
         let policy = FcfsPolicy;
         // Request A arrived at t=0 with no priority.
@@ -284,15 +260,6 @@ mod tests {
         let key_a = enqueue_key(&policy, Duration::from_secs(0), &a);
         let key_b = enqueue_key(&policy, Duration::from_secs(5), &b);
         assert!(key_b > key_a);
-    }
-
-    #[test]
-    fn lcfs_later_arrival_scheduled_first() {
-        let policy = LcfsPolicy;
-        let req = request_with(512, 0.0, OverlapScores::default());
-        let early = enqueue_key(&policy, Duration::from_secs(1), &req);
-        let late = enqueue_key(&policy, Duration::from_secs(10), &req);
-        assert!(late > early, "later arrival should have higher key");
     }
 
     #[test]

@@ -307,19 +307,26 @@ pub mod llm {
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
     /// Master switch for the `nvext` extension protocol on the frontend.
-    /// Default `true`. Falsy values (`0` / `false` / `no` / `off`,
-    /// case-insensitive) cause the frontend to drop `request.nvext` at
-    /// handler entry, ignore the routing-override headers
-    /// (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`,
-    /// `x-dynamo-dp-rank`, `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
+    /// The protocol is **enabled by default**; this variable disables it.
+    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) cause
+    /// the frontend to drop `request.nvext` at handler entry, ignore the
+    /// routing-override headers (`x-dynamo-worker-instance-id`,
+    /// `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
+    /// `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
     /// `extra_fields` opt-in.
-    pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
+    pub const DYN_DISABLE_FRONTEND_NVEXT: &str = "DYN_DISABLE_FRONTEND_NVEXT";
+
+    /// Ignore unknown OpenAI frontend request fields. Unknown fields are dropped,
+    /// not handled; known pass-through fields remain type-validated.
+    pub const DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: &str =
+        "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
 
     /// Master switch for the frontend's HTTP admin API surface.
-    /// Default `true`. Falsy values prevent registration of `GET` /
-    /// `POST /busy_threshold`. Inference, metrics, models, health, and
-    /// liveness routes are unaffected.
-    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
+    /// The admin API is **enabled by default**; this variable disables it.
+    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
+    /// registration of `GET` / `POST /busy_threshold`. Inference, metrics,
+    /// models, health, and liveness routes are unaffected.
+    pub const DYN_DISABLE_FRONTEND_ADMIN_API: &str = "DYN_DISABLE_FRONTEND_ADMIN_API";
 
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
@@ -352,8 +359,13 @@ pub mod llm {
     /// Enable the LoRA allocation controller (set to "true" to enable)
     pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
 
-    /// LoRA allocation algorithm ("hrw" or "random")
+    /// LoRA allocation algorithm ("hrw", "random", or "mcf")
     pub const DYN_LORA_ALLOCATION_ALGORITHM: &str = "DYN_LORA_ALLOCATION_ALGORITHM";
+
+    /// JSON configuration for the MCF (min-cost flow) placement solver.
+    /// Example: '{"candidate_m":16,"gamma_load":2000,"beta_keep":500}'
+    /// Omitted fields use defaults. Only relevant when algorithm is "mcf".
+    pub const DYN_LORA_MCF_CONFIG: &str = "DYN_LORA_MCF_CONFIG";
 
     /// LoRA allocation controller recompute interval in seconds
     pub const DYN_LORA_ALLOCATION_TIMESTEP_SECS: &str = "DYN_LORA_ALLOCATION_TIMESTEP_SECS";
@@ -389,8 +401,7 @@ pub mod llm {
     /// Audit sink configuration
     pub mod audit {
         /// Audit sink selection. Comma-separated values: `stderr`, `nats`,
-        /// `jsonl`, `jsonl_gz`. Setting any non-empty value enables audit
-        /// recording.
+        /// `jsonl`, `jsonl_gz`, `otel`. Unset disables audit recording.
         pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
 
         /// Force audit emission even when the request `store` flag is `false`.
@@ -419,6 +430,10 @@ pub mod llm {
 
         /// Rotating gzip JSONL audit sink roll threshold in record lines.
         pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
+
+        /// Maximum serialized OTEL audit payload bytes. Oversized records emit
+        /// an incomplete marker payload instead of the full request/response.
+        pub const DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES: &str = "DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES";
     }
 
     /// Per-request replay trace configuration
@@ -511,6 +526,13 @@ pub mod router {
     /// Scheduling policy for the router queue ("fcfs" or "wspt").
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
     pub const DYN_ROUTER_POLICY_CONFIG: &str = "DYN_ROUTER_POLICY_CONFIG";
+}
+
+/// Request plane transport environment variables
+pub mod request_plane {
+    /// Request plane payload codec selection: "json" or "msgpack".
+    /// JSON is the compatibility default.
+    pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 }
 
 /// TCP response stream server (CallHome listener) environment variables
@@ -695,10 +717,14 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_DISABLE_FRONTEND_NVEXT,
+            llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+            llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
@@ -711,6 +737,7 @@ mod tests {
             llm::DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND,
             llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
             llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
+            llm::DYN_LORA_MCF_CONFIG,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,
@@ -731,6 +758,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -744,6 +772,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
+            request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
@@ -800,6 +829,7 @@ mod tests {
 
         // OpenTelemetry vars should start with OTEL_
         assert!(logging::otlp::OTEL_EXPORT_ENABLED.starts_with("OTEL_"));
+        assert!(logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT.starts_with("OTEL_"));
         assert!(logging::otlp::OTEL_SERVICE_NAME.starts_with("OTEL_"));
     }
 }

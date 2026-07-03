@@ -120,12 +120,20 @@ data:
       hostSuffix: {{ $ingressHostSuffix | quote }}
       {{- end }}
     {{- end }}
-    {{- if and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled }}
+    {{- $serviceMesh := .Values.dynamo.serviceMesh | default dict }}
+    {{- $hasServiceMesh := and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh }}
+    {{- $hasServiceMeshEnabled := and $hasServiceMesh (hasKey $serviceMesh "enabled") }}
+    {{- $serviceMeshExplicitlyDisabled := and $hasServiceMeshEnabled (kindIs "bool" $serviceMesh.enabled) (not $serviceMesh.enabled) }}
+    {{- if $hasServiceMesh }}
     serviceMesh:
-      provider: {{ .Values.dynamo.serviceMesh.provider | default "istio" | quote }}
-      {{- if eq (.Values.dynamo.serviceMesh.provider | default "istio") "istio" }}
+      {{- if and $hasServiceMeshEnabled (kindIs "bool" $serviceMesh.enabled) }}
+      enabled: {{ $serviceMesh.enabled }}
+      {{- end }}
+      {{- if not $serviceMeshExplicitlyDisabled }}
+      provider: {{ $serviceMesh.provider | default "istio" | quote }}
+      {{- if eq ($serviceMesh.provider | default "istio") "istio" }}
       istio:
-        {{- $istio := .Values.dynamo.serviceMesh.istio | default dict }}
+        {{- $istio := $serviceMesh.istio | default dict }}
         tlsMode: {{ $istio.tlsMode | default "SIMPLE" | quote }}
         {{- if hasKey $istio "insecureSkipVerify" }}
         insecureSkipVerify: {{ $istio.insecureSkipVerify }}
@@ -141,6 +149,7 @@ data:
         {{- if $istio.caCertificates }}
         caCertificates: {{ $istio.caCertificates | quote }}
         {{- end }}
+      {{- end }}
       {{- end }}
     {{- end }}
     {{- if not .Values.namespaceRestriction.enabled }}

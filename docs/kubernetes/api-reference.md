@@ -3609,6 +3609,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled overrides service mesh auto-detection. nil = auto-detect. |  |  |
 | `provider` _string_ | Provider selects the service mesh implementation. Supported: "istio", "".<br />Empty string disables service mesh resource generation. |  |  |
 | `istio` _[IstioMeshConfiguration](#istiomeshconfiguration)_ | Istio holds Istio-specific settings. Only used when Provider is "istio". |  |  |
 
