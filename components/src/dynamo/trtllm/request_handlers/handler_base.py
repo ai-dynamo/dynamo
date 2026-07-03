@@ -622,12 +622,19 @@ class HandlerBase(BaseGenerativeHandler):
         # Serialize first_gen_log_probs for the Rust transport layer.
         DisaggregatedParamsCodec.serialize_first_gen_log_probs(params_dict)
 
+        # Text-only decode requests already carry the original token_ids.
+        # Prompt metadata is only needed to avoid reprocessing multimodal input.
+        if not self._request_has_multimodal(request) and not any(
+            key in request for key in ("_epd_processed_prompt", "_epd_prompt_token_ids")
+        ):
+            return params_dict
+
         # Pack prefill metadata for DECODE worker optimization
         # The frontend only forwards disaggregated_params from prefill response
         # Note: max_tokens is already handled by Rust frontend's PrefillRouter
         prefill_metadata = {}
 
-        # ALWAYS pack prompt info for DECODE to skip re-processing
+        # Pack prompt info for DECODE to skip re-processing
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
         # Use processed_input['prompt'] (from process_openai_request) which is the actual
         # multimodal prompt used by TRT-LLM, not res.prompt which might be raw
