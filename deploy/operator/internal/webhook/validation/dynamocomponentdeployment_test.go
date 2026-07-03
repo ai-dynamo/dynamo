@@ -199,7 +199,18 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName}}},
 				}
 			}),
-			wantCELErr: "spec.podTemplate: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
+			wantCELErr: "spec.podTemplate.metadata.annotations: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
+		},
+		{
+			name: "v1beta1 valid pod template backend annotation reaches the webhook",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "RaY",
+					}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName}}},
+				}
+			}),
 		},
 		{
 			name: "v1alpha1 invalid extra pod metadata annotation reaches the webhook",

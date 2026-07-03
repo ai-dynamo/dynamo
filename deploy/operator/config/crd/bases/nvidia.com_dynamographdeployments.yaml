@@ -12704,6 +12704,9 @@ spec:
                                   type: string
                                   maxLength: 262144
                                 type: object
+                                x-kubernetes-validations:
+                                  - rule: '!("nvidia.com/vllm-distributed-executor-backend" in self) || self["nvidia.com/vllm-distributed-executor-backend"].lowerAscii() in ["mp", "ray"]'
+                                    message: podTemplate backend annotation must be mp or ray, case-insensitively
                               finalizers:
                                 items:
                                   type: string
@@ -20812,9 +20815,6 @@ spec:
                               - containers
                             type: object
                         type: object
-                        x-kubernetes-validations:
-                          - message: podTemplate backend annotation must be mp or ray, case-insensitively
-                            rule: '!has(self.metadata) || !has(self.metadata.annotations) || !(''nvidia.com/vllm-distributed-executor-backend'' in self.metadata.annotations) || self.metadata.annotations[''nvidia.com/vllm-distributed-executor-backend''].lowerAscii() in [''mp'', ''ray'']'
                       replicas:
                         description: |-
                           replicas is the desired number of Pods for this component. When

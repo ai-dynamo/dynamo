@@ -115,7 +115,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// themselves. Validation rejects pod templates where a
 	// non-`"main"` container is missing a required field such as `image`.
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.annotations) || !('nvidia.com/vllm-distributed-executor-backend' in self.metadata.annotations) || self.metadata.annotations['nvidia.com/vllm-distributed-executor-backend'].lowerAscii() in ['mp', 'ray']",message="podTemplate backend annotation must be mp or ray, case-insensitively"
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
 	// replicas is the desired number of Pods for this component. When
