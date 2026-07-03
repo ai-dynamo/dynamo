@@ -82,7 +82,8 @@ uv pip install -e lib/gpu_memory_service
 Install Dynamo with a backend extra to pull the inference engine and its CUDA dependencies. Choose the backend you intend to run:
 
 ```bash
-uv pip install -e ".[vllm]"   # or [sglang]
+# Use .[vllm] or .[sglang] instead to install the relevant framework dependencies
+uv pip install -e .
 ```
 
 > [!NOTE]
