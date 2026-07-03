@@ -20,11 +20,12 @@ use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::request_cache_salt;
+use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
+use crate::envoy_helpers::find_header;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
@@ -64,6 +65,16 @@ fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigO
         track_prefill_tokens: Some(false),
         ..Default::default()
     })
+}
+
+fn cache_namespace_with_header_override(
+    headers: &[(String, String)],
+    body_cache_namespace: Option<String>,
+) -> Option<String> {
+    find_header(headers, HEADER_TENANT_ID)
+        .filter(|tenant_id| !tenant_id.is_empty())
+        .map(str::to_owned)
+        .or(body_cache_namespace)
 }
 
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
@@ -920,9 +931,11 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, cache_namespace, priority_jump, strict_priority) = self
+        let (tokens, body_cache_namespace, priority_jump, strict_priority) = self
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
+        let cache_namespace =
+            cache_namespace_with_header_override(&req.headers, body_cache_namespace);
 
         // Try prefill routing first (disaggregated mode).
         //
@@ -1098,6 +1111,33 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tenant_header_overrides_body_cache_namespace() {
+        let headers = vec![("X-Tenant-ID".to_string(), "tenant-header".to_string())];
+
+        assert_eq!(
+            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
+                .as_deref(),
+            Some("tenant-header")
+        );
+    }
+
+    #[test]
+    fn empty_tenant_header_falls_back_to_body_cache_namespace() {
+        let headers = vec![(HEADER_TENANT_ID.to_string(), String::new())];
+
+        assert_eq!(
+            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
+                .as_deref(),
+            Some("tenant-body")
+        );
+    }
+
+    #[test]
+    fn absent_cache_namespace_stays_absent() {
+        assert_eq!(cache_namespace_with_header_override(&[], None), None);
+    }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
     /// non-zero `priority_jump`, and absence collapses to `0.0`. If this

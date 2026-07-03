@@ -191,6 +191,9 @@ impl ZmqEventNormalizer {
                 cache_namespace,
                 ..
             } => {
+                if cache_namespace.as_deref() == Some("") {
+                    *cache_namespace = None;
+                }
                 if cache_namespace.is_none()
                     && let Some(parent) = parent_block_hash.as_ref()
                 {
@@ -201,7 +204,15 @@ impl ZmqEventNormalizer {
                         Some(CacheNamespaceState::Ambiguous) => {
                             return Err(ZmqEventFilterReason::AmbiguousCacheNamespace);
                         }
-                        None => {}
+                        None => {
+                            // Deliberately preserve the unsalted interpretation when a
+                            // listener joins in the middle of a chain. The vLLM wire
+                            // format cannot distinguish an unknown salted parent from a
+                            // genuinely unsalted one, and retaining every unsalted block
+                            // here would duplicate the index on the event hot path. The
+                            // backend still enforces its own cache isolation; this narrow
+                            // fail-open case can only pollute the router overlap score.
+                        }
                     }
                 }
 

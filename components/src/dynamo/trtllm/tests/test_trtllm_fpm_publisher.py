@@ -30,6 +30,7 @@ in ``test_invoke_handler_matches_publisher_keyword_set``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import queue
 import threading
 from unittest.mock import MagicMock
@@ -423,6 +424,48 @@ def test_handle_kv_event_forwards_cache_salt_to_zmq_publisher():
 
     pub.zmq_kv_event_publisher.publish_stored.assert_called_once()
     assert pub.zmq_kv_event_publisher.publish_stored.call_args.args[-1] == "tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_drops_conflicting_salts_and_processes_next_event(caplog):
+    pub = _publisher_for_kv_event_test()
+    pub._stop_event = threading.Event()
+    pub.zmq_kv_event_publisher = None
+    publisher = MagicMock()
+    pub.kv_event_publishers = {0: publisher}
+
+    conflicting = _stored_kv_event("tenant-a")
+    conflicting["data"]["blocks"].append(
+        {
+            **conflicting["data"]["blocks"][0],
+            "block_hash": 456,
+            "cache_salt": "tenant-b",
+        }
+    )
+    valid = _stored_kv_event("tenant-c")
+    valid["event_id"] = 2
+
+    async def fetch_events():
+        yield conflicting
+        yield valid
+
+    def handle_event(event):
+        pub._handle_kv_event(event)
+        if event["event_id"] == 2:
+            pub._stop_event.set()
+
+    with caplog.at_level(logging.WARNING):
+        await pub._polling_loop(
+            fetch_events,
+            handle_event,
+            min_sleep=0.001,
+            max_sleep=0.001,
+            backoff_factor=1.0,
+        )
+
+    publisher.publish_stored.assert_called_once()
+    assert publisher.publish_stored.call_args.kwargs["cache_salt"] == "tenant-c"
+    assert "Dropping stored KV event with invalid cache namespace" in caplog.text
 
 
 def test_publisher_initializes_fpm_publisher_under_attention_dp(monkeypatch):

@@ -315,4 +315,4 @@ async def test_unified_llm_engine_forwards_cache_salt_to_prompt():
         pass
 
     prompt = engine.engine_client.calls[0][0][0]
-    assert prompt["cache_salt"] == "tenant-a"
+    assert prompt["cache_salt"] == "dynamo-cache-salt:tenant-a"

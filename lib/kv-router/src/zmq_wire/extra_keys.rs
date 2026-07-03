@@ -5,6 +5,9 @@ use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
 
 use super::types::ExtraKeyItem;
 
+// Must match _DYNAMO_CACHE_SALT_PREFIX in components/src/dynamo/vllm/handlers.py.
+const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
+
 /// Parse MM hash from extra_keys string:
 /// - Only accept canonical vLLM MM identifiers (64-char hex digest)
 /// - Convert by taking the first 16 hex chars as u64
@@ -17,40 +20,30 @@ pub fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
     None
 }
 
-fn cache_namespace_candidate<'a>(value: &'a str, lora_name: Option<&str>) -> Option<&'a str> {
-    if value.is_empty() {
-        return None;
-    }
-    if lora_name.is_some_and(|name| name == value) {
-        return None;
-    }
-    if parse_mm_hash_from_extra_key(value).is_some() {
-        return None;
-    }
-    Some(value)
-}
-
 /// Extract a vLLM cache salt from `extra_keys` when a producer does not emit
 /// top-level `cache_salt`. vLLM aligns `extra_keys` with blocks and includes
-/// cache salt only in the first block. Only MessagePack string values are
-/// candidates; byte values such as prompt-embedding hashes must never become
-/// cache namespaces.
+/// cache salt only in the first block. Dynamo tags the opaque value before
+/// passing it to vLLM because bare strings are otherwise ambiguous with LoRA
+/// names and legacy multimodal hashes. The first matching LoRA item is skipped
+/// before looking for the tag so a salt equal to the LoRA name still works.
 pub fn extra_keys_to_cache_namespace(
     extra_keys: Option<&[Option<Vec<ExtraKeyItem>>]>,
     lora_name: Option<&str>,
 ) -> Option<String> {
     let first_block = extra_keys?.first()?.as_ref()?;
-    first_block.iter().find_map(|key| match key {
-        ExtraKeyItem::Hash(hash)
-        | ExtraKeyItem::HashWithSignedOffset((hash, _))
-        | ExtraKeyItem::HashWithUnsignedOffset((hash, _)) => {
-            cache_namespace_candidate(hash, lora_name).map(str::to_owned)
+    let mut unmatched_lora = lora_name.filter(|name| !name.is_empty());
+    first_block.iter().find_map(|key| {
+        let ExtraKeyItem::Hash(value) = key else {
+            return None;
+        };
+        if unmatched_lora.is_some_and(|name| name == value) {
+            unmatched_lora = None;
+            return None;
         }
-        ExtraKeyItem::Bytes(_)
-        | ExtraKeyItem::Signed(_)
-        | ExtraKeyItem::Unsigned(_)
-        | ExtraKeyItem::Float(_)
-        | ExtraKeyItem::Bool(_) => None,
+        value
+            .strip_prefix(DYNAMO_CACHE_SALT_PREFIX)
+            .filter(|namespace| !namespace.is_empty())
+            .map(str::to_owned)
     })
 }
 
@@ -118,5 +111,34 @@ mod tests {
     fn prompt_embedding_bytes_are_not_cache_namespace() {
         let extra_keys = [Some(vec![ExtraKeyItem::Bytes(b"prompt-embed".to_vec())])];
         assert_eq!(extra_keys_to_cache_namespace(Some(&extra_keys), None), None);
+    }
+
+    #[test]
+    fn untagged_strings_are_not_cache_namespaces() {
+        let extra_keys = [Some(vec![ExtraKeyItem::Hash("tenant-a".to_string())])];
+        assert_eq!(extra_keys_to_cache_namespace(Some(&extra_keys), None), None);
+    }
+
+    #[test]
+    fn tagged_cache_namespace_is_decoded() {
+        let extra_keys = [Some(vec![ExtraKeyItem::Hash(
+            "dynamo-cache-salt:tenant-a".to_string(),
+        )])];
+        assert_eq!(
+            extra_keys_to_cache_namespace(Some(&extra_keys), None).as_deref(),
+            Some("tenant-a")
+        );
+    }
+
+    #[test]
+    fn cache_namespace_equal_to_lora_name_is_decoded() {
+        let extra_keys = [Some(vec![
+            ExtraKeyItem::Hash("adapter-a".to_string()),
+            ExtraKeyItem::Hash("dynamo-cache-salt:adapter-a".to_string()),
+        ])];
+        assert_eq!(
+            extra_keys_to_cache_namespace(Some(&extra_keys), Some("adapter-a")).as_deref(),
+            Some("adapter-a")
+        );
     }
 }

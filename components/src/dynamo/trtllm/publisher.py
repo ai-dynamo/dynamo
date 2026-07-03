@@ -872,7 +872,17 @@ class Publisher:
                     block_mm_infos.append(None)
 
             lora_name = data.get("lora_name")
-            cache_salt = stored_event_cache_salt(data)
+            try:
+                cache_salt = stored_event_cache_salt(data)
+            except ValueError as error:
+                logger.warning(
+                    "Dropping stored KV event with invalid cache namespace: "
+                    "engine_event_id=%s attention_dp_rank=%s error=%s",
+                    event_id,
+                    attention_dp_rank,
+                    error,
+                )
+                return
 
             logger.debug(
                 "Publishing stored KV event: engine_event_id=%s "

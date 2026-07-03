@@ -3,7 +3,10 @@
 
 import pytest
 
-from dynamo.trtllm.utils.request_utils import stored_event_cache_salt
+from dynamo.trtllm.utils.request_utils import (
+    request_cache_salt,
+    stored_event_cache_salt,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -11,6 +14,39 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    ("request_body", "expected"),
+    [
+        (
+            {
+                "routing": {"cache_salt": "tenant-routing"},
+                "extra_args": {"nvext": {"cache_salt": "tenant-nvext"}},
+            },
+            "tenant-routing",
+        ),
+        (
+            {
+                "routing": {"cache_salt": ""},
+                "extra_args": {"nvext": {"cache_salt": "tenant-nvext"}},
+            },
+            "tenant-nvext",
+        ),
+        (
+            {
+                "routing": {"cache_salt": ""},
+                "extra_args": {"nvext": {"cache_salt": ""}},
+            },
+            None,
+        ),
+        ({}, None),
+    ],
+)
+def test_request_cache_salt_precedence_and_empty_fallback(
+    request_body, expected
+) -> None:
+    assert request_cache_salt(request_body) == expected
 
 
 def test_stored_event_cache_salt_uses_per_block_schema() -> None:
