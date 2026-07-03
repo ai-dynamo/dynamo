@@ -247,10 +247,6 @@ rules:
   - patch
   - update
   - watch
-{{- $serviceMesh := .Values.dynamo.serviceMesh | default dict }}
-{{- $hasServiceMesh := and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh }}
-{{- $serviceMeshProviderIstio := and $hasServiceMesh (eq ($serviceMesh.provider | default "istio") "istio") }}
-{{- if or .Values.istioVirtualServiceEnabled $serviceMeshProviderIstio }}
 - apiGroups:
   - networking.istio.io
   resources:
@@ -264,7 +260,6 @@ rules:
   - patch
   - update
   - watch
-{{- end }}
 - apiGroups:
   - networking.k8s.io
   resources:
