@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nemotron-ultra-model-download
+  labels:
+    app.kubernetes.io/name: nemotron-ultra-model-download
+    app.kubernetes.io/part-of: nemotron-ultra
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nemotron-ultra-model-download
+        app.kubernetes.io/part-of: nemotron-ultra
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: download
+          image: python:3.10-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -Eeuo pipefail
+              python3 -m pip install --no-cache-dir -U huggingface_hub
+              export HF_HOME=/opt/models
+              python3 - <<'PY'
+              import os
+              from huggingface_hub import snapshot_download
+
+              model_repo = "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+              model_revision = os.environ.get("MODEL_REVISION", "main")
+
+              model_path = "/opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+              os.makedirs(model_path, exist_ok=True)
+              snapshot_download(
+                  repo_id=model_repo,
+                  revision=model_revision,
+                  local_dir=model_path,
+              )
+              print(f"MODEL_DOWNLOAD_SNAPSHOT_DONE repo={model_repo} path={model_path}")
+              PY
+              MODEL_PATH="/opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+              test -r "${MODEL_PATH}/config.json"
+              test -r "${MODEL_PATH}/tokenizer.json"
+              test -r "${MODEL_PATH}/tokenizer_config.json"
+              test -r "${MODEL_PATH}/generation_config.json"
+              test -r "${MODEL_PATH}/ultra_v3_reasoning_parser.py"
+              echo "MODEL_DOWNLOAD_PASS path=${MODEL_PATH}"
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /opt/models
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

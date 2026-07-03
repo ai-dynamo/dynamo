@@ -44,3 +44,4 @@ When both modes are enabled, throughput-based scaling provides a lower bound on 
 
 - **User docs**: [Planner Guide](../../../../docs/components/planner/planner-guide.md) (deployment, configuration, examples)
 - **Design docs**: [Planner Design](../../../../docs/design-docs/planner-design.md) (architecture, algorithms)
+- **Manual workflows**: [tests/manual/README.md](tests/manual/README.md) (dry run helpers, perf configs, and manual scaling scripts)

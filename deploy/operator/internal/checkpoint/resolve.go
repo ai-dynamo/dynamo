@@ -20,42 +20,50 @@ package checkpoint
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type CheckpointInfo struct {
-	Enabled        bool
-	Exists         bool
-	Identity       *nvidiacomv1alpha1.DynamoCheckpointIdentity
-	Hash           string
-	Location       string
-	StorageType    nvidiacomv1alpha1.DynamoCheckpointStorageType
-	CheckpointName string
-	Ready          bool
+	Enabled          bool
+	Exists           bool
+	Identity         *nvidiacomv1alpha1.DynamoCheckpointIdentity
+	GPUMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec
+	Hash             string
+	ArtifactVersion  string
+	CheckpointName   string
+	Ready            bool
+	StartupPolicy    nvidiacomv1alpha1.CheckpointStartupPolicy
+	// Empty means the restore pod targets the default main container.
+	RestoreTargetContainers []string
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
-	hash, err := checkpointIdentityHash(ckpt)
+	hash, err := CheckpointID(ckpt)
 	if err != nil {
 		return nil, err
 	}
 
 	return &CheckpointInfo{
-		Enabled:        true,
-		Exists:         true,
-		Identity:       &ckpt.Spec.Identity,
-		Hash:           hash,
-		Location:       ckpt.Status.Location,
-		StorageType:    ckpt.Status.StorageType,
-		CheckpointName: ckpt.Name,
-		Ready:          ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		Enabled:          true,
+		Exists:           true,
+		Identity:         &ckpt.Spec.Identity,
+		GPUMemoryService: ckpt.Spec.GPUMemoryService,
+		Hash:             hash,
+		ArtifactVersion:  checkpointArtifactVersion(ckpt),
+		CheckpointName:   ckpt.Name,
+		Ready:            ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 	}, nil
+}
+
+func checkpointArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string {
+	if ckpt == nil {
+		return snapshotprotocol.DefaultCheckpointArtifactVersion
+	}
+	return snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 }
 
 func ResolveCheckpointForService(
@@ -64,6 +72,10 @@ func ResolveCheckpointForService(
 	namespace string,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
 ) (*CheckpointInfo, error) {
+	startupPolicy := nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+	if config != nil && config.StartupPolicy != "" {
+		startupPolicy = config.StartupPolicy
+	}
 	switch {
 	case config == nil || !config.Enabled:
 		return &CheckpointInfo{Enabled: false}, nil
@@ -76,9 +88,23 @@ func ResolveCheckpointForService(
 			return nil, fmt.Errorf("failed to get referenced checkpoint %s: %w", *config.CheckpointRef, err)
 		}
 
-		return checkpointInfoFromObject(ckpt)
+		info, err := checkpointInfoFromObject(ckpt)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateResolvedGMSSnapshotGate(info); err != nil {
+			return nil, err
+		}
+		if config.TargetContainerName != "" {
+			info.RestoreTargetContainers = []string{config.TargetContainerName}
+		}
+		info.StartupPolicy = startupPolicy
+		return info, nil
 	case config.Identity == nil:
-		return nil, fmt.Errorf("checkpoint enabled but no checkpointRef or identity provided")
+		return &CheckpointInfo{
+			Enabled:       true,
+			StartupPolicy: startupPolicy,
+		}, nil
 	}
 
 	hash, err := ComputeIdentityHash(*config.Identity)
@@ -92,9 +118,10 @@ func ResolveCheckpointForService(
 	}
 	if existing == nil {
 		return &CheckpointInfo{
-			Enabled:  true,
-			Identity: config.Identity,
-			Hash:     hash,
+			Enabled:       true,
+			Identity:      config.Identity,
+			Hash:          hash,
+			StartupPolicy: startupPolicy,
 		}, nil
 	}
 
@@ -102,40 +129,20 @@ func ResolveCheckpointForService(
 	if err != nil {
 		return nil, err
 	}
+	if err := validateResolvedGMSSnapshotGate(info); err != nil {
+		return nil, err
+	}
 	info.Identity = config.Identity
+	if config.TargetContainerName != "" {
+		info.RestoreTargetContainers = []string{config.TargetContainerName}
+	}
+	info.StartupPolicy = startupPolicy
 	return info, nil
 }
 
-func ResolveCheckpointStorage(
-	hash string,
-	version string,
-	config *configv1alpha1.CheckpointConfiguration,
-) (string, nvidiacomv1alpha1.DynamoCheckpointStorageType, error) {
-	version = strings.TrimSpace(version)
-	if version == "" {
-		version = consts.DefaultCheckpointArtifactVersion
+func validateResolvedGMSSnapshotGate(info *CheckpointInfo) error {
+	if info == nil {
+		return nil
 	}
-
-	storageType := configv1alpha1.CheckpointStorageTypePVC
-	if config != nil && config.Storage.Type != "" {
-		storageType = config.Storage.Type
-	}
-
-	switch storageType {
-	case configv1alpha1.CheckpointStorageTypeS3:
-		if config == nil || config.Storage.S3.URI == "" {
-			return "", "", fmt.Errorf("S3 storage type selected but no S3 URI configured (set checkpoint.storage.s3.uri)")
-		}
-		return fmt.Sprintf("%s/%s/versions/%s.tar", config.Storage.S3.URI, hash, version), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
-	case configv1alpha1.CheckpointStorageTypeOCI:
-		if config == nil || config.Storage.OCI.URI == "" {
-			return "", "", fmt.Errorf("OCI storage type selected but no OCI URI configured (set checkpoint.storage.oci.uri)")
-		}
-		return fmt.Sprintf("%s:%s-%s", config.Storage.OCI.URI, hash, version), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
-	default:
-		if config == nil || config.Storage.PVC.BasePath == "" {
-			return "", "", fmt.Errorf("PVC storage type selected but no PVC base path configured (set checkpoint.storage.pvc.basePath)")
-		}
-		return fmt.Sprintf("%s/%s/versions/%s", config.Storage.PVC.BasePath, hash, version), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
-	}
+	return ValidateGMSSnapshotGate("checkpoint.gpuMemoryService", info.Enabled, info.GPUMemoryService)
 }

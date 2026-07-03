@@ -6,7 +6,9 @@
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{EngineType, KvEventPublishers, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{
+    EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
+};
 use crate::scheduler::{Scheduler, SchedulerHandle, SglangScheduler};
 
 /// Create a scheduler for the configured engine type.
@@ -19,14 +21,18 @@ pub fn create_engine(
     output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
     kv_event_publishers: KvEventPublishers,
     cancellation_token: Option<CancellationToken>,
+    fpm_publisher: FpmPublisher,
 ) -> Box<dyn SchedulerHandle> {
     match args.engine_type {
-        EngineType::Vllm => Box::new(Scheduler::new(
+        // TRT-LLM reuses the vLLM scheduler core; the GUARANTEED_NO_EVICT
+        // policy is carried in `args` and read by the core per pass.
+        EngineType::Vllm | EngineType::Trtllm => Box::new(Scheduler::new(
             args,
             dp_rank,
             output_tx,
             kv_event_publishers,
             cancellation_token,
+            fpm_publisher,
         )),
         EngineType::Sglang => Box::new(SglangScheduler::new(
             args,
@@ -34,6 +40,7 @@ pub fn create_engine(
             output_tx,
             kv_event_publishers,
             cancellation_token,
+            fpm_publisher,
         )),
     }
 }

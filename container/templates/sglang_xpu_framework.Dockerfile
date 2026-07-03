@@ -1,0 +1,112 @@
+{#
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#}
+# === BEGIN templates/sglang_xpu_framework.Dockerfile ===
+
+##################################
+#### SGLang XPU Framework ########
+##################################
+#
+# PURPOSE: Build SGLang from source for Intel XPU (GPU) environments.
+#
+# This stage follows the pattern from sgl-project/sglang/docker/xpu.Dockerfile.
+# It builds SGLang with XPU PyTorch (Intel GPU via oneAPI/Level Zero).
+#
+# The resulting image is used as the base for sglang_runtime when device=xpu.
+#
+
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
+
+ARG TARGETARCH
+ARG PYTHON_VERSION
+ARG SGLANG_REF
+ARG SGLANG_GIT_URL
+ARG SGLANG_KERNEL_GIT_URL
+ARG SGLANG_KERNEL_REF
+
+SHELL ["/bin/bash", "-c"]
+
+# Install additional system dependencies for XPU build
+USER root
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libsqlite3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /tmp/neo && cd /tmp/neo && \
+    WGET="wget -q --tries=5 --waitretry=5 --retry-connrefused --retry-on-http-error=429,500,502,503,504" && \
+    $WGET https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-core-2_2.24.8+20344_amd64.deb && \
+    $WGET https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-opencl-2_2.24.8+20344_amd64.deb && \
+    $WGET https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/intel-ocloc_25.48.36300.8-0_amd64.deb && \
+    $WGET https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/intel-opencl-icd_25.48.36300.8-0_amd64.deb && \
+    $WGET https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/libigdgmm12_22.8.2_amd64.deb && \
+    $WGET https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/libze-intel-gpu1_25.48.36300.8-0_amd64.deb && \
+    $WGET https://github.com/oneapi-src/level-zero/releases/download/v1.26.0/level-zero_1.26.0+u24.04_amd64.deb && \
+    dpkg -i *.deb && \
+    cd / && rm -rf /tmp/neo
+
+# Install Miniforge (conda) — follows upstream sgl-project/sglang/docker/xpu.Dockerfile pattern.
+# Conda provides correct library linkage with the base image's oneAPI/Level Zero stack.
+ENV CONDA_DIR=/opt/miniforge3
+RUN curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused -o /tmp/miniforge.sh \
+        https://github.com/conda-forge/miniforge/releases/download/25.1.1-0/Miniforge3-Linux-x86_64.sh && \
+    bash /tmp/miniforge.sh -b -p ${CONDA_DIR} && \
+    rm /tmp/miniforge.sh && \
+    ${CONDA_DIR}/bin/conda create -y -n sglang python=${PYTHON_VERSION} && \
+    ${CONDA_DIR}/bin/conda run -n sglang conda install -y pip
+
+ENV VIRTUAL_ENV="${CONDA_DIR}/envs/sglang" \
+    PATH="${CONDA_DIR}/envs/sglang/bin:${CONDA_DIR}/bin:${PATH}" \
+    CONDA_DEFAULT_ENV=sglang
+
+# Install PyTorch XPU packages (matching upstream xpu.Dockerfile)
+WORKDIR /sgl-workspace
+RUN pip3 install \
+        torch==2.11.0+xpu \
+        torchao \
+        torchvision \
+        torchaudio==2.11.0+xpu \
+        --index-url https://download.pytorch.org/whl/xpu
+
+RUN pip3 install triton-xpu==3.7.0
+
+# Install sgl-kernel-xpu — needs icpx (DPCPP) for SYCL kernels.
+# Uses --no-build-isolation so build deps must be pre-installed.
+RUN source /opt/intel/oneapi/setvars.sh --force && \
+    pip3 install scikit-build-core cmake ninja setuptools && \
+    pip3 install "sgl-kernel @ git+${SGLANG_KERNEL_GIT_URL}@${SGLANG_KERNEL_REF}" --no-build-isolation
+
+# Clone SGLang and install for XPU (sgl-kernel is already satisfied from above)
+RUN git clone ${SGLANG_GIT_URL} sglang && \
+    cd sglang && \
+    git checkout ${SGLANG_REF} && \
+    cd python && \
+    cp pyproject_xpu.toml pyproject.toml && \
+    pip3 install --no-build-isolation --extra-index-url https://download.pytorch.org/whl/xpu ".[diffusion]" && \
+    pip3 install "xgrammar==0.1.33" --no-deps && \
+    pip3 install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate ftfy
+
+# Multimodal + accelerate runtime deps that pyproject_xpu.toml does NOT pull in
+# via the `[diffusion]` extra above:
+#   - decord: dropped from pyproject_xpu.toml entirely (CUDA pyproject.toml
+#     ships decord2 by default for multimodal video decode).
+#   - accelerate: only declared in pyproject_xpu.toml's `[test]` extra, but
+#     diffusers needs it at runtime for enable_model_cpu_offload.
+# Use --no-deps so the resolver doesn't pull CUDA-bound transitive packages.
+RUN pip3 install --no-deps decord accelerate
+
+# pyproject_xpu.toml's [diffusion] extra pulls opencv-python (with X11/libGL
+# deps), but the container image has no libGL.so.1, so `import cv2` fails.
+# Swap to opencv-python-headless (same version) — matches the CUDA pyproject
+# default and avoids dragging X11 libs into the image.
+RUN pip3 uninstall -y opencv-python && \
+    pip3 install --no-deps "opencv-python-headless==4.10.0.84"
+
+# Source conda + oneAPI environment in bashrc for interactive shells
+RUN echo ". ${CONDA_DIR}/bin/activate sglang" >> /etc/bash.bashrc && \
+    echo "source /opt/intel/oneapi/setvars.sh --force" >> /etc/bash.bashrc
+
+ENV SGLANG_FORCE_SHUTDOWN=1
+
+# === END templates/sglang_xpu_framework.Dockerfile ===

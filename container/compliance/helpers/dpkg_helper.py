@@ -120,6 +120,12 @@ def parse_dpkg_status(status_path):
                 elif ":" in line:
                     key, _, val = line.partition(":")
                     current[key.strip()] = val.strip()
+    except FileNotFoundError:
+        print(
+            f"WARNING: No dpkg status file found: {status_path}",
+            file=sys.stderr,
+        )
+        return {}
     except (OSError, IOError):
         print(f"ERROR: Cannot read dpkg status file: {status_path}", file=sys.stderr)
         sys.exit(1)

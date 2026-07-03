@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -20,7 +21,16 @@ from vllm.renderers import ChatParams
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
-from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+from vllm.utils.async_utils import make_async
+
+
+class _Renderer(Protocol):
+    """Structural type for vLLM's chat-template renderer."""
+
+    async def render_messages_async(
+        self, messages: Any, params: ChatParams
+    ) -> tuple[Any, dict[str, Any]]:
+        ...
 
 
 @dataclass
@@ -32,15 +42,17 @@ class PreprocessResult:
     prompt_token_ids: list[int]
 
 
-_ASYNC_TOKENIZER_POOL: dict[int, AsyncMicrobatchTokenizer] = {}
+_ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
 
 
-def _get_async_tokenizer(tokenizer: TokenizerLike) -> AsyncMicrobatchTokenizer:
+def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
     key = id(tokenizer)
     async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
     if async_tokenizer is None:
-        async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
+        async_tokenizer = make_async(
+            tokenizer, executor=ThreadPoolExecutor(max_workers=1)
+        )
         _ASYNC_TOKENIZER_POOL[key] = async_tokenizer
     return async_tokenizer
 
@@ -80,6 +92,7 @@ def _prepare_request(
     tokenizer: TokenizerLike,
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
+    enable_auto_tool_choice: bool = False,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -103,9 +116,13 @@ def _prepare_request(
         request_for_sampling = ChatCompletionRequest.model_validate(request)
 
     tool_parser: ToolParser | None = None
-    if tool_parser_class and request_for_sampling.tools:
+    # With enable_auto_tool_choice the model may emit tool calls even when the
+    # client did not supply an explicit `tools` list, so we activate the parser
+    # whenever the tool_parser_class is available.
+    has_tools = bool(request_for_sampling.tools)
+    if tool_parser_class and (has_tools or enable_auto_tool_choice):
         if request_for_sampling.tool_choice != "none":
-            tool_parser = tool_parser_class(tokenizer)
+            tool_parser = tool_parser_class(tokenizer, request_for_sampling.tools)
             request_for_sampling = tool_parser.adjust_request(request_for_sampling)
 
     # Strip tools from the template when tool_choice=none so the model doesn't
@@ -160,9 +177,10 @@ async def preprocess_chat_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
     tokenizer: TokenizerLike,
-    renderer,
+    renderer: _Renderer,
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
+    enable_auto_tool_choice: bool = False,
 ) -> PreprocessResult:
     (
         request_for_sampling,
@@ -175,6 +193,7 @@ async def preprocess_chat_request(
         tokenizer=tokenizer,
         tool_parser_class=tool_parser_class,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
+        enable_auto_tool_choice=enable_auto_tool_choice,
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
@@ -209,17 +228,29 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
+        stream_response: bool = True,
     ) -> None:
         self.tokenizer = tokenizer
         self.request_for_sampling = request_for_sampling
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
+        self.stream_response = stream_response
+        # See https://github.com/ai-dynamo/dynamo/issues/8636 —
+        # when the chat template runs with enable_thinking=False,
+        # the reasoning open/close tags live in the prompt and the generated
+        # output carries none — so is_reasoning_end_streaming() never fires,
+        # reasoning_is_done stays false, and tool-call markup leaks into
+        # reasoning_content. Skip the reasoning parser in that case.
+        # `enable_thinking` is the convention adopted across the modern
+        # reasoning-capable model families that vLLM supports; templates
+        # that don't honor it simply leave it unset (no effect here).
+        thinking_disabled = chat_template_kwargs.get("enable_thinking") is False
         self.reasoning_parser = (
             reasoning_parser_class(
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,
             )
-            if reasoning_parser_class
+            if reasoning_parser_class and not thinking_disabled
             else None
         )
         self._fast_plain_text = (
@@ -234,11 +265,23 @@ class StreamingPostProcessor:
         self.previous_token_ids: list[int] = []
         self.reasoning_is_done = False
         self.in_progress_tool_calls: dict[int, DeltaToolCall] = {}
+        # Per-choice tracking (https://github.com/ai-dynamo/dynamo/issues/8636) of whether a tool_call delta was
+        # emitted on that choice, keyed by `output.index`. Required because
+        # `n > 1` requests stream multiple choices interleaved; a remap on
+        # one choice must not bleed into another. See _remap_finish_reason().
+        self._tool_call_choices_emitted: set[int] = set()
         # Buffer for post-reasoning tool text when </think> and <tool_call>
         # arrive in the same chunk.  The streaming tool parser cannot handle
         # this correctly, so we accumulate text here and fall back to the
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
+
+    def _should_buffer_for_non_streaming_tool_parse(self) -> bool:
+        return (
+            not self.stream_response
+            and self.tool_parser is not None
+            and self.request_for_sampling.tool_choice != "none"
+        )
 
     @staticmethod
     def _merge_tool_call(
@@ -280,6 +323,44 @@ class StreamingPostProcessor:
             and self.request_for_sampling.tool_choice != "none"
         )
 
+    def _tool_parser_terminal_markers(self, names: tuple[str, ...]) -> tuple[str, ...]:
+        parser_engine = getattr(self.tool_parser, "_parser_engine", None)
+        parser_engine_config = getattr(parser_engine, "parser_engine_config", None)
+        terminals = getattr(parser_engine_config, "terminals", None)
+        if not isinstance(terminals, dict):
+            return ()
+
+        markers: list[str] = []
+        for name in names:
+            marker = terminals.get(name)
+            if isinstance(marker, str) and marker:
+                markers.append(marker)
+        return tuple(markers)
+
+    def _tool_start_markers(self) -> tuple[str, ...]:
+        markers = [
+            getattr(self.tool_parser, "tool_call_start_token", None),
+            # MistralToolParser names its [TOOL_CALLS] marker bot_token.
+            getattr(self.tool_parser, "bot_token", None),
+            *self._tool_parser_terminal_markers(("TOOL_START", "FUNC_PREFIX")),
+        ]
+        return tuple(
+            dict.fromkeys(
+                marker for marker in markers if isinstance(marker, str) and marker
+            )
+        )
+
+    def _tool_end_markers(self) -> tuple[str, ...]:
+        markers = [
+            getattr(self.tool_parser, "tool_call_end_token", None),
+            *self._tool_parser_terminal_markers(("TOOL_END", "FUNC_END")),
+        ]
+        return tuple(
+            dict.fromkeys(
+                marker for marker in markers if isinstance(marker, str) and marker
+            )
+        )
+
     @staticmethod
     def _compose_delta_message(
         reasoning: str | None, content: str | None
@@ -312,7 +393,9 @@ class StreamingPostProcessor:
         if extracted.tools_called:
             for i, tool_call in enumerate(extracted.tool_calls):
                 self._add_tool_call_from_extracted(i, tool_call)
-            return self._compose_delta_message(saved_reasoning, None)
+            return self._compose_delta_message(
+                saved_reasoning, extracted.content or None
+            )
 
         return self._compose_delta_message(saved_reasoning, extracted.content or None)
 
@@ -348,29 +431,93 @@ class StreamingPostProcessor:
             for _, tool_call in self.in_progress_tool_calls.items()
         ]
 
+    def _remap_finish_reason(
+        self, output_index: int, finish_reason: str | None
+    ) -> str | None:
+        # Per https://github.com/ai-dynamo/dynamo/issues/8636 — OpenAI ChatCompletion finish_reason must be "tool_calls"
+        # when the model called a tool. vLLM stops at <|im_end|> and reports
+        # "stop"; remap once a tool_call delta has been emitted on THIS
+        # choice. Per-choice tracking is required for `n > 1` requests —
+        # choice 0 emitting tool_calls must not remap choice 1's stop.
+        # Spec: https://github.com/openai/openai-openapi/blob/master/openapi.yaml
+        if finish_reason == "stop" and output_index in self._tool_call_choices_emitted:
+            return "tool_calls"
+        return finish_reason
+
     def _emit_tool_calls_choice(self, output: Any) -> dict[str, Any]:
+        self._tool_call_choices_emitted.add(output.index)
         choice = {
             "index": output.index,
             "delta": {
                 "role": "assistant",
                 "tool_calls": self._dump_in_progress_tool_calls(),
             },
-            "finish_reason": output.finish_reason,
+            "finish_reason": self._remap_finish_reason(
+                output.index, output.finish_reason
+            ),
             "logprobs": output.logprobs,
         }
         self.in_progress_tool_calls.clear()
         return choice
 
-    @staticmethod
-    def _build_choice(output: Any, delta: dict[str, Any]) -> dict[str, Any]:
+    def _build_choice(self, output: Any, delta: dict[str, Any]) -> dict[str, Any]:
+        if delta.get("tool_calls"):
+            self._tool_call_choices_emitted.add(output.index)
         return {
             "index": output.index,
             "delta": delta,
-            "finish_reason": output.finish_reason,
+            "finish_reason": self._remap_finish_reason(
+                output.index, output.finish_reason
+            ),
             "logprobs": output.logprobs,
         }
 
+    def _process_non_streaming_tool_output(self, output: Any) -> dict[str, Any] | None:
+        delta_token_ids = list(output.token_ids or [])
+        delta_text = output.text or ""
+        current_text = self.previous_text + delta_text
+        current_token_ids = self.previous_token_ids + delta_token_ids
+
+        self.previous_text = current_text
+        self.previous_token_ids = current_token_ids
+        if not output.finish_reason:
+            return None
+
+        saved_reasoning = None
+        content = current_text
+        if self.reasoning_parser:
+            saved_reasoning, content = self.reasoning_parser.extract_reasoning(
+                current_text,
+                request=self.request_for_sampling,
+            )
+            if not self.request_for_sampling.include_reasoning:
+                saved_reasoning = None
+
+        delta_message = self._extract_tool_calls_from_text(
+            content or "",
+            saved_reasoning=saved_reasoning,
+        )
+        if delta_message is None:
+            if self.in_progress_tool_calls:
+                return self._emit_tool_calls_choice(output)
+            return self._build_choice(output, {})
+
+        delta: dict[str, Any] = {"role": "assistant"}
+        if delta_message.content:
+            delta["content"] = delta_message.content
+        if delta_message.reasoning:
+            delta["reasoning_content"] = delta_message.reasoning
+        if self.in_progress_tool_calls:
+            delta["tool_calls"] = self._dump_in_progress_tool_calls()
+            self.in_progress_tool_calls.clear()
+        if len(delta) == 1:
+            delta = {}
+        return self._build_choice(output, delta)
+
     def process_output(self, output: Any) -> dict[str, Any] | None:
+        if self._should_buffer_for_non_streaming_tool_parse():
+            return self._process_non_streaming_tool_output(output)
+
         delta_token_ids = list(output.token_ids or [])
         # vLLM output_processor already applies stop-token/stop-string trimming
         # to text. Re-detokenizing from token_ids can reintroduce stop markers.
@@ -401,9 +548,11 @@ class StreamingPostProcessor:
         # ------------------------------------------------------------------
         if self._tool_text_buffer is not None:
             self._tool_text_buffer += delta_text
-            tool_call_end = getattr(self.tool_parser, "tool_call_end_token", None)
             buffer_complete = (
-                tool_call_end and tool_call_end in self._tool_text_buffer
+                any(
+                    marker in self._tool_text_buffer
+                    for marker in self._tool_end_markers()
+                )
             ) or output.finish_reason
             if buffer_complete:
                 buffered_text = self._tool_text_buffer
@@ -442,10 +591,10 @@ class StreamingPostProcessor:
                 current_text = ""
                 current_token_ids = []
 
-                tool_call_start = getattr(
-                    self.tool_parser, "tool_call_start_token", None
-                )
-                if post_content and tool_call_start and tool_call_start in post_content:
+                tool_start_markers = self._tool_start_markers()
+                if post_content and any(
+                    marker in post_content for marker in tool_start_markers
+                ):
                     # Tool call markup present — buffer for non-streaming
                     # extraction (streaming parser can't handle the combined
                     # reasoning-end + tool-start in a single chunk).

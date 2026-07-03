@@ -15,12 +15,14 @@ pub mod context;
 pub mod error;
 pub mod network;
 pub use network::egress::addressed_router::{AddressedPushRouter, AddressedRequest};
-pub use network::egress::push_router::{PushRouter, RouterMode, WorkerLoadMonitor};
+pub use network::egress::push_router::{
+    MultimodalCacheIndex, MultimodalCacheKeyExtractor, PushRouter, RouterMode, WorkerLoadMonitor,
+};
 pub mod registry;
 
 pub use crate::engine::{
-    self as engine, AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, DataStream,
-    Engine, EngineStream, EngineUnary, ResponseStream, async_trait,
+    self as engine, AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream,
+    Data, DataStream, Engine, EngineStream, EngineUnary, ResponseStream, async_trait,
 };
 pub use anyhow::Error;
 pub use context::Context;
@@ -30,9 +32,44 @@ pub use error::{PipelineError, PipelineErrorExt, TwoPartCodecError};
 /// about the request. This information propagates through the stages, both local and distributed.
 pub type SingleIn<T> = Context<T>;
 
-/// Pipeline inputs carry a [`Context`] which can be used to carry metadata or additional information
-/// about the request. This information propagates through the stages, both local and distributed.
-pub type ManyIn<T> = Context<DataStream<T>>;
+/// `Sync` ownership cell for a non-`Sync` [`DataStream<T>`]. [`Self::take`]
+/// moves the inner stream out; the mutex serialises concurrent attempts so
+/// the first caller observes `Some(stream)` and all later callers see
+/// `None`. Iteration happens on the returned `DataStream<T>`.
+pub struct RequestStream<T: Data> {
+    inner: std::sync::Mutex<Option<DataStream<T>>>,
+}
+
+impl<T: Data> RequestStream<T> {
+    /// Wrap a [`DataStream<T>`] in a `Sync` ownership cell.
+    pub fn new(stream: DataStream<T>) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(Some(stream)),
+        }
+    }
+
+    /// Atomically move the inner stream out. Returns `Some(stream)` exactly
+    /// once across all threads racing on the same `RequestStream`; every
+    /// subsequent call (on any thread) returns `None`. The returned stream
+    /// is the unique owner; the wrapper retains nothing.
+    pub fn take(&self) -> Option<DataStream<T>> {
+        self.inner.lock().unwrap().take()
+    }
+}
+
+impl<T: Data> std::fmt::Debug for RequestStream<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let taken = self.inner.lock().map(|g| g.is_none()).unwrap_or(true);
+        f.debug_struct("RequestStream")
+            .field("taken", &taken)
+            .finish()
+    }
+}
+
+/// Pipeline input for streaming-request engines: a [`RequestStream<T>`]
+/// payload wrapped in a [`Context`], symmetric to [`SingleIn<T>`] for unary
+/// inputs.
+pub type ManyIn<T> = Context<RequestStream<T>>;
 
 /// Type alias for the output of pipeline that returns a single value
 pub type SingleOut<T> = EngineUnary<T>;

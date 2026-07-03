@@ -6,6 +6,12 @@ title: KV Events for Custom Engines
 
 This document explains how to implement KV event publishing for custom inference engines, enabling them to participate in Dynamo's KV cache-aware routing.
 
+> [!NOTE]
+> This guide covers lower-level Python workers and custom runtime integrations
+> that instantiate `KvEventPublisher` directly. Unified backends should prefer
+> `LLMEngine.kv_event_sources()` and let `Worker` construct publishers; see
+> [KV event publishing for unified backends](../development/unified-backends.md#python-kv-event-publishing-optional).
+
 ## Overview
 
 The KV Router relies on real-time events from backend workers to track which KV cache blocks are stored on each worker. When your custom engine allocates or evicts KV cache blocks, it should publish these events so the router can make optimal routing decisions.
@@ -293,5 +299,5 @@ Stop background tasks (ZMQ listener, event forwarding).
 ## See Also
 
 - **[Event Plane](../design-docs/event-plane.md)**: Transport options (NATS, ZMQ) and configuration
-- **[Router Guide](../components/router/router-guide.md)**: Configuration, tuning, and production setup
+- **[Configuration and Tuning](../components/router/router-configuration.md)**: Router flags, tuning, and production setup
 - **[Router Design](../design-docs/router-design.md)**: Architecture details and event transport modes

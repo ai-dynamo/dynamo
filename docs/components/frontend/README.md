@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Frontend
+subtitle: API gateway that exposes OpenAI HTTP and KServe gRPC endpoints and handles request preprocessing, routing, and response formatting.
 ---
 
 The Dynamo Frontend is the API gateway for serving LLM inference requests. It provides OpenAI-compatible HTTP endpoints and KServe gRPC endpoints, handling request preprocessing, routing, and response formatting.
@@ -85,7 +86,7 @@ spec:
 |-----------|---------|-------------|
 | `--http-port` | 8000 | HTTP server port |
 | `--kserve-grpc-server` | false | Enable KServe gRPC server |
-| `--router-mode` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct` |
+| `--router-mode` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct`, `least-loaded`, `device-aware-weighted` (`power-of-two` and `least-loaded` use synchronous prefill fallback in disaggregated prefill mode) |
 
 See the [Frontend Guide](frontend-guide.md) for full configuration options.
 

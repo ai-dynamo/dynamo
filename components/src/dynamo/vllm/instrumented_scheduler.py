@@ -59,15 +59,13 @@ How metrics are measured
   passes the correct output for the batch being processed, even in
   async mode where multiple batches are in flight).
 * **queued_requests**: computed from ``self.waiting`` at emit time.
-* **wall_time**: approximates the schedule-to-update_from_output
-  latency described in ``ForwardPassMetrics``.  Measured as the time
-  between consecutive ``update_from_output()`` calls.  This works
-  because the EngineCore always blocks on ``future.result()`` (the
-  GPU forward pass) right before calling ``update_from_output``, so
-  the interval is dominated by GPU compute.  Assumption: CPU overhead
-  (scheduling + output processing) between consecutive calls is small
-  relative to GPU forward pass time.  ``wall_time`` is ``0.0`` for
-  the first message after engine idle and for heartbeats.
+* **wall_time**: approximates the GPU forward pass time for each batch.
+  In steady state, measured as the interval between consecutive
+  ``update_from_output()`` calls (accurate because CPU scheduling
+  overlaps with GPU execution).  For the first batch after engine idle
+  (no previous ``update_from_output``), falls back to a per-batch
+  ``schedule()``-to-``update_from_output()`` timestamp recorded via a
+  FIFO queue.  ``wall_time`` is ``0.0`` only for heartbeats.
 
 Serialization and ZMQ send are handled by a background thread
 (same approach as vLLM's ZmqEventPublisher) so the scheduler
@@ -79,19 +77,28 @@ Inject via:
 
 from __future__ import annotations
 
+import enum
+import json
 import logging
+import math
 import os
 import queue
 import threading
 import time
+from collections import deque
+from dataclasses import asdict, dataclass, field
 from itertools import count
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import msgspec.structs
+import numpy as np
 import zmq
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import RequestStatus
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
+from vllm.v1.request import Request, RequestStatus
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
@@ -104,7 +111,6 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.outputs import ModelRunnerOutput
     from vllm.v1.structured_output import StructuredOutputManager
@@ -114,6 +120,45 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FPM_PORT = 20380
 ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
+ENV_FPM_WORKER_ID = "DYN_FPM_WORKER_ID"
+ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
+
+
+# ---------------------------------------------------------------------------
+# Benchmark mode dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BenchmarkConfig:
+    mode: Literal["prefill", "decode", "agg"] = "agg"
+    prefill_isl_granularity: int = 16
+    decode_length_granularity: int = 6
+    decode_batch_size_granularity: int = 6
+    warmup_iterations: int = 5
+    output_path: str = "/tmp/benchmark_results.json"
+
+
+class _BenchPhase(enum.Enum):
+    IDLE = "idle"
+    WARMUP = "warmup"
+    PREFILL_SWEEP = "prefill_sweep"
+    DECODE_SWEEP = "decode_sweep"
+    DONE = "done"
+
+
+@dataclass
+class BenchmarkPoint:
+    point_type: str  # "prefill" or "decode"
+    isl: int = 0
+    context_length: int = 0
+    batch_size: int = 0
+
+
+@dataclass
+class BenchmarkPointResult:
+    point: BenchmarkPoint
+    fpms: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -227,12 +272,15 @@ class InstrumentedScheduler(AsyncScheduler):
             **kwargs,
         )
 
-        dp_rank = getattr(vllm_config.parallel_config, "data_parallel_rank", 0) or 0
-        self._fpm_worker_id = vllm_config.additional_config.get("fpm_worker_id", "")
+        dp_rank = self._resolve_dp_rank(vllm_config.parallel_config)
+        self._fpm_worker_id = os.environ.get(ENV_FPM_WORKER_ID, "")
         self._fpm_dp_rank = dp_rank
 
+        self._schedule_times: deque[float] = deque()
         self._last_update_time: float = 0.0
         self._prompt_len_per_req: dict[str, int] = {}
+        self._bench_active: bool = False
+        self._bench_phase: _BenchPhase = _BenchPhase.IDLE
 
         base_port = int(os.environ.get(ENV_FPM_PORT, str(DEFAULT_FPM_PORT)))
         port = base_port + dp_rank
@@ -250,11 +298,101 @@ class InstrumentedScheduler(AsyncScheduler):
             dp_rank,
         )
 
+        self._bench_init(vllm_config)
+
+    @staticmethod
+    def _resolve_dp_rank(parallel_config) -> int:
+        # ``data_parallel_index`` always holds the true global DP rank of the
+        # engine process. For dense (non-MoE) models in external DP mode,
+        # vLLM resets ``data_parallel_rank`` to 0 in every child process but
+        # preserves ``data_parallel_index`` (see ``vllm/v1/engine/core.py``:
+        # ``parallel_config.data_parallel_index = dp_rank`` then
+        # ``parallel_config.data_parallel_rank = 0``). Reading the rank field
+        # would make every DP child compute ``base_port + 0`` and the second
+        # ``bind()`` would fail with "Address already in use".
+        dp_rank = getattr(parallel_config, "data_parallel_index", None)
+        if dp_rank is None:
+            dp_rank = getattr(parallel_config, "data_parallel_rank", 0) or 0
+        return dp_rank
+
     # ------------------------------------------------------------------
     # Overrides
     # ------------------------------------------------------------------
 
+    def has_requests(self) -> bool:
+        if self._bench_active:
+            return True
+        return super().has_requests()
+
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        if self._bench_active and self._bench_phase != _BenchPhase.IDLE:
+            try:
+                output = self._bench_step()
+            except Exception:
+                logger.exception("Benchmark step failed, cleaning up")
+                self._bench_cleanup_requests()
+                self._bench_active = False
+                self._bench_phase = _BenchPhase.IDLE
+                return self._schedule_and_record_time(throttle_prefills)
+            if output is not None:
+                self.kv_cache_manager.new_step_starts()
+                self._update_after_schedule(output)
+                self._schedule_times.append(time.monotonic())
+                return output
+
+            if (
+                self._bench_phase == _BenchPhase.DECODE_SWEEP
+                and self._bench_active_req_ids
+            ):
+                empty = SchedulerOutput(
+                    scheduled_new_reqs=[],
+                    scheduled_cached_reqs=CachedRequestData.make_empty(),
+                    num_scheduled_tokens={},
+                    total_num_scheduled_tokens=0,
+                    scheduled_spec_decode_tokens={},
+                    scheduled_encoder_inputs={},
+                    num_common_prefix_blocks=(
+                        [0] * self.kv_cache_manager.num_kv_cache_groups
+                    ),
+                    finished_req_ids=self.finished_req_ids,
+                    free_encoder_mm_hashes=[],
+                )
+                # See _bench_inject_fake_decode for the rationale; the
+                # parent scheduler attaches connector metadata to every
+                # SchedulerOutput when a connector is configured, so
+                # benchmark-built outputs must do the same or the worker
+                # asserts on bind_connector_metadata. Use direct
+                # attribute access (not getattr-with-default) so a
+                # future vLLM bump that drops these attributes from the
+                # parent fails loudly instead of being silently masked.
+                if self.connector is not None:
+                    empty.kv_connector_metadata = self.connector.build_connector_meta(
+                        empty
+                    )
+                if self.ec_connector is not None:
+                    empty.ec_connector_metadata = (
+                        self.ec_connector.build_connector_meta(empty)
+                    )
+                self._update_after_schedule(empty)
+                return empty
+
+        return self._schedule_and_record_time(throttle_prefills)
+
+    def _schedule_and_record_time(
+        self, throttle_prefills: bool = False
+    ) -> SchedulerOutput:
+        output = super().schedule(throttle_prefills)
+        if output.total_num_scheduled_tokens > 0:
+            self._schedule_times.append(time.monotonic())
+        return output
+
     def shutdown(self) -> None:
+        if self._bench_active and self._bench_active_req_ids:
+            logger.warning(
+                "Benchmark interrupted, cleaning up %d requests",
+                len(self._bench_active_req_ids),
+            )
+            self._bench_cleanup_requests()
         self._publisher.shutdown()
         super().shutdown()
 
@@ -264,18 +402,28 @@ class InstrumentedScheduler(AsyncScheduler):
         model_runner_output: "ModelRunnerOutput",
     ):
         result = super().update_from_output(scheduler_output, model_runner_output)
-        now = time.monotonic()
 
         if scheduler_output.total_num_scheduled_tokens > 0:
-            wall_time = (
-                now - self._last_update_time if self._last_update_time > 0 else 0.0
-            )
+            now = time.monotonic()
+            t_sched = self._schedule_times.popleft() if self._schedule_times else 0.0
+
+            if self._last_update_time > 0:
+                wall_time = now - self._last_update_time
+            elif t_sched > 0:
+                wall_time = now - t_sched
+            else:
+                wall_time = 0.0
             self._last_update_time = now
 
             metrics = self._extract_metrics(
                 scheduler_output, self._compute_queued(), wall_time
             )
             self._publisher.publish(metrics)
+
+            if self._bench_active:
+                self._bench_current_fpms.append(
+                    json.loads(msgspec.json.encode(metrics))
+                )
         else:
             self._last_update_time = 0.0
 
@@ -312,6 +460,9 @@ class InstrumentedScheduler(AsyncScheduler):
         decode_kv = WelfordAccumulator()
 
         for req in new_reqs:
+            if self._bench_new_request_counts_as_decode(req.req_id):
+                decode_kv.add(req.num_computed_tokens)
+                continue
             num_prefill += 1
             sum_prefill_tokens += num_scheduled.get(req.req_id, 0)
             prompt_len = len(req.prompt_token_ids) if req.prompt_token_ids else 0
@@ -338,8 +489,48 @@ class InstrumentedScheduler(AsyncScheduler):
             var_decode_kv_tokens=decode_kv.variance(),
         )
 
+    def _bench_new_request_counts_as_decode(self, req_id: str) -> bool:
+        """Synthetic decode benchmark requests register as new requests."""
+        return (
+            getattr(self, "_bench_active", False)
+            and getattr(self, "_bench_phase", _BenchPhase.IDLE)
+            == _BenchPhase.DECODE_SWEEP
+            and req_id in getattr(self, "_bench_active_req_ids", set())
+        )
+
     def _compute_queued(self) -> QueuedRequestMetrics:
-        """Single-pass aggregation over self.waiting -- no intermediate list."""
+        """Single-pass aggregation over ``self.waiting`` and ``self.skipped_waiting``.
+
+        vLLM's scheduler parks requests in two queues:
+
+        * ``self.waiting`` holds requests in ``WAITING`` (new, never scheduled)
+          and ``PREEMPTED`` (were decoding, evicted back for memory) states.
+        * ``self.skipped_waiting`` holds "blocked-waiting" requests awaiting an
+          async precondition — see ``Scheduler._is_blocked_waiting_status`` /
+          ``Scheduler._enqueue_waiting_request``:
+
+              WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+                                          -- grammar/structured-output compile
+                                          -- WAITING_FOR_FSM on older vLLM
+              WAITING_FOR_REMOTE_KVS      -- disagg decode-engine KV transfer
+              WAITING_FOR_STREAMING_REQ   -- streaming request handshake
+
+        A ``WAITING_FOR_REMOTE_KVS`` request is a **decode** request: the
+        prefill engine has already computed its KV and is transferring it; once
+        finished the request goes straight to decode without a local prefill
+        step. ``num_computed_tokens`` is pre-set to the transferred KV length
+        (see ``Scheduler.schedule`` at the ``load_kv_async`` branch), so it is
+        the correct decode-KV-context value for FPM purposes.
+
+        ``WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR`` /
+        ``WAITING_FOR_STREAMING_REQ`` have no KV computed yet — they are queued
+        prefill requests blocked on a precondition.
+
+        Only iterating ``self.waiting`` (the previous behaviour) silently
+        misses every ``WAITING_FOR_REMOTE_KVS`` request on the decode engine
+        in disaggregated serving, and misclassifies it as queued prefill if it
+        ever transiently appears in ``self.waiting``.
+        """
         prefill = WelfordAccumulator()
         decode_kv = WelfordAccumulator()
 
@@ -347,6 +538,18 @@ class InstrumentedScheduler(AsyncScheduler):
             if request.status == RequestStatus.PREEMPTED:
                 decode_kv.add(request.num_computed_tokens)
             else:
+                prefill.add(request.num_tokens)
+
+        for request in self.skipped_waiting:
+            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                # Disagg decode side: KV already computed on the prefill
+                # engine and being transferred. Next schedule() step will
+                # start generating -- count as queued decode.
+                decode_kv.add(request.num_computed_tokens)
+            else:
+                # Structured-output waits / WAITING_FOR_STREAMING_REQ:
+                # no KV yet, essentially a queued prefill awaiting a
+                # precondition.
                 prefill.add(request.num_tokens)
 
         return QueuedRequestMetrics(
@@ -365,3 +568,445 @@ class InstrumentedScheduler(AsyncScheduler):
     def _cleanup_finished(self, output: SchedulerOutput) -> None:
         for req_id in output.finished_req_ids:
             self._prompt_len_per_req.pop(req_id, None)
+
+    # ------------------------------------------------------------------
+    # Benchmark mode
+    # ------------------------------------------------------------------
+
+    def _bench_init(self, vllm_config: "VllmConfig") -> None:
+        """Parse benchmark config and initialise state machine."""
+        bench_cfg = vllm_config.additional_config.get("benchmark")
+        if not bench_cfg:
+            self._bench_active = False
+            return
+
+        cfg = bench_cfg if isinstance(bench_cfg, dict) else {}
+        # additional_config values arrive as strings from JSON; coerce to
+        # the types that BenchmarkConfig expects.
+        _INT_FIELDS = {
+            "prefill_isl_granularity",
+            "decode_length_granularity",
+            "decode_batch_size_granularity",
+            "warmup_iterations",
+        }
+        for k in _INT_FIELDS:
+            if k in cfg and not isinstance(cfg[k], int):
+                cfg[k] = int(cfg[k])
+        known = {f.name for f in BenchmarkConfig.__dataclass_fields__.values()}
+        self._bench_config = BenchmarkConfig(
+            **{k: v for k, v in cfg.items() if k in known}
+        )
+        self._bench_config.output_path = os.environ.get(
+            ENV_FPM_BENCHMARK_OUTPUT_PATH,
+            self._bench_config.output_path,
+        )
+
+        dp_rank = self._fpm_dp_rank
+        if dp_rank > 0:
+            base, ext = os.path.splitext(self._bench_config.output_path)
+            self._bench_config.output_path = f"{base}_dp{dp_rank}{ext}"
+
+        try:
+            os.unlink(self._bench_config.output_path)
+        except FileNotFoundError:
+            pass
+
+        self._bench_active = True
+        self._bench_phase = _BenchPhase.WARMUP
+        self._bench_grid: deque[BenchmarkPoint] = deque()
+        self._bench_current_point: BenchmarkPoint | None = None
+        self._bench_results: list[BenchmarkPointResult] = []
+        self._bench_current_fpms: list[dict] = []
+        self._bench_active_req_ids: set[str] = set()
+        self._bench_seq = 0
+        self._bench_grid_built = False
+        self._bench_drain_pending = False
+
+        # Build block_hasher so benchmark requests work with prefix caching.
+        if self.cache_config.enable_prefix_caching:
+            caching_hash_fn = get_hash_fn_by_name(
+                self.cache_config.prefix_caching_hash_algo
+            )
+            init_none_hash(caching_hash_fn)
+            self._bench_block_hasher = get_request_block_hasher(
+                self.block_size, caching_hash_fn
+            )
+        else:
+            self._bench_block_hasher = None
+
+        logger.info("Benchmark mode enabled: %s", self._bench_config)
+
+    # -- Grid generation ------------------------------------------------
+
+    def _bench_build_grid(self) -> None:
+        """Generate the sweep grid once scheduler limits are known."""
+        if self._bench_grid_built:
+            return
+        self._bench_grid_built = True
+        mode = self._bench_config.mode
+        if mode in ("prefill", "agg"):
+            self._bench_generate_prefill_grid()
+        if mode in ("decode", "agg"):
+            self._bench_generate_decode_grid()
+        logger.info("Benchmark grid: %d points (%s mode)", len(self._bench_grid), mode)
+
+    def _bench_generate_prefill_grid(self) -> None:
+        n = max(1, self._bench_config.prefill_isl_granularity)
+        max_tokens = self.max_num_scheduled_tokens
+        if max_tokens < 10:
+            logger.warning(
+                "max_num_scheduled_tokens=%d too small, skipping prefill grid",
+                max_tokens,
+            )
+            return
+        isls = np.unique(np.linspace(10, max_tokens, n, dtype=int))
+        for isl in isls:
+            self._bench_grid.append(BenchmarkPoint(point_type="prefill", isl=int(isl)))
+
+    def _bench_generate_decode_grid(self) -> None:
+        n_len = max(1, self._bench_config.decode_length_granularity)
+        n_bs = max(1, self._bench_config.decode_batch_size_granularity)
+        max_ctx = self.max_model_len - 10
+        if max_ctx < self.block_size:
+            logger.warning("max_model_len too small for decode grid, skipping")
+            return
+        ctx_lens = np.unique(np.linspace(self.block_size, max_ctx, n_len, dtype=int))
+        for ctx_len in ctx_lens:
+            ctx_len = int(ctx_len)
+            # Match what _bench_inject_fake_decode actually allocates:
+            # ctx_len + 1 tokens (the +1 is the input slot for the
+            # async-scheduler placeholder write -- see the comment on
+            # _bench_inject_fake_decode), rounded UP to the next block
+            # boundary by the KV cache manager. Sizing max_batch from
+            # ctx_len directly would under-count blocks per request and
+            # let the allocator silently truncate the batch on boundary
+            # points (e.g. ctx_len that is a multiple of block_size:
+            # ctx_len=16 with block_size=16 actually consumes 2 blocks
+            # per request, not 1).
+            blocks_per_req = math.ceil((ctx_len + 1) / self.block_size)
+            kv_capped_batch = self.cache_config.num_gpu_blocks // blocks_per_req
+            max_batch = min(self.max_num_running_reqs, kv_capped_batch)
+            if max_batch < 1:
+                continue
+            batch_sizes = np.unique(np.linspace(1, max_batch, n_bs, dtype=int))
+            for bs in batch_sizes:
+                self._bench_grid.append(
+                    BenchmarkPoint(
+                        point_type="decode",
+                        context_length=ctx_len,
+                        batch_size=int(bs),
+                    )
+                )
+
+    # -- Request injection / cleanup ------------------------------------
+
+    def _bench_inject_prefill(
+        self, prompt_len: int, max_tokens: int, n: int = 1
+    ) -> None:
+        for _ in range(n):
+            req_id = f"__bench_{self._bench_seq}"
+            req = Request(
+                request_id=req_id,
+                prompt_token_ids=[0] * prompt_len,
+                sampling_params=SamplingParams(max_tokens=max_tokens),
+                pooling_params=None,
+                block_hasher=self._bench_block_hasher,
+                cache_salt=req_id,
+            )
+            self.add_request(req)
+            self._bench_active_req_ids.add(req_id)
+            self._bench_seq += 1
+
+    def _bench_inject_fake_decode(
+        self, ctx_len: int, batch_size: int
+    ) -> SchedulerOutput:
+        """Create fake decode requests with pre-allocated KV and return
+        a custom SchedulerOutput that registers them with the model runner.
+
+        We pad the synthetic prompt to ``ctx_len + 1`` tokens (rather than
+        ``ctx_len``) so the input slot at position ``ctx_len`` -- the one
+        the decode iteration reads from -- is part of the request's prompt
+        and therefore guaranteed to be a valid token id (0). Without this
+        padding the worker's async-scheduler bookkeeping writes a ``-1``
+        placeholder into ``token_ids_cpu[req_idx, ctx_len]`` after
+        sampling (gpu_model_runner._update_states_after_model_execute, see
+        ``sampled_ids = [-1]`` for async scheduling). When the same input
+        batch slot gets reused by a later benchmark batch, that ``-1``
+        is read as the input token and the embedding lookup OOBs. Padding
+        by one keeps the placeholder write at position ``ctx_len + 1``
+        (out of the read range) and leaves position ``ctx_len`` untouched.
+        Also allocate ``ctx_len + 1`` KV slots so block-table indexing for
+        position ``ctx_len`` (block ``ctx_len // block_size`` -- which is
+        a NEW block when ``ctx_len % block_size == 0``) stays in range.
+        """
+        new_reqs_data: list[NewRequestData] = []
+        num_scheduled_tokens: dict[str, int] = {}
+        padded_len = ctx_len + 1
+
+        for _ in range(batch_size):
+            req_id = f"__bench_{self._bench_seq}"
+            prompt = [0] * padded_len
+            req = Request(
+                request_id=req_id,
+                prompt_token_ids=prompt,
+                sampling_params=SamplingParams(max_tokens=100_000),
+                pooling_params=None,
+                block_hasher=self._bench_block_hasher,
+                cache_salt=req_id,
+            )
+
+            new_blocks = self.kv_cache_manager.allocate_slots(
+                req, padded_len, delay_cache_blocks=True
+            )
+            if new_blocks is None:
+                logger.warning(
+                    "KV exhausted at ctx_len=%d after %d requests, truncating batch",
+                    ctx_len,
+                    len(new_reqs_data),
+                )
+                break
+
+            req.num_computed_tokens = ctx_len
+            req.status = RequestStatus.RUNNING
+
+            self.requests[req_id] = req
+            self.running.append(req)  # type: ignore[has-type]
+            self._bench_active_req_ids.add(req_id)
+            self._bench_seq += 1
+
+            block_ids = new_blocks.get_block_ids()
+            new_reqs_data.append(
+                NewRequestData(
+                    req_id=req_id,
+                    prompt_token_ids=prompt,
+                    mm_features=[],
+                    sampling_params=req.sampling_params,
+                    pooling_params=None,
+                    block_ids=block_ids,
+                    num_computed_tokens=ctx_len,
+                    lora_request=None,
+                    # vLLM >=0.22's v2 GPU model runner requires `prefill_token_ids`
+                    # (asserted non-None in gpu/model_runner.add_requests, used as the
+                    # request's `all_token_ids`). vLLM's own scheduler passes
+                    # `req._all_token_ids` for new requests; mirror that here for the
+                    # synthetic decode requests we build directly. Older runners ignore it.
+                    prefill_token_ids=req._all_token_ids,
+                )
+            )
+            num_scheduled_tokens[req_id] = 1
+
+        new_block_ids_to_zero = (
+            (self.kv_cache_manager.take_new_block_ids() or None)
+            if getattr(self, "needs_kv_cache_zeroing", False)
+            else None
+        )
+
+        output = SchedulerOutput(
+            scheduled_new_reqs=new_reqs_data,
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens=num_scheduled_tokens,
+            total_num_scheduled_tokens=len(new_reqs_data),
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
+            finished_req_ids=self.finished_req_ids,
+            free_encoder_mm_hashes=[],
+            new_block_ids_to_zero=new_block_ids_to_zero,
+        )
+
+        # Mirror the parent scheduler's connector-metadata population (see
+        # vllm/v1/core/sched/scheduler.py:912-923). Without this, the
+        # gpu_model_runner asserts ``scheduler_output.kv_connector_metadata
+        # is not None`` whenever a KV connector is configured (e.g. the
+        # NixlConnector used by disagg workers), and EngineCore dies the
+        # instant the decode sweep tries to run a synthetic batch.
+        # Our fake decode reqs have their KV pre-allocated via
+        # ``allocate_slots`` above, so ``build_connector_meta`` produces a
+        # no-op metadata -- no transfers planned, just a non-None object
+        # the worker-side ``bind_connector_metadata`` can consume.
+        if self.connector is not None:
+            output.kv_connector_metadata = self.connector.build_connector_meta(output)
+        if self.ec_connector is not None:
+            output.ec_connector_metadata = self.ec_connector.build_connector_meta(
+                output
+            )
+
+        return output
+
+    def _bench_cleanup_requests(self) -> None:
+        """Free all resources held by active benchmark requests."""
+        for req_id in list(self._bench_active_req_ids):
+            req = self.requests.get(req_id)
+            if req:
+                self.kv_cache_manager.free(req)
+                self.finished_req_ids.add(req_id)
+                del self.requests[req_id]
+        running = self.running  # type: ignore[has-type]
+        self.running = [
+            r for r in running if r.request_id not in self._bench_active_req_ids
+        ]
+        self._bench_active_req_ids.clear()
+        self._schedule_times.clear()
+
+    # -- State machine --------------------------------------------------
+
+    def _bench_step(self) -> SchedulerOutput | None:
+        """Advance the benchmark state machine.
+
+        Returns a custom ``SchedulerOutput`` for fake-decode points, or
+        ``None`` when normal scheduling should handle the current step
+        (prefill / warmup / cleanup cycles).
+        """
+        self._bench_build_grid()
+
+        if self._bench_phase == _BenchPhase.WARMUP:
+            return self._bench_step_warmup()
+        if self._bench_phase == _BenchPhase.PREFILL_SWEEP:
+            return self._bench_step_prefill()
+        if self._bench_phase == _BenchPhase.DECODE_SWEEP:
+            return self._bench_step_decode()
+        if self._bench_phase == _BenchPhase.DONE:
+            self._bench_write_results()
+            self._bench_active = False
+            self._bench_phase = _BenchPhase.IDLE
+            logger.info("Benchmark complete")
+        return None
+
+    def _bench_step_warmup(self) -> SchedulerOutput | None:
+        if not self._bench_active_req_ids:
+            iters = self._bench_config.warmup_iterations
+            if iters > 0:
+                self._bench_inject_prefill(prompt_len=256, max_tokens=iters)
+                logger.info("Benchmark warmup: 1 prefill + %d decode steps", iters)
+            else:
+                self._bench_transition_after_warmup()
+            return None
+
+        still_alive = any(rid in self.requests for rid in self._bench_active_req_ids)
+        if not still_alive:
+            self._bench_transition_after_warmup()
+        return None
+
+    def _bench_transition_after_warmup(self) -> None:
+        self._bench_cleanup_requests()
+        self._bench_current_fpms.clear()
+        mode = self._bench_config.mode
+        if mode in ("prefill", "agg"):
+            self._bench_phase = _BenchPhase.PREFILL_SWEEP
+            logger.info("Benchmark: entering PREFILL_SWEEP")
+        else:
+            self._bench_phase = _BenchPhase.DECODE_SWEEP
+            logger.info("Benchmark: entering DECODE_SWEEP")
+
+    def _bench_drain_if_pending(self) -> bool:
+        """If a drain cycle is pending, discard stale FPMs and return True."""
+        if not self._bench_drain_pending:
+            return False
+        self._bench_drain_pending = False
+        self._bench_current_fpms.clear()
+        self._schedule_times.clear()
+        return True
+
+    def _bench_step_prefill(self) -> SchedulerOutput | None:
+        if self._bench_drain_if_pending():
+            pass  # fall through to inject next point
+
+        elif self._bench_active_req_ids:
+            still_alive = any(
+                rid in self.requests for rid in self._bench_active_req_ids
+            )
+            if still_alive:
+                return None
+            if not self._bench_current_fpms:
+                return None
+            self._bench_save_current_point()
+            self._bench_cleanup_requests()
+            self._bench_drain_pending = True
+            return None
+
+        point = self._bench_pop_next("prefill")
+        if point is None:
+            if self._bench_config.mode == "agg":
+                self._bench_phase = _BenchPhase.DECODE_SWEEP
+                logger.info("Benchmark: entering DECODE_SWEEP")
+            else:
+                self._bench_phase = _BenchPhase.DONE
+            return None
+
+        self._bench_current_point = point
+        self._bench_current_fpms = []
+        self._bench_inject_prefill(prompt_len=point.isl, max_tokens=1)
+        logger.info("Benchmark prefill: ISL=%d", point.isl)
+        return None
+
+    def _bench_step_decode(self) -> SchedulerOutput | None:
+        if self._bench_drain_if_pending():
+            pass  # fall through to inject next point
+
+        elif self._bench_active_req_ids:
+            if not self._bench_current_fpms:
+                return None
+            self._bench_save_current_point()
+            self._bench_cleanup_requests()
+            self._bench_drain_pending = True
+            return None
+
+        point = self._bench_pop_next("decode")
+        if point is None:
+            self._bench_phase = _BenchPhase.DONE
+            return None
+
+        self._bench_current_point = point
+        self._bench_current_fpms = []
+        logger.info(
+            "Benchmark decode: ctx_len=%d batch_size=%d",
+            point.context_length,
+            point.batch_size,
+        )
+        return self._bench_inject_fake_decode(point.context_length, point.batch_size)
+
+    def _bench_pop_next(self, point_type: str) -> BenchmarkPoint | None:
+        while self._bench_grid:
+            pt = self._bench_grid[0]
+            if pt.point_type == point_type:
+                return self._bench_grid.popleft()
+            break
+        return None
+
+    def _bench_save_current_point(self) -> None:
+        if self._bench_current_point is not None and self._bench_current_fpms:
+            self._bench_results.append(
+                BenchmarkPointResult(
+                    point=self._bench_current_point,
+                    fpms=list(self._bench_current_fpms),
+                )
+            )
+        self._bench_current_point = None
+        self._bench_current_fpms = []
+
+    # -- Results output -------------------------------------------------
+
+    def _bench_write_results(self) -> None:
+        output = {
+            "config": asdict(self._bench_config),
+            "limits": {
+                "max_num_scheduled_tokens": self.max_num_scheduled_tokens,
+                "max_num_running_reqs": self.max_num_running_reqs,
+                "max_model_len": self.max_model_len,
+                "block_size": self.block_size,
+                "num_gpu_blocks": self.cache_config.num_gpu_blocks,
+            },
+            "results": [
+                {"point": asdict(r.point), "fpms": r.fpms} for r in self._bench_results
+            ],
+        }
+        dest = self._bench_config.output_path
+        tmp = dest + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(output, f, indent=2)
+        os.replace(tmp, dest)
+        logger.info(
+            "Benchmark results written to %s (%d points)",
+            dest,
+            len(self._bench_results),
+        )

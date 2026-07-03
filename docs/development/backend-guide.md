@@ -6,7 +6,20 @@ sidebar-title: Writing Python Workers
 subtitle: Create custom Python workers and engines for Dynamo
 ---
 
-# Writing Python Workers in Dynamo
+> **Lower-level Python worker path.** This guide documents the
+> `@dynamo_worker()` + `register_model()` + `endpoint.serve_endpoint()`
+> entry point. For new engines, prefer Dynamo's
+> [unified backend path](unified-backends.md) for Python or Rust — it puts the
+> framework in charge of lifecycle, signal handling, cancellation
+> monitoring, and model registration, and ships plumbing for Prometheus
+> metrics, KV event publishing, KV-aware routing, OpenTelemetry
+> tracing, health-check canaries, guided decoding, and custom Jinja
+> chat templates. Stay on this path for workloads that depend on
+> multimodal, LoRA, logprob extraction, engine routes (pause/resume,
+> profiling, weight updates), text-in-text-out, snapshot/CRIU, or
+> diffusion — features the unified backend does not yet cover. See
+> the [unified-path feature gaps](unified-backends.md#python-feature-gaps)
+> for the current matrix.
 
 This guide explains how to create your own Python worker in Dynamo.
 
@@ -67,8 +80,8 @@ The `model_input` can be:
 - ModelInput.Text. Your engine expects raw text input and handles its own tokenization and pre-processing.
 
 The `model_type` can be:
-- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat).
-- ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions).
+- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+- ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://developers.openai.com/api/reference/resources/completions/methods/create).
 
 `register_model` can also take the following kwargs:
 - `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name or the folder name.
@@ -115,14 +128,13 @@ In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.
 
 A Python worker may need to be shut down promptly, for example when the node running the worker is to be reclaimed and there isn't enough time to complete all ongoing requests before the shutdown deadline.
 
-In such cases, you can signal incomplete responses by raising a `GeneratorExit` exception in your generate loop. This will immediately close the response stream, signaling to the frontend that the stream is incomplete. With request migration enabled (see the [`migration_limit`](../fault-tolerance/request-migration.md) parameter), the frontend will automatically migrate the partially completed request to another worker instance, if available, to be completed.
-
-> [!WARNING]
-> We will update the `GeneratorExit` exception to a new Dynamo exception. Please expect minor code breaking change in the near future.
+In such cases, you can signal incomplete responses by raising an `EngineShutdown` exception in your generate loop. This will immediately close the response stream, signaling to the frontend that the stream is incomplete. With request migration enabled (see the [`migration_limit`](../fault-tolerance/request-migration.md) parameter), the frontend will automatically migrate the partially completed request to another worker instance, if available, to be completed.
 
 Here's an example of how to implement this in your `RequestHandler`:
 
 ```python
+from dynamo.llm.exceptions import EngineShutdown
+
 class RequestHandler:
 
     async def generate(self, request):
@@ -130,13 +142,13 @@ class RequestHandler:
         for result in self.engine.generate_streaming(request):
             # Check if we need to migrate before yielding each token
             if is_shutting_down():
-                # Raising GeneratorExit closes the stream and triggers migration
-                raise GeneratorExit("Worker shutting down, migrating request")
+                # Raising EngineShutdown closes the stream and triggers migration
+                raise EngineShutdown("Worker shutting down, migrating request")
 
             yield result
 ```
 
-When `GeneratorExit` is raised, the frontend receives the incomplete response and can seamlessly continue generation on another available worker instance, preserving the user experience even during worker shutdowns.
+When `EngineShutdown` is raised, the frontend receives the incomplete response and can seamlessly continue generation on another available worker instance, preserving the user experience even during worker shutdowns.
 
 For more information about how request migration works, see the [Request Migration Architecture](../fault-tolerance/request-migration.md) documentation.
 

@@ -1,17 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 try:
     from PIL import Image
+    from vllm.sampling_params import SamplingParams
+    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
+    from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
+    from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -23,7 +30,7 @@ pytestmark = [
 ]
 
 
-def _make_handler():
+def _make_handler(stage_types=("diffusion",)):
     with patch(
         "dynamo.vllm.omni.omni_handler.BaseOmniHandler.__init__", return_value=None
     ):
@@ -34,6 +41,22 @@ def _make_handler():
     config.served_model_name = None
     config.output_modalities = ["text"]
     handler.config = config
+
+    defaults = []
+    for st in stage_types:
+        if st == "diffusion":
+            defaults.append(OmniDiffusionSamplingParams())
+        else:
+            llm_default = MagicMock(spec=SamplingParams)
+            llm_default.clone.return_value = SamplingParams()
+            defaults.append(llm_default)
+
+    engine_client = MagicMock()
+    engine_client.default_sampling_params_list = defaults
+    engine_client.engine.get_stage_metadata.side_effect = lambda i: SimpleNamespace(
+        stage_type=stage_types[i]
+    )
+    handler.engine_client = engine_client
     return handler
 
 
@@ -45,216 +68,101 @@ class TestEngineInputs:
         assert ei.fps == 0
         assert ei.sampling_params_list is None
         assert ei.response_format is None
-
-
-class TestPrepareImageOutput:
-    @pytest.mark.asyncio
-    async def test_b64_json(self):
-        """b64_json format returns data URI with base64 prefix."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"fake_png_data")
-        results = await handler._prepare_image_output([img], "req-1", "b64_json")
-        assert len(results) == 1
-        assert results[0].startswith("data:image/png;base64,")
-
-    @pytest.mark.asyncio
-    async def test_b64_default_when_none(self):
-        """None response_format defaults to base64 encoding."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"data")
-        results = await handler._prepare_image_output([img], "req-1", None)
-        assert results[0].startswith("data:image/png;base64,")
-
-    @pytest.mark.asyncio
-    async def test_invalid_format(self):
-        """Unsupported response_format raises ValueError."""
-        handler = _make_handler()
-        with pytest.raises(ValueError, match="Invalid response format"):
-            await handler._prepare_image_output([MagicMock()], "req-1", "invalid")
-
-    @pytest.mark.asyncio
-    async def test_multiple_images(self):
-        """Multiple input images produce one output entry each."""
-        handler = _make_handler()
-        imgs = [MagicMock() for _ in range(3)]
-        for img in imgs:
-            img.save = lambda b, format: b.write(b"px")
-        results = await handler._prepare_image_output(imgs, "req-1", "b64_json")
-        assert len(results) == 3
+        assert ei.output_format is None
 
 
 class TestBuildEngineInputs:
-    def test_chat_completion(self):
+    @pytest.mark.asyncio
+    async def test_chat_completion(self):
         """Chat request extracts text prompt with no sampling params."""
         handler = _make_handler()
         raw = {"messages": [{"role": "user", "content": "hello"}]}
-        inputs = handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
+        inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
         assert inputs.request_type == RequestType.CHAT_COMPLETION
         assert inputs.prompt["prompt"] == "hello"
         assert inputs.sampling_params_list is None
 
-    def test_image_generation(self):
+    @pytest.mark.asyncio
+    async def test_image_generation(self):
         """Image request parses prompt, size, and creates diffusion sampling params."""
         handler = _make_handler()
         req = NvCreateImageRequest(prompt="a cat", size="512x512")
-        inputs = handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
+        inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
         assert inputs.request_type == RequestType.IMAGE_GENERATION
         assert inputs.prompt["prompt"] == "a cat"
+        assert inputs.prompt["modalities"] == ["image"]
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 512,
+            "target_w": 512,
+        }
         assert len(inputs.sampling_params_list) == 1
         sp = inputs.sampling_params_list[0]
         assert sp.height == 512
         assert sp.width == 512
 
-    def test_video_generation(self):
+    @pytest.mark.asyncio
+    async def test_image_chat_completion_uses_multimodal_prompt(self):
+        """Image chat requests must use vLLM-Omni multimodal preprocessing."""
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        handler.config.output_modalities = ["image"]
+        raw = {
+            "messages": [{"role": "user", "content": "a glass teapot"}],
+            "extra_body": {"height": 768, "width": 512, "seed": 123},
+        }
+
+        inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
+
+        assert inputs.request_type == RequestType.CHAT_COMPLETION
+        assert inputs.prompt["prompt"] == "a glass teapot"
+        assert inputs.prompt["modalities"] == ["image"]
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 768,
+            "target_w": 512,
+        }
+        assert len(inputs.sampling_params_list) == 2
+        sp = inputs.sampling_params_list[1]
+        assert sp.height == 768
+        assert sp.width == 512
+
+    @pytest.mark.asyncio
+    async def test_video_generation(self):
         """Video request parses prompt, size, seconds, and sets fps."""
         handler = _make_handler()
         req = NvCreateVideoRequest(
             prompt="a drone", model="test", size="832x480", seconds=2
         )
-        inputs = handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        inputs = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
         assert inputs.request_type == RequestType.VIDEO_GENERATION
         assert inputs.prompt["prompt"] == "a drone"
         assert inputs.fps > 0
 
-    def test_audio_not_implemented(self):
-        """Audio generation raises NotImplementedError."""
-        handler = _make_handler()
-        with pytest.raises(NotImplementedError):
-            handler.build_engine_inputs({}, RequestType.AUDIO_GENERATION)
-
-
-class TestFormatTextChunk:
-    def _make_output(self, text="hello world", finish_reason=None):
-        output = MagicMock()
-        output.text = text
-        output.finish_reason = finish_reason
-        request_output = MagicMock()
-        request_output.outputs = [output]
-        request_output.prompt_token_ids = [1, 2, 3]
-        return request_output
-
-    def test_delta_text(self):
-        """Delta content is the diff between current and previous text."""
-        handler = _make_handler()
-        ro = self._make_output("hello world")
-        chunk = handler._format_text_chunk(ro, "req-1", "hello ")
-        assert chunk["choices"][0]["delta"]["content"] == "world"
-
-    def test_no_outputs_returns_error(self):
-        """Empty engine outputs produce an error chunk."""
-        handler = _make_handler()
-        ro = MagicMock()
-        ro.outputs = []
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert "Error" in chunk["choices"][0]["delta"]["content"]
-
-    def test_finish_reason_included(self):
-        """Final chunk includes finish_reason and usage stats."""
-        handler = _make_handler()
-        handler._build_completion_usage = lambda ro: {
-            "prompt_tokens": 3,
-            "completion_tokens": 1,
-        }
-        ro = self._make_output("done", finish_reason="stop")
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert chunk["choices"][0]["finish_reason"] == "stop"
-        assert "usage" in chunk
-
-    def test_finish_reason_abort_normalized(self):
-        """Abort finish reason is normalized to 'cancelled'."""
-        handler = _make_handler()
-        handler._build_completion_usage = lambda ro: {
-            "prompt_tokens": 3,
-            "completion_tokens": 1,
-        }
-        ro = self._make_output("done", finish_reason="abort")
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert chunk["choices"][0]["finish_reason"] == "cancelled"
-
-    def test_finish_reason_none_when_not_finished(self):
-        """finish_reason is None when output has no finish_reason."""
-        handler = _make_handler()
-        ro = self._make_output("partial")
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert chunk["choices"][0]["finish_reason"] is None
-
-
-class TestFormatImageChunk:
     @pytest.mark.asyncio
-    async def test_chat_completion_format(self):
-        """Chat completion route returns image_url content parts."""
+    async def test_audio_generation_delegates_toaudio(self):
+        """Audio request delegates to audio."""
         handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
-        chunk = await handler._format_image_chunk(
-            [img], "req-1", request_type=RequestType.CHAT_COMPLETION
+        expected = EngineInputs(
+            prompt={"prompt": "Hello world"},
+            request_type=RequestType.AUDIO_GENERATION,
         )
-        assert chunk["object"] == "chat.completion.chunk"
-        assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
 
-    @pytest.mark.asyncio
-    async def test_image_generation_b64_format(self):
-        """Image generation with b64_json format returns base64 data."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
-        chunk = await handler._format_image_chunk(
-            [img],
-            "req-1",
-            response_format="b64_json",
-            request_type=RequestType.IMAGE_GENERATION,
+        async def mock_engine_inputs(req):
+            return expected
+
+        handler.audio = MagicMock()
+        handler.audio.build_engine_inputs = mock_engine_inputs
+        inputs = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="Hello world"),
+            RequestType.AUDIO_GENERATION,
         )
-        assert chunk["data"][0]["b64_json"] is not None
-
-    @pytest.mark.asyncio
-    async def test_image_generation_default_format_returns_b64(self):
-        """Image generation with response_format=None defaults to b64_json."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
-        chunk = await handler._format_image_chunk(
-            [img],
-            "req-1",
-            response_format=None,
-            request_type=RequestType.IMAGE_GENERATION,
-        )
-        assert chunk["data"][0]["b64_json"] is not None
-
-    @pytest.mark.asyncio
-    async def test_empty_images_returns_error(self):
-        """Empty image list produces an error chunk."""
-        handler = _make_handler()
-        chunk = await handler._format_image_chunk([], "req-1")
-        assert "Error" in chunk["choices"][0]["delta"]["content"]
-
-
-class TestFormatVideoChunk:
-    @pytest.mark.asyncio
-    async def test_empty_frames_returns_none(self):
-        """Empty frame list returns None."""
-        handler = _make_handler()
-        result = await handler._format_video_chunk([], "req-1", fps=16)
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_error_returns_failed_status(self):
-        """Encoding failure returns NvVideosResponse with failed status and error."""
-        handler = _make_handler()
-        with patch(
-            "dynamo.vllm.omni.omni_handler.normalize_video_frames",
-            side_effect=RuntimeError("boom"),
-        ):
-            chunk = await handler._format_video_chunk([MagicMock()], "req-1", fps=16)
-        assert chunk["status"] == "failed"
-        assert "boom" in chunk["error"]
+        assert inputs.request_type == RequestType.AUDIO_GENERATION
+        assert inputs.prompt["prompt"] == "Hello world"
 
 
 class TestI2VEngineInputs:
     """Tests for image-to-video: multi_modal_data attachment, I2V nvext params, and protocol fields."""
 
-    def test_t2v_no_multi_modal_data_and_i2v_attaches_image(self):
+    @pytest.mark.asyncio
+    async def test_t2v_no_multi_modal_data_and_i2v_attaches_image(self):
         """T2V has no multi_modal_data; I2V attaches image to prompt."""
         handler = _make_handler()
         req = NvCreateVideoRequest(
@@ -262,15 +170,18 @@ class TestI2VEngineInputs:
         )
 
         # T2V: no image
-        t2v = handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        t2v = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
         assert "multi_modal_data" not in t2v.prompt
 
         # I2V: image attached
         img = Image.new("RGB", (64, 64), color="red")
-        i2v = handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION, image=img)
+        i2v = await handler.build_engine_inputs(
+            req, RequestType.VIDEO_GENERATION, image=img
+        )
         assert i2v.prompt["multi_modal_data"]["image"] is img
 
-    def test_i2v_nvext_params_on_sampling_params(self):
+    @pytest.mark.asyncio
+    async def test_i2v_nvext_params_on_sampling_params(self):
         """boundary_ratio and guidance_scale_2 are forwarded to sampling params."""
         handler = _make_handler()
         req = NvCreateVideoRequest(
@@ -281,9 +192,8 @@ class TestI2VEngineInputs:
                 boundary_ratio=0.875, guidance_scale_2=1.0, num_inference_steps=40
             ),
         )
-        sp = handler.build_engine_inputs(
-            req, RequestType.VIDEO_GENERATION
-        ).sampling_params_list[0]
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
         assert sp.boundary_ratio == 0.875
         assert sp.guidance_scale_2 == 1.0
         assert sp.num_inference_steps == 40
@@ -306,3 +216,265 @@ class TestI2VEngineInputs:
         empty = VideoNvExt()
         assert empty.boundary_ratio is None
         assert empty.guidance_scale_2 is None
+
+
+class TestBuildSamplingParamsList:
+    def test_single_diffusion_stage(self):
+        handler = _make_handler(stage_types=("diffusion",))
+        sp = OmniDiffusionSamplingParams(height=512, width=512)
+        result = handler._build_sampling_params_list(sp)
+        assert len(result) == 1
+        assert result[0] is sp
+
+    def test_llm_then_diffusion(self):
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        sp = OmniDiffusionSamplingParams(height=512, width=512)
+        result = handler._build_sampling_params_list(sp)
+        assert len(result) == 2
+        assert isinstance(result[0], SamplingParams)
+        assert result[1] is sp
+
+    def test_fallback_when_defaults_empty(self):
+        handler = _make_handler()
+        handler.engine_client.default_sampling_params_list = []
+        sp = OmniDiffusionSamplingParams(height=512, width=512)
+        result = handler._build_sampling_params_list(sp)
+        assert result == [sp]
+
+    def test_llm_default_is_cloned(self):
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        sp = OmniDiffusionSamplingParams()
+        handler._build_sampling_params_list(sp)
+        handler.engine_client.default_sampling_params_list[0].clone.assert_called_once()
+
+
+class TestBuildOriginalPrompt:
+    """build_original_prompt only carries prompt/negative_prompt/multi_modal_data.
+
+    height/width/num_inference_steps live in OmniDiffusionSamplingParams, not the prompt.
+    """
+
+    def test_basic_fields(self):
+        result = build_original_prompt(
+            {"prompt": "a cat"}, nvext={}, height=512, width=512
+        )
+        assert result["prompt"] == "a cat"
+        assert result.get("negative_prompt") is None
+        assert "height" not in result
+        assert "width" not in result
+
+    def test_negative_prompt_from_request(self):
+        result = build_original_prompt(
+            {"prompt": "a cat", "negative_prompt": "blurry"},
+            nvext={"negative_prompt": "ignored"},
+            height=1024,
+            width=1024,
+        )
+        assert result["negative_prompt"] == "blurry"
+
+    def test_multi_modal_data_forwarded(self):
+        img = object()
+        result = build_original_prompt(
+            {"prompt": "x", "multi_modal_data": {"image": img}},
+            nvext={},
+            height=512,
+            width=512,
+        )
+        assert result["multi_modal_data"]["image"] is img
+
+    def test_no_inference_steps_or_guidance(self):
+        result = build_original_prompt(
+            {"prompt": "x"},
+            nvext={"num_inference_steps": 50, "guidance_scale": 7.5},
+            height=512,
+            width=512,
+        )
+        assert "num_inference_steps" not in result
+        assert "guidance_scale" not in result
+
+
+class TestParseOmniRequest:
+    """parse_omni_request: image geometry goes into sampling params and processor kwargs."""
+
+    @pytest.mark.asyncio
+    async def test_image_sampling_params_has_geometry(self):
+        request = {
+            "prompt": "a sunset",
+            "size": "512x512",
+            "output_modalities": ["image"],
+        }
+        result = await parse_omni_request(request, ["image"])
+        sp = result["sampling_params_list"]
+        assert sp["height"] == 512
+        assert sp["width"] == 512
+
+    @pytest.mark.asyncio
+    async def test_image_prompt_uses_multimodal_preprocessor_kwargs(self):
+        request = {
+            "prompt": "a sunset",
+            "size": "512x512",
+            "output_modalities": ["image"],
+        }
+        result = await parse_omni_request(request, ["image"])
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == "a sunset"
+        assert prompt["modalities"] == ["image"]
+        assert prompt["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
+
+        op = result["original_prompt"]
+        assert op["prompt"] == "a sunset"
+        assert "height" not in op
+        assert "width" not in op
+        assert op["modalities"] == ["image"]
+        assert op["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
+
+    def test_image_request_uses_nvext_negative_prompt(self):
+        request = {
+            "prompt": "a red apple",
+            "size": "1024x1024",
+            "nvext": {"negative_prompt": "blurry, low quality"},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+
+        assert result["engine_inputs"]["negative_prompt"] == "blurry, low quality"
+        assert result["original_prompt"]["negative_prompt"] == "blurry, low quality"
+
+    def test_image_request_uses_nvext_dimensions_consistently(self):
+        request = {
+            "prompt": "a red apple",
+            "size": "512x512",
+            "nvext": {"height": 640, "width": 768},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+
+        assert result["sampling_params_list"]["height"] == 640
+        assert result["sampling_params_list"]["width"] == 768
+        assert result["engine_inputs"]["mm_processor_kwargs"] == {
+            "target_h": 640,
+            "target_w": 768,
+        }
+        assert result["original_prompt"]["mm_processor_kwargs"] == {
+            "target_h": 640,
+            "target_w": 768,
+        }
+
+    @pytest.mark.asyncio
+    async def test_nvext_params_go_into_sampling_params_not_prompt(self):
+        request = {
+            "prompt": "x",
+            "size": "512x512",
+            "nvext": {"num_inference_steps": 30, "guidance_scale": 4.0},
+        }
+        result = await parse_omni_request(request, ["image"])
+        sp = result["sampling_params_list"]
+        assert sp["num_inference_steps"] == 30
+        assert sp["guidance_scale"] == 4.0
+        op = result["original_prompt"]
+        assert "num_inference_steps" not in op
+        assert "guidance_scale" not in op
+
+    @pytest.mark.asyncio
+    async def test_image_chat_request_uses_multimodal_preprocessor_kwargs(self):
+        request = {
+            "messages": [{"role": "user", "content": "a glass teapot"}],
+            "extra_body": {"height": 768, "width": 512, "guidance_scale": 1.5},
+        }
+
+        result = await parse_omni_request(request, ["image"])
+
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == "a glass teapot"
+        assert prompt["modalities"] == ["image"]
+        assert prompt["mm_processor_kwargs"] == {"target_h": 768, "target_w": 512}
+        assert result["original_prompt"] == prompt
+        assert result["sampling_params_list"] == {
+            "height": 768,
+            "width": 512,
+            "guidance_scale": 1.5,
+        }
+
+
+# ---------------------------------------------------------------------------
+# AudioGenerationHandler — data_source / response_format field mapping
+# ---------------------------------------------------------------------------
+
+
+def _make_audio_handler():
+    config = MagicMock()
+    config.tts_max_instructions_length = 200
+    config.tts_max_new_tokens_min = 1
+    config.tts_max_new_tokens_max = 4096
+    config.tts_ref_audio_timeout = 10
+    config.tts_ref_audio_max_bytes = 1024 * 1024
+    engine_client = MagicMock()
+    engine_client.model_config.hf_config.talker_config = None
+    return AudioGenerationHandler(config, engine_client, None, None)
+
+
+class TestAudioHandlerFieldMapping:
+    """AudioGenerationHandler maps data_source→response_format and response_format→output_format."""
+
+    @pytest.mark.asyncio
+    async def test_generic_path_maps_data_source_to_response_format(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hello", data_source="url", response_format="mp3"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "url"  # data_source → response_format
+        assert result.output_format == "mp3"  # response_format → output_format
+
+    @pytest.mark.asyncio
+    async def test_generic_path_maps_data_source_b64_json(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hello", data_source="b64_json", response_format="opus"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "b64_json"
+        assert result.output_format == "opus"
+
+    @pytest.mark.asyncio
+    async def test_generic_path_no_data_source_passes_none(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        # No data_source → response_format in EngineInputs will be None
+        req = NvCreateAudioSpeechRequest(input="hello", response_format="wav")
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format is None
+        assert result.output_format == "wav"
+
+    @pytest.mark.asyncio
+    async def test_tts_path_applies_same_field_mapping(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=True)
+        handler._validate_tts_request = MagicMock()
+        handler._estimate_tts_prompt_len = MagicMock(return_value=10)
+
+        req = NvCreateAudioSpeechRequest(
+            input="hi", data_source="url", response_format="flac"
+        )
+        result = await handler.build_engine_inputs(req)
+
+        assert result.response_format == "url"
+        assert result.output_format == "flac"
+
+    @pytest.mark.asyncio
+    async def test_request_type_is_audio_generation(self):
+        handler = _make_audio_handler()
+        handler._is_tts_model = MagicMock(return_value=False)
+
+        result = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="hi")
+        )
+        assert result.request_type == RequestType.AUDIO_GENERATION

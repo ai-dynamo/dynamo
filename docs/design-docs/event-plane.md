@@ -20,11 +20,10 @@ Key use cases:
 
 The event plane supports two transports:
 
-| | NATS (default) | ZMQ |
+| | ZMQ (default) | NATS |
 |---|---|---|
-| **External infrastructure** | Requires a NATS server | None (peer-to-peer) |
-| **Setup complexity** | Simple -- point at a NATS server | Automatic -- workers bind sockets and register via discovery |
-| **Best for** | Large-scale deployments | Low operational overhead |
+| **External infrastructure** | None (peer-to-peer) | Requires a NATS server |
+| **Setup complexity** | Automatic -- workers bind sockets and register via discovery | Simple -- point at a NATS server |
 
 ## Configuration
 
@@ -33,11 +32,11 @@ The event plane supports two transports:
 Set the `DYN_EVENT_PLANE` environment variable to choose a transport:
 
 ```bash
-# Use NATS (default -- no need to set explicitly)
-export DYN_EVENT_PLANE=nats
-
-# Use ZMQ
+# Use ZMQ (default -- no need to set explicitly)
 export DYN_EVENT_PLANE=zmq
+
+# Use NATS (opt-in)
+export DYN_EVENT_PLANE=nats
 ```
 
 Python components also accept this as a CLI flag:
@@ -54,12 +53,15 @@ python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DYN_EVENT_PLANE` | Transport: `nats` or `zmq` | `nats` |
+| `DYN_EVENT_PLANE` | Transport: `nats` or `zmq` | `zmq` (all backends) |
 | `NATS_SERVER` | NATS server URL (NATS transport only) | `nats://localhost:4222` |
+
+When `DYN_EVENT_PLANE` is not set, the default is **zmq**. Set `DYN_EVENT_PLANE=nats`
+to opt into the NATS transport.
 
 ## NATS Transport
 
-When using NATS (`DYN_EVENT_PLANE=nats` or unset):
+When using NATS (`DYN_EVENT_PLANE=nats`):
 
 - Requires a running NATS server. Set `NATS_SERVER` if it is not on `localhost:4222`.
 - Events are published to NATS subjects scoped by namespace and component.
@@ -112,7 +114,7 @@ With `--no-router-kv-events`:
 
 - The router falls back to prediction-based cache-aware routing (estimates cache state from routing decisions).
 - No NATS server or ZMQ sockets are needed.
-- TTL-based expiration and LRU pruning keep predicted state from growing stale.
+- TTL-based expiration keeps predicted state from growing stale.
 
 ## Deployment Modes
 

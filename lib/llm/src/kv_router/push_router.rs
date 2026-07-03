@@ -1,540 +1,327 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
-    dynamo_nvtx_range,
+    discovery::ClaimPayloadFuture,
+    metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
+    traits::DistributedRuntimeProvider,
 };
 use futures::stream::{self, StreamExt};
-use serde_json::json;
-use tokio::sync::OnceCell;
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{
-        CacheControlClient, KvRouter,
-        cache_control::{PinState, create_cache_control_client, spawn_pin_prefix},
-        metrics::RouterRequestMetrics,
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
-        timing::{RequestPhase, RequestTracker},
+        timing::{RequestPhase, RoutingData},
+    },
+    session_affinity::{
+        AffinityCoordinator, AffinityTarget, ResolvedAffinity, affinity_id, session_final,
     },
 };
+
+mod cancellation;
+mod request_guard;
+mod selection;
+
+use cancellation::{cancel_on_stop, cancelled_error};
+use request_guard::RequestGuard;
+use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
+
+const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
+const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
-    /// Lazily initialized on first PIN request. `None` when cache_control is disabled.
-    cache_control_cell: Option<OnceCell<CacheControlClient>>,
-}
-
-/// Result of worker selection containing instance ID, dp_rank, and overlap amount.
-struct WorkerSelection {
-    instance_id: u64,
-    dp_rank: u32,
-    overlap_amount: u32,
-}
-
-/// Drop guard that manages the full lifecycle of a routed request:
-/// per-item tracking (prefill, first token, output blocks) and final cleanup (free + metrics).
-///
-/// In the happy path, `finish().await` runs cleanup inline in the async context.
-/// If the stream is dropped early (e.g., client disconnect, consumer drop), the
-/// `Drop` impl fires and spawns a task to call `free()`.
-struct RequestGuard {
-    chooser: Arc<KvRouter>,
-    context_id: String,
-    tracker: Option<Arc<RequestTracker>>,
-    request_metrics: Arc<RouterRequestMetrics>,
-    cumulative_osl: usize,
-    metrics_recorded: bool,
-    freed: bool,
-    prefill_marked: bool,
-    first_token_recorded: bool,
-    track_output_blocks: bool,
-    current_total_blocks: usize,
-    isl_tokens: usize,
-    block_size: usize,
-    expected_output_tokens: Option<u32>,
-    // PIN state: set when cache_control TTL is present and a cc_client exists
-    pin_state: Option<PinState>,
-}
-
-impl RequestGuard {
-    async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
-        if !self.prefill_marked {
-            let has_tokens = item
-                .data
-                .as_ref()
-                .map(|d| !d.token_ids.is_empty())
-                .unwrap_or(false);
-            if has_tokens {
-                if let Err(e) = self.chooser.mark_prefill_completed(&self.context_id).await {
-                    tracing::warn!(
-                        "Failed to mark prefill completed for request {}: {e}",
-                        self.context_id
-                    );
-                }
-                self.prefill_marked = true;
-            }
-        }
-
-        let new_tokens = item.data.as_ref().map(|d| d.token_ids.len()).unwrap_or(0);
-
-        if !self.first_token_recorded && new_tokens > 0 {
-            if let Some(ref tracker) = self.tracker {
-                tracker.record_first_token();
-                if let Some(ttft) = tracker.ttft_ms() {
-                    self.request_metrics
-                        .time_to_first_token_seconds
-                        .observe(ttft / 1000.0);
-                }
-            }
-            self.first_token_recorded = true;
-        }
-
-        self.cumulative_osl += new_tokens;
-
-        if self.track_output_blocks {
-            let new_total_blocks =
-                (self.isl_tokens + self.cumulative_osl).div_ceil(self.block_size);
-            if new_total_blocks > self.current_total_blocks {
-                let decay_fraction = self
-                    .expected_output_tokens
-                    .map(|eot| (1.0 - (self.cumulative_osl as f64 / eot.max(1) as f64)).max(0.0));
-                if let Err(e) = self
-                    .chooser
-                    .add_output_block(&self.context_id, decay_fraction)
-                {
-                    tracing::warn!(
-                        "Failed to add output block for request {}: {e}",
-                        self.context_id
-                    );
-                }
-
-                if let Some(ref tracker) = self.tracker {
-                    tracker.record_osl(self.cumulative_osl);
-                    tracker.record_finish();
-                    if let Some(avg_itl) = tracker.avg_itl_ms() {
-                        self.request_metrics
-                            .inter_token_latency_seconds
-                            .observe(avg_itl / 1000.0);
-                    }
-                }
-
-                self.current_total_blocks = new_total_blocks;
-            }
-        }
-    }
-
-    async fn finish(&mut self) {
-        self.record_metrics();
-        if let Err(e) = self.chooser.free(&self.context_id).await {
-            tracing::warn!("Failed to free request {}: {e}", self.context_id);
-        }
-        self.freed = true;
-
-        if let Some(ref pin) = self.pin_state {
-            spawn_pin_prefix(
-                Some(&pin.cc_client),
-                &pin.token_ids,
-                pin.instance_id,
-                &self.context_id,
-                pin.ttl_seconds,
-            );
-        }
-    }
-
-    fn record_metrics(&mut self) {
-        if self.metrics_recorded {
-            return;
-        }
-        self.metrics_recorded = true;
-        if let Some(ref tracker) = self.tracker {
-            tracker.record_finish();
-            tracker.record_osl(self.cumulative_osl);
-        }
-        self.request_metrics
-            .output_sequence_tokens
-            .observe(self.cumulative_osl as f64);
-        self.request_metrics.requests_total.inc();
-    }
-}
-
-impl Drop for RequestGuard {
-    fn drop(&mut self) {
-        self.record_metrics();
-        if !self.freed {
-            let chooser = self.chooser.clone();
-            let context_id = self.context_id.clone();
-            let Ok(handle) = tokio::runtime::Handle::try_current() else {
-                tracing::warn!("No tokio runtime for drop guard free of request {context_id}");
-                return;
-            };
-            handle.spawn(async move {
-                if let Err(e) = chooser.free(&context_id).await {
-                    tracing::warn!("Failed to free request {context_id} (drop guard): {e}");
-                }
-            });
-        }
-    }
+    affinity: Option<AffinityCoordinator>,
 }
 
 impl KvPushRouter {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
-    ) -> Self {
+        session_affinity_ttl: Option<Duration>,
+    ) -> Result<Self, Error> {
+        let affinity = session_affinity_ttl
+            .map(|ttl| {
+                AffinityCoordinator::new_distributed(
+                    ttl,
+                    inner.client.endpoint.id().to_string(),
+                    inner.client.endpoint.drt().discovery(),
+                )
+            })
+            .transpose()?;
+
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        let cache_control_cell = if chooser.kv_router_config().router_enable_cache_control {
-            tracing::info!("Cache control enabled for PIN operations (lazy init)");
-            Some(OnceCell::new())
-        } else {
-            None
-        };
-        KvPushRouter {
+        Ok(KvPushRouter {
             inner,
             chooser,
-            cache_control_cell,
-        }
-    }
-
-    /// Select a worker for the request, either using a preselected worker or finding the best match.
-    ///
-    /// When `is_query_only` is false, this also registers the request with the scheduler via `add_request`.
-    async fn select_worker(
-        &self,
-        context_id: &str,
-        request: &PreprocessedRequest,
-        phase: RequestPhase,
-        is_query_only: bool,
-    ) -> Result<WorkerSelection, Error> {
-        let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
-        let routing = request.routing.as_ref();
-        let lora_name = routing.and_then(|r| r.lora_name.clone());
-        let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
-        let dp_rank = routing.and_then(|r| r.dp_rank).unwrap_or(0);
-        let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
-        let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
-        let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
-
-        // Get pre-selected worker based on phase, with backend_instance_id as fallback
-        let preselected_id = match phase {
-            RequestPhase::Prefill => {
-                routing.and_then(|r| r.prefill_worker_id.or(r.backend_instance_id))
-            }
-            RequestPhase::Decode => {
-                routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id))
-            }
-            RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
-        };
-
-        let Some(id) = preselected_id else {
-            let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
-            let (best_worker, overlap_amount) = self
-                .chooser
-                .find_best_match(
-                    Some(context_id),
-                    routing_token_ids,
-                    block_mm_infos,
-                    request.router_config_override.as_ref(),
-                    !is_query_only,
-                    lora_name,
-                    priority_jump,
-                    expected_output_tokens,
-                    allowed_worker_ids,
-                )
-                .await?;
-
-            if !is_query_only {
-                let total_blocks = routing_token_ids
-                    .len()
-                    .div_ceil(self.chooser.block_size() as usize);
-                // NOTE: tests/mm_router/test_vllm_mm_router_e2e.py parses this log line.
-                // Keep the "[ROUTING] ... with X/Y blocks overlap" shape stable unless
-                // router tests are updated together.
-                tracing::debug!(
-                    request_id = %context_id,
-                    worker_id = best_worker.worker_id,
-                    dp_rank = best_worker.dp_rank,
-                    overlap_blocks = overlap_amount,
-                    total_blocks = total_blocks,
-                    "[ROUTING] Best: worker_{} dp_rank={} with {}/{} blocks overlap",
-                    best_worker.worker_id,
-                    best_worker.dp_rank,
-                    overlap_amount,
-                    total_blocks,
-                );
-            }
-
-            return Ok(WorkerSelection {
-                instance_id: best_worker.worker_id,
-                dp_rank: best_worker.dp_rank,
-                overlap_amount,
-            });
-        };
-
-        tracing::debug!(
-            worker_id = id,
-            dp_rank = dp_rank,
-            ?phase,
-            "Routing to specified worker"
-        );
-
-        let worker = WorkerWithDpRank::new(id, dp_rank);
-        let overlap_blocks = self
-            .chooser
-            .get_overlap_blocks(
-                routing_token_ids,
-                block_mm_infos,
-                worker,
-                lora_name.as_deref(),
-            )
-            .await?;
-
-        if !is_query_only {
-            self.chooser
-                .add_request(
-                    context_id.to_string(),
-                    routing_token_ids,
-                    block_mm_infos,
-                    overlap_blocks,
-                    expected_output_tokens,
-                    worker,
-                    lora_name,
-                    request.router_config_override.as_ref(),
-                )
-                .await;
-        } else {
-            tracing::debug!(
-                request_id = %context_id,
-                worker_id = id,
-                dp_rank = dp_rank,
-                "Skipping add_request - query or handled externally"
-            );
-        }
-
-        Ok(WorkerSelection {
-            instance_id: id,
-            dp_rank,
-            overlap_amount: overlap_blocks,
+            affinity,
         })
     }
-}
 
-#[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for KvPushRouter
-{
-    /// Generate method that handles KV-aware routing with three distinct behaviors:
-    ///
-    /// 1. **If `query_instance_id` annotation is set**:
-    ///    - Returns the best matching worker ID without routing the request
-    ///    - Does NOT update any router local states
-    ///    - Response includes worker_instance_id and token_data annotations
-    ///
-    /// 2. **If `backend_instance_id` is set in the request**:
-    ///    - Routes directly to the specified backend instance
-    ///    - DOES update router states to track this request (unless query_instance_id is also set)
-    ///    - Bypasses the normal KV matching logic
-    ///
-    /// 3. **If neither are set (default behavior)**:
-    ///    - Finds the best worker based on KV cache overlap
-    ///    - Updates router states to track the request
-    ///    - Routes to the selected worker
-    ///
-    /// The router state updates include tracking active sequences and managing
-    /// prefill/completion lifecycle for proper KV cache management.
-    async fn generate(
+    async fn select_request(
         &self,
-        request: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        // Extract context ID for request tracking
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        is_query_only: bool,
+        affinity_worker: Option<WorkerWithDpRank>,
+    ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
-
-        // Simple query-only detection: presence of query_instance_id annotation means query-only mode
-        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
-
-        // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
-        let phase = request
-            .tracker
-            .as_ref()
-            .map(|t| t.phase())
-            .unwrap_or(RequestPhase::Aggregated);
-
-        let block_size = self.chooser.block_size() as usize;
-        let selection = self
-            .select_worker(&context_id, &request, phase, is_query_only)
+        let policy_class = request.metadata().get("policy-class").cloned();
+        let routing_parts = RoutingRequestParts::new(request);
+        let request_context = request.context().clone();
+        let mut selection_future = Box::pin(async {
+            self.select_worker(
+                &context_id,
+                request,
+                routing_parts,
+                phase,
+                is_query_only,
+                SelectionOptions {
+                    affinity_worker,
+                    policy_class,
+                },
+            )
             .instrument(tracing::info_span!("kv_router.select_worker"))
-            .await?;
-        let WorkerSelection {
-            instance_id,
-            dp_rank,
-            overlap_amount,
-        } = selection;
+            .await
+        });
+        let selection_result = tokio::select! {
+            biased;
 
-        // In approximate mode (use_kv_events=false), record the routing decision
-        // so the indexer can track cache state based on routing decisions.
-        // This covers both pre-selected workers and find_best_match selections.
-        if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
-            let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
-            let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
-            let worker = WorkerWithDpRank::new(instance_id, dp_rank);
-            let mut tokens_with_hashes =
-                TokensWithHashes::new(routing_token_ids.to_vec(), self.chooser.block_size())
-                    .with_is_eagle(self.chooser.is_eagle());
-            if let Some(infos) = block_mm_infos {
-                tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
-            }
-            if let Some(lora_name) = lora_name {
-                tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
-            }
-            if let Err(e) = self
-                .chooser
-                .record_routing_decision(tokens_with_hashes, worker)
-                .await
-            {
-                tracing::warn!(
-                    request_id = %context_id,
-                    worker_id = instance_id,
-                    dp_rank = dp_rank,
-                    error = %e,
-                    "Failed to record routing decision in approximate mode"
-                );
+            _ = request_context.stopped() => None,
+            result = &mut selection_future => Some(result),
+        };
+        drop(selection_future);
+
+        match selection_result {
+            Some(result) => result,
+            None => {
+                if !is_query_only && let Err(error) = self.chooser.free(&context_id).await {
+                    tracing::warn!(
+                        request_id = %context_id,
+                        %error,
+                        "Failed to free scheduler state after cancellation during worker selection"
+                    );
+                }
+                Err(cancelled_error(&context_id))
             }
         }
+    }
 
-        // Record routing metrics on tracker and observe ISL + prefill start.
-        let request_metrics =
-            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component());
-        if let Some(ref tracker) = request.tracker {
-            let (routing_token_ids, _) = request.block_mm_routing_info();
-            let isl_blocks = routing_token_ids.len().div_ceil(block_size);
-            tracker.record_kv_hit(overlap_amount, isl_blocks);
-            tracker.record_isl(
-                routing_token_ids.len(),
-                overlap_amount as usize * block_size,
-            );
-            tracker.record_worker_full(instance_id, dp_rank, self.chooser.worker_type());
-            tracker.record_router_queue_depth(self.chooser.pending_count());
-            if let Some(hit_rate) = tracker.kv_hit_rate() {
-                request_metrics.kv_hit_rate.observe(hit_rate);
-            }
-        }
-        request_metrics
-            .input_sequence_tokens
-            .observe(request.token_ids.len() as f64);
-
-        // Handle query-only requests: early return with worker info
+    async fn select_with_affinity(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        is_query_only: bool,
+    ) -> Result<(WorkerSelection, Option<ResolvedAffinity>), Error> {
+        let Some(affinity) = self.affinity.as_ref() else {
+            return Ok((
+                self.select_request(request, phase, is_query_only, None)
+                    .await?,
+                None,
+            ));
+        };
+        let Some(session_id) = affinity_id(request)? else {
+            return Ok((
+                self.select_request(request, phase, is_query_only, None)
+                    .await?,
+                None,
+            ));
+        };
         if is_query_only {
-            let stream_context = request.context().clone();
-            let worker_id_info = request.tracker.as_ref().and_then(|t| t.get_worker_info());
-
-            tracing::trace!(
-                ?phase,
-                worker_id = instance_id,
-                ?worker_id_info,
-                "Returning worker selection (query-only mode)"
-            );
-
-            let output = LLMEngineOutput {
-                disaggregated_params: Some(json!({
-                    "worker_id": worker_id_info,
-                    "token_ids": request.token_ids
-                })),
-                ..Default::default()
-            };
-            let response = Annotated::from_data(output);
-            let stream = stream::iter(vec![response]);
-            return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+            let target = affinity.query_target(&session_id)?;
+            let worker = target.and_then(affinity_worker);
+            return Ok((
+                self.select_request(request, phase, true, worker).await?,
+                None,
+            ));
         }
 
-        // Route to worker
-        let isl_tokens = request.token_ids.len();
-        let expected_output_tokens = request
-            .routing
-            .as_ref()
-            .and_then(|r| r.expected_output_tokens);
-        let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
-        let tracker = request.tracker.clone();
-
-        // Extract pin state: lazily init cache_control client on first PIN request
-        let pin_state: Option<PinState> = async {
-            let ttl = request.routing.as_ref().and_then(|r| r.cache_control_ttl)?;
-            let cell = self.cache_control_cell.as_ref()?;
-            let component = self.chooser.client().endpoint.component().clone();
-            let client = cell
-                .get_or_try_init(|| create_cache_control_client(&component))
-                .await
-                .inspect_err(|e| tracing::warn!("Failed to create cache_control client: {e}"))
-                .ok()?
-                .clone();
-            Some(PinState {
-                token_ids: request.token_ids.clone(),
-                cc_client: client,
-                instance_id,
-                ttl_seconds: ttl,
+        let request_context = request.context();
+        let operation = affinity
+            .acquire_with_context(&session_id, request_context.as_ref())
+            .await?;
+        let resolved = operation
+            .resolve(|| -> ClaimPayloadFuture<'_> {
+                Box::pin(async {
+                    let selection = self.select_request(request, phase, true, None).await?;
+                    let target = AffinityTarget {
+                        worker_id: selection.instance_id,
+                        dp_rank: Some(selection.dp_rank),
+                    };
+                    Ok(serde_json::to_value(target)?)
+                })
             })
+            .await?;
+        let worker = affinity_worker(resolved.target());
+        let selection = self.select_request(request, phase, false, worker).await?;
+        Ok((selection, Some(resolved)))
+    }
+
+    async fn track_selection(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        selection: &mut WorkerSelection,
+        is_query_only: bool,
+    ) -> Result<RequestGuard, Error> {
+        let context_id = request.context().id().to_string();
+        let request_context = request.context().clone();
+        let routing_parts = RoutingRequestParts::new(request);
+        let block_size = self.chooser.block_size() as usize;
+        let mut guard = RequestGuard::new(
+            self.chooser.clone(),
+            context_id.clone(),
+            request,
+            selection.scheduler_tracked,
+        );
+
+        let record_result: Result<(), Error> = async {
+            if !is_query_only && self.chooser.indexer().records_routing_decisions() {
+                let worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
+                let record_result = if let Some(hashes) = selection.routing_hashes.take() {
+                    cancel_on_stop(
+                        request_context.as_ref(),
+                        &context_id,
+                        self.chooser.record_routing_decision_hashes(hashes, worker),
+                    )
+                    .await?
+                } else {
+                    let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+                    let mut tokens_with_hashes = TokensWithHashes::new(
+                        routing_parts.token_ids.to_vec(),
+                        self.chooser.block_size(),
+                    )
+                    .with_is_eagle(self.chooser.is_eagle());
+                    if let Some(infos) = routing_parts.block_mm_infos {
+                        tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
+                    }
+                    if let Some(lora_name) = lora_name {
+                        tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
+                    }
+                    cancel_on_stop(
+                        request_context.as_ref(),
+                        &context_id,
+                        self.chooser
+                            .record_routing_decision(tokens_with_hashes, worker),
+                    )
+                    .await?
+                };
+                if let Err(error) = record_result {
+                    tracing::warn!(
+                        request_id = %context_id,
+                        worker_id = selection.instance_id,
+                        dp_rank = selection.dp_rank,
+                        error = %error,
+                        "Failed to record routing decision"
+                    );
+                }
+            }
+
+            if let Some(ref tracker) = request.tracker {
+                let isl_blocks = routing_parts.token_ids.len().div_ceil(block_size);
+                tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
+                tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
+                tracker.record_worker(
+                    selection.instance_id,
+                    Some(selection.dp_rank),
+                    self.chooser.worker_type(),
+                );
+                tracker.record_router_queue_depth(self.chooser.pending_count());
+                if let Some(hit_rate) = tracker.kv_hit_rate() {
+                    guard.request_metrics().kv_hit_rate.observe(hit_rate);
+                }
+            }
+            guard
+                .request_metrics()
+                .input_sequence_tokens
+                .observe(request.token_ids.len() as f64);
+            Ok(())
         }
         .await;
 
-        let (mut backend_input, context) = request.into_parts();
-        backend_input.routing_mut().dp_rank = Some(dp_rank);
-        let updated_request = context.map(|_| backend_input);
-
-        // Record prefill start right before pushing to backend (OnceLock: first call wins).
-        if let Some(ref tracker) = tracker {
-            tracker.record_prefill_start();
+        if let Err(error) = record_result {
+            guard.abort().await;
+            return Err(error);
         }
+        Ok(guard)
+    }
 
-        let chooser = self.chooser.clone();
-        let mut response_stream = self
-            .inner
-            .direct(updated_request, instance_id)
-            .instrument(tracing::info_span!(
+    async fn dispatch_selection(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+        selection: WorkerSelection,
+        mut guard: RequestGuard,
+        exact: bool,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let context_id = request.context().id().to_string();
+        let request_context = request.context().clone();
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or(RequestPhase::Aggregated);
+        let phase_label = phase.to_string();
+        guard.start_dispatch(&phase_label);
+        self.warn_if_output_replay_annotation_ignored(&request, &selection);
+
+        let (mut backend_input, context) = request.into_parts();
+        backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
+        let updated_request = context.map(|_| backend_input);
+        guard.record_prefill_start();
+
+        let dispatch = async {
+            if exact {
+                self.inner
+                    .dispatch_exact(updated_request, selection.instance_id)
+                    .await
+            } else {
+                self.inner
+                    .direct(updated_request, selection.instance_id)
+                    .await
+            }
+        };
+        let dispatch_result = cancel_on_stop(
+            request_context.as_ref(),
+            &context_id,
+            dispatch.instrument(tracing::info_span!(
                 "kv_router.route_request",
                 request_id = %context_id,
-                worker_id = instance_id,
-                dp_rank = dp_rank,
-                overlap_blocks = overlap_amount,
+                worker_id = selection.instance_id,
+                dp_rank = selection.dp_rank,
+                overlap_blocks = selection.overlap_amount,
                 phase = ?phase,
-            ))
-            .await?;
+            )),
+        )
+        .await
+        .and_then(|result| result);
+        let mut response_stream = match dispatch_result {
+            Ok(stream) => stream,
+            Err(error) => {
+                guard.abort().await;
+                return Err(error);
+            }
+        };
+
+        guard.mark_dispatched();
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
-
         let wrapped_stream = Box::pin(async_stream::stream! {
-            let mut guard = RequestGuard {
-                chooser: chooser.clone(),
-                context_id: context_id.clone(),
-                tracker: tracker.clone(),
-                request_metrics: request_metrics.clone(),
-                cumulative_osl: 0,
-                metrics_recorded: false,
-                freed: false,
-                prefill_marked: false,
-                first_token_recorded: false,
-                track_output_blocks,
-                current_total_blocks: isl_tokens.div_ceil(block_size),
-                isl_tokens,
-                block_size,
-                expected_output_tokens,
-                pin_state,
-            };
+            let mut guard = guard;
 
             loop {
                 tokio::select! {
@@ -559,6 +346,182 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }
+
+    fn warn_if_output_replay_annotation_ignored(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        selection: &WorkerSelection,
+    ) {
+        let Some(replay_key) = request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY) else {
+            return;
+        };
+        let consumes_replay = self
+            .chooser
+            .workers_with_configs
+            .borrow()
+            .get(&selection.instance_id)
+            .and_then(|config| {
+                config
+                    .get_engine_specific::<bool>(OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY)
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(false);
+        if consumes_replay {
+            return;
+        }
+
+        tracing::warn!(
+            replay_key,
+            worker_id = selection.instance_id,
+            dp_rank = selection.dp_rank,
+            "request has output token replay annotation but selected worker has not declared replay-token consumption"
+        );
+    }
+
+    pub(crate) async fn select_and_dispatch_prefill<M, F>(
+        &self,
+        mut request: SingleIn<PreprocessedRequest>,
+        prepare: F,
+    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
+    where
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
+    {
+        let phase = RequestPhase::Prefill;
+        let phase_label = phase.to_string();
+        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+        let close_on_finish = !is_query_only && session_final(request.content());
+        let (mut selection, operation) = self
+            .select_with_affinity(&request, phase, is_query_only)
+            .await?;
+        let mut guard = self
+            .track_selection(&request, &mut selection, is_query_only)
+            .await?;
+        let target = AffinityTarget {
+            worker_id: selection.instance_id,
+            dp_rank: Some(selection.dp_rank),
+        };
+        let metadata = match prepare(&mut request, target) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                guard.abort().await;
+                return Err(error);
+            }
+        };
+        drop(route_guard);
+        let stream = self
+            .dispatch_selection(request, selection, guard, true)
+            .await?;
+        let Some(operation) = operation else {
+            return Ok((metadata, stream));
+        };
+        Ok((metadata, operation.into_stream(stream, close_on_finish)))
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for KvPushRouter
+{
+    /// Generate method that handles KV-aware routing with three distinct behaviors:
+    ///
+    /// 1. **If `query_instance_id` annotation is set**:
+    ///    - Returns the best matching worker ID without routing the request
+    ///    - Does NOT update any router local states
+    ///    - Response includes worker_instance_id and token_data annotations
+    ///
+    /// 2. **If a phase-specific worker or `backend_instance_id` is set in the request**:
+    ///    - Query-only requests return that worker selection without state updates
+    ///    - Requests route through the scheduler as an exact pin when dp_rank is resolved
+    ///    - If dp_rank cannot be resolved, the request is rejected instead of treating rank 0 as a sentinel
+    ///
+    /// 3. **If neither are set (default behavior)**:
+    ///    - Finds the best worker based on KV cache overlap
+    ///    - Updates router states to track the request
+    ///    - Routes to the selected worker
+    ///
+    /// The router state updates include tracking active sequences and managing
+    /// prefill/completion lifecycle for proper KV cache management.
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or(RequestPhase::Aggregated);
+        let phase_label = phase.to_string();
+        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
+        let close_on_finish = !is_query_only && session_final(request.content());
+        let (mut selection, operation) = self
+            .select_with_affinity(&request, phase, is_query_only)
+            .await?;
+        if is_query_only {
+            let routing_parts = RoutingRequestParts::new(&request);
+            if let Some(ref tracker) = request.tracker {
+                let isl_blocks = routing_parts
+                    .token_ids
+                    .len()
+                    .div_ceil(self.chooser.block_size() as usize);
+                tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
+                tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
+                tracker.record_worker(
+                    selection.instance_id,
+                    Some(selection.dp_rank),
+                    self.chooser.worker_type(),
+                );
+                tracker.record_router_queue_depth(self.chooser.pending_count());
+            }
+            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component())
+                .input_sequence_tokens
+                .observe(request.token_ids.len() as f64);
+            let stream_context = request.context().clone();
+            let worker_id_info = request
+                .tracker
+                .as_ref()
+                .and_then(|tracker| tracker.get_worker_info());
+
+            tracing::trace!(
+                ?phase,
+                worker_id = selection.instance_id,
+                ?worker_id_info,
+                "Returning worker selection (query-only mode)"
+            );
+
+            let output = LLMEngineOutput {
+                routing_data: Some(RoutingData {
+                    worker_id: worker_id_info,
+                    token_ids: Some(request.token_ids.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let response = Annotated::from_data(output);
+            let stream = stream::iter(vec![response]);
+            return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+        }
+
+        let guard = self
+            .track_selection(&request, &mut selection, false)
+            .await?;
+        drop(route_guard);
+        let stream = self
+            .dispatch_selection(request, selection, guard, operation.is_some())
+            .await?;
+        match operation {
+            Some(operation) => Ok(operation.into_stream(stream, close_on_finish)),
+            None => Ok(stream),
+        }
+    }
+}
+
+fn affinity_worker(target: AffinityTarget) -> Option<WorkerWithDpRank> {
+    target
+        .dp_rank
+        .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
 }
 
 /// A direct routing wrapper for `RouterMode::Direct`.
@@ -603,5 +566,201 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         tracing::debug!(worker_id = worker_id, "Direct routing to specified worker");
 
         self.inner.direct(request, worker_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
+    use dynamo_kv_router::{DefaultWorkerSelector, config::KvRouterConfig};
+    use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        distributed::DistributedConfig,
+        error::{ErrorType, match_error_chain},
+        pipeline::{AsyncEngineContext, Context, PushRouter, RouterMode, context::Controller},
+    };
+    use tokio::sync::watch;
+
+    use super::*;
+    use crate::{
+        local_model::runtime_config::ModelRuntimeConfig,
+        protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    };
+
+    fn request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("affinity-selection-cancellation".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+        let endpoint = component.endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let workers = HashMap::from([
+            (7, ModelRuntimeConfig::default()),
+            (8, ModelRuntimeConfig::default()),
+        ]);
+        let (_tx, workers) = watch::channel(workers);
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        let chooser = KvRouter::new(
+            endpoint,
+            client.clone(),
+            workers,
+            16,
+            DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+            Some(config),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let inner = PushRouter::from_client(client, RouterMode::KV)
+            .await
+            .unwrap();
+        let router = KvPushRouter::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+        (router, runtime)
+    }
+
+    #[tokio::test]
+    async fn session_affinity_disabled_does_not_create_coordinator() {
+        let (router, runtime) = router(None).await;
+        assert!(router.affinity.is_none());
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_affinity_existing_selection_cancellation_preserves_binding_without_retry() {
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+        let session_id = SessionAffinityId::new("cancelled-selection");
+        let original_target = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(0),
+        };
+        let resolved = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(&session_id)
+            .await
+            .unwrap()
+            .resolve(|| Box::pin(async move { Ok(serde_json::to_value(original_target)?) }))
+            .await
+            .unwrap();
+        drop(resolved);
+
+        let controller = Controller::new("cancelled-selection-request".to_string());
+        controller.stop();
+        let mut request = Context::with_controller(request(), controller);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+        let Err(error) = router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+        else {
+            panic!("stopped request must return cancellation");
+        };
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::Cancelled],
+            &[]
+        ));
+        assert_eq!(
+            router
+                .affinity
+                .as_ref()
+                .unwrap()
+                .query_target(&session_id)
+                .unwrap(),
+            Some(original_target)
+        );
+
+        let resolved = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(&session_id)
+            .await
+            .unwrap()
+            .resolve(|| {
+                Box::pin(async move {
+                    Ok(serde_json::to_value(AffinityTarget {
+                        worker_id: 8,
+                        dp_rank: Some(0),
+                    })?)
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(resolved.target(), original_target);
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_affinity_binding_overrides_conflicting_explicit_proposal() {
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+        let session_id = SessionAffinityId::new("conflicting-explicit-proposal");
+        let bound_target = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(0),
+        };
+        let resolved = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(&session_id)
+            .await
+            .unwrap()
+            .resolve(|| Box::pin(async move { Ok(serde_json::to_value(bound_target)?) }))
+            .await
+            .unwrap();
+        drop(resolved);
+
+        let mut content = request();
+        content.routing_mut().backend_instance_id = Some(8);
+        content.routing_mut().decode_worker_id = Some(8);
+        content.routing_mut().dp_rank = Some(0);
+        let mut request = Context::new(content);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+        let (selection, resolved) = router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+            .unwrap();
+        assert_eq!(selection.instance_id, 7);
+        assert_eq!(selection.dp_rank, 0);
+        assert_eq!(resolved.unwrap().target(), bound_target);
+        router.chooser.free(request.context().id()).await.unwrap();
+
+        drop(router);
+        runtime.shutdown();
     }
 }

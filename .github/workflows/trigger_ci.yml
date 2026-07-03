@@ -20,9 +20,12 @@ on:
     branches:
       - main
       - release/*.*.*
-      - "pull-request/[0-9]+"
-    # Skip docs only changes
+    # Docs deployment is handled by fern-docs.yml. Docs-only changes are
+    # covered by pre-merge Fern checks, so do not wake this secrets-backed
+    # GitLab mirror/Test Lab pipeline for docs metadata/config.
     paths-ignore:
+      - 'docs/**'
+      - 'fern/**'
       - '**.md'
       - '**.rst'
 
@@ -34,7 +37,7 @@ jobs:
       group: gitlab_ci_runners
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     - name: Sync Mirror Repository
       run: ./.github/workflows/mirror_repo.sh ${{ secrets.PROJECT_ACCESS_TOKEN }} ${{ secrets.MIRROR_URL }}
 
@@ -46,7 +49,7 @@ jobs:
       group: gitlab_ci_runners
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     - name: Detect source code changes
       id: src_changes
       uses: dorny/paths-filter@v3

@@ -23,7 +23,7 @@ _chat_protocol = importlib.import_module(
     "vllm.entrypoints.openai.chat_completion.protocol"
 )
 _engine_protocol = importlib.import_module("vllm.entrypoints.openai.engine.protocol")
-_inputs_data = importlib.import_module("vllm.inputs.data")
+_inputs_data = importlib.import_module("vllm.inputs")
 _reasoning = importlib.import_module("vllm.reasoning")
 _sampling_params = importlib.import_module("vllm.sampling_params")
 _tool_parsers = importlib.import_module("vllm.tool_parsers")
@@ -369,6 +369,7 @@ class TestVllmRendererApi:
             "cache_salt",
             "data_parallel_rank",
             "prompt_embeds",
+            "prompt_is_token_ids",
             "client_index",
             "current_wave",
             "priority",
@@ -377,19 +378,44 @@ class TestVllmRendererApi:
             "external_req_id",
             "reasoning_ended",
         )
+        reasoning_request_fields = (*base_request_fields, "reasoning_parser_kwargs")
+        abort_request_fields = (*reasoning_request_fields, "abort_immediately")
         # vllm-omni monkey-patches EngineCoreRequest with an extra field
         # (only installed on amd64, not arm64)
-        omni_fields = base_request_fields + ("additional_information",)
+        omni_fields = (*reasoning_request_fields, "additional_information")
+        abort_omni_fields = (*abort_request_fields, "additional_information")
+        valid_request_fields = (
+            base_request_fields,
+            reasoning_request_fields,
+            abort_request_fields,
+            (*base_request_fields, "additional_information"),
+            omni_fields,
+            abort_omni_fields,
+        )
         actual_request_fields = EngineCoreRequest.__struct_fields__
-        assert actual_request_fields in (base_request_fields, omni_fields), (
+        assert actual_request_fields in valid_request_fields, (
             "EngineCoreRequest fields changed!\n"
-            f"Expected (base): {base_request_fields}\n"
-            f"Expected (omni): {omni_fields}\n"
+            f"Expected variants: {valid_request_fields}\n"
             f"Actual:          {actual_request_fields}\n"
             "Update request construction in components/src/dynamo/frontend/vllm_processor.py"
         )
 
-        expected_output_fields = (
+        base_output_fields = (
+            "request_id",
+            "new_token_ids",
+            "new_logprobs",
+            "new_prompt_logprobs_tensors",
+            "pooling_output",
+            "finish_reason",
+            "stop_reason",
+            "events",
+            "kv_transfer_params",
+            "trace_headers",
+            "prefill_stats",
+            "routed_experts",
+            "num_nans_in_logits",
+        )
+        cached_token_output_fields = (
             "request_id",
             "new_token_ids",
             "new_logprobs",
@@ -405,11 +431,29 @@ class TestVllmRendererApi:
             "routed_experts",
             "num_nans_in_logits",
         )
+        # vllm-omni extends EngineCoreOutput with a multimodal output channel
+        # and streaming segment metadata (only installed on amd64, not arm64).
+        # Declaration order in OmniEngineCoreOutput determines wire position.
+        omni_output_extra_fields = (
+            "multimodal_output",
+            "is_segment_finished",
+            "new_prompt_len_snapshot",
+        )
+        omni_output_fields = base_output_fields + omni_output_extra_fields
+        omni_cached_token_output_fields = (
+            cached_token_output_fields + omni_output_extra_fields
+        )
+        valid_output_fields = (
+            base_output_fields,
+            cached_token_output_fields,
+            omni_output_fields,
+            omni_cached_token_output_fields,
+        )
         actual_output_fields = EngineCoreOutput.__struct_fields__
-        assert actual_output_fields == expected_output_fields, (
+        assert actual_output_fields in valid_output_fields, (
             "EngineCoreOutput fields changed!\n"
-            f"Expected: {expected_output_fields}\n"
-            f"Actual:   {actual_output_fields}\n"
+            f"Expected variants: {valid_output_fields}\n"
+            f"Actual:          {actual_output_fields}\n"
             "Update output mapping in components/src/dynamo/frontend/vllm_processor.py"
         )
 
@@ -528,10 +572,11 @@ class TestVllmRendererApi:
         )
 
     def test_reasoning_parser_method_signatures(self):
-        """Verify ReasoningParser has extract_reasoning_streaming and
-        is_reasoning_end_streaming.
+        """Verify ReasoningParser has extract_reasoning_streaming,
+        is_reasoning_end_streaming, and extract_reasoning.
 
-        prepost.py calls both during streaming post-processing to separate
+        prepost.py calls the streaming pair during streaming post-processing
+        and extract_reasoning on the non-streaming finalize path to separate
         reasoning tokens from content tokens.
         """
         assert hasattr(ReasoningParser, "extract_reasoning_streaming"), (
@@ -565,4 +610,16 @@ class TestVllmRendererApi:
         assert end_params == ["self", "input_ids", "delta_ids"], (
             "ReasoningParser.is_reasoning_end_streaming signature changed; "
             f"expected ['self', 'input_ids', 'delta_ids'], got {end_params}"
+        )
+
+        assert hasattr(ReasoningParser, "extract_reasoning"), (
+            "ReasoningParser no longer has 'extract_reasoning'; "
+            "update StreamingPostProcessor in "
+            "components/src/dynamo/frontend/prepost.py"
+        )
+        batch_sig = inspect.signature(ReasoningParser.extract_reasoning)
+        batch_params = list(batch_sig.parameters)
+        assert batch_params == ["self", "model_output", "request"], (
+            "ReasoningParser.extract_reasoning signature changed; "
+            f"expected ['self', 'model_output', 'request'], got {batch_params}"
         )

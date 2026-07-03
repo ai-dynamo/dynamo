@@ -13,17 +13,39 @@ from abc import ABC, abstractmethod
 from queue import Queue
 from typing import Any, Awaitable, List, Optional
 
-import msgpack
+import msgspec
 import torch
-from nixl._api import nixl_agent, nixl_agent_config
 from pydantic import BaseModel
 from safetensors import torch as safetensors_torch
 
-import dynamo.nixl_connect as nixl_connect
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
+
+
+def _load_nixl_api():
+    try:
+        from nixl._api import nixl_agent, nixl_agent_config
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL is required for NIXL embedding transfer; install nixl "
+            "to use NIXL write-based multimodal embedding transfer."
+        ) from exc
+
+    return nixl_agent, nixl_agent_config
+
+
+def _load_nixl_connect():
+    try:
+        import dynamo.nixl_connect as nixl_connect
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL is required for NIXL embedding transfer; install "
+            "dynamo.nixl_connect to use NIXL read-based transfers."
+        ) from exc
+
+    return nixl_connect
 
 
 def torch_dtype_from_string(dtype_str: str) -> torch.dtype:
@@ -379,6 +401,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
 
     def __init__(self):
         # NIXL agent setup
+        nixl_agent, nixl_agent_config = _load_nixl_api()
         self.sender_id = f"sender_{str(uuid.uuid4())}"
         self.nixl_agent = nixl_agent(
             self.sender_id, nixl_agent_config(num_threads=8, capture_telemetry=True)
@@ -406,7 +429,9 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
         self.transfer_timeout = 60  # seconds, can be tuned based on expected transfer time and network condition
 
     def __del__(self):
-        self._state_update_task.cancel()
+        state_update_task = getattr(self, "_state_update_task", None)
+        if state_update_task is not None:
+            state_update_task.cancel()
 
     async def _state_update(self):
         """Long-running async task that processes transfer requests."""
@@ -522,7 +547,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                     (target_buffer, target_byte_size, target_device_id, target_mem_str),
                     write_done_id,
                     remote_agent_metadata,
-                ) = msgpack.unpackb(notif)
+                ) = msgspec.msgpack.decode(notif)
                 write_requests.append(
                     (
                         # receiver contact
@@ -626,6 +651,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
         self.transfer_tensor = self.ring_buffer.buffer_tensor
 
         # NIXL agent setup
+        nixl_agent, nixl_agent_config = _load_nixl_api()
         self.receiver_id = f"receiver_{str(uuid.uuid4())}"
         self.nixl_agent = nixl_agent(
             self.receiver_id, nixl_agent_config(num_threads=8, capture_telemetry=True)
@@ -703,7 +729,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
 
         # Request for transfer
         tensor_id = self.id_counter.get_next_id()
-        notif_msg = msgpack.packb(
+        notif_msg = msgspec.msgpack.encode(
             (
                 nixl_request.tensor_id,
                 (
@@ -774,7 +800,8 @@ class NixlReadEmbeddingSender(AbstractEmbeddingSender):
     """
 
     def __init__(self):
-        self.connector = nixl_connect.Connector()
+        self._nixl_connect = _load_nixl_connect()
+        self.connector = self._nixl_connect.Connector()
 
     @_nvtx.annotate("mm:nixl:send_embeddings", color="magenta")
     async def send_embeddings(
@@ -796,9 +823,24 @@ class NixlReadEmbeddingSender(AbstractEmbeddingSender):
         else:
             transfer_buf = embeddings.clone().detach()
         with _nvtx.annotate("mm:nixl:create_descriptor", color="pink"):
-            descriptor = nixl_connect.Descriptor(transfer_buf)
+            descriptor = self._nixl_connect.Descriptor(transfer_buf)
         with _nvtx.annotate("mm:nixl:create_readable", color="pink"):
-            readable_op = await self.connector.create_readable(descriptor)
+            try:
+                readable_op = await self.connector.create_readable(descriptor)
+            except Exception as exc:
+                # If NIXL registration fails for a device tensor, fall back to CPU staging.
+                if not transfer_buf.device.type == "cpu":
+                    logger.warning(
+                        "NIXL registration failed for %s tensor, falling back "
+                        "to CPU staging: %s",
+                        transfer_buf.device.type,
+                        exc,
+                    )
+                    transfer_buf = transfer_buf.cpu()
+                    descriptor = self._nixl_connect.Descriptor(transfer_buf)
+                    readable_op = await self.connector.create_readable(descriptor)
+                else:
+                    raise
         request = TransferRequest(
             embeddings_shape=list(embeddings.shape),
             embedding_dtype_str=torch_dtype_to_string(embeddings.dtype),
@@ -821,19 +863,20 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
         max_items: int = 1024,
     ) -> None:
         super().__init__()
-        self.connector = nixl_connect.Connector()
+        self._nixl_connect = _load_nixl_connect()
+        self.connector = self._nixl_connect.Connector()
         self.tensor_id_counter = 0
         self.aggregated_op_create_time = 0
         self.aggregated_op_wait_time = 0
-        self.warmedup_descriptors: Queue[nixl_connect.Descriptor] = Queue()
-        self.inuse_descriptors: dict[int, tuple[nixl_connect.Descriptor, bool]] = {}
+        self.warmedup_descriptors: Queue[Any] = Queue()
+        self.inuse_descriptors: dict[int, tuple[Any, bool]] = {}
         connection = run_async(self.connector._create_connection)
         # Create descriptor for our allocated tensor
         for _ in range(max_items):
             encodings_tensor = torch.zeros(
                 max_item_mm_token * embedding_hidden_size, dtype=torch.int8
             )
-            descriptor = nixl_connect.Descriptor(encodings_tensor)
+            descriptor = self._nixl_connect.Descriptor(encodings_tensor)
             descriptor.register_with_connector(connection)
             self.warmedup_descriptors.put(descriptor)
 
@@ -854,7 +897,7 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
         # Extract dynamic shape, metadata, and auxiliary data
         embeddings_shape = request.embeddings_shape
         embeddings_dtype = torch_dtype_from_string(request.embedding_dtype_str)
-        readable_metadata = nixl_connect.RdmaMetadata.model_validate(
+        readable_metadata = self._nixl_connect.RdmaMetadata.model_validate(
             request.serialized_request
         )
 
@@ -864,7 +907,7 @@ class NixlReadEmbeddingReceiver(AbstractEmbeddingReceiver):
                 "No warmed up descriptors available, creating a temporary one for transfer."
             )
             encodings_tensor = torch.zeros(*embeddings_shape, dtype=embeddings_dtype)
-            descriptor = nixl_connect.Descriptor(encodings_tensor)
+            descriptor = self._nixl_connect.Descriptor(encodings_tensor)
             dynamic_descriptor = True
         else:
             descriptor = self.warmedup_descriptors.get()

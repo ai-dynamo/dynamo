@@ -3,12 +3,16 @@
 # Filters that trigger CI jobs:
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
+#   snapshot -> snapshot-agent build and test
+#   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
+#   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
+#   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
@@ -28,14 +32,19 @@ docs:
   - '**/.gitattributes'
   - 'LICENSE'
   - 'CODEOWNERS'
+  - '.coveragerc'
+  - '.claude/**'
+  - '.agents/**'
+  # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
+  - 'skills/**'
 
 examples:
   - 'recipes/**'
   - 'examples/**'
-  - 'benchmarks/**'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
+  - 'dev/observability/**'
   - 'deploy/observability/**'
   - 'deploy/pre-deployment/**'
 
@@ -46,6 +55,12 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
+  # Standalone CRD apiVersion converter: classification-only so it satisfies
+  # the changed-files coverage check without triggering the operator deploy
+  # pipeline (it is excluded from the `deploy` filter below).
+  - 'deploy/utils/convert_api_version.py'
+  - 'deploy/utils/tests/**'
+  - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
@@ -53,13 +68,18 @@ ignore:
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
+  - '.github/allurerc.mjs'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
-  - 'container/templates/aws.Dockerfile'
   - 'container/templates/local_dev.Dockerfile'
   - 'container/templates/dev.Dockerfile'
+  # Removed by trtllm upstream-base migration; claim here so changed-files
+  # validation passes on the deletion diff without triggering trtllm CI.
+  - 'container/build_trtllm_wheel.sh'
+  - 'container/deps/trtllm/**'
+  - 'scripts/dco_check.py'
 
 ci: &ci
   - '.github/workflows/**'
@@ -70,10 +90,6 @@ ci: &ci
   - 'container/Dockerfile.test'
 
 core:
-  # Exclude documentation files first, then include patterns override for specific paths
-  - '!**/*.md'
-  - '!**/*.rst'
-  - '!**/*.txt'
   - *ci
   - 'container/render.py'
   - 'container/Dockerfile.template'
@@ -81,6 +97,7 @@ core:
   - 'container/templates/args.Dockerfile'
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
+  - 'container/templates/compliance.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - 'container/compliance/**'
@@ -88,69 +105,110 @@ core:
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
+  # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
+  # TokenSpeed Docker images and backend-specific build/test jobs.
+  - 'components/src/dynamo/tokenspeed/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
   - '*.rs'
   - 'scripts/report_pytest_markers.py'
+  # Negation patterns MUST come after positive patterns — micromatch processes
+  # patterns left-to-right, so negations only filter matches accumulated by
+  # preceding patterns. Placing them first has no effect.
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.txt'
 
 operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
+  # Operator imports the local snapshot module.
+  - 'deploy/snapshot/**'
   - 'docs/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
-deploy:
+snapshot:
+  - *ci
+  - 'deploy/snapshot/**'
+  - 'deploy/snapshot/.*'
+
+power_agent:
+  - *ci
+  - 'deploy/power-agent/**'
+  - 'deploy/helm/charts/power-agent/**'
   - '!**/*.md'
   - '!**/*.rst'
+
+deploy:
   - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
-
-planner:
-  - 'components/src/dynamo/planner/**'
-  - 'components/src/dynamo/global_planner/**'
-  - 'tests/planner/**'
-  - 'tests/global_planner/**'
-  - 'components/src/dynamo/profiler/**'
-  - 'components/src/dynamo/global_router/**'
-
-vllm:
+  - 'tests/utils/managed_deployment.py'
+  # Standalone CRD apiVersion converter: not used by the deploy-test harness and
+  # has no CI test wiring, so it should not trigger the operator deploy pipeline.
+  - '!deploy/utils/convert_api_version.py'
+  - '!deploy/utils/tests/**'
   - '!**/*.md'
   - '!**/*.rst'
+
+planner:
+  - 'container/templates/planner.Dockerfile'
+  - 'components/src/dynamo/planner/**'
+  - 'components/src/dynamo/global_planner/**'
+  - 'components/src/dynamo/profiler/**'
+  - 'components/src/dynamo/global_router/**'
+  # Power-aware planner (PR #9369): per-node power agent component
+  - 'deploy/power-agent/**'
+  - 'deploy/helm/charts/power-agent/**'
+
+vllm:
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
   - 'container/templates/vllm_*'
-
-sglang:
   - '!**/*.md'
   - '!**/*.rst'
+
+sglang:
+  - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
   - 'container/templates/sglang_*'
+  - 'container/deps/sglang/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 trtllm:
-  - '!**/*.md'
-  - '!**/*.rst'
-  - 'container/deps/trtllm/**'
+  - 'container/deps/requirements.trtllm.txt'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
-  - 'container/build_trtllm_wheel.sh'
   - 'container/templates/trtllm_*'
-
-frontend:
   - '!**/*.md'
   - '!**/*.rst'
+
+# sample -> sample-unified-test (framework-agnostic CPU-only backend
+# reference implementation). Piggybacks on the vllm image, so a sample-only
+# change triggers vllm-build + sample-unified-test. The common/backend ABC
+# already triggers `core`; this filter is for the launch scripts and tests
+# that are specific to the sample backend.
+sample:
+  - 'examples/backends/sample/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+frontend:
   - *ci
   - '.cargo/config.toml'
   - 'lib/**'
@@ -159,11 +217,15 @@ frontend:
   - 'container/deps/*'
   - 'container/compliance/**'
   - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 rust:
   - '.github/workflows/pre-merge.yml'
@@ -171,3 +233,11 @@ rust:
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
+
+benchmarks:
+  - 'benchmarks/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+efa:
+  - 'container/templates/aws.Dockerfile'

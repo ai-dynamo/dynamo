@@ -91,6 +91,10 @@ pub mod name_prefix {
     /// Prefix for work-handler transport breakdown metrics (backend side)
     pub const WORK_HANDLER: &str = "dynamo_work_handler";
 
+    /// Prefix for request admission/rejection control metrics (e.g.
+    /// `dynamo_rejection_request_total`).
+    pub const REJECTION: &str = "dynamo_rejection";
+
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
 
@@ -136,7 +140,7 @@ pub mod labels {
     /// When a metric already has a label, injection does not overwrite it (original is preserved).
     pub const MODEL_NAME: &str = "model_name";
 
-    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
 
     /// Label for router instance (discovery.instance_id() of the frontend)
@@ -170,12 +174,19 @@ pub mod frontend_service {
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
+    /// Total number of LLM requests accepted by the frontend handler
+    pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
+
     /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
     pub const QUEUED_REQUESTS: &str = "queued_requests";
 
     /// Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
     /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
+
+    /// Number of requests currently being handled by the frontend, from HTTP handler
+    /// entry to response completion. Clearer name for what inflight_requests measures.
+    pub const ACTIVE_REQUESTS: &str = "active_requests";
 
     /// Number of disconnected clients (gauge that can go up and down)
     pub const DISCONNECTED_CLIENTS: &str = "disconnected_clients";
@@ -192,6 +203,15 @@ pub mod frontend_service {
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
 
+    /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
+    pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
+
+    /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    pub const SHARED_CACHE_HIT_RATE: &str = "shared_cache_hit_rate";
+
+    /// Shared cache blocks beyond device overlap for the selected worker
+    pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "shared_cache_beyond_blocks";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
@@ -206,6 +226,11 @@ pub mod frontend_service {
 
     /// Inter-token latency in seconds
     pub const INTER_TOKEN_LATENCY_SECONDS: &str = "inter_token_latency_seconds";
+
+    /// End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.
+    /// Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
+    /// pooling-model latencies (sub-second) without sacrificing resolution.
+    pub const EMBEDDING_LATENCY_SECONDS: &str = "embedding_latency_seconds";
 
     /// Model configuration metrics
     ///
@@ -232,8 +257,16 @@ pub mod frontend_service {
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
+    /// Total number of times migration was disabled because the sequence length
+    /// exceeded the configured max_seq_len limit
+    pub const MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL: &str =
+        "model_migration_max_seq_len_exceeded_total";
+
     /// Total number of request cancellations
     pub const MODEL_CANCELLATION_TOTAL: &str = "model_cancellation_total";
+
+    /// Total number of requests rejected due to resource exhaustion
+    pub const MODEL_REJECTION_TOTAL: &str = "model_rejection_total";
 
     /// Active decode blocks (KV cache blocks) per worker
     /// Gauge metric tracking current KV cache block utilization for each worker
@@ -260,6 +293,30 @@ pub mod frontend_service {
 
     /// Number of requests pending in the router's scheduler queue (gauge per worker_type)
     pub const ROUTER_QUEUE_PENDING_REQUESTS: &str = "router_queue_pending_requests";
+
+    /// Number of replicas allocated for a LoRA adapter (gauge per LoRA)
+    pub const LORA_REPLICA_FACTOR: &str = "lora_replica_factor";
+
+    /// Whether a LoRA adapter is actively receiving traffic (1=active, 0=inactive)
+    pub const LORA_IS_ACTIVE: &str = "lora_is_active";
+
+    /// Estimated load (windowed request count) for a LoRA adapter
+    pub const LORA_ESTIMATED_LOAD: &str = "lora_estimated_load";
+
+    /// Raw arrival count (windowed rate counter) for a LoRA adapter
+    pub const LORA_RAW_ARRIVAL_COUNT: &str = "lora_raw_arrival_count";
+
+    /// Number of in-flight (active) requests for a LoRA adapter
+    pub const LORA_ACTIVE_REQUESTS: &str = "lora_active_requests";
+
+    /// Total LoRA loads (new placements) this controller tick
+    pub const LORA_CHURN_LOADS_TOTAL: &str = "lora_churn_loads_total";
+
+    /// Total LoRA unloads (removed placements) this controller tick
+    pub const LORA_CHURN_UNLOADS_TOTAL: &str = "lora_churn_unloads_total";
+
+    /// MCF solver overflow count (unplaceable replicas)
+    pub const LORA_OVERFLOW_COUNT: &str = "lora_overflow_count";
 
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
@@ -314,11 +371,17 @@ pub mod frontend_service {
         /// Model or resource not found (404)
         pub const NOT_FOUND: &str = "not_found";
 
-        /// Service overloaded, too many requests (503)
+        /// Service overloaded or rate limited (429 or 529)
         pub const OVERLOAD: &str = "overload";
+
+        /// Service unavailable because no backend worker can serve the request
+        pub const UNAVAILABLE: &str = "unavailable";
 
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";
+
+        /// Backend accepted the request but stopped responding (response inactivity timeout)
+        pub const RESPONSE_TIMEOUT: &str = "response_timeout";
 
         /// Internal server error (500 and other unexpected errors)
         pub const INTERNAL: &str = "internal";
@@ -357,6 +420,26 @@ pub mod work_handler {
 
     /// Backend processing: handle_payload entry to first response sent
     pub const TIME_TO_FIRST_RESPONSE_SECONDS: &str = "time_to_first_response_seconds";
+
+    /// Current items in the bounded work queue awaiting dispatcher pickup (gauge)
+    pub const QUEUE_DEPTH: &str = "queue_depth";
+
+    /// Configured capacity of the bounded work queue (gauge, static)
+    pub const QUEUE_CAPACITY: &str = "queue_capacity";
+
+    /// Total times enqueuing work failed because the dispatcher channel was closed.
+    /// Note: tokio bounded mpsc applies backpressure on full — it does NOT increment
+    /// this counter. Saturation shows up as rising `QUEUE_DEPTH` toward `QUEUE_CAPACITY`.
+    pub const ENQUEUE_REJECTED_TOTAL: &str = "enqueue_rejected_total";
+
+    /// Time spent waiting to acquire a worker-pool permit (histogram)
+    pub const PERMIT_WAIT_SECONDS: &str = "permit_wait_seconds";
+
+    /// Current number of active worker-pool tasks holding a permit (gauge)
+    pub const POOL_ACTIVE_TASKS: &str = "pool_active_tasks";
+
+    /// Configured worker-pool size / total permits (gauge, static)
+    pub const POOL_CAPACITY: &str = "pool_capacity";
 
     /// Label name for error type classification
     pub const ERROR_TYPE_LABEL: &str = "error_type";
@@ -490,6 +573,12 @@ pub mod routing_overhead {
 
     /// Total routing overhead per request
     pub const TOTAL_MS: &str = "overhead_total_ms";
+
+    /// Time spent querying the shared KV cache (Mooncake)
+    pub const SHARED_CACHE_QUERY_MS: &str = "overhead_shared_cache_query_ms";
+
+    /// Total shared cache query errors (timeouts, HTTP failures)
+    pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
 /// Router request metrics (component-scoped aggregate histograms + counter)
@@ -503,6 +592,14 @@ pub mod router {
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
 
+    /// Total number of remote indexer overlap queries that failed
+    pub const REMOTE_INDEXER_QUERY_FAILURES_TOTAL: &str =
+        "router_remote_indexer_query_failures_total";
+
+    /// Total number of remote indexer routing-decision writes that failed
+    pub const REMOTE_INDEXER_WRITE_FAILURES_TOTAL: &str =
+        "router_remote_indexer_write_failures_total";
+
     /// Time to first token observed at the router (seconds)
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "router_time_to_first_token_seconds";
 
@@ -514,16 +611,41 @@ pub mod router {
 
     /// Output sequence length in tokens observed at the router
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "router_output_sequence_tokens";
+
+    /// Predicted KV cache hit rate at routing time (0.0-1.0)
+    pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
+
+    /// Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    pub const SHARED_CACHE_HIT_RATE: &str = "router_shared_cache_hit_rate";
+
+    /// Shared cache blocks beyond device overlap for the selected worker
+    pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "router_shared_cache_beyond_blocks";
+
+    /// Whether the router currently has a worker/dp_rank registered (1 = registered)
+    pub const WORKER_REGISTERED: &str = "router_worker_registered";
 }
 
 /// Frontend pipeline stage and event-loop metrics
 pub mod frontend_perf {
     /// Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
     pub const STAGE_DURATION_SECONDS: &str = "stage_duration_seconds";
+    /// Per-stage inflight request gauge (labels: stage, phase)
+    /// Tracks how many requests are currently in each pipeline stage.
+    /// Phase values: "prefill", "decode", "aggregated" (for route/dispatch); empty for preprocess.
+    pub const STAGE_REQUESTS: &str = "stage_requests";
+
+    /// Stage label values for STAGE_REQUESTS and STAGE_DURATION_SECONDS.
+    pub const STAGE_PREPROCESS: &str = "preprocess";
+    pub const STAGE_ROUTE: &str = "route";
+    pub const STAGE_DISPATCH: &str = "dispatch";
     /// Tokenization time in preprocessor
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
+    /// L1 tokenizer cache hits (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
+    pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
+    /// L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
+    pub const TOKENIZER_CACHE_MISSES_TOTAL: &str = "tokenizer_cache_misses_total";
     /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
     /// Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
@@ -605,6 +727,18 @@ pub mod kvrouter {
 pub mod kv_publisher {
     /// Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     pub const ENGINES_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_engines_dropped_events_total";
+
+    /// Total number of ZMQ KV events seen by the relay, labeled by stage and event type
+    pub const ZMQ_EVENTS_TOTAL: &str = "kv_publisher_zmq_events_total";
+
+    /// Total number of ZMQ KV events filtered before conversion, labeled by event type and reason
+    pub const ZMQ_FILTERED_EVENTS_TOTAL: &str = "kv_publisher_zmq_filtered_events_total";
+
+    /// Total number of ZMQ KV events dropped due to conversion issues, labeled by event type and reason
+    pub const ZMQ_CONVERSION_ISSUES_TOTAL: &str = "kv_publisher_zmq_conversion_issues_total";
+
+    /// Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
+    pub const ZMQ_SUSPICIOUS_EVENTS_TOTAL: &str = "kv_publisher_zmq_suspicious_events_total";
 }
 
 /// Additional TRT-LLM worker metrics beyond what the engine natively provides.
@@ -635,6 +769,15 @@ pub mod trtllm_additional {
 
     /// KV cache transfer speed per request in GB/s
     pub const KV_TRANSFER_SPEED_GB_S: &str = "trtllm_kv_transfer_speed_gb_s";
+
+    /// Configured maximum number of TRT-LLM KV events buffered before older events are dropped
+    pub const KV_EVENT_BUFFER_CAPACITY: &str = "trtllm_kv_event_buffer_capacity";
+
+    /// Number of TRT-LLM KV events returned to Dynamo in one polling drain
+    pub const KV_EVENT_DRAIN_BATCH_SIZE: &str = "trtllm_kv_event_drain_batch_size";
+
+    /// Total number of missing TRT-LLM KV event IDs detected by Dynamo
+    pub const KV_EVENT_ID_GAP_EVENTS_TOTAL: &str = "trtllm_kv_event_id_gap_events_total";
 }
 
 // KV cache statistics metrics

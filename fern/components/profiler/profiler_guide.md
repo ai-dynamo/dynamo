@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 ---
 
-# Profiler Guide
-
 This guide covers deployment, configuration, integration, and troubleshooting for the Dynamo Profiler.
 
 ## What is a DynamoGraphDeploymentRequest (DGDR)?
@@ -50,13 +48,8 @@ The profiler sweeps over the following parallelization mappings for prefill and 
 
 ### Kubernetes Deployment (DGDR)
 
-The recommended deployment method is through DGDRs. Sample configurations are provided in `benchmarks/profiler/deploy/`:
-
-| Sample | Description |
-|--------|-------------|
-| `profile_sla_dgdr.yaml` | Standard online profiling with AIPerf |
-| `profile_sla_aic_dgdr.yaml` | Fast offline profiling with AI Configurator |
-| `profile_sla_moe_dgdr.yaml` | MoE model profiling (SGLang) |
+The recommended deployment method is through DGDRs. For copyable manifests, see the
+profiler and planner examples in the current documentation.
 
 #### Container Images
 
@@ -66,7 +59,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -83,7 +76,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
 
   workload:
     isl: 3000
@@ -229,7 +222,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
 
   workload: { ... }
   sla: { ... }
@@ -290,13 +283,14 @@ Pass arguments to the SLA planner via the features section:
 ```yaml
 features:
   planner:
-    planner_min_endpoint: 2                    # Minimum endpoints to maintain
-    planner_adjustment_interval: 60            # Adjustment interval (seconds)
-    planner_load_predictor: linear             # Load prediction method
+    min_endpoint: 2                            # Minimum endpoints to maintain
+    load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
+    throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
+    load_predictor: linear                     # Load prediction method
 ```
 
 > [!NOTE]
-> Planner arguments use `planner_` prefix. See the AI Configurator documentation for full list.
+> Planner arguments use the `PlannerConfig` field names consumed by the planner service. See the AI Configurator documentation for full list.
 
 ### Model Cache PVC (Advanced)
 
@@ -371,6 +365,20 @@ When using DGDR, the Dynamo Operator:
 2. Stores profiling data in ConfigMaps (`planner-profile-data`)
 3. Generates optimized DGD configurations
 4. Deploys the DGD with SLA Planner integration
+
+#### Failure Handling
+
+Profiling failures are not retried at the Kubernetes Job level (`backoffLimit: 0`).
+Most profiler errors — validation failures, unsupported model/hardware combinations,
+missing configs — are deterministic and will never succeed on retry, so re-running
+the full profiling cycle would only waste GPU time.
+
+When the profiler reports failure, the output-copier sidecar writes the error
+details (phase, error message, profiler status) to the output ConfigMap and exits
+successfully. The DGDR controller reads the failure from the ConfigMap and
+transitions the DGDR directly to the `Failed` phase with the specific sub-phase
+failure reason (e.g., `SweepingDecodeFailed`, `GeneratingDGDFailed`). Use
+`kubectl describe dgdr <name>` to see the failure details in the conditions.
 
 The generated DGD is tracked via labels:
 ```yaml
@@ -480,14 +488,14 @@ SGLang workers expose profiling endpoints for runtime performance analysis:
 
 ```bash
 # Start profiling
-curl -X POST http://localhost:9090/engine/start_profile \
+curl -X POST http://localhost:9090/engine/control/start_profile \
   -H "Content-Type: application/json" \
   -d '{"output_dir": "/tmp/profiler_output"}'
 
 # Run inference requests...
 
 # Stop profiling
-curl -X POST http://localhost:9090/engine/stop_profile
+curl -X POST http://localhost:9090/engine/control/stop_profile
 ```
 
 View traces using Chrome's `chrome://tracing`, [Perfetto UI](https://ui.perfetto.dev/), or TensorBoard.

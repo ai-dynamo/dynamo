@@ -29,7 +29,7 @@ For simple deployments or development/testing, the aggregated (EPD) pattern is e
 
 | Backend | E/PD | E/P/D | Notes |
 |---------|------|-------|-------|
-| **vLLM** | ✅ | ✅ | NIXL transfer for embeddings; NIXL KV cache transfer for P/D |
+| **vLLM** | ✅ | ✅ | Separate encode worker currently handles `image_url` inputs; `video_url` inputs stay on the prefill/PD path |
 | **TRT-LLM** | ❌ | ✅ | Supports image URLs (via `MultimodalEncoder`) and pre-computed embeddings (via NIXL) |
 | **SGLang** | ✅ | ✅ | NIXL for embeddings; bootstrap mechanism for P/D KV transfer |
 
@@ -91,4 +91,4 @@ cd $DYNAMO_HOME/examples/backends/sglang
 ./launch/multimodal_disagg.sh
 ```
 
-See the backend-specific documentation ([vLLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md), [TRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-trtllm.md), [SGLang](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-sglang.md)) for full configuration details and component flags.
+See the backend-specific documentation ([vLLM](multimodal-vllm.md), [TRT-LLM](multimodal-trtllm.md), [SGLang](multimodal-sglang.md)) for full configuration details and component flags.

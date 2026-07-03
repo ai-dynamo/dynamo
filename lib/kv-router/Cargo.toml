@@ -8,15 +8,20 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
 
 [features]
 default = []
 metrics = ["dep:prometheus"]
 runtime-protocols = ["dep:dynamo-runtime"]
 bench = []
-standalone-indexer = ["dep:axum", "dep:bytes", "dep:zeromq", "dep:serde_json", "dep:reqwest"]
-indexer-runtime = ["metrics", "runtime-protocols", "standalone-indexer"]
+profile = []
+shard-metrics = []
+standalone-indexer = ["dep:axum", "dep:serde_json", "dep:reqwest", "dep:zmq", "dep:chrono", "dep:tracing-appender"]
+standalone-slot-tracker = ["dep:axum", "dep:serde_json", "dep:zmq"]
+standalone-selection = ["standalone-indexer"]
 
 [dependencies]
 # repo
@@ -27,17 +32,20 @@ dynamo-tokens = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
+indexmap = { workspace = true }
 ordered-float = { workspace = true }
 derive_builder = { workspace = true }
-derive-getters = { workspace = true }
 prometheus = { workspace = true, optional = true }
 rand = { workspace = true }
+seqlock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
+serde_yaml = "0.9.34"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+zmq = { version = "0.10", optional = true }
 uuid = { workspace = true }
 validator = { workspace = true }
 xxhash-rust = { workspace = true }
@@ -51,13 +59,15 @@ rustc-hash = "2.1.1"
 
 # standalone-indexer (optional)
 axum = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
-zeromq = { version = "0.4.1", optional = true }
+tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 dynamo-tokens = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

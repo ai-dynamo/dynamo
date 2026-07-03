@@ -1,339 +1,424 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Deploying Your First Model
+title: DGDR Reference
+subtitle: Field reference for DynamoGraphDeploymentRequest, the deploy-by-intent generator that profiles and produces a DGD.
 ---
 
-# Deploying Your First Model
+A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's deploy-by-intent generator
+for [`DynamoGraphDeployment`](api-reference.md#dynamographdeployment) (DGD)
+resources. You describe what you want to run and your performance targets; the
+profiler determines a configuration and produces the DGD that serves traffic.
 
-End-to-end tutorial for deploying `Qwen/Qwen3-0.6B` on Kubernetes using Dynamo's recommended
-`DynamoGraphDeploymentRequest` (DGDR) workflow — from zero to your first inference response.
+For the full deployment mental model — including DGD, DCD, DGDR, recipes,
+strategy selection, model caching, planner setup, and common pitfalls — see the
+[Deployment Overview](model-deployment-guide.md).
 
-> [!NOTE]
-> This guide assumes you have already completed the
-> [platform installation](installation-guide.md) and that the Dynamo operator and CRDs are
-> running in your cluster.
+## DGDR, DGD, and Recipes
 
-## What is a DynamoGraphDeploymentRequest?
+Dynamo provides two Custom Resources for deploying inference graphs:
 
-A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's **deploy-by-intent** API. You describe what
-you want to run and your performance targets; Dynamo's profiler determines the optimal
-configuration automatically, then creates the live deployment for you.
-
-| | DGDR (this guide) | DGD (manual) |
+| | DGD (canonical live deployment) | DGDR (generator/profiler) |
 |---|---|---|
-| **You provide** | Model + optional SLA targets | Full deployment spec |
-| **Profiling** | Automated | You bring your own config |
-| **Best for** | Getting started, SLA-driven deployments | Fine-grained control |
+| **You provide** | Full deployment spec (services, parallelism, replicas, resource limits, etc.) | Model, backend, workload, hardware, and optional SLA targets |
+| **What happens** | The operator reconciles the DGD into `DynamoComponentDeployment` resources and pods | The profiler generates a DGD; with `autoApply: true`, the operator creates it |
+| **Best for** | Known-good configs, tuned recipes, or full manual control | New model/hardware combinations, SLA-driven sizing, or generated DGD YAML |
+| **Persistence** | Persists and serves traffic | Reaches a terminal state after generation/deploy |
 
-For a deeper comparison, see [Understanding Dynamo's Custom Resources](README.md#understanding-dynamos-custom-resources).
+Use DGD directly when you have a hand-crafted configuration for a specific
+model/hardware combination. Most
+[recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) are tuned DGD
+manifests. Use DGDR when you want Dynamo to generate the DGD for you.
 
-## Prerequisites
+For DGD deployment details, see [Creating Deployments](deployment/create-deployment.md).
 
-Before starting, confirm:
+## Spec Reference
 
-- Platform installed: `kubectl get pods -n ${NAMESPACE}` shows operator pods `Running`
-- CRDs present: `kubectl get crd | grep dynamo` shows `dynamographdeploymentrequests.nvidia.com`
-- `kubectl` and `helm` available in your shell
-
-Set these variables once — they are referenced throughout the guide:
-
-```bash
-export NAMESPACE=dynamo-system      # namespace where the platform is installed
-export RELEASE_VERSION=1.x.x       # match the installed platform version (e.g. 1.0.0)
-export HF_TOKEN=<your-hf-token>    # HuggingFace token
-```
-
-> [!TIP]
-> `Qwen/Qwen3-0.6B` is a public model. A HuggingFace token is not strictly required to download
-> it, but is recommended to avoid rate limiting.
-
-## Step 1: Configure Namespace and Secrets
-
-```bash
-# Create the namespace (idempotent — safe to run even if it already exists)
-kubectl create namespace ${NAMESPACE} --dry-run=client -o yaml | kubectl apply -f -
-
-# Create the HuggingFace token secret for model download
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="${HF_TOKEN}" \
-  -n ${NAMESPACE}
-```
-
-Verify the secret was created:
-
-```bash
-kubectl get secret hf-token-secret -n ${NAMESPACE}
-```
-
-## Step 2: Create the DynamoGraphDeploymentRequest
-
-Save the following as `qwen3-first-model.yaml`:
+### Minimal Example
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeploymentRequest
 metadata:
-  name: qwen3-first-model
+  name: my-model
 spec:
-  # Model to profile and deploy
   model: Qwen/Qwen3-0.6B
-
-  # Container image for the profiling job — must match your installed platform version.
-  # This is the same dynamo-frontend image used by the deployed inference service.
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:${RELEASE_VERSION}"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
-Apply it (uses `envsubst` to substitute the `RELEASE_VERSION` shell variable into the YAML):
-
-```bash
-envsubst < qwen3-first-model.yaml | kubectl apply -f - -n ${NAMESPACE}
-```
-
-### Field reference
+### Field Reference
 
 | Field | Required | Default | Purpose |
 |---|---|---|---|
 | `model` | Yes | — | HuggingFace model ID (e.g. `Qwen/Qwen3-0.6B`) |
-| `image` | No | — | Container image for the profiling job (`dynamo-frontend`) |
-| `backend` | No | `auto` | Inference engine (`auto`, `vllm`, `sglang`, `trtllm`) |
-| `searchStrategy` | No | `rapid` | Profiling depth — `rapid` (~30s, AIC simulation) or `thorough` (2–4h, real GPUs) |
-| `autoApply` | No | `true` | Automatically create and start the deployment after profiling |
-| `sla` | No | — | Target latency (TTFT, ITL in ms) for profiler optimization |
-| `workload` | No | — | Expected traffic shape (ISL, OSL, request rate) |
-| `hardware` | No | auto-detected | GPU SKU and count override; required when GPU discovery is disabled. When not set, the auto-discovered GPU count is capped at 32 — set `hardware.totalGpus` explicitly to use more. |
+| `image` | No | — | Container image for the profiling job. Dynamo >= 1.1.0: use `dynamo-planner`; earlier versions: use `dynamo-frontend`. |
+| `backend` | No | `auto` | Inference engine: `auto`, `vllm`, `sglang`, `trtllm` |
+| `searchStrategy` | No | `rapid` | Profiling depth: `rapid` (AIC-backed DynoSim-style modeling, ~30s) or `thorough` (real GPU, 2–4h) |
+| `autoApply` | No | `true` | Automatically deploy the profiler's recommended config |
+| `sla.ttft` | No | — | Target time to first token (ms) |
+| `sla.itl` | No | — | Target inter-token latency (ms) |
+| `sla.e2eLatency` | No | — | Target end-to-end latency (ms). Cannot be combined with explicit `ttft`/`itl`. |
+| `workload.isl` | No | `4000` | Expected average input sequence length |
+| `workload.osl` | No | `1000` | Expected average output sequence length |
+| `workload.requestRate` | No | — | Target requests per second |
+| `workload.concurrency` | No | — | Target concurrent requests |
+| `hardware.gpuSku` | No | auto-detected | GPU SKU (see [SKU Format](#sku-format)) |
+| `hardware.vramMb` | No | auto-detected | GPU VRAM in MB |
+| `hardware.totalGpus` | No | auto-detected (capped at 32) | Total GPUs available to the deployment |
+| `hardware.numGpusPerNode` | No | auto-detected | GPUs per node |
+| `hardware.interconnect` | No | auto-detected | Interconnect type |
+| `hardware.rdma` | No | auto-detected | Whether RDMA is available |
+| `modelCache.pvcName` | No | — | Name of a `ReadWriteMany` PVC containing cached model weights |
+| `modelCache.pvcModelPath` | No | — | Path to the model directory inside the PVC |
+| `modelCache.pvcMountPath` | No | `/opt/model-cache` | Mount path inside containers |
+| `features.planner` | No | disabled | PlannerConfig passed to the Planner service; when present, the generated DGD includes Planner service/configuration |
+| `features.mocker` | No | disabled | Enable mocker mode for testing |
+| `overrides.profilingJob` | No | — | `batchv1.JobSpec` overrides for the profiling job (e.g., tolerations) |
+| `overrides.dgd` | No | — | Raw DGD override base applied to the generated deployment |
 
-For the full spec reference, see the [DGDR API Reference](api-reference.md) and
-[Profiler Guide](../components/profiler/profiler-guide.md).
+For the complete CRD spec, see the [API Reference](api-reference.md).
 
-> [!IMPORTANT]
-> If you are using a **namespace-scoped operator** with GPU discovery disabled, you must also
-> provide explicit hardware info or the DGDR will be rejected at admission:
->
-> ```yaml
-> spec:
->   ...
->   hardware:
->     numGpusPerNode: 1
->     gpuSku: "H100-SXM5-80GB"
->     vramMb: 81920
-> ```
->
-> See the [installation guide](installation-guide.md#gpu-discovery-for-dynamographdeploymentrequests-with-namespace-scoped-operators)
-> for details.
+### Planner
 
-## Step 3: Monitor Profiling Progress
+DGDR supports Planner through `spec.features.planner`. Set this field to a
+PlannerConfig object to have DGDR pass that configuration to the profiler and
+generate Planner support in the final DGD. DGDR passes this PlannerConfig
+through without field-level validation; the Planner service validates it when it
+starts.
 
-Profiling is the automated step where Dynamo sweeps across candidate configurations (parallelism, batching, scheduling strategies) to find the one that best meets your SLA and hardware — so you don't have to tune it manually.
+When Planner is enabled, the generated output may include a `Planner` service in
+the DGD plus supporting Planner configuration resources, such as a
+`planner-config-*` ConfigMap. Depending on profiling mode and Planner settings,
+DGDR may also generate profiling-data resources for Planner bootstrap data.
 
-Watch the DGDR status in real time:
+Minimal Planner-enabled DGDR:
 
-```bash
-kubectl get dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE} -w
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-planner
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
 ```
 
-The `PHASE` column progresses through:
+To evaluate Planner recommendations without applying scaling changes, enable
+advisory mode in the same `features.planner` object:
 
-| Phase | What is happening |
-|---|---|
-| `Pending` (condition: `DiscoveringHardware`) | Spec validated; operator is discovering GPU hardware and preparing the profiling job |
-| `Profiling` | Profiling job is running (AIC simulation or real-GPU sweep) |
-| `Ready` | Profiling complete; optimal config stored in `.status`. Terminal state when `autoApply: false` |
-| `Deploying` | Creating the `DynamoGraphDeployment` (only when `autoApply: true`) |
-| `Deployed` | DGD is running and healthy |
-| `Failed` | Unrecoverable error — check events for details |
-
-> [!TIP]
-> `Deployed` is the success terminal state when `autoApply: true` (the default).
-> If you set `autoApply: false`, the phase stops at `Ready` — profiling is complete and the
-> generated DGD spec is stored in `.status`, but no deployment is created automatically.
-> To inspect and deploy it manually:
->
-> ```bash
-> # View the generated DGD spec
-> kubectl get dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE} \
->   -o jsonpath='{.status.profilingResults.selectedConfig}' | python3 -m json.tool
->
-> # Save it and apply
-> kubectl get dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE} \
->   -o jsonpath='{.status.profilingResults.selectedConfig}' > generated-dgd.yaml
-> kubectl apply -f generated-dgd.yaml -n ${NAMESPACE}
-> ```
-
-For a full status summary and events:
-
-```bash
-kubectl describe dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE}
+```yaml
+spec:
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+      advisory: true
 ```
 
-To follow the profiling job logs:
+For Planner behavior, scaling modes, and the full PlannerConfig field reference,
+see the [Planner overview](../components/planner/README.md) and
+[Planner Guide](../components/planner/planner-guide.md).
+For additional generated-deployment examples, see
+[DGDR Examples](dgdr-examples.md).
 
-```bash
-# Find the profiling pod
-kubectl get pods -n ${NAMESPACE} -l nvidia.com/dgdr-name=qwen3-first-model
+`spec.overrides.dgd` is not required to enable Planner. Use
+`spec.features.planner` for Planner enablement and configuration. Use
+`spec.overrides.dgd` only when you need to customize the generated DGD after
+DGDR has assembled it.
 
-# Stream its logs
-kubectl logs -f <profiling-pod-name> -n ${NAMESPACE}
+> [!NOTE]
+> DGDR does not currently expose a `features.kvRouter` field. To configure
+> router mode or KV-aware routing details, use a direct DGD, a tuned recipe, or
+> `overrides.dgd` when you still want DGDR to generate the base deployment.
+
+### Generated DGD Overrides
+
+Use `spec.overrides.dgd` when the generated `DynamoGraphDeployment` needs a
+field that DGDR does not expose directly. The value is a partial
+`nvidia.com/v1alpha1` DGD object that is merged into the profiler-generated
+deployment after Dynamo selects a configuration.
+
+For example, to inject an environment variable into every generated service:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-sglang
+spec:
+  model: Qwen/Qwen3-30B-A3B
+  backend: sglang
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      spec:
+        envs:
+          - name: TRITON_PTXAS_PATH
+            value: /usr/local/cuda/bin/ptxas
 ```
 
-> [!TIP]
-> With `searchStrategy: rapid`, profiling typically completes in under 15 minutes on a single GPU.
+Use `spec.envs` for variables that should apply to all generated services. To
+target a single service, override that service's `envs` entry instead:
 
-## Step 4: Verify the Deployment
-
-Once the DGDR reaches `Deployed`, the `DynamoGraphDeployment` has been created automatically.
-Check that everything is running:
-
-```bash
-# See the auto-created DGD
-kubectl get dynamographdeployment -n ${NAMESPACE}
-
-# Confirm all pods are Running
-kubectl get pods -n ${NAMESPACE}
-```
-
-Wait until pods are ready:
-
-```bash
-kubectl wait --for=condition=ready pod \
-  -l nvidia.com/dynamo-deployment=qwen3-first-model \
-  -n ${NAMESPACE} \
-  --timeout=600s
-```
-
-Find the frontend service name:
-
-```bash
-kubectl get svc -n ${NAMESPACE} | grep frontend
-```
-
-## Step 5: Send Your First Request
-
-Port-forward to the frontend and send an inference request:
-
-```bash
-# Start port-forward (replace <frontend-service-name> with the name from Step 4)
-kubectl port-forward svc/<frontend-service-name> 8000:8000 -n ${NAMESPACE} &
-
-# Confirm the model is available
-curl http://localhost:8000/v1/models
-
-# Send a chat completion request
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "What is NVIDIA Dynamo?"}],
-    "max_tokens": 200
-  }'
-```
-
-A successful response looks like:
-
-```json
-{
-  "id": "chatcmpl-...",
-  "object": "chat.completion",
-  "model": "Qwen/Qwen3-0.6B",
-  "choices": [{
-    "message": {
-      "role": "assistant",
-      "content": "NVIDIA Dynamo is a high-performance inference framework..."
-    }
-  }]
-}
-```
-
-Your first model is now live.
-
-## Cleanup
-
-To remove the deployment and profiling artifacts:
-
-```bash
-kubectl delete dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE}
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          decode:  # replace with the generated service name
+            envs:
+              - name: CUSTOM_WORKER_ENV
+                value: "enabled"
 ```
 
 > [!NOTE]
-> Deleting a DGDR does **not** delete the `DynamoGraphDeployment` it created. The DGD persists
-> independently so it can continue serving traffic.
+> `overrides.profilingJob` only customizes the profiling Job. Use
+> `overrides.dgd` for settings that must appear on the deployed worker pods.
 
-## Troubleshooting
+### Routing
 
-**DGDR stuck in `Pending`**
+DGDR-generated deployments include a standalone `Frontend` service. That
+frontend runs Dynamo's embedded router and defaults to `round-robin` routing,
+which is often not optimal. Because DGDR does not yet expose a first-class
+router feature, configure the generated frontend with `spec.overrides.dgd`.
 
-```bash
-kubectl describe dynamographdeploymentrequest qwen3-first-model -n ${NAMESPACE}
-# Check the Events section at the bottom
+For the full router mode and environment variable reference, see
+[Router Guide](../components/router/router-guide.md) and
+[Router Configuration](../components/router/router-configuration.md).
+
+For example, enable KV-aware routing on the generated frontend:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-kv-router
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          Frontend:
+            envs:
+              - name: DYN_ROUTER_MODE
+                value: kv
 ```
 
-Common causes: no available GPU nodes, image pull failure (check image tag; NGC credentials are
-optional but may be needed if you hit rate limits pulling from public NGC), missing `hardware`
-config for a namespace-scoped operator.
+Use the same `Frontend` override for other frontend router modes, such as
+`random`, `least-loaded`, or `device-aware-weighted`. For normal DGDR
+deployments, use `kv` when you want prefix-cache-aware routing and
+`round-robin` or `least-loaded` when you only want load balancing. Use
+`direct` only when an external router supplies explicit worker IDs in the
+request routing hints. For detailed mode definitions, see
+[Router Guide](../components/router/router-guide.md#routing-modes-router-mode).
 
-> [!TIP]
-> **GPU node taints** are a frequent cause of pods staying `Pending`. Many clusters (including
-> GKE by default and most shared/HPC environments) taint GPU nodes with
-> `nvidia.com/gpu:NoSchedule` so that only GPU-aware workloads land on them. If the profiling
-> job pod is stuck with a `0/N nodes are available: … node(s) had untolerated taint` event,
-> add a toleration to your DGDR via `overrides.profilingJob`. The operator and profiler
-> automatically forward it to every candidate and deployed pod:
->
-> ```yaml
-> spec:
->   ...
->   overrides:
->     profilingJob:
->       template:
->         spec:
->           containers: []    # required placeholder; leave empty to inherit defaults
->           tolerations:
->             - key: nvidia.com/gpu
->               operator: Exists
->               effect: NoSchedule
-> ```
+KV-aware routing can use event-driven prefix-cache state or approximate
+prefix matching. The frontend still runs in `kv` mode in both cases. If you
+do not configure worker KV-event publication, set
+`DYN_ROUTER_USE_KV_EVENTS=false` to use approximate KV mode:
 
-**Profiling job fails**
-
-```bash
-kubectl get pods -n ${NAMESPACE} -l nvidia.com/dgdr-name=qwen3-first-model
-kubectl logs <profiling-pod-name> -n ${NAMESPACE}
-# If the pod has already exited:
-kubectl logs <profiling-pod-name> -n ${NAMESPACE} --previous
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          Frontend:
+            envs:
+              - name: DYN_ROUTER_MODE
+                value: kv
+              - name: DYN_ROUTER_USE_KV_EVENTS
+                value: "false"
 ```
 
-**Pods not starting after profiling**
+For event-driven prefix-cache state, enable worker event publication only
+where prefill happens: the single worker in aggregated serving, or prefill
+workers in disaggregated serving. Decode workers are scored by load
+(`dyn-decode-scorer`), not prefix overlap (`dyn-prefill-scorer`), so vLLM
+decode workers omit both `--enable-prefix-caching` and `--kv-events-config`.
+Service names depend on the selected backend and topology, so inspect the
+generated DGD first, especially when `autoApply: false`.
 
-```bash
-kubectl describe pod <pod-name> -n ${NAMESPACE}
-# Look for ImagePullBackOff, OOMKilled, or Insufficient resources
+For example, a generated vLLM disaggregated deployment may contain a
+`VllmPrefillWorker` service. This override appends the vLLM KV-event publishing
+arguments to that service while enabling the frontend KV router:
+
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          Frontend:
+            envs:
+              - name: DYN_ROUTER_MODE
+                value: kv
+          VllmPrefillWorker:
+            extraPodSpec:
+              mainContainer:
+                args:
+                  - --enable-prefix-caching
+                  - --kv-events-config
+                  - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 ```
 
-**Model not responding after port-forward**
+Worker KV-event flags are backend-specific. For cross-backend behavior, see
+[Router Operations](../components/router/router-operations.md#additional-notes).
 
-```bash
-# Check frontend is ready
-kubectl get pods -n ${NAMESPACE} | grep frontend
+| Backend | Detailed docs | Worker-side event publishing |
+|---|---|---|
+| vLLM | [vLLM Reference Guide](../backends/vllm/vllm-reference-guide.md#argument-reference), [vLLM Examples](../backends/vllm/vllm-examples.md#aggregated-serving-with-kv-routing) | `--enable-prefix-caching` and `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` on the aggregated worker or disaggregated prefill worker |
+| SGLang | [SGLang KV Events](../backends/sglang/sglang-reference-guide.md#kv-events), [SGLang Examples](../backends/sglang/sglang-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config` with the SGLang event endpoint |
+| TRT-LLM | [TRT-LLM DP Rank Routing](../backends/trtllm/trtllm-dp-rank-routing.md#enabling-dp-rank-routing), [TRT-LLM Observability](../backends/trtllm/trtllm-observability.md) | `--publish-events-and-metrics` |
 
-# Check frontend logs
-kubectl logs <frontend-pod-name> -n ${NAMESPACE}
+In Kubernetes deployments the Dynamo runtime normally uses Kubernetes
+discovery and the NATS event plane. Some backends, such as vLLM and SGLang,
+emit raw KV events over ZMQ; the Dynamo worker consumes those backend events
+and republishes router events through the Dynamo event plane. For the event
+plane model, see [Event Plane](../design-docs/event-plane.md).
+
+### EPP and Gateway Routing
+
+EPP/Gateway routing is a different topology from the standalone frontend that
+DGDR generates:
+
+```text
+client -> Gateway -> EPP selects worker -> worker frontend sidecar -> engine
 ```
 
-## Next Steps
+In this mode the EPP owns worker selection. The worker-local frontend sidecar
+must run with `--router-mode direct` so it honors the worker IDs selected by
+EPP. In the normal Gateway path, the selected endpoint and the frontend sidecar
+are the same worker pod; if they differ, direct mode can still forward to the
+worker ID supplied by EPP.
 
-- **Tune for production SLAs**: Add `sla` (TTFT, ITL) and `workload` (ISL, OSL) targets to
-  your DGDR so the profiler optimizes for your specific traffic. See the
-  [Profiler Guide](../components/profiler/profiler-guide.md) for the full configuration
-  reference and picking modes. For ready-to-use YAML — including SLA targets, private models,
-  MoE, and overrides — see [DGDR Examples](../components/profiler/profiler-examples.md).
-- **Scale the deployment**: [Autoscaling guide](autoscaling.md)
-- **SLA-aware autoscaling**: Enable the Planner via `features.planner` in the DGDR —
-  see the [Planner Guide](../components/planner/planner-guide.md).
-- **Inspect the generated config**: Set `autoApply: false` and extract the DGD spec with
-  `kubectl get dgdr <name> -o jsonpath='{.status.profilingResults.selectedConfig}'`
-  before deploying.
-- **Direct control**: [Creating Deployments](deployment/create-deployment.md) — write your own
-  `DynamoGraphDeployment` spec for full customization.
-- **Monitor performance**: [Observability](observability/metrics.md)
-- **Try specific backends**: [vLLM](../backends/vllm/README.md),
-  [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)
+DGDR does not currently generate EPP components or frontend sidecars. Also,
+`overrides.dgd` only patches services that already exist in the generated DGD,
+so it cannot be used to add a missing `Epp` service to a DGDR-generated
+deployment. Use a direct DGD manifest or a GAIE recipe for EPP deployments.
+For manifests, `frontendSidecar` configuration, direct routing, EPP routing
+variables such as `DYN_USE_KV_EVENTS`, and route setup, see
+[Gateway API Inference Extension](gateway-api/README.mdx).
+
+### SKU Format
+
+When providing hardware configuration manually, use lowercase underscore format:
+
+| Correct | Incorrect |
+|---|---|
+| `h100_sxm` | `H100-SXM5-80GB` |
+| `h200_sxm` | `H200-SXM-141GB` |
+| `a100_sxm` | `A100-SXM4-80GB` |
+| `a30` | `A30` |
+| `l40s` | `L40S` |
+
+All supported values: `gb200_sxm`, `b200_sxm`, `h200_sxm`, `h100_sxm`,
+`h100_pcie`, `a100_sxm`, `a100_pcie`, `a30`, `l40s`, `l40`, `l4`,
+`v100_sxm`, `v100_pcie`, `t4`, `mi200`, `mi300`.
+
+> [!NOTE]
+> Not all SKUs are supported by the AIC profiler for `rapid` mode. See
+> [AIC Support Matrix](model-deployment-guide.md#aic-support-matrix) for details.
+
+> [!IMPORTANT]
+> **PCIe variants not yet supported by profiler.** The CRD admits PCIe SKUs
+> (`h100_pcie`, `a100_pcie`, `v100_pcie`), but the profiler does not currently
+> ship training data for them. You can submit a DGDR with a PCIe value; the
+> operator will accept it but profiler-assisted sizing will fall back to
+> defaults. Profiler support for PCIe SKUs is tracked as an engineering
+> follow-up.
+
+## Lifecycle
+
+When you create a DGDR, it progresses through these phases:
+
+| Phase | What is happening |
+|---|---|
+| `Pending` | Spec validated; operator is discovering GPU hardware and preparing the profiling job |
+| `Profiling` | Profiling job running — sub-phases: `Initializing`, `SweepingPrefill`, `SweepingDecode`, `SelectingConfig`, `BuildingCurves`, `GeneratingDGD`, `Done` |
+| `Ready` | Profiling complete; optimal config stored in `.status.profilingResults.selectedConfig`. Terminal state when `autoApply: false`. |
+| `Deploying` | Creating the `DynamoGraphDeployment` (only when `autoApply: true`) |
+| `Deployed` | DGD is running and healthy |
+| `Failed` | Unrecoverable error — profiling failures are not retried (`backoffLimit: 0`); check events and conditions for details |
+
+### Conditions
+
+The operator maintains these conditions on the DGDR status:
+
+| Condition | Meaning |
+|---|---|
+| `Validation` | Spec validation passed or failed |
+| `Profiling` | Profiling job is running, succeeded, or failed |
+| `SpecGenerated` | Generated DGD spec is available |
+| `DeploymentReady` | DGD is deployed and healthy |
+| `Succeeded` | Aggregate condition — true when the DGDR has reached its target state |
+
+### Monitoring
+
+```bash
+# Watch phase transitions
+kubectl get dgdr my-model -n $NAMESPACE -w
+
+# Detailed status, conditions, and events
+kubectl describe dgdr my-model -n $NAMESPACE
+
+# Profiling sub-phase
+kubectl get dgdr my-model -n $NAMESPACE -o jsonpath='{.status.profilingPhase}'
+
+# Profiling job logs
+kubectl get pods -n $NAMESPACE -l nvidia.com/dgdr-name=my-model
+kubectl logs -f <profiling-pod-name> -n $NAMESPACE
+
+# View generated DGD spec (when autoApply: false)
+kubectl get dgdr my-model -n $NAMESPACE \
+  -o jsonpath='{.status.profilingResults.selectedConfig}' | python3 -m json.tool
+
+# View Pareto-optimal configs from profiling
+kubectl get dgdr my-model -n $NAMESPACE \
+  -o jsonpath='{.status.profilingResults.pareto}'
+```
+
+### Resource Ownership
+
+- The DGDR does **not** set an owner reference on the DGD it creates. Deleting
+  a DGDR does not delete the DGD — it persists independently so it can continue
+  serving traffic.
+- The relationship is tracked via labels: `dgdr.nvidia.com/name` and
+  `dgdr.nvidia.com/namespace`.
+- Additional resources (planner ConfigMaps) are created in the same namespace
+  and labeled with `dgdr.nvidia.com/name`.
+
+## Known Issues
+
+- **`pareto_analysis.py` produces NaN for some configurations.** Tracked as an
+  engineering follow-up. Workaround: re-run with a narrower sweep; narrow
+  sweeps bypass the NaN path in practice.
+- **PCIe profiler data not yet available.** See the PCIe callout under
+  [SKU Format](#sku-format).
+
+## Further Reading
+
+- [Deployment Overview](model-deployment-guide.md) — DGD, DCD, DGDR, recipes, strategy selection, and common pitfalls
+- [Profiler Guide](../components/profiler/profiler-guide.md) — Profiling algorithms, picking modes, gate checks
+- [Profiler Examples](../components/profiler/profiler-examples.md) — Ready-to-use YAML for SLA targets, private models, MoE, overrides
+- [Planner Guide](../components/planner/planner-guide.md) — Scaling modes, PlannerConfig reference
+- [API Reference](api-reference.md) — Complete CRD field specifications
+- [Creating Deployments](deployment/create-deployment.md) — DGD spec for full manual control

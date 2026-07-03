@@ -38,7 +38,7 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     custom_jinja_template: Optional[str] = None
     discovery_backend: str
     request_plane: str
-    event_plane: str
+    event_plane: Optional[str] = None
     enable_local_indexer: bool = True
     use_kv_events: bool
 
@@ -63,8 +63,11 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
     return config.__dict__
 
 
-def parse_args() -> Config:
+def parse_args(argv: list[str] | None = None) -> Config:
     """Parse command-line arguments for the vLLM backend.
+
+    Args:
+        argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
 
     Returns:
         Config: Parsed configuration object.
@@ -94,7 +97,7 @@ def parse_args() -> Config:
             continue
         vg._group_actions.append(action)
 
-    args, unknown = parser.parse_known_args()
+    args, unknown = parser.parse_known_args(argv)
     dynamo_config = Config.from_cli_args(args)
 
     # Validate arguments
@@ -117,16 +120,32 @@ def parse_args() -> Config:
     return dynamo_config
 
 
+def configure_rl_logprobs_mode(config: Config) -> None:
+    if not config.enable_rl:
+        return
+
+    if config.engine_args.logprobs_mode == "raw_logprobs":
+        config.engine_args.logprobs_mode = "processed_logprobs"
+        logger.info("Defaulting logprobs_mode=processed_logprobs (--enable-rl active).")
+        return
+
+    if config.engine_args.logprobs_mode != "processed_logprobs":
+        raise ValueError(
+            "--enable-rl requires logprobs_mode=processed_logprobs; "
+            f"got {config.engine_args.logprobs_mode!r}."
+        )
+
+
 def cross_validate_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
     """Validate dynamo and engine config together. This should not modify the configs."""
 
     if hasattr(engine_config, "stream_interval") and engine_config.stream_interval != 1:
-        logger.warning(
-            "--stream-interval is currently not respected in Dynamo. "
-            "Dynamo uses its own post-processing implementation on the frontend, "
-            "bypassing vLLM's OutputProcessor buffering."
+        logger.info(
+            "--stream-interval=%d will be propagated to the Dynamo frontend. "
+            "Set DYN_VLLM_STREAM_INTERVAL env var to override.",
+            engine_config.stream_interval,
         )
 
     # Validate --gms-shadow-mode requires --load-format gms
@@ -153,21 +172,11 @@ def update_dynamo_config_with_engine(
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint
 
-    if dynamo_config.route_to_encoder:
-        dynamo_config.component = "processor"
+    # Multi-modal related component/endpoint resolution
+    if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
+        dynamo_config.component = "encode"
         dynamo_config.endpoint = "generate"
-    elif dynamo_config.multimodal_encode_worker:
-        dynamo_config.component = "encoder"
-        dynamo_config.endpoint = "generate"
-    elif dynamo_config.multimodal_decode_worker:
-        dynamo_config.component = "decoder"
-        dynamo_config.endpoint = "generate"
-    elif (
-        dynamo_config.multimodal_worker
-        and dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL
-    ):
-        dynamo_config.component = "backend"
-        dynamo_config.endpoint = "generate"
+    # Standard component/endpoint resolution
     elif dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
         dynamo_config.component = "prefill"
         dynamo_config.endpoint = "generate"
@@ -216,14 +225,6 @@ def update_dynamo_config_with_engine(
     # Clear connector list (no longer used for vLLM)
     dynamo_config.connector = []  # type: ignore[assignment]
 
-    # Validate ModelExpress P2P server URL
-    if getattr(engine_config, "load_format", None) in ("mx-source", "mx-target"):
-        if not dynamo_config.model_express_url:
-            raise ValueError(
-                f"--model-express-url or MODEL_EXPRESS_URL env var is required "
-                f"when using --load-format={engine_config.load_format}"
-            )
-
 
 def update_engine_config_with_dynamo(
     dynamo_config: Config, engine_config: AsyncEngineArgs
@@ -237,17 +238,14 @@ def update_engine_config_with_dynamo(
         engine_config.enable_prefix_caching = True
 
     if getattr(engine_config, "block_size", None) is None:
-        engine_config.block_size = 16
         logger.debug(
-            f"Setting reasonable default of {engine_config.block_size} for block_size"
+            "block_size is not set in engine config. vLLM engine block_size will be determined at runtime based on the model and attention backend."
         )
 
     if _uses_nixl_connector(engine_config):
         ensure_side_channel_host()
 
-    defaults = {
-        # vLLM 0.13+ renamed 'task' to 'runner'
-        "runner": "generate",
+    defaults: Dict[str, Any] = {
         # As of vLLM >=0.10.0 the engine unconditionally calls
         # `sampling_params.update_from_tokenizer(...)`, so we can no longer
         # skip tokenizer initialisation.  Setting this to **False** avoids
@@ -256,6 +254,9 @@ def update_engine_config_with_dynamo(
         "enable_log_requests": False,
         "disable_log_stats": False,
     }
+
+    if hasattr(engine_config, "runner"):
+        logger.debug(f"Using runner={engine_config.runner} from engine args")
 
     kv_cfg = create_kv_events_config(dynamo_config, engine_config)
     defaults["kv_events_config"] = kv_cfg
@@ -283,6 +284,41 @@ def update_engine_config_with_dynamo(
                 f"be injected. To use forward pass metrics, either remove "
                 f"--scheduler-cls or subclass InstrumentedScheduler."
             )
+
+    if dynamo_config.benchmark_mode is not None:
+        if dynamo_config.multimodal_worker or dynamo_config.multimodal_decode_worker:
+            logger.warning(
+                "--benchmark-mode is not supported for multimodal workers. "
+                "Benchmark data will be collected but not served via endpoint."
+            )
+        existing_cls = getattr(engine_config, "scheduler_cls", None)
+        if existing_cls is None and not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+            defaults[
+                "scheduler_cls"
+            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            logger.info("Benchmark mode: auto-enabling InstrumentedScheduler")
+        elif existing_cls is not None and "InstrumentedScheduler" not in str(
+            existing_cls
+        ):
+            raise ValueError(
+                f"--benchmark-mode requires InstrumentedScheduler but "
+                f"--scheduler-cls is set to '{existing_cls}'. Either remove "
+                f"--scheduler-cls or use a subclass of InstrumentedScheduler."
+            )
+        dynamo_config._benchmark_additional_config = {  # type: ignore[attr-defined]
+            "mode": dynamo_config.benchmark_mode,
+            "prefill_isl_granularity": dynamo_config.benchmark_prefill_granularity,
+            "decode_length_granularity": dynamo_config.benchmark_decode_length_granularity,
+            "decode_batch_size_granularity": dynamo_config.benchmark_decode_batch_granularity,
+            "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
+            "output_path": dynamo_config.benchmark_output_path,
+            "timeout": dynamo_config.benchmark_timeout,
+        }
+        logger.info(
+            "Benchmark mode=%s configured (output=%s)",
+            dynamo_config.benchmark_mode,
+            dynamo_config.benchmark_output_path,
+        )
 
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():

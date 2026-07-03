@@ -20,11 +20,13 @@ from typing import Union
 
 from pydantic import BaseModel
 
-from dynamo.planner.utils.agg_planner import AggPlanner
-from dynamo.planner.utils.decode_planner import DecodePlanner
-from dynamo.planner.utils.disagg_planner import DisaggPlanner
-from dynamo.planner.utils.planner_config import PlannerConfig
-from dynamo.planner.utils.prefill_planner import PrefillPlanner
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.adapters import (
+    AggPlanner,
+    DecodePlanner,
+    DisaggPlanner,
+    PrefillPlanner,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 logger = logging.getLogger(__name__)
@@ -84,13 +86,13 @@ def _parse_config() -> PlannerConfig:
 
 
 @dynamo_worker()
-async def worker(runtime: DistributedRuntime):
-    config = _parse_config()
+async def worker(runtime: DistributedRuntime, config: PlannerConfig):
     await init_planner(runtime, config)
 
 
 def main():
-    asyncio.run(worker())  # type: ignore[call-arg]
+    config = _parse_config()
+    asyncio.run(worker(config))  # type: ignore[call-arg]
 
 
 if __name__ == "__main__":

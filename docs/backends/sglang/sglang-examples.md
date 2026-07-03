@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Examples
+subtitle: Launch scripts cover aggregated, disaggregated, KV-routed, multimodal, and diffusion deployments on the SGLang backend.
 ---
 
 For quick start instructions, see the [SGLang README](README.md). This document provides all deployment patterns for running SGLang with Dynamo, including LLMs, multimodal, and diffusion models, and Kubernetes deployment.
@@ -11,12 +12,12 @@ For quick start instructions, see the [SGLang README](README.md). This document 
 For local/bare-metal development, start etcd and optionally NATS using Docker Compose:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 <Note>
 - **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
-- **NATS** is only needed when using KV routing with events (`--kv-events-config`). Use `--no-router-kv-events` on the frontend for prediction-based routing without NATS.
+- **NATS** is only needed when using NATS-backed KV routing events (`--kv-events-config`). Use ZMQ-backed events or `--no-router-kv-events` for routing without NATS.
 - **On Kubernetes**, neither is required when using the Dynamo operator (`DYN_DISCOVERY_BACKEND=kubernetes`).
 </Note>
 
@@ -144,7 +145,7 @@ Options: `--wan-size 1b|14b`, `--num-frames`, `--height`, `--width`, `--num-infe
 
 For full details on all diffusion worker types (LLM, image, video), see [Diffusion](sglang-diffusion.md).
 
-### Kubernetes Deployment
+## Kubernetes Deployment
 
 For complete K8s deployment examples, see:
 
@@ -188,6 +189,6 @@ Ensure both prefill and decode workers can reach each other over TCP. The bootst
 - **[SGLang README](README.md)**: Quick start and feature overview
 - **[Reference Guide](sglang-reference-guide.md)**: Architecture, configuration, and operational details
 - **[SGLang Multimodal](../../features/multimodal/multimodal-sglang.md)**: Vision model deployment patterns
-- **[SGLang HiCache](../../integrations/sglang-hicache.md)**: Hierarchical cache integration
+- **[SGLang HiCache](sglang-hicache.md)**: Hierarchical cache integration
 - **[Benchmarking](../../benchmarks/benchmarking.md)**: Performance benchmarking tools
 - **[Tuning Disaggregated Performance](../../performance/tuning.md)**: P/D tuning guide

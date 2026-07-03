@@ -1,22 +1,30 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod artifacts;
 mod collector;
 mod entrypoints;
 pub(crate) mod offline;
 mod online;
-mod router;
+mod planner_handle;
+mod router_shared;
 mod validate;
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use dynamo_kv_router::PrefillLoadEstimator;
 
+pub use artifacts::{
+    ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
+};
 pub(crate) use collector::TraceCollector;
 #[cfg(test)]
 pub(crate) use collector::TraceRequestStatsSnapshot;
 pub use collector::{
-    TraceDistributionStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
+    PerRequestRecord, ReplayTerminalStatus, SlaThresholds, TraceDistributionStats,
+    TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
     TraceSimulationReport, TraceThroughputStats,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +38,8 @@ pub enum ReplayArgsMode {
     Aggregated,
     Disagg,
 }
+
+pub type ReplayPrefillLoadEstimator = Arc<dyn PrefillLoadEstimator>;
 
 #[derive(Clone, Debug)]
 pub struct OfflineDisaggReplayConfig {
@@ -51,23 +61,44 @@ impl OfflineDisaggReplayConfig {
 }
 
 pub use entrypoints::{
-    simulate_concurrency_file, simulate_concurrency_file_disagg_with_router_mode,
-    simulate_concurrency_file_with_router_mode, simulate_concurrency_live_file,
-    simulate_concurrency_live_file_with_router_mode, simulate_concurrency_live_requests,
+    ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
+    generate_trace_worker_artifacts_offline_with_kv_event_visibility,
+    simulate_agentic_trace_workload_with_router_mode, simulate_concurrency_file,
+    simulate_concurrency_file_disagg_with_router_mode,
+    simulate_concurrency_file_disagg_with_router_mode_and_format,
+    simulate_concurrency_file_with_router_mode,
+    simulate_concurrency_file_with_router_mode_and_format, simulate_concurrency_live_file,
+    simulate_concurrency_live_file_with_router_mode,
+    simulate_concurrency_live_file_with_router_mode_and_format, simulate_concurrency_live_requests,
     simulate_concurrency_live_requests_with_router_mode, simulate_concurrency_live_workload,
     simulate_concurrency_live_workload_with_router_mode, simulate_concurrency_requests,
     simulate_concurrency_requests_disagg_with_router_mode,
     simulate_concurrency_requests_with_router_mode, simulate_concurrency_workload,
     simulate_concurrency_workload_disagg_with_router_mode,
-    simulate_concurrency_workload_with_router_mode, simulate_trace_file,
-    simulate_trace_file_disagg_with_router_mode, simulate_trace_file_with_router_mode,
-    simulate_trace_live_file, simulate_trace_live_file_with_router_mode,
-    simulate_trace_live_requests, simulate_trace_live_requests_with_router_mode,
-    simulate_trace_live_workload, simulate_trace_live_workload_with_router_mode,
-    simulate_trace_requests, simulate_trace_requests_disagg_with_router_mode,
-    simulate_trace_requests_with_router_mode, simulate_trace_workload,
-    simulate_trace_workload_disagg_with_router_mode, simulate_trace_workload_with_router_mode,
+    simulate_concurrency_workload_disagg_with_router_mode_and_options,
+    simulate_concurrency_workload_with_router_mode,
+    simulate_concurrency_workload_with_router_mode_and_options,
+    simulate_loaded_trace_disagg_with_router_mode_and_options,
+    simulate_loaded_trace_live_with_router_mode,
+    simulate_loaded_trace_with_router_mode_and_options, simulate_trace_file,
+    simulate_trace_file_disagg_with_router_mode,
+    simulate_trace_file_disagg_with_router_mode_and_format, simulate_trace_file_with_router_mode,
+    simulate_trace_file_with_router_mode_and_format, simulate_trace_live_file,
+    simulate_trace_live_file_with_router_mode,
+    simulate_trace_live_file_with_router_mode_and_format, simulate_trace_live_requests,
+    simulate_trace_live_requests_with_router_mode, simulate_trace_live_workload,
+    simulate_trace_live_workload_with_router_mode, simulate_trace_requests,
+    simulate_trace_requests_disagg_with_router_mode, simulate_trace_requests_with_router_mode,
+    simulate_trace_workload, simulate_trace_workload_disagg_with_router_mode,
+    simulate_trace_workload_with_router_mode,
 };
+pub use offline::components::TrafficStats;
+pub use offline::planner_hook::{
+    NoopPlannerHook, PlannerHook, PlannerTickDecision, PlannerTickMetrics,
+};
+#[doc(hidden)]
+pub use offline::run_offline_handoff_conformance;
+pub use planner_handle::PlannerReplayHandle;
 pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(
@@ -155,16 +186,20 @@ mod tests {
             DirectRequest {
                 tokens: vec![1; 4],
                 max_output_tokens: 1,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(1)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
+                ..Default::default()
             },
             DirectRequest {
                 tokens: vec![2; 4],
                 max_output_tokens: 1,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(2)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(200.0),
+                ..Default::default()
             },
         ];
 

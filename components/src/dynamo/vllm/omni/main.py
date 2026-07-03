@@ -15,11 +15,14 @@ from dynamo.common.storage import get_fs
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.llm import ModelInput, ModelType, fetch_model, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, fetch_model, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
+from dynamo.vllm.omni.realtime_utils import init_omni_realtime
+from dynamo.vllm.omni.stage_router import init_omni_stage_router
+from dynamo.vllm.omni.stage_worker import init_omni_stage
 
 from .args import OmniConfig, parse_omni_args
 
@@ -69,22 +72,27 @@ async def init_omni(
     if model_type is None:
         model_type = ModelType.Images
 
-    await register_model(
-        ModelInput.Text,
-        model_type,
-        generate_endpoint,
-        config.model,
-        config.served_model_name,
-        kv_cache_block_size=config.engine_args.block_size,
-    )
-
-    logger.info("Starting to serve Omni worker endpoint...")
-
-    health_check_payload = (
-        await VllmOmniHealthCheckPayload.create(handler.engine_client)
-    ).to_dict()
-
     try:
+        await register_model(
+            ModelInput.Text,
+            model_type,
+            generate_endpoint,
+            config.model,
+            config.served_model_name,
+            kv_cache_block_size=config.engine_args.block_size,
+            # Omni workers serve the full multi-stage pipeline behind one
+            # endpoint; there is no prefill/decode split visible to the
+            # frontend, so they register as Aggregated.
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+        )
+
+        logger.info("Starting to serve Omni worker endpoint...")
+
+        health_check_payload = (
+            await VllmOmniHealthCheckPayload.create(handler.engine_client)
+        ).to_dict()
+
         await generate_endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
@@ -101,7 +109,7 @@ async def init_omni(
             health_check_payload=health_check_payload,
         )
     except Exception as e:
-        logger.error("Failed to serve Omni endpoint: %s", e)
+        logger.error("Omni worker failed: %s", e)
         raise
     finally:
         logger.debug("Cleaning up Omni worker")
@@ -124,13 +132,22 @@ async def worker():
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
-        use_kv_events=False,
     )
 
     install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
-    await init_omni(runtime, config, shutdown_event)
-    logger.debug("Omni worker completed, exiting...")
+    if config.stage_id is not None:
+        await init_omni_stage(runtime, config, shutdown_endpoints, shutdown_event)
+        logger.debug("init_omni_stage completed (stage %d)", config.stage_id)
+    elif config.omni_router:
+        await init_omni_stage_router(runtime, config, shutdown_endpoints)
+        logger.debug("init_omni_stage_router completed")
+    elif config.realtime:
+        await init_omni_realtime(runtime, config, shutdown_endpoints, shutdown_event)
+        logger.debug("init_omni_realtime completed, exiting...")
+    else:
+        await init_omni(runtime, config, shutdown_event)
+        logger.debug("Omni worker completed, exiting...")
 
 
 def main():

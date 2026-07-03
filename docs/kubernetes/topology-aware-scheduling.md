@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Topology Aware Scheduling
+subtitle: Packs prefill, decode, and routing pods within the same rack or zone to reduce inter-node latency.
 ---
 
 Topology Aware Scheduling (TAS) lets you control where Dynamo places inference workload pods relative to the cluster's network topology. By packing related pods within the same rack, block, or other topology domain, you reduce inter-node latency and improve throughput — especially for disaggregated serving where prefill, decode, and routing components communicate frequently.
 
 TAS is **opt-in**. Existing deployments without topology constraints continue to work unchanged.
+
+TAS controls pod placement. To constrain or bias the Dynamo router's prefill-to-decode handoff after pods are already running, see [Topology-Aware KV Transfer](topology-aware-kv-transfer.md).
 
 ## Prerequisites
 
@@ -15,7 +18,7 @@ TAS is **opt-in**. Existing deployments without topology constraints continue to
 | **Grove** | Installed on the cluster. See the [Grove Installation Guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md). |
 | **ClusterTopology CR** | A cluster-scoped `ClusterTopology` resource configured by the cluster admin, mapping topology domain names to node labels. See [Grove documentation](https://github.com/NVIDIA/grove) for setup instructions. |
 | **KAI Scheduler** | [KAI Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is required by Grove for topology-aware pod placement. |
-| **Dynamo operator** | The latest Dynamo operator Helm chart includes read-only RBAC for `clustertopologies.grove.io` via a dedicated ClusterRole. This works for both cluster-wide and namespace-restricted operator deployments — no extra configuration is needed. |
+| **Dynamo operator** | The latest Dynamo operator Helm chart includes read-only RBAC for `clustertopologies.grove.io` via a dedicated ClusterRole. No extra configuration is needed. |
 
 ## Topology Domains
 
@@ -50,7 +53,6 @@ spec:
     packDomain: zone
   services:
     VllmWorker:
-      dynamoNamespace: my-llm
       componentType: worker
       replicas: 2
       envFromSecret: hf-token-secret
@@ -64,7 +66,6 @@ spec:
           args:
             - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
     Frontend:
-      dynamoNamespace: my-llm
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -89,7 +90,6 @@ spec:
     topologyProfile: my-cluster-topology
   services:
     VllmWorker:
-      dynamoNamespace: my-llm
       componentType: worker
       replicas: 2
       multinode:
@@ -107,7 +107,6 @@ spec:
           args:
             - python3 -m dynamo.vllm --model meta-llama/Llama-4-Maverick-17B-128E
     Frontend:
-      dynamoNamespace: my-llm
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -133,7 +132,6 @@ spec:
     packDomain: zone
   services:
     VllmWorker:
-      dynamoNamespace: my-llm
       componentType: worker
       replicas: 2
       multinode:
@@ -151,7 +149,6 @@ spec:
           args:
             - python3 -m dynamo.vllm --model meta-llama/Llama-4-Maverick-17B-128E
     Frontend:
-      dynamoNamespace: my-llm
       componentType: frontend
       replicas: 1
       # inherits zone from spec.topologyConstraint

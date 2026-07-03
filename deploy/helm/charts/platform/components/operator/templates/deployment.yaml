@@ -42,9 +42,15 @@ spec:
       labels:
         control-plane: controller-manager
       {{- include "dynamo-operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.controllerManager.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         kubectl.kubernetes.io/default-container: manager
         checksum/config: {{ include (print $.Template.BasePath "/operator-config.yaml") . | sha256sum }}
+        {{- with .Values.controllerManager.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -68,6 +74,8 @@ spec:
         args:
           - "--crds-dir=/opt/dynamo-operator/crds/"
           - "--version={{ .Chart.AppVersion }}"
+          - "--conversion-webhook-service-name={{ include "dynamo-operator.fullname" . }}-webhook-service"
+          - "--conversion-webhook-service-namespace={{ .Release.Namespace }}"
       {{- end }}
       containers:
       - args:
@@ -76,11 +84,28 @@ spec:
         command:
         - /manager
         env:
+        {{- range .Values.env }}
+        {{- if eq .name "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT" }}
+        {{- fail "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT is reserved; use featureGates.gmsSnapshot instead" }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.featureGates.gmsSnapshot }}
+        - name: DYN_OPERATOR_ALLOW_GMS_SNAPSHOT
+          value: "1"
+        {{- end }}
         {{- with .Values.env }}
           {{- toYaml . | nindent 8 }}
         {{- end }}
         - name: KUBERNETES_CLUSTER_DOMAIN
           value: {{ quote .Values.kubernetesClusterDomain }}
+        - name: POD_SERVICE_ACCOUNT
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.serviceAccountName
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         imagePullPolicy: {{ .Values.controllerManager.manager.image.pullPolicy | quote }}
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
         livenessProbe:

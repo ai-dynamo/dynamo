@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Examples
+subtitle: Launch scripts cover aggregated, disaggregated, KV-routed, and multinode deployment patterns for the TensorRT-LLM backend.
 ---
 
 For quick start instructions, see the [TensorRT-LLM README](README.md). This document provides all deployment patterns for running TensorRT-LLM with Dynamo, including single-node, multi-node, and Kubernetes deployments.
@@ -19,12 +20,12 @@ For quick start instructions, see the [TensorRT-LLM README](README.md). This doc
 For local/bare-metal development, start etcd and optionally NATS using Docker Compose:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 <Note>
 - **etcd** is optional but is the default local discovery backend. You can also use `--discovery-backend file` to use file system based discovery.
-- **NATS** is optional - only needed if using KV routing with events. Workers must be explicitly configured to publish events. Use `--no-router-kv-events` on the frontend for prediction-based routing without events.
+- **NATS** is optional - only needed if using NATS-backed KV routing events. Workers must be explicitly configured to publish events. Use ZMQ-backed events or `--no-router-kv-events` on the frontend for routing without NATS.
 - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD).
 </Note>
 
@@ -32,7 +33,7 @@ docker compose -f deploy/docker-compose.yml up -d
 Each launch script runs the frontend and worker(s) in a single terminal. You can run each command separately in different terminals for testing. Each shell script simply runs `python3 -m dynamo.frontend <args>` to start up the ingress and `python3 -m dynamo.trtllm <args>` to start up the workers.
 </Tip>
 
-For detailed information about the architecture and how KV-aware routing works, see the [Router Guide](../../components/router/router-guide.md).
+For detailed information about KV-aware routing behavior, see [Routing Concepts](../../components/router/router-concepts.md). For deployment modes, see the [Router Guide](../../components/router/router-guide.md).
 
 ## Single Node Examples
 
@@ -111,8 +112,3 @@ See the [client](../sglang/README.md#testing-the-deployment) section to learn ho
 <Note>
 To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 </Note>
-
-## Benchmarking
-
-To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)

@@ -70,12 +70,42 @@ Each engine backend has its own CLI flag to control what fraction of GPU memory 
 | SGLang  | `--mem-fraction-static`          | —                                          | 0.88
 | TRT-LLM | `--free-gpu-memory-fraction`    | `DYN_TRTLLM_FREE_GPU_MEMORY_FRACTION`      | 0.9
 
-Dynamo launch scripts recognize a generic env var, `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` (float 0.0-1.0), and translate it to the engine-specific flag. This is used by `tests/utils/profile_pytest.py` to binary-search the minimum VRAM a test needs. Currently implemented for vLLM launch scripts; SGLang and TRT-LLM support is planned.
+Dynamo launch scripts use absolute KV cache overrides for deterministic, parallel-safe GPU memory control. For vLLM, `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` maps to `--kv-cache-memory-bytes`. For SGLang, `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` maps to `--max-total-tokens`. These are set by `tests/utils/profile_pytest.py` during binary-search profiling and by `tests/utils/pytest_parallel_gpu.py` at runtime.
 
 Setting a lower memory fraction leaves more headroom for other CUDA allocations (e.g. activation buffers, NCCL buffers) at the cost of a smaller KV cache. Setting it higher allows more concurrent requests but risks OOM from non-KV-cache allocations. Typical production values are 0.85-0.95.
 
 > [!Important]
-> In vLLM, when `--kv-cache-memory-bytes` is set to an explicit value (not None), it **overrides and ignores** `--gpu-memory-utilization` for KV cache sizing ([vLLM CacheConfig docs](https://docs.vllm.ai/en/stable/api/vllm/config/cache/)). This means `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` has no effect on actual VRAM usage for scripts that set `--kv-cache-memory-bytes`. For example, `disagg_multimodal_epd.sh` uses `--kv-cache-memory-bytes=512MB` for its prefill/decode workers, so their VRAM consumption is fixed regardless of the memory fraction.
+> In vLLM, when `--kv-cache-memory-bytes` is set to an explicit value (not None), it **overrides and ignores** `--gpu-memory-utilization` for KV cache sizing ([vLLM CacheConfig docs](https://docs.vllm.ai/en/stable/api/vllm/config/cache/)). This is exactly why we use `--kv-cache-memory-bytes` for parallel-safe allocation: it provides a deterministic, absolute KV cache cap that is immune to profiling races.
+
+
+## Host Memory Allocator (jemalloc)
+
+The sections above tune GPU memory. This section covers *host* (CPU) memory, which is allocated by the C library's `malloc` implementation and matters most for the **frontend**.
+Under high load the default glibc allocator's lock can become a point of contention on the per-request allocation/free path, capping frontend throughput.
+[jemalloc](https://github.com/jemalloc/jemalloc) reduces this contention with per-arena locks and thread-local caches.
+
+Because the benefit and the best settings depend heavily on the workload, it should be mindfully tuned — jemalloc is installed in the container (`libjemalloc2`) but **opt-in per process**, not enabled by default.
+
+### Enabling jemalloc
+
+Preload the library for the frontend by setting `LD_PRELOAD` (in a Kubernetes deployment, set it in the frontend container `env` rather than in the image):
+
+```bash
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+```
+
+> [!Note]
+> The path is architecture-dependent. On arm64 it is `/usr/lib/aarch64-linux-gnu/libjemalloc.so.2`. If unsure, locate it with `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`.
+
+### Tuning jemalloc
+
+jemalloc is configured at runtime through the `MALLOC_CONF` environment variable. A reasonable empirical starting point for the frontend:
+
+```bash
+export MALLOC_CONF="narenas:32,tcache:true,lg_tcache_max:15,dirty_decay_ms:5000,muzzy_decay_ms:5000"
+```
+
+These values are empirical and should be fine-tuned per use case — validate with your own workload using AIPerf (see [Engine Configuration and Tuning](#engine-configuration-and-tuning)). See the [jemalloc tuning documentation](https://github.com/jemalloc/jemalloc/blob/dev/TUNING.md) for the full set of options.
 
 
 ## Disaggregated Router

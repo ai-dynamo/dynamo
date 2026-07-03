@@ -9,7 +9,7 @@ inputs:
     description: 'Full container image URI to scan (must be accessible to the BuildKit worker)'
     required: true
   artifact_name:
-    description: 'Name for the uploaded artifact (e.g., compliance-vllm-cuda12-amd64)'
+    description: 'Name for the uploaded artifact (e.g., compliance-vllm-cuda13-amd64)'
     required: true
   arch:
     description: 'Docker platform string (e.g. linux/amd64, linux/arm64)'
@@ -24,7 +24,7 @@ inputs:
     required: false
     default: 'runtime'
   cuda_version:
-    description: 'CUDA version for base image resolution (e.g., 12.9, 13.0, 13.1)'
+    description: 'CUDA version for base image resolution (e.g., 13.0, 13.1)'
     required: false
     default: ''
   base_image:

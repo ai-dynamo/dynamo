@@ -145,6 +145,22 @@ async def test_deployment(
     framework = deployment_target.framework
     profile = deployment_target.profile
 
+    # NIXL_ERR_BACKEND: vCluster CI nodes lack RDMA/UCX for inter-pod KV
+    # transfer.  Prefill workers crash in NixlWrapper.create_backend.
+    if framework == "vllm" and profile in ("disagg", "disagg_router"):
+        pytest.skip(
+            "NIXL_ERR_BACKEND: CI cluster lacks RDMA/UCX for inter-pod KV transfer"
+        )
+
+    # CI deploy cluster uses MIG-partitioned GPUs (~10 GiB slices); lower
+    # gpu-memory-utilization so vLLM 0.23.0+ flashinfer sampler warmup fits
+    # without triggering cudaMalloc -> NVML query, which is restricted on MIG.
+    # TODO (ops): remove this if CI transitions to e.g. CUDA MPS
+    if framework == "vllm":
+        deployment_spec.add_arg_to_service(
+            "VllmDecodeWorker", "--gpu-memory-utilization", "0.7"
+        )
+
     model = next((s.model for s in deployment_spec.services if s.model), None)
     if not model:
         pytest.fail(

@@ -17,9 +17,14 @@
 
 instances:
   - url: dynamo.docs.buildwithfern.com/dynamo
-    custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com]
+    custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com/dynamo]
+    multi-source: true
 
 title: NVIDIA Dynamo Documentation
+
+agents:
+  page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/latest/llms.txt. For section-specific indexes, append /llms.txt to any section URL."
+
 
 products:
   - display-name: Dynamo
@@ -36,6 +41,14 @@ redirects:
     destination: "/dynamo/dev/"
   - source: "/dynamo/latest/index.html"
     destination: "/dynamo/"
+  - source: "/dynamo/dev/backends/custom-backend/writing-unified-backends/python"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/backends/custom-backend/writing-unified-backends/rust"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/latest/backends/custom-backend/writing-unified-backends/python"
+    destination: "/dynamo/latest/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/latest/backends/custom-backend/writing-unified-backends/rust"
+    destination: "/dynamo/latest/backends/custom-backend/writing-unified-backends"
   # Unversioned root redirects → dev (fixes broken links from docs.nvidia.com/dynamo)
   # See: https://github.com/ai-dynamo/dynamo/issues/7297
   - source: "/dynamo/resources/support-matrix"
@@ -81,6 +94,14 @@ redirects:
     destination: "/dynamo/latest/resources/release-artifacts"
   - source: "/dynamo/latest/getting-started/examples"
     destination: "/dynamo/latest/resources/examples"
+  # Documentation section: style guide moved out of getting-started, and the
+  # docs-system guide ("Dynamo Docs Guide") was renamed. Dev-only (main).
+  - source: "/dynamo/dev/getting-started/documentation-style-guide"
+    destination: "/dynamo/dev/documentation/style-guide"
+  - source: "/dynamo/dev/documentation/dynamo-docs-guide"
+    destination: "/dynamo/dev/documentation/building-and-publishing"
+  - source: "/dynamo/dev/agents/priority-scheduling"
+    destination: "/dynamo/dev/components/router/priority-scheduling"
   - source: "/dynamo/dev/user-guides/multimodal-model-serving/diffusion-experimental/:slug*"
     destination: "/dynamo/dev/user-guides/diffusion/:slug*"
   - source: "/dynamo/dev/user-guides/multimodal-model-serving/diffusion-experimental"
@@ -95,20 +116,113 @@ redirects:
     destination: "/dynamo/dev/user-guides/agents/:slug*"
   - source: "/dynamo/dev/user-guides/agentic-workloads"
     destination: "/dynamo/dev/user-guides/agents"
+  - source: "/dynamo/dev/user-guides/custom-backend/python-unified-backends"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/user-guides/custom-backend/rust-unified-backends"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/backends/custom-backend/python-unified-backends"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/backends/custom-backend/rust-unified-backends"
+    destination: "/dynamo/dev/backends/custom-backend/writing-unified-backends"
+  - source: "/dynamo/dev/user-guides/custom-backend/:slug*"
+    destination: "/dynamo/dev/backends/custom-backend/:slug*"
+  - source: "/dynamo/dev/user-guides/custom-backend"
+    destination: "/dynamo/dev/backends/custom-backend/custom-backend-overview"
   - source: "/dynamo/latest/planner/planner_intro.html"
     destination: "/dynamo/components/planner"
+  # Kubernetes sidebar reorganization: keep old section-generated URLs working.
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/quickstart"
+    destination: "/dynamo/dev/kubernetes-deployment/start-here/kubernetes-quickstart"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/installation-guide"
+    destination: "/dynamo/dev/kubernetes-deployment/start-here/installation-guide"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/minikube-setup"
+    destination: "/dynamo/dev/kubernetes-deployment/start-here/minikube-setup"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/model-deployment-guide"
+    destination: "/dynamo/dev/kubernetes-deployment/deploy-models/model-deployment-guide"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/managing-models-with-dynamo-model"
+    destination: "/dynamo/dev/kubernetes-deployment/deploy-models/managing-models-with-dynamo-model"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/dgdr-reference"
+    destination: "/dynamo/dev/kubernetes-deployment/deploy-models/dgdr-reference"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/model-caching"
+    destination: "/dynamo/dev/kubernetes-deployment/model-loading/model-caching"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/autoscaling"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/autoscaling"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/rolling-update"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/rolling-update"
+  - source: "/dynamo/dev/kubernetes-deployment/observability-k8s/metrics"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/observability/metrics"
+  - source: "/dynamo/dev/kubernetes-deployment/observability-k8s/logging"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/observability/logging"
+  - source: "/dynamo/dev/kubernetes-deployment/observability-k8s/operator-metrics"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/observability/operator-metrics"
+  - source: "/dynamo/dev/kubernetes-deployment/multinode/multinode-deployments"
+    destination: "/dynamo/dev/kubernetes-deployment/scale/multinode-deployments"
+  - source: "/dynamo/dev/kubernetes-deployment/multinode/grove"
+    destination: "/dynamo/dev/kubernetes-deployment/scale/grove"
+  - source: "/dynamo/dev/kubernetes-deployment/multinode/topology-aware-scheduling"
+    destination: "/dynamo/dev/kubernetes-deployment/scale/topology-aware-scheduling"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/disagg-communication"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/disagg-communication"
+  - source: "/dynamo/dev/kubernetes-deployment/scale/disagg-communication"
+    destination: "/dynamo/dev/kubernetes-deployment/operate/disagg-communication"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/dynamo-operator"
+    destination: "/dynamo/dev/kubernetes-deployment/start-here/dynamo-operator"
+  - source: "/dynamo/dev/kubernetes-deployment/advanced-platform/dynamo-operator"
+    destination: "/dynamo/dev/kubernetes-deployment/start-here/dynamo-operator"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/service-discovery"
+    destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/service-discovery"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/webhooks"
+    destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/webhooks"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/snapshot"
+    destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/snapshot"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/shadow-engine-failover"
+    destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/shadow-engine-failover"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/developing-with-tilt"
+    destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/developing-with-tilt"
+  - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/inference-gateway-gaie"
+    destination: "/dynamo/dev/kubernetes-deployment/request-routing/gateway-api-inference-extension/overview"
+  - source: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+    destination: "/dynamo/dev/kubernetes-deployment/request-routing/gateway-api-inference-extension/overview"
+  # SGLang HiCache doc: canonical URL under Integrations > KV Cache Integrations.
+  - source: "/dynamo/dev/backends/sg-lang/hi-cache"
+    destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  - source: "/dynamo/dev/integrations/sg-lang-hi-cache"
+    destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  - source: "/dynamo/integrations/sg-lang-hi-cache"
+    destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  - source: "/dynamo/dev/integrations/sglang-hicache"
+    destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  - source: "/dynamo/integrations/sglang-hicache"
+    destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  # Digest moved from /blog to /digest
+  - source: "/dynamo/dev/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/dev/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/latest/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/latest/blog"
+    destination: "/dynamo/dev/digest"
+  - source: "/dynamo/blog/:slug*"
+    destination: "/dynamo/dev/digest/:slug*"
+  - source: "/dynamo/blog"
+    destination: "/dynamo/dev/digest"
 
 # GitHub repository link in navbar
 navbar-links:
   - type: dropdown
-    text: Blog
+    text: Digest
     links:
       - text: All Posts
-        href: /dynamo/dev/blog
-      - text: "Full-Stack Optimizations for Agentic Inference"
-        href: /dynamo/dev/blog/agentic-inference
-      - text: "Flash Indexer: Inter-Galactic KV Routing"
-        href: /dynamo/dev/blog/flash-indexer
+        href: /dynamo/dev/digest
+      - text: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
+        href: /dynamo/dev/digest/dynamo-snapshot-fast-startup
+      - text: "DynoSim: Simulating the Pareto Frontier"
+        href: /dynamo/dev/digest/dynosim-pareto-frontier
+      - text: "Dynamo Day 0 support for TokenSpeed"
+        href: /dynamo/dev/digest/tokenspeed-day-0
+      - text: "Multi-Turn Agentic Harnesses"
+        href: /dynamo/dev/digest/agentic-harnesses
   - type: github
     value: https://github.com/ai-dynamo/dynamo
 
@@ -128,7 +242,6 @@ metadata:
 experimental:
   mdx-components:
     - ./components
-  basepath-aware: true
 
 colors:
   accentPrimary:

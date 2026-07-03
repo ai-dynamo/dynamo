@@ -169,6 +169,13 @@ fn create_operation_for_route(method: &str, path: &str) -> utoipa::openapi::path
             .build(),
     );
 
+    operation = operation.response(
+        "529",
+        ResponseBuilder::new()
+            .description("Service overloaded")
+            .build(),
+    );
+
     operation.build()
 }
 

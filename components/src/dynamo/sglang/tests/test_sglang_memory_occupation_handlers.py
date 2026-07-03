@@ -5,13 +5,13 @@ import asyncio
 import sys
 import types
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from dynamo.sglang.request_handlers.handler_base import (
     BaseWorkerHandler,
-    SGLangEngineQuiesceController,
+    SGLangEnginePauseController,
 )
 
 pytestmark = [
@@ -45,7 +45,8 @@ class _TestWorkerHandler(BaseWorkerHandler):
         yield {}
 
 
-def _make_handler() -> _TestWorkerHandler:
+@pytest.fixture
+def handler():
     handler = _TestWorkerHandler.__new__(_TestWorkerHandler)
     handler.engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(
@@ -53,34 +54,24 @@ def _make_handler() -> _TestWorkerHandler:
             release_memory_occupation=AsyncMock(),
             resume_memory_occupation=AsyncMock(),
             continue_generation=AsyncMock(),
+            auto_create_handle_loop=MagicMock(),
+            rid_to_state={},
+            flush_cache=AsyncMock(return_value=SimpleNamespace(success=True)),
+            clear_hicache_storage=AsyncMock(return_value=SimpleNamespace(success=True)),
+            server_args=SimpleNamespace(hicache_storage_backend=None),
         )
     )
     handler.generate_endpoint = SimpleNamespace(
         unregister_endpoint_instance=AsyncMock(),
         register_endpoint_instance=AsyncMock(),
     )
-    handler._quiesce_controller = SGLangEngineQuiesceController(handler.engine)
-    handler._quiesce_lock = asyncio.Lock()
+    handler._pause_controller = SGLangEnginePauseController(handler.engine)
+    handler._pause_lock = asyncio.Lock()
     return handler
 
 
 @pytest.mark.asyncio
-async def test_resume_before_release_is_noop():
-    handler = _make_handler()
-
-    result = await handler.resume_memory_occupation({})
-
-    assert result["status"] == "ok"
-    assert result["message"] == "Memory already resumed"
-    handler.engine.tokenizer_manager.resume_memory_occupation.assert_not_awaited()
-    handler.engine.tokenizer_manager.continue_generation.assert_not_awaited()
-    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_release_and_resume_are_idempotent():
-    handler = _make_handler()
-
+async def test_release_and_resume_are_idempotent(handler):
     first_release = await handler.release_memory_occupation({})
     second_release = await handler.release_memory_occupation({})
 
@@ -113,11 +104,29 @@ async def test_release_and_resume_are_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_release_and_resume_use_explicit_request_tags():
-    handler = _make_handler()
+async def test_memory_occupation_handlers_forward_tags_exactly(handler):
+    await handler.release_memory_occupation({"tags": []})
+    resume_result = await handler.resume_memory_occupation({"tags": []})
+
+    assert resume_result["status"] == "ok"
+    release_req = (
+        handler.engine.tokenizer_manager.release_memory_occupation.await_args.args[0]
+    )
+    resume_req = (
+        handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
+    )
+    assert release_req.tags == []
+    assert resume_req.tags == []
+
+    handler.engine.tokenizer_manager.pause_generation.reset_mock()
+    handler.engine.tokenizer_manager.release_memory_occupation.reset_mock()
+    handler.engine.tokenizer_manager.resume_memory_occupation.reset_mock()
+    handler.engine.tokenizer_manager.continue_generation.reset_mock()
+    handler.generate_endpoint.unregister_endpoint_instance.reset_mock()
+    handler.generate_endpoint.register_endpoint_instance.reset_mock()
 
     await handler.release_memory_occupation({"tags": ["weights"]})
-    resume_result = await handler.resume_memory_occupation({"tags": ["weights"]})
+    resume_result = await handler.resume_memory_occupation({})
 
     assert resume_result["status"] == "ok"
     release_req = (
@@ -127,73 +136,84 @@ async def test_release_and_resume_use_explicit_request_tags():
         handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
     )
     assert release_req.tags == ["weights"]
-    assert resume_req.tags == ["weights"]
+    assert resume_req.tags is None
     handler.engine.tokenizer_manager.continue_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_resume_reuses_release_tags_when_request_omits_them():
-    handler = _make_handler()
+async def test_resume_recovers_generation_pause_after_failed_release_rollback(handler):
+    manager = handler.engine.tokenizer_manager
+    manager.release_memory_occupation = AsyncMock(
+        side_effect=RuntimeError("release failed")
+    )
+    failed_continue = AsyncMock(side_effect=RuntimeError("continue failed"))
+    manager.continue_generation = failed_continue
 
-    await handler.release_memory_occupation({"tags": ["weights"]})
+    release_result = await handler.release_memory_occupation({})
+
+    assert release_result["status"] == "error"
+    assert handler._pause_controller.is_paused is False
+    assert handler._pause_controller.needs_resume_recovery is True
+    failed_continue.assert_awaited_once()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+
+    manager.continue_generation = AsyncMock()
     resume_result = await handler.resume_memory_occupation({})
 
     assert resume_result["status"] == "ok"
-    resume_req = (
-        handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
+    manager.resume_memory_occupation.assert_not_awaited()
+    manager.continue_generation.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    assert handler._pause_controller.needs_resume_recovery is False
+
+
+@pytest.mark.asyncio
+async def test_release_reregisters_after_clean_pause_rollback(handler):
+    manager = handler.engine.tokenizer_manager
+    manager.release_memory_occupation = AsyncMock(
+        side_effect=RuntimeError("release failed")
     )
-    assert resume_req.tags == ["weights"]
-    handler.engine.tokenizer_manager.continue_generation.assert_awaited_once()
+
+    release_result = await handler.release_memory_occupation({})
+
+    # Rollback continued generation cleanly, so the engine is serving-safe again.
+    assert release_result["status"] == "error"
+    assert handler._pause_controller.is_paused is False
+    assert handler._pause_controller.needs_resume_recovery is False
+    manager.continue_generation.assert_awaited_once()
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    # The endpoint must rejoin the routing pool since resume will early-return.
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_resume_with_no_sleeping_state_is_noop():
-    handler = _make_handler()
-
-    result = await handler.resume_memory_occupation({})
-
-    assert result["status"] == "ok"
-    assert result["message"] == "Memory already resumed"
-    handler.engine.tokenizer_manager.resume_memory_occupation.assert_not_awaited()
-    handler.engine.tokenizer_manager.continue_generation.assert_not_awaited()
-    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_release_returns_error_when_worker_has_no_tokenizer_manager():
-    handler = _make_handler()
+@pytest.mark.parametrize(
+    ("method_name", "endpoint_method"),
+    [
+        ("release_memory_occupation", "unregister_endpoint_instance"),
+        ("resume_memory_occupation", "register_endpoint_instance"),
+    ],
+)
+async def test_memory_control_returns_error_without_pause_controller(
+    handler,
+    method_name,
+    endpoint_method,
+):
     handler.engine = None
-    handler._quiesce_controller = None
+    handler._pause_controller = None
 
-    result = await handler.release_memory_occupation({})
+    result = await getattr(handler, method_name)({})
 
     assert result == {
         "status": "error",
         "message": "memory control not supported on this worker",
     }
-    handler.generate_endpoint.unregister_endpoint_instance.assert_not_awaited()
+    getattr(handler.generate_endpoint, endpoint_method).assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_resume_returns_error_when_worker_has_no_tokenizer_manager():
-    handler = _make_handler()
-    handler.engine = None
-    handler._quiesce_controller = None
-
-    result = await handler.resume_memory_occupation({})
-
-    assert result == {
-        "status": "error",
-        "message": "memory control not supported on this worker",
-    }
-    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_resume_keeps_quiesced_state_when_register_fails():
-    handler = _make_handler()
+async def test_resume_keeps_paused_state_when_register_fails(handler):
     await handler.release_memory_occupation({})
     handler.generate_endpoint.register_endpoint_instance = AsyncMock(
         side_effect=RuntimeError("discovery write timeout")
@@ -202,5 +222,103 @@ async def test_resume_keeps_quiesced_state_when_register_fails():
     result = await handler.resume_memory_occupation({})
 
     assert result["status"] == "error"
-    assert handler._quiesce_controller is not None
-    assert handler._quiesce_controller.is_quiesced is True
+    assert handler._pause_controller is not None
+    assert handler._pause_controller.is_paused is True
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_flushes_sglang_cache(handler):
+    handler.engine.tokenizer_manager.server_args = SimpleNamespace(
+        hicache_storage_backend="none"
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
+
+    assert chunks == [{"status": "success", "message": "KV cache cleared"}]
+    handler.engine.tokenizer_manager.auto_create_handle_loop.assert_called_once_with()
+    handler.engine.tokenizer_manager.flush_cache.assert_awaited_once_with()
+    handler.engine.tokenizer_manager.clear_hicache_storage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_clears_configured_sglang_external_cache(handler):
+    handler.engine.tokenizer_manager.server_args = SimpleNamespace(
+        hicache_storage_backend="nixl"
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
+
+    assert chunks == [{"status": "success", "message": "KV cache cleared"}]
+    handler.engine.tokenizer_manager.auto_create_handle_loop.assert_called_once_with()
+    handler.engine.tokenizer_manager.flush_cache.assert_awaited_once_with()
+    handler.engine.tokenizer_manager.clear_hicache_storage.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_rejects_active_sglang_requests(handler):
+    handler.engine.tokenizer_manager.rid_to_state = {"request-1": object()}
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
+
+    assert chunks == [
+        {
+            "status": "error",
+            "message": "Cannot clear KV cache while requests are active",
+        }
+    ]
+    handler.engine.tokenizer_manager.auto_create_handle_loop.assert_not_called()
+    handler.engine.tokenizer_manager.flush_cache.assert_not_awaited()
+    handler.engine.tokenizer_manager.clear_hicache_storage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_returns_error_without_engine(handler):
+    handler.engine = None
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
+
+    assert chunks == [
+        {
+            "status": "error",
+            "message": "KV cache clear not supported on this worker",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_reports_flush_failure(handler):
+    handler.engine.tokenizer_manager.flush_cache = AsyncMock(
+        return_value=SimpleNamespace(success=False, message="cache busy")
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
+
+    assert chunks == [{"status": "error", "message": "cache busy"}]
+    handler.engine.tokenizer_manager.flush_cache.assert_awaited_once_with()
+    handler.engine.tokenizer_manager.clear_hicache_storage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_reports_sglang_external_cache_failure(handler):
+    handler.engine.tokenizer_manager.server_args = SimpleNamespace(
+        hicache_storage_backend="nixl"
+    )
+    handler.engine.tokenizer_manager.clear_hicache_storage = AsyncMock(
+        return_value=SimpleNamespace(success=False, message="storage busy")
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
+
+    assert chunks == [{"status": "error", "message": "storage busy"}]
+    handler.engine.tokenizer_manager.flush_cache.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_reports_flush_exception(handler):
+    handler.engine.tokenizer_manager.flush_cache = AsyncMock(
+        side_effect=RuntimeError("flush crashed")
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
+
+    assert chunks == [{"status": "error", "message": "flush crashed"}]

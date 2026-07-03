@@ -4,7 +4,7 @@
 title: SGLang Multimodal
 ---
 
-This document provides a comprehensive guide for multimodal inference using SGLang backend in Dynamo. SGLang multimodal supports **EPD**, **E/PD**, and **E/P/D** flows, with NIXL (RDMA) for zero-copy tensor transfer in disaggregated modes.
+This document provides a comprehensive guide for multimodal inference using SGLang backend in Dynamo. SGLang multimodal supports native **EPD** and **EP/D** flows where the SGLang engine performs media encoding, plus explicit encode-worker **E/PD** and **E/P/D** flows with NIXL (RDMA) for zero-copy tensor transfer.
 
 ## Support Matrix
 
@@ -12,34 +12,44 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Vision encoder generates embeddings |
 | **Image** | Data URL (Base64) | No | No |  |
-| **Video** | HTTP/HTTPS URL | No | No |  |
-| **Audio** | HTTP/HTTPS URL | No | No |  |
+| **Video** | HTTP/HTTPS/`file://` URL | Yes | Yes | Vision encoder generates embeddings |
+| **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
+
+> **MM-aware KV routing** is available for SGLang via the Rust frontend — it substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix-cache key matches the router's overlap calculation. The frontend auto-detects the backend from the worker's `ModelDeploymentCard` (the SGLang worker advertises `backend_framework="sglang"`), so no deployer-side flag is required. See [Multimodal KV Routing → SGLang section](./multimodal-kv-routing.md#sglang). That path is orthogonal to the encode-worker / EPD topologies documented below; it's a frontend routing concern that works with the aggregated SGLang worker layout in `examples/backends/sglang/launch/agg_multimodal_router.sh`.
 
 ### Supported URL Formats
 
 | Format | Example | Description |
 |--------|---------|-------------|
 | **HTTP/HTTPS** | `http://example.com/image.jpg` | Remote media files |
+| **file://** | `file:///tmp/test.mp4` | Local files accessible to the backend |
 
 ## Deployment Patterns
 
-SGLang supports EPD, E/PD, and E/P/D patterns. See [Multimodal Architecture Patterns](README.md#architecture-patterns) for detailed explanations.
+SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Serving](README.md) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
-| EPD (Simple Aggregated) | ✅ | `agg.sh` | Internal encoding |
+| EPD (Simple Aggregated) | ✅ | `agg_vision.sh` | Internal encoding |
+| EP/D or P/D (No Separate Encode Worker) | ✅ | `disagg.sh`, `disagg_same_gpu.sh` | Native SGLang P/D launchers; prefill performs encode + prefill, decode reprocesses raw media metadata for token layout |
 | E/PD (Encode Separate) | ✅ | `multimodal_epd.sh` | Vision encoder separate |
 | E/P/D (Full Disaggregation) | ✅ | `multimodal_disagg.sh` | KV cache via bootstrap |
-| EP/D (Traditional Disaggregated) | ❌ | N/A | Not supported |
 
 ### Component Flags
 
 | Component | Flag | Purpose |
 |-----------|------|---------|
-| Encode Worker | `--multimodal-encode-worker` | Frontend-facing, vision encoding, embeddings generation (Rust frontend tokenizes) |
-| PD Worker | `--multimodal-worker` | Prefill + Decode with embeddings |
-| Decode Worker | `--multimodal-worker --serving-mode=decode` | Entry point for disaggregation |
-| Prefill Worker | `--multimodal-worker --serving-mode=prefill` | Called by Decode, bootstrap coordination |
+| Native multimodal worker | `--enable-multimodal` | Allow raw multimodal inputs. In EP/D or P/D this keeps the normal prefill/decode workers; both receive raw media metadata. |
+| Encode Worker | `--enable-multimodal --disaggregation-mode encode` | Frontend-facing, vision encoding, embeddings generation (Rust frontend tokenizes) |
+| Internal PD Worker | `--enable-multimodal --dedicated-mm-encoder --disaggregation-mode pd` | Prefill + decode worker that consumes embeddings from the encode worker |
+| Internal Decode Worker | `--enable-multimodal --dedicated-mm-encoder --disaggregation-mode decode` | Entry point for E/P/D after the encode worker has produced embeddings |
+| Internal Prefill Worker | `--enable-multimodal --dedicated-mm-encoder --disaggregation-mode prefill` | Called by internal decode, bootstrap coordination with precomputed embeddings |
+
+<Warning>
+`--dedicated-mm-encoder` is intentionally explicit. Do not infer the internal E/PD or E/P/D worker path from `--enable-multimodal --disaggregation-mode prefill/decode`. Native EP/D or P/D uses those same two disaggregation modes, but it stays on the normal SGLang handlers: prefill processes raw image/video inputs to build vision context, while decode reprocesses the same raw media metadata so token layout matches the transferred KV cache. If the dedicated encoder flag is removed or made implicit, native disaggregated deployments can register only internal topology workers and lose the public OpenAI chat/completions surface.
+
+In SGLang E/P/D, keep this flag on both the decode and prefill workers. This differs from vLLM: SGLang's encode worker delegates generation to `backend.generate`, which is the decode worker, and that decode worker forwards the precomputed multimodal payload to prefill. With this flag, the internal workers consume transferred embeddings instead of raw image/video URLs, avoiding the duplicate raw-media preprocessing used by native EP/D or P/D.
+</Warning>
 
 ### SGLang-Specific Characteristics
 
@@ -68,19 +78,19 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Workflow
 
-The `DecodeWorkerHandler` receives multimodal requests with image URLs and passes them directly to SGLang's engine. SGLang's internal `mm_data_processor` handles image fetching, loading, encoding, and token expansion.
+The `DecodeWorkerHandler` receives multimodal requests with image/video URLs and passes them directly to SGLang's engine. SGLang's internal `mm_data_processor` handles image/video fetching, loading, encoding, and token expansion.
 
 ```mermaid
 flowchart LR
   HTTP --> worker
-  worker --tokenized text + image_urls--> SGLang[SGLang Engine]
+  worker --tokenized text + image/video URLs--> SGLang[SGLang Engine]
 ```
 
 ### Launch
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/sglang
-./launch/agg.sh --model Qwen/Qwen2.5-VL-7B-Instruct --chat-template qwen2-vl
+./launch/agg_vision.sh --model-path Qwen/Qwen2-VL-7B-Instruct
 ```
 
 **Client:**
@@ -111,6 +121,79 @@ curl http://localhost:8000/v1/chat/completions \
     "stream": false
   }' | jq
 ```
+
+Video requests use the same aggregated path:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2-VL-7B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Describe the video in detail"
+          },
+          {
+            "type": "video_url",
+            "video_url": {
+              "url": "https://samplelib.com/mp4/sample-5s.mp4"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 50,
+    "stream": false
+  }' | jq
+```
+
+## EP/D or P/D Serving (No Separate Encode Worker)
+
+### Components
+
+- workers:
+  - [PrefillWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/llm/prefill_handler.py) receives raw multimodal metadata and lets SGLang perform media loading, encoding, token expansion, and KV production during prefill.
+  - [DecodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/request_handlers/llm/decode_handler.py) receives matching multimodal metadata so token layout stays aligned with the transferred KV cache.
+
+### Workflow
+
+The Rust frontend tokenizes the request and forwards image/video URLs as `multi_modal_data`. There is no encode worker. The prefill worker passes those URLs to SGLang's normal multimodal engine path, so the vision context is produced inside the prefill worker. The decode worker also passes the same URLs to SGLang so the tokenizer manager can reproduce the multimodal token layout while consuming KV cache from prefill.
+
+This native EP/D or P/D path intentionally trades simplicity for duplicated raw-media preprocessing: both prefill and decode call SGLang with `image_data`/`video_data`, so SGLang's multimodal processor may fetch/load/preprocess the same media twice. Use the E/PD or E/P/D encode-worker topology when the deployment must preprocess media once and forward precomputed embeddings.
+
+```mermaid
+flowchart LR
+  HTTP --> decode_worker
+  decode_worker --request + raw media metadata--> prefill_worker
+  prefill_worker --SGLang media encode + KV Cache--> decode_worker
+  decode_worker -.-> HTTP
+```
+
+### Launch
+
+Native P/D and EP/D use the same launchers. The topology is selected by the
+model: text-only models run P/D, while VLMs run native EP/D where the prefill
+worker performs the media encode step. Neither path has a separate encode
+worker.
+
+```bash
+cd $DYNAMO_HOME/examples/backends/sglang
+
+# P/D: text-only model, prefill on GPU 0 and decode on GPU 1.
+./launch/disagg.sh --model Qwen/Qwen3-0.6B
+
+# EP/D: VLM, same launcher; prefill performs media encoding and decode runs separately.
+./launch/disagg.sh --model Qwen/Qwen3-VL-4B-Instruct
+
+# Single-GPU smoke test: same EP/D behavior with prefill and decode packed together.
+./launch/disagg_same_gpu.sh --model Qwen/Qwen3-VL-4B-Instruct
+```
+
+These launchers pass `--enable-multimodal` to the prefill and decode workers but deliberately do not pass `--dedicated-mm-encoder`.
 
 ## E/PD Serving (Encode Separate)
 
@@ -376,10 +459,11 @@ Supported templates: `qwen2-vl`, `llama-3`, `vicuna`, etc.
 | Use Case | NIXL Used? | Data Transfer | Notes |
 |----------|------------|---------------|-------|
 | EPD (Simple Aggregated) | No | N/A | All processing internal to SGLang |
+| EP/D or P/D (No Separate Encode Worker) | No | Prefill → Decode (KV cache via bootstrap) | Prefill performs SGLang media encoding inline |
 | E/PD (Encode Separate) | Yes | Encoder → PD (embeddings) | Vision encoder separate |
 | E/P/D (Full Disaggregation) | Yes | Encoder → Prefill (embeddings) | KV cache via SGLang bootstrap |
 
-**Key Difference:** SGLang P/D uses bootstrap mechanism, not NIXL for KV cache like vLLM.
+**Key Difference:** SGLang native EP/D or P/D uses bootstrap mechanism, not NIXL for KV cache like vLLM.
 
 ## Environment Variables
 
@@ -431,7 +515,6 @@ Key NVTX ranges emitted:
 
 - **No Data URL support** - Only HTTP/HTTPS URLs supported; `data:image/...` base64 URLs not supported
 - **No pre-computed embeddings** - Cannot use `.pt`, `.pth`, `.bin` embedding files; vision encoder runs for every request
-- **No video support** - No video encoder implementation
 - **No audio support** - No audio encoder implementation
 - **Only Processor registers with Dynamo** - Workers are internal components, frontend routes to Processor only
 - **Disaggregated routing** - Decode Worker is the entry point (calls Prefill), cannot route directly to Prefill workers

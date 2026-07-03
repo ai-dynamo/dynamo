@@ -13,94 +13,113 @@ Policy: support current SGLang release + 1 version back (N and N-1). Each
 fallback branch must document which version it covers and when it can be
 removed. When the old version falls outside the support window, delete the
 fallback and any associated polyfills.
+
+Runtime data-contract notes (not code-level shims):
+
+* ``meta_info["routed_experts"]`` is a base64 UTF-8 string from sglang
+  >= 0.5.11. Pass through; do not re-encode.
 """
 
-import ipaddress
+import inspect
 import logging
-import socket
+from functools import lru_cache
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-try:
-    from sglang.srt.utils.network import (  # noqa: F401
-        NetworkAddress,
-        get_local_ip_auto,
-        get_zmq_socket,
-    )
 
-    _SGLANG_HAS_NETWORK_MODULE = True
-except ImportError:
-    # Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+
-    from sglang.srt.utils import (  # type: ignore[no-redef]  # noqa: F401
-        get_local_ip_auto,
-        get_zmq_socket,
-    )
+# ---------------------------------------------------------------------------
+# Top-level sglang exports: Engine, ServerArgs
+#
+# Some SGLang dev builds (including 0.5.x snapshots) do not re-export these
+# from sglang/__init__.py, while Dynamo historically uses `import sglang as sgl`
+# followed by `sgl.Engine(...)` throughout this backend.
+# ---------------------------------------------------------------------------
+def ensure_sglang_top_level_exports() -> None:
+    """Restore top-level SGLang exports omitted by some install flavors."""
+    import sglang as sgl
 
-    _SGLANG_HAS_NETWORK_MODULE = False
-    logger.info(
-        "sglang.srt.utils.network not found (sglang <= 0.5.9); "
-        "using compatibility shim for NetworkAddress"
-    )
+    if not hasattr(sgl, "Engine"):
+        from sglang.srt.entrypoints.engine import Engine
 
-    class NetworkAddress:  # type: ignore[no-redef]
-        """Minimal polyfill for sglang.srt.utils.network.NetworkAddress."""
+        sgl.Engine = Engine
 
-        def __init__(self, host: str, port: int) -> None:
-            self.host = host
-            self.port = port
+    if not hasattr(sgl, "ServerArgs"):
+        from sglang.srt.server_args import ServerArgs
 
-        @property
-        def is_ipv6(self) -> bool:
-            try:
-                ipaddress.IPv6Address(self.host)
-                return True
-            except ValueError:
-                return False
+        sgl.ServerArgs = ServerArgs
 
-        @classmethod
-        def parse(cls, addr: str) -> "NetworkAddress":
-            """Parse 'host:port', '[IPv6]:port', or bare host."""
-            addr = addr.strip()
-            if addr.startswith("["):
-                end = addr.find("]")
-                host = addr[1:end] if end != -1 else addr.strip("[]")
-                rest = addr[end + 1 :] if end != -1 else ""
-                if rest.startswith(":") and rest[1:].isdigit():
-                    return cls(host, int(rest[1:]))
-                return cls(host, 0)
-            if addr.count(":") == 1:
-                host_part, port_part = addr.rsplit(":", 1)
-                if port_part.isdigit():
-                    return cls(host_part, int(port_part))
-            return cls(addr, 0)
 
-        def resolved(self) -> "NetworkAddress":
-            """DNS-resolve the host, preserving port."""
-            try:
-                infos = socket.getaddrinfo(
-                    self.host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
-                )
-                resolved_ip = infos[0][4][0]
-                return NetworkAddress(resolved_ip, self.port)
-            except socket.gaierror:
-                return self
+ensure_sglang_top_level_exports()
 
-        def to_host_port_str(self) -> str:
-            """Return '[IPv6]:port' or 'host:port'."""
-            if self.is_ipv6:
-                return f"[{self.host}]:{self.port}"
-            return f"{self.host}:{self.port}"
 
-        def to_tcp(self) -> str:
-            """Return 'tcp://[IPv6]:port' or 'tcp://host:port'."""
-            if self.is_ipv6:
-                return f"tcp://[{self.host}]:{self.port}"
-            return f"tcp://{self.host}:{self.port}"
+@lru_cache(maxsize=32)
+def _get_async_generate_supported_kwarg_names(
+    async_generate: Any,
+) -> frozenset[str] | None:
+    """Return supported async_generate keyword names, or None for **kwargs."""
+    try:
+        signature = inspect.signature(async_generate)
+    except (TypeError, ValueError):
+        logger.debug(
+            "Could not inspect SGLang Engine.async_generate signature; "
+            "dropping optional compatibility kwargs"
+        )
+        return frozenset()
+
+    names: set[str] = set()
+    for name, param in signature.parameters.items():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return None
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            names.add(name)
+
+    return frozenset(names)
+
+
+def filter_supported_async_generate_kwargs(
+    engine: Any, kwargs: dict[str, Any]
+) -> dict[str, Any]:
+    """Return only async_generate kwargs accepted by this SGLang engine.
+
+    SGLang occasionally adds optional Engine.async_generate kwargs before every
+    supported install flavor has them. Keep the compatibility boundary narrow:
+    callers decide which kwargs are optional, and this helper only drops those
+    optional kwargs when the installed engine cannot accept them.
+    """
+    async_generate = engine.async_generate
+    signature_source = getattr(async_generate, "__func__", async_generate)
+
+    try:
+        supported_kwarg_names = _get_async_generate_supported_kwarg_names(
+            signature_source
+        )
+    except TypeError:
+        supported_kwarg_names = _get_async_generate_supported_kwarg_names.__wrapped__(
+            signature_source
+        )
+
+    if supported_kwarg_names is None:
+        return kwargs
+
+    return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
+
+
+def enable_disjoint_streaming_output(server_args: Any) -> None:
+    """Enable SGLang's disjoint streaming output.
+
+    Diffusion workers pass a ``SimpleNamespace`` stub that does not carry the
+    field, so this is a no-op when the attribute is absent.
+    """
+    if hasattr(server_args, "incremental_streaming_output"):
+        server_args.incremental_streaming_output = True
 
 
 __all__ = [
-    "NetworkAddress",
-    "get_local_ip_auto",
-    "get_zmq_socket",
-    "_SGLANG_HAS_NETWORK_MODULE",
+    "enable_disjoint_streaming_output",
+    "ensure_sglang_top_level_exports",
+    "filter_supported_async_generate_kwargs",
 ]

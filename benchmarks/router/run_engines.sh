@@ -102,7 +102,7 @@ if [ ${#EXTRA_ARGS[@]} -eq 0 ]; then
 
         EXTRA_ARGS=(
             "--extra-engine-args" "$ENGINE_CONFIG"
-            "--publish-events-and-metrics"
+            "--publish-kv-events"
         )
     else
         # Default args for vLLM engine (explicitly include block-size)

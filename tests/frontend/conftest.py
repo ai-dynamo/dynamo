@@ -34,6 +34,19 @@ def pytest_ignore_collect(collection_path, config):
         if importlib.util.find_spec("torch") is None:
             return True  # torch not available, skip this file
 
+    # In-proc OTLP test needs grpc + opentelemetry-proto. Skip when
+    # missing (e.g. pre-commit env that only installs lint deps).
+    # find_spec on a dotted name imports the parent and raises ModuleNotFoundError
+    # if it doesn't exist, so guard the opentelemetry.proto lookup.
+    if filename == "test_unified_worker_otlp_export.py":
+        if importlib.util.find_spec("grpc") is None:
+            return True
+        try:
+            if importlib.util.find_spec("opentelemetry.proto") is None:
+                return True
+        except ModuleNotFoundError:
+            return True
+
     return None
 
 
@@ -63,10 +76,15 @@ def start_services_with_http(
         yield ports.frontend_port, ports.system_ports[0]
 
 
-def check_grpc_server_ready(
+def check_grpc_server_live(
     port: int, max_attempts: int = 30, retry_delay: float = 0.5
 ) -> bool:
-    """Check if gRPC server is ready to accept connections.
+    """Check if the gRPC server process is up and accepting connections.
+
+    Uses KServe `server_live` rather than `server_ready` because this fixture
+    runs before any worker is launched — `server_ready` only flips true once
+    a model has a WorkerSet ready to serve, which won't happen until callers
+    of this fixture start their worker processes.
 
     Args:
         port: gRPC server port
@@ -74,24 +92,24 @@ def check_grpc_server_ready(
         retry_delay: Delay between retry attempts in seconds
 
     Returns:
-        True if server is ready
+        True if server is live
 
     Raises:
-        Exception: If server is not ready after max_attempts
+        Exception: If server is not live after max_attempts
     """
     import tritonclient.grpc as grpcclient
 
     for attempt in range(max_attempts):
         try:
             client = grpcclient.InferenceServerClient(f"localhost:{port}")
-            if client.is_server_ready():
+            if client.is_server_live():
                 logger.info(
-                    f"gRPC server is ready on port {port} (attempt {attempt + 1}/{max_attempts})"
+                    f"gRPC server is live on port {port} (attempt {attempt + 1}/{max_attempts})"
                 )
-                # Add delay after readiness check to ensure server is fully stable for parallel tests
+                # Add delay after liveness check to ensure server is fully stable for parallel tests
                 # Retry the check once more to confirm stability
                 time.sleep(0.5)
-                if client.is_server_ready():
+                if client.is_server_live():
                     logger.info(f"gRPC server confirmed stable on port {port}")
                     return True
                 else:
@@ -101,12 +119,10 @@ def check_grpc_server_ready(
                     continue
         except Exception as e:
             if attempt < max_attempts - 1:
-                logger.debug(f"gRPC server not ready on attempt {attempt + 1}: {e}")
+                logger.debug(f"gRPC server not live on attempt {attempt + 1}: {e}")
                 time.sleep(retry_delay)
             else:
-                logger.error(
-                    f"gRPC server not ready after {max_attempts} attempts: {e}"
-                )
+                logger.error(f"gRPC server not live after {max_attempts} attempts: {e}")
                 raise
     return False
 
@@ -200,7 +216,7 @@ def start_services_with_grpc(
                 f"gRPC Frontend starting on port {ports.frontend_port} "
                 f"(metrics on {grpc_metrics_port})"
             )
-            check_grpc_server_ready(ports.frontend_port)
+            check_grpc_server_live(ports.frontend_port)
             yield ports.frontend_port, ports.system_ports[0]
     finally:
         deallocate_port(grpc_metrics_port)
@@ -226,6 +242,8 @@ class MockerWorkerProcess(ManagedProcess):
         system_port: int,
         speedup_ratio: int = 100,
         worker_id: str = "mocker-worker",
+        extra_args: list = None,
+        extra_env: dict = None,
     ):
         self.worker_id = worker_id
         self.frontend_port = frontend_port
@@ -245,6 +263,10 @@ class MockerWorkerProcess(ManagedProcess):
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(system_port)
+        if extra_env:
+            env.update(extra_env)
+        if extra_args:
+            command.extend(extra_args)
 
         log_dir = f"{request.node.name}_{worker_id}"
 
@@ -314,3 +336,97 @@ def start_services_with_mocker(
         wait_for_http_completions_ready(frontend_port=frontend_port, model=model)
         logger.info(f"Mocker Worker started for test on port {frontend_port}")
         yield frontend_port
+
+
+class SampleUnifiedWorkerProcess(ManagedProcess):
+    """Unified-backend sample worker (`dynamo.common.backend.sample_main`).
+
+    CPU-only Python reference engine that exercises the unified backend's
+    `Worker.run()` path — the same code path real backends (vllm/trtllm/
+    sglang) go through. Useful for tests that need to validate the unified
+    Worker/EngineAdapter pipeline without a GPU.
+
+    Mirrors `MockerWorkerProcess` but uses the unified entry point. Accepts
+    `extra_env` for tests that need to inject telemetry / tracing env vars
+    (e.g. `OTEL_EXPORT_ENABLED=1`, `DYN_LOGGING_JSONL=1`).
+    """
+
+    def __init__(
+        self,
+        request,
+        frontend_port: int,
+        system_port: int,
+        model_name: str = QWEN,
+        component: str = "sample",
+        disaggregation_mode: str = "agg",
+        worker_id: str = "sample-worker",
+        extra_args: list | None = None,
+        extra_env: dict | None = None,
+    ):
+        self.worker_id = worker_id
+        self.frontend_port = frontend_port
+        self.system_port = system_port
+
+        command = [
+            "python3",
+            "-m",
+            "dynamo.common.backend.sample_main",
+            "--model-name",
+            model_name,
+            "--component",
+            component,
+            "--disaggregation-mode",
+            disaggregation_mode,
+        ]
+        if extra_args:
+            command.extend(extra_args)
+
+        env = os.environ.copy()
+        env["DYN_LOG"] = "info"
+        env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+        env["DYN_SYSTEM_PORT"] = str(system_port)
+        if extra_env:
+            env.update(extra_env)
+
+        log_dir = f"{request.node.name}_{worker_id}"
+
+        try:
+            shutil.rmtree(log_dir)
+        except FileNotFoundError:
+            pass
+
+        super().__init__(
+            command=command,
+            env=env,
+            health_check_urls=[
+                (f"http://localhost:{frontend_port}/v1/models", self._check_models_api),
+                (f"http://localhost:{system_port}/health", self.is_ready),
+            ],
+            timeout=120,
+            display_output=True,
+            terminate_all_matching_process_names=False,
+            straggler_commands=["-m dynamo.common.backend.sample_main"],
+            log_dir=log_dir,
+        )
+
+    def _check_models_api(self, response):
+        try:
+            if response.status_code != 200:
+                return False
+            data = response.json()
+            return len(data.get("data", [])) > 0
+        except Exception:
+            return False
+
+    def is_ready(self, response) -> bool:
+        try:
+            status = (response.json() or {}).get("status")
+        except ValueError:
+            logger.warning("%s health response is not valid JSON", self.worker_id)
+            return False
+        is_ready = status == "ready"
+        if is_ready:
+            logger.info("%s status is ready", self.worker_id)
+        else:
+            logger.warning("%s status is not ready: %s", self.worker_id, status)
+        return is_ready

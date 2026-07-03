@@ -13,8 +13,6 @@ use std::future::Future;
 #[allow(unused_imports)]
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
-#[allow(unused_imports)]
-use zeromq::{PubSocket, Socket, SocketSend, ZmqMessage};
 
 #[cfg(test)]
 mod test_event_processing {
@@ -30,8 +28,15 @@ mod test_event_processing {
         let token_ids = vec![10, 20, 30, 40];
         let blk_hash = 0xdead_beef;
 
-        let stored =
-            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None, None);
+        let stored = create_stored_block_from_parts(
+            kv_block_size,
+            blk_hash,
+            &token_ids,
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(stored.block_hash.0, blk_hash);
         let expected_hash =
@@ -60,6 +65,7 @@ mod test_event_processing {
             &Arc::new(AtomicU32::new(0)),
             None,
             None,
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -84,6 +90,7 @@ mod test_event_processing {
             &warning_count,
             None,
             None,
+            None,
         );
 
         // should early-exit as second has mismatch
@@ -106,6 +113,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
 
         let out = convert_event(
@@ -114,7 +124,9 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
-        );
+            None,
+        )
+        .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Stored(_)));
     }
 
@@ -132,6 +144,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -142,6 +157,9 @@ mod test_event_processing {
             lora_name: Some("my-lora".to_string()),
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -151,14 +169,18 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+            None,
+        )
+        .unwrap();
         let lora_out = convert_event(
             lora_evt,
             2,
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+            None,
+        )
+        .unwrap();
 
         let base_hash = match &base_out.event.data {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
@@ -189,6 +211,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -199,6 +224,9 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
 
         let out1 = convert_event(
@@ -207,14 +235,18 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+            None,
+        )
+        .unwrap();
         let out2 = convert_event(
             evt2,
             2,
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
-        );
+            None,
+        )
+        .unwrap();
 
         let hash1 = match &out1.event.data {
             KvCacheEventData::Stored(s) => s.blocks[0].tokens_hash,
@@ -292,6 +324,9 @@ mod test_event_processing {
         let raw_evt = RawKvEvent::BlockRemoved {
             block_hashes: vec![BlockHashValue::Unsigned(123), BlockHashValue::Signed(456)],
             medium: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
         };
         let out = convert_event(
             raw_evt,
@@ -299,7 +334,9 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
-        );
+            None,
+        )
+        .unwrap();
 
         assert!(matches!(out.event.data, KvCacheEventData::Removed(_)));
     }
@@ -314,7 +351,9 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
-        );
+            None,
+        )
+        .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Cleared));
     }
 
@@ -335,9 +374,12 @@ mod test_event_processing {
         let mm_hash =
             "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
         let infos = extra_keys_to_block_mm_infos(Some(vec![
-            Some(vec![mm_hash.clone()]),
+            Some(vec![ExtraKeyItem::Hash(mm_hash.clone())]),
             None,
-            Some(vec!["invalid".to_string(), mm_hash]),
+            Some(vec![
+                ExtraKeyItem::Hash("invalid".to_string()),
+                ExtraKeyItem::Hash(mm_hash),
+            ]),
         ]))
         .expect("expected parsed MM infos");
 
@@ -386,6 +428,32 @@ mod test_event_processing {
     }
 
     #[test]
+    fn test_seq_block_stored_field8_supports_tuple_extra_keys() {
+        let mm_hash =
+            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+        let extra_keys_payload = rmps::to_vec(&(
+            "BlockStored",
+            vec![10_u64],
+            None::<u64>,
+            vec![1_u32, 2, 3, 4],
+            4_usize,
+            None::<u64>,
+            None::<String>,
+            None::<String>,
+            vec![Some(vec![(mm_hash, 7_i64)])],
+        ))
+        .unwrap();
+        let extra_keys_event: RawKvEvent = rmps::from_slice(&extra_keys_payload).unwrap();
+        let RawKvEvent::BlockStored { block_mm_infos, .. } = extra_keys_event else {
+            panic!("expected BlockStored");
+        };
+        assert_eq!(
+            block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
+    }
+
+    #[test]
     fn test_map_block_stored_supports_extra_keys() {
         #[derive(serde::Serialize)]
         struct MapBlockStoredEvent {
@@ -425,16 +493,61 @@ mod test_event_processing {
             0x0123_4567_89ab_cdef
         );
     }
+
+    #[test]
+    fn test_map_block_stored_supports_tuple_extra_keys() {
+        type BlockTupleExtraKeys = Option<Vec<Option<Vec<(String, i64)>>>>;
+
+        #[derive(serde::Serialize)]
+        struct MapBlockStoredEvent {
+            #[serde(rename = "type")]
+            event_type: &'static str,
+            block_hashes: Vec<u64>,
+            parent_block_hash: Option<u64>,
+            token_ids: Vec<u32>,
+            block_size: usize,
+            lora_id: Option<u64>,
+            medium: Option<String>,
+            lora_name: Option<String>,
+            extra_keys: BlockTupleExtraKeys,
+        }
+
+        let mm_hash =
+            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+        let payload = rmps::to_vec(&MapBlockStoredEvent {
+            event_type: "BlockStored",
+            block_hashes: vec![10],
+            parent_block_hash: None,
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 4,
+            lora_id: None,
+            medium: Some("GPU".to_string()),
+            lora_name: None,
+            extra_keys: Some(vec![Some(vec![(mm_hash, 3)])]),
+        })
+        .unwrap();
+
+        let event: RawKvEvent = rmps::from_slice(&payload).unwrap();
+        let RawKvEvent::BlockStored { block_mm_infos, .. } = event else {
+            panic!("expected BlockStored");
+        };
+        assert_eq!(
+            block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests_startup_helpers {
     use super::*;
+    use crate::utils::zmq::{bind_pub_socket, send_multipart};
     use bytes::Bytes;
-    use dynamo_kv_router::indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface};
+    use dynamo_kv_router::indexer::{
+        GetWorkersRequest, KvIndexer, KvIndexerInterface, WorkerKvQueryResponse,
+    };
     use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use std::sync::{Arc, Mutex};
-    use zeromq::{PubSocket, Socket, SocketSend, ZmqMessage};
 
     // Type alias to resolve clippy::type_complexity warning
     type PublishedEvents = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
@@ -534,6 +647,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
@@ -626,6 +740,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
@@ -708,6 +823,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
@@ -820,21 +936,31 @@ mod tests_startup_helpers {
     }
 
     //--------------------------------------------------------------------
-    // Test start_zmq_listener without a real socket
-    //   (feed it frames through a ZMQ PAIR tcp socket)
+    // Test start_zmq_listener with a real ZMQ publisher
     //--------------------------------------------------------------------
     #[tokio::test]
     async fn test_start_zmq_listener_pushes_to_channel() {
+        #[derive(serde::Serialize)]
+        struct MapBlockStoredEvent {
+            #[serde(rename = "type")]
+            event_type: &'static str,
+            block_hashes: Vec<u64>,
+            parent_block_hash: Option<u64>,
+            token_ids: Vec<u32>,
+            block_size: usize,
+            group_idx: Option<u32>,
+            kv_cache_spec_kind: Option<&'static str>,
+        }
+
         // Prepare channel that listener should fill
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
-        // ZMQ TCP endpoint using localhost with fixed port
-        let endpoint = "tcp://127.0.0.1:15555";
+        // Keep the unique IPC directory alive until the sockets shut down.
+        let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let topic = "".to_string(); // subscribe to all
 
         // Publisher side - set up first
-        let mut pub_socket = PubSocket::new();
-        pub_socket.bind(endpoint).await.unwrap();
+        let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
 
         // Cancellation token so we can stop the listener
         let token = dynamo_runtime::CancellationToken::new();
@@ -844,54 +970,80 @@ mod tests_startup_helpers {
         // Spawn async listener (connects to publisher bound above)
         let listener_handle = tokio::spawn({
             let token = token.clone();
-            start_zmq_listener(endpoint.to_string(), topic, 1, tx, token, 4, next_event_id)
+            start_zmq_listener(
+                endpoint.to_string(),
+                topic,
+                1,
+                tx,
+                token,
+                4,
+                next_event_id,
+                None,
+            )
         });
 
-        // Give time for the connection to establish
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Send synthetic 3-frame message: [topic, seq(8B), payload]
+        // Build synthetic 3-frame message: [topic, seq(8B), payload]
         let seq: u64 = 77;
 
-        let events = vec![RawKvEvent::BlockStored {
-            block_hashes: vec![BlockHashValue::Unsigned(42)],
-            parent_block_hash: None,
-            token_ids: vec![0, 1, 2, 3],
-            block_size: 4,
-            medium: None,
-            lora_name: None,
-            block_mm_infos: None,
-            is_eagle: None,
-        }];
-
-        let batch = KvEventBatch {
-            ts: 0.0,
-            events,
-            data_parallel_rank: Some(1),
-        };
-
-        let payload = Bytes::from(rmps::to_vec(&batch).unwrap());
-
-        let frames = vec![
-            Bytes::from(""),
-            Bytes::from(seq.to_be_bytes().to_vec()),
-            payload.clone(),
+        let events = vec![
+            MapBlockStoredEvent {
+                event_type: "BlockStored",
+                block_hashes: vec![41],
+                parent_block_hash: None,
+                token_ids: vec![0, 1, 2, 3],
+                block_size: 4,
+                group_idx: Some(1),
+                kv_cache_spec_kind: Some("mamba"),
+            },
+            MapBlockStoredEvent {
+                event_type: "BlockStored",
+                block_hashes: vec![42],
+                parent_block_hash: None,
+                token_ids: vec![0, 1, 2, 3],
+                block_size: 4,
+                group_idx: None,
+                kv_cache_spec_kind: None,
+            },
         ];
 
-        // Create a proper multipart message
-        let msg = ZmqMessage::try_from(frames).expect("Failed to create ZmqMessage");
+        let batch = (0.0, events, Some(1_i32));
 
-        // Send the multipart message
-        pub_socket.send(msg).await.unwrap();
+        let payload = Bytes::from(rmps::to_vec_named(&batch).unwrap());
 
-        // Wait for message to be received
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let frames = vec![
+            Bytes::from("").to_vec(),
+            Bytes::from(seq.to_be_bytes().to_vec()).to_vec(),
+            payload.clone().to_vec(),
+        ];
 
-        // Check that we received the message
-        let event = rx.try_recv().expect("no message received").event;
+        // Republish on a 50ms interval until the listener forwards an event
+        // (or the 5s deadline trips). ZMQ PUB drops messages destined for
+        // subscribers whose SUBSCRIBE handshake has not yet completed, so a
+        // one-shot send + fixed sleep is racy on contended runners.
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            let mut publish_interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        return event.expect("listener channel closed").event;
+                    }
+                    _ = publish_interval.tick() => {
+                        send_multipart(&pub_socket, frames.clone())
+                            .await
+                            .expect("failed to send ZMQ test event");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for listener event");
+
+        assert_eq!(event.event_id, 0);
 
         let KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
+            start_position,
             blocks,
         }) = event.data
         else {
@@ -899,12 +1051,86 @@ mod tests_startup_helpers {
         };
 
         assert!(parent_hash.is_none());
+        assert!(start_position.is_none());
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_hash.0, 42);
 
         // Stop the listener
         token.cancel();
         let _ = listener_handle.await;
+    }
+
+    #[tokio::test]
+    async fn test_start_zmq_listener_connects_before_publisher_bind() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        // Keep the unique IPC directory alive until the sockets shut down.
+        let (_ipc_dir, endpoint) = unique_ipc_endpoint();
+        let topic = String::new();
+        let token = dynamo_runtime::CancellationToken::new();
+        let next_event_id = Arc::new(AtomicU64::new(0));
+
+        let listener_handle = tokio::spawn({
+            let token = token.clone();
+            let endpoint = endpoint.clone();
+            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None)
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
+        let batch = KvEventBatch {
+            ts: 0.0,
+            events: vec![RawKvEvent::BlockStored {
+                block_hashes: vec![BlockHashValue::Unsigned(64)],
+                parent_block_hash: None,
+                token_ids: vec![4, 5, 6, 7],
+                block_size: 4,
+                medium: None,
+                lora_name: None,
+                block_mm_infos: None,
+                is_eagle: None,
+                group_idx: None,
+                kv_cache_spec_kind: None,
+                kv_cache_spec_sliding_window: None,
+            }],
+            data_parallel_rank: Some(0),
+        };
+        let payload = rmps::to_vec(&batch).unwrap();
+
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            let mut publish_interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        return event.expect("listener channel closed").event;
+                    }
+                    _ = publish_interval.tick() => {
+                        send_multipart(
+                            &pub_socket,
+                            vec![Vec::new(), 12u64.to_be_bytes().to_vec(), payload.clone()],
+                        )
+                        .await
+                        .expect("failed to send ZMQ test event");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for listener event");
+
+        let KvCacheEventData::Stored(KvCacheStoreData { blocks, .. }) = event.data else {
+            panic!("expected KvCacheStoreData");
+        };
+        assert_eq!(blocks[0].block_hash.0, 64);
+
+        token.cancel();
+        let _ = listener_handle.await;
+    }
+
+    fn unique_ipc_endpoint() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("failed to create temporary ZMQ directory");
+        let endpoint = format!("ipc://{}", dir.path().join("events.sock").display());
+        (dir, endpoint)
     }
 
     //--------------------------------------------------------------------
@@ -949,6 +1175,7 @@ mod tests_startup_helpers {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
@@ -1009,14 +1236,19 @@ mod tests_startup_helpers {
         );
 
         // assert: Worker's local indexer buffered event
-        let buffered = local_indexer_1.get_all_events_in_buffer();
-        assert_eq!(buffered.len(), 1, "Local indexer should buffer 1 event");
+        match local_indexer_1.get_events_in_id_range(Some(1), None).await {
+            WorkerKvQueryResponse::Events { events, .. } => {
+                assert_eq!(events.len(), 1, "Local indexer should buffer 1 event");
+            }
+            other => panic!("Expected buffered events, got {other:?}"),
+        }
 
         // === STEP 2 & 3: Simulate Outage - Stop forwarding to router ===
         let event_2 = KvCacheEvent {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100), // Shared prefix
@@ -1049,12 +1281,16 @@ mod tests_startup_helpers {
         }
 
         // assert: Worker's local indexer has both events
-        let buffered = local_indexer_1.get_all_events_in_buffer();
-        assert_eq!(
-            buffered.len(),
-            2,
-            "Local indexer should have both events during outage"
-        );
+        match local_indexer_1.get_events_in_id_range(Some(1), None).await {
+            WorkerKvQueryResponse::Events { events, .. } => {
+                assert_eq!(
+                    events.len(),
+                    2,
+                    "Local indexer should have both events during outage"
+                );
+            }
+            other => panic!("Expected buffered events, got {other:?}"),
+        }
 
         // assert: Router DOESN'T have event_2
         let block_hashes_2 = vec![LocalBlockHash(200), LocalBlockHash(202)];
@@ -1080,7 +1316,7 @@ mod tests_startup_helpers {
             .get_events_in_id_range(Some(last_known_id + 1), None)
             .await;
         let missed_events = match response {
-            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events { events: e, .. } => e,
             dynamo_kv_router::indexer::WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             dynamo_kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
                 panic!("Unexpected error response: {message}")
@@ -1121,51 +1357,154 @@ mod tests_startup_helpers {
 }
 
 #[cfg(test)]
-mod test_exponential_backoff {
+mod test_event_dedup_filter {
     use super::*;
 
-    #[test]
-    fn test_backoff_calculation_progression() {
-        // Test the exponential progression
-        assert_eq!(calculate_backoff_ms(0), 10); // 10 * 2^0 = 10
-        assert_eq!(calculate_backoff_ms(1), 20); // 10 * 2^1 = 20
-        assert_eq!(calculate_backoff_ms(2), 40); // 10 * 2^2 = 40
-        assert_eq!(calculate_backoff_ms(3), 80); // 10 * 2^3 = 80
-        assert_eq!(calculate_backoff_ms(4), 160); // 10 * 2^4 = 160
-        assert_eq!(calculate_backoff_ms(5), 320); // 10 * 2^5 = 320
-        assert_eq!(calculate_backoff_ms(6), 640); // 10 * 2^6 = 640
-        assert_eq!(calculate_backoff_ms(7), 1280); // 10 * 2^7 = 1280
-        assert_eq!(calculate_backoff_ms(8), 2560); // 10 * 2^8 = 2560
+    fn store_data(hashes: &[u64]) -> KvCacheStoreData {
+        KvCacheStoreData {
+            parent_hash: None,
+            start_position: None,
+            blocks: hashes
+                .iter()
+                .map(|&h| KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(h),
+                    tokens_hash: LocalBlockHash(h * 10),
+                    mm_extra_info: None,
+                })
+                .collect(),
+        }
     }
 
-    #[test]
-    fn test_backoff_caps_at_max_exponent() {
-        // After MAX_BACKOFF_EXPONENT, should stay at 2^8 = 2560ms
-        assert_eq!(calculate_backoff_ms(8), 2560);
-        assert_eq!(calculate_backoff_ms(9), 2560); // Same as 8
-        assert_eq!(calculate_backoff_ms(100), 2560); // Same as 8
-    }
-
-    #[test]
-    fn test_backoff_never_exceeds_max() {
-        // Even if we somehow had a huge exponent, never exceed MAX_BACKOFF_MS
-        for i in 0..20 {
-            assert!(calculate_backoff_ms(i) <= MAX_BACKOFF_MS);
+    fn remove_data(hashes: &[u64]) -> KvCacheRemoveData {
+        KvCacheRemoveData {
+            block_hashes: hashes
+                .iter()
+                .map(|&h| ExternalSequenceBlockHash(h))
+                .collect(),
         }
     }
 
     #[test]
-    #[expect(clippy::assertions_on_constants)]
-    fn test_backoff_constants_are_sane() {
-        // Verify our constants make sense together
-        assert!(INITIAL_BACKOFF_MS > 0);
-        assert!(MAX_BACKOFF_MS > INITIAL_BACKOFF_MS);
-        assert!(MAX_BACKOFF_EXPONENT <= 10); // Prevent crazy exponents
-        assert!(MAX_CONSECUTIVE_ERRORS > 0);
+    fn stores_track_refcounts_for_removes() {
+        let mut filter = EventDedupFilter::new();
+        let data = store_data(&[1, 2, 3]);
 
-        // Max calculated value should be less than MAX_BACKOFF_MS
-        let max_calculated = INITIAL_BACKOFF_MS * 2_u64.pow(MAX_BACKOFF_EXPONENT);
-        assert!(max_calculated <= MAX_BACKOFF_MS);
+        // Store same hashes twice — refcount should be 2
+        filter.track_store(0, StorageTier::Device, &data);
+        filter.track_store(0, StorageTier::Device, &data);
+
+        // First remove — refcounts 2→1, all filtered out
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
+        assert!(result.is_none());
+
+        // Second remove — refcounts 1→0, all pass through
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().block_hashes.len(), 3);
+    }
+
+    #[test]
+    fn duplicate_removes_are_filtered() {
+        let mut filter = EventDedupFilter::new();
+
+        // Store same hash twice
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+
+        // First remove — refcount 2→1, filtered out
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
+        assert!(result.is_none());
+
+        // Second remove — refcount 1→0, passes through
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().block_hashes.len(), 1);
+    }
+
+    #[test]
+    fn store_remove_store_cycle() {
+        let mut filter = EventDedupFilter::new();
+
+        // Store hash 1
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+
+        // Remove hash 1 — refcount 1→0, passes through
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
+        assert!(result.is_some());
+
+        // Store hash 1 again — refcount starts fresh at 1
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+
+        // Remove again — refcount 1→0, passes through
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn clear_resets_all_ranks() {
+        let mut filter = EventDedupFilter::new();
+
+        // Store on rank 0 and rank 1
+        filter.track_store(0, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
+
+        // Clear wipes all ranks (matches indexer semantics where Cleared
+        // from any rank removes all blocks for the entire worker).
+        filter.clear();
+
+        // Both ranks pass through defensively after clear
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
+        assert!(result.is_some());
+
+        let result = filter.filter_remove(1, StorageTier::Device, remove_data(&[1]));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn mixed_blocks_in_single_remove() {
+        let mut filter = EventDedupFilter::new();
+
+        // Hash 1: stored twice (refcount 2)
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+
+        // Hash 2: stored once (refcount 1)
+        filter.track_store(0, StorageTier::Device, &store_data(&[2]));
+
+        // Hash 3: stored twice (refcount 2)
+        filter.track_store(0, StorageTier::Device, &store_data(&[3]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[3]));
+
+        // Remove all three — only hash 2 (refcount 1→0) passes through
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert_eq!(result.block_hashes.len(), 1);
+        assert_eq!(result.block_hashes[0], ExternalSequenceBlockHash(2));
+    }
+
+    #[test]
+    fn same_hash_on_different_ranks_are_independent() {
+        let mut filter = EventDedupFilter::new();
+
+        // Store hash 1 on rank 0 (twice) and rank 1 (once)
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1]));
+
+        // Remove hash 1 on rank 1 — refcount 1→0, passes through
+        let result = filter.filter_remove(1, StorageTier::Device, remove_data(&[1]));
+        assert!(result.is_some());
+
+        // Remove hash 1 on rank 0 — refcount 2→1, filtered out
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
+        assert!(result.is_none());
+
+        // Remove hash 1 on rank 0 again — refcount 1→0, passes through
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
+        assert!(result.is_some());
     }
 }
 
@@ -1203,7 +1542,8 @@ mod test_integration_publisher {
         // Test 1: Publish 10 different metrics with 0.5ms intervals
         // Only the last one should be published after 1ms of stability
         for i in 0..10 {
-            publisher.publish(None, (i * 100) as u64).unwrap();
+            let value = (i * 100) as u64;
+            publisher.publish(None, None, Some(value)).unwrap();
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
 
@@ -1218,8 +1558,9 @@ mod test_integration_publisher {
 
         let (_envelope, event) = result.unwrap().unwrap(); // Unwrap the Option and the Result
         assert_eq!(event.worker_id, worker_id);
-        assert_eq!(event.active_decode_blocks, Some(900)); // Last value: 9 * 100
+        assert_eq!(event.active_decode_blocks, None); // Worker publisher sends kv_used_blocks
         assert_eq!(event.active_prefill_tokens, None); // Worker doesn't publish prefill tokens
+        assert_eq!(event.kv_used_blocks, Some(900));
 
         // Ensure no more events are waiting
         let no_msg =
@@ -1228,7 +1569,7 @@ mod test_integration_publisher {
 
         // Test 2: Publish 10 more metrics with same active_decode_blocks - should not trigger publish
         for _ in 0..10 {
-            publisher.publish(None, 900).unwrap(); // Keep same as last published
+            publisher.publish(None, None, Some(900)).unwrap(); // Keep same as last published
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
 
@@ -1299,6 +1640,7 @@ mod batching_state_tests {
 
         state.pending_stored = Some(KvCacheStoreData {
             parent_hash: None,
+            start_position: None,
             blocks: vec![],
         });
         assert!(
@@ -1402,6 +1744,7 @@ mod batching_state_tests {
         };
         let first = KvCacheStoreData {
             parent_hash: Some(ExternalSequenceBlockHash(0)),
+            start_position: None,
             blocks: vec![block1],
         };
 
@@ -1455,6 +1798,13 @@ mod event_processor_tests {
 
     fn local_gpu_event(event: KvCacheEvent) -> PlacementEvent {
         PlacementEvent::local_gpu(1, event)
+    }
+
+    fn local_host_event(event: KvCacheEvent) -> PlacementEvent {
+        PlacementEvent::new(
+            Placement::local_worker(1, event.dp_rank, StorageTier::HostPinned),
+            event,
+        )
     }
 
     /// Test that pushing N removed events results in batched output
@@ -1608,6 +1958,7 @@ mod event_processor_tests {
                 event_id: i as u64,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash,
+                    start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(i as u64),
                         tokens_hash: LocalBlockHash(i as u64 * 100),
@@ -1700,6 +2051,7 @@ mod event_processor_tests {
                 event_id: i as u64,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: Some(ExternalSequenceBlockHash((i + 1) as u64 * 100)),
+                    start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(i as u64),
                         tokens_hash: LocalBlockHash(i as u64 * 100),
@@ -1766,6 +2118,7 @@ mod event_processor_tests {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: Some(10),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -1781,6 +2134,7 @@ mod event_processor_tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
+                start_position: Some(11_111),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(2),
                     tokens_hash: LocalBlockHash(200),
@@ -1796,6 +2150,7 @@ mod event_processor_tests {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
+                start_position: Some(20),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(3),
                     tokens_hash: LocalBlockHash(300),
@@ -1829,6 +2184,11 @@ mod event_processor_tests {
                 data.parent_hash, None,
                 "First batch should preserve the original root parent"
             );
+            assert_eq!(
+                data.start_position,
+                Some(10),
+                "First batch should preserve the original start position"
+            );
         } else {
             panic!("Expected first event to be Stored");
         }
@@ -1843,6 +2203,11 @@ mod event_processor_tests {
                 data.parent_hash,
                 Some(ExternalSequenceBlockHash(1)),
                 "Second batch should preserve the reused parent hash"
+            );
+            assert_eq!(
+                data.start_position,
+                Some(20),
+                "Second batch should keep the new root's start position"
             );
         } else {
             panic!("Expected second event to be Stored");
@@ -1978,6 +2343,7 @@ mod event_processor_tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2002,6 +2368,106 @@ mod event_processor_tests {
             2,
             "Switching from Removed to Stored should cause immediate flush, resulting in 2 separate events"
         );
+    }
+
+    #[tokio::test]
+    async fn test_host_tier_events_are_published_and_preserved() {
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                Some(100),
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_host_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(42)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(
+            events.len(),
+            1,
+            "Expected a single published host-tier event"
+        );
+        assert_eq!(events[0].storage_tier, StorageTier::HostPinned);
+
+        let KvCacheEventData::Removed(data) = &events[0].event.data else {
+            panic!("Expected Removed event");
+        };
+        assert_eq!(data.block_hashes, vec![ExternalSequenceBlockHash(42)]);
+    }
+
+    #[tokio::test]
+    async fn test_storage_tier_change_causes_flush() {
+        let timeout_ms = Some(100);
+
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                timeout_ms,
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_host_event(KvCacheEvent {
+            event_id: 0,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(1)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(2)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(
+            events.len(),
+            2,
+            "Changing storage tier should flush the current batch"
+        );
+        assert_eq!(events[0].storage_tier, StorageTier::HostPinned);
+        assert_eq!(events[1].storage_tier, StorageTier::Device);
     }
 
     /// Test that dp_rank change causes immediate flush
@@ -2280,6 +2746,7 @@ mod event_processor_tests {
             event_id: 100,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2295,6 +2762,7 @@ mod event_processor_tests {
             event_id: 101,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(2),
                     tokens_hash: LocalBlockHash(200),
@@ -2312,6 +2780,7 @@ mod event_processor_tests {
             event_id: 200,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(1000),
@@ -2397,6 +2866,7 @@ mod event_processor_tests {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None, // Root block with no parent
+                start_position: Some(10),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(1),
                     tokens_hash: LocalBlockHash(100),
@@ -2413,6 +2883,7 @@ mod event_processor_tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(1)), // Points to previous block
+                start_position: Some(999),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(2),
                     tokens_hash: LocalBlockHash(200),
@@ -2429,6 +2900,7 @@ mod event_processor_tests {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: Some(ExternalSequenceBlockHash(2)),
+                start_position: Some(1_234),
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(3),
                     tokens_hash: LocalBlockHash(300),
@@ -2458,6 +2930,11 @@ mod event_processor_tests {
             assert_eq!(
                 data.parent_hash, None,
                 "Batch parent_hash should remain None (from first event), NOT overwritten by subsequent events"
+            );
+            assert_eq!(
+                data.start_position,
+                Some(10),
+                "Batch start_position should remain anchored to the first event"
             );
         } else {
             panic!("Expected Stored event");

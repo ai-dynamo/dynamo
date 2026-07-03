@@ -15,7 +15,7 @@ use dynamo_runtime::{
     },
 };
 use prometheus::{
-    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 use serde::Serialize;
 use std::{
@@ -25,7 +25,34 @@ use std::{
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
+use crate::protocols::{
+    common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
+    openai::chat_completions::NvCreateChatCompletionStreamResponse,
+};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
+
+use dynamo_runtime::error::ErrorType as DynamoErrorType;
+
+/// Check whether an error chain indicates the request was rejected.
+pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
+    const REJECTION: &[DynamoErrorType] = &[DynamoErrorType::ResourceExhausted];
+    const NON_REJECTION: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
+}
+
+/// Check whether an error chain indicates that no backend worker is available.
+pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool {
+    const UNAVAILABLE: &[DynamoErrorType] = &[DynamoErrorType::Unavailable];
+    const AVAILABLE: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
+}
+
+/// Check whether an error chain indicates the request was cancelled.
+pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
+    const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
+    const NON_CANCELLATION: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
+}
 
 pub use prometheus::Registry;
 
@@ -33,6 +60,7 @@ use super::RouteDoc;
 
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -97,6 +125,110 @@ pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometh
     registry.register(Box::new(WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.clone()))?;
     registry.register(Box::new(WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.clone()))?;
     registry.register(Box::new(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.clone()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// LoRA allocation metrics (updated by LoraController each tick)
+// ---------------------------------------------------------------------------
+
+pub static LORA_REPLICA_FACTOR_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_REPLICA_FACTOR),
+            "Number of replicas allocated for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_replica_factor gauge")
+});
+
+pub static LORA_IS_ACTIVE_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_IS_ACTIVE),
+            "Whether a LoRA adapter is active (1) or inactive (0)",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_is_active gauge")
+});
+
+pub static LORA_RAW_ARRIVAL_COUNT_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::LORA_RAW_ARRIVAL_COUNT
+            ),
+            "Raw arrival count (windowed rate counter) for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_raw_arrival_count gauge")
+});
+
+pub static LORA_ESTIMATED_LOAD_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_ESTIMATED_LOAD),
+            "Estimated load (windowed request count) for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_estimated_load gauge")
+});
+
+pub static LORA_ACTIVE_REQUESTS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_ACTIVE_REQUESTS),
+            "Number of in-flight requests for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_active_requests gauge")
+});
+
+pub static LORA_CHURN_LOADS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        format!(
+            "dynamo_frontend_{}",
+            frontend_service::LORA_CHURN_LOADS_TOTAL
+        ),
+        "Total LoRA loads (new placements) this tick",
+    )
+    .expect("Failed to create lora_churn_loads gauge")
+});
+
+pub static LORA_CHURN_UNLOADS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        format!(
+            "dynamo_frontend_{}",
+            frontend_service::LORA_CHURN_UNLOADS_TOTAL
+        ),
+        "Total LoRA unloads (removed placements) this tick",
+    )
+    .expect("Failed to create lora_churn_unloads gauge")
+});
+
+pub static LORA_OVERFLOW_COUNT_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        format!("dynamo_frontend_{}", frontend_service::LORA_OVERFLOW_COUNT),
+        "MCF solver overflow count (unplaceable replicas)",
+    )
+    .expect("Failed to create lora_overflow_count gauge")
+});
+
+pub fn register_lora_allocation_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(LORA_REPLICA_FACTOR_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_IS_ACTIVE_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_RAW_ARRIVAL_COUNT_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_ESTIMATED_LOAD_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_ACTIVE_REQUESTS_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_CHURN_LOADS_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_CHURN_UNLOADS_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_OVERFLOW_COUNT_GAUGE.clone()))?;
     Ok(())
 }
 
@@ -233,8 +365,11 @@ struct MetricsHandlerState {
 }
 
 pub struct Metrics {
+    request_started_counter: IntCounterVec,
     request_counter: IntCounterVec,
+    /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility.
     inflight_gauge: IntGaugeVec,
+    active_requests_gauge: IntGaugeVec,
     client_disconnect_gauge: prometheus::IntGauge,
     http_queue_gauge: IntGaugeVec,
     request_duration: HistogramVec,
@@ -245,6 +380,11 @@ pub struct Metrics {
     output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
+    /// End-to-end latency of an OpenAI `/v1/embeddings` request. Distinct from
+    /// `request_duration` so the buckets can be sized for sub-second pooling
+    /// inference rather than the 1-512s LLM-generation range. Labeled by
+    /// `model`.
+    embedding_latency: HistogramVec,
 
     // Runtime configuration metrics. Note: Some of these metrics represent counter-like values from
     // source systems, but are implemented as gauges because they are copied/synchronized from upstream
@@ -256,7 +396,9 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
+    model_rejection_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -283,6 +425,8 @@ pub struct InflightGuard {
     status: Status,
     error_type: ErrorType,
     timer: Instant,
+    request_id: String,
+    span: tracing::Span,
 }
 
 /// Requests will be logged by the type of endpoint hit
@@ -304,6 +448,9 @@ pub enum Endpoint {
     /// OAI Videos
     Videos,
 
+    /// OAI Audio Speech
+    Audios,
+
     /// OAI Responses
     Responses,
 
@@ -312,6 +459,9 @@ pub enum Endpoint {
 
     /// Tensor
     Tensor,
+
+    /// Generate (token-in/token-out)
+    Generate,
 }
 
 /// Metrics for the HTTP service
@@ -346,10 +496,14 @@ pub enum ErrorType {
     Validation,
     /// Model or resource not found (404)
     NotFound,
-    /// Service overloaded, too many requests (503)
+    /// Service overloaded or rate limited (429 or 529)
     Overload,
+    /// Service unavailable because no backend worker can serve the request
+    Unavailable,
     /// Request cancelled by client or timeout
     Cancelled,
+    /// Backend accepted the request but stopped responding (response inactivity timeout)
+    ResponseTimeout,
     /// Internal server error (500 and other unexpected errors)
     Internal,
     /// Feature not implemented (501)
@@ -360,6 +514,16 @@ pub enum ErrorType {
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
     model: String,
+    // Per-model metric handles resolved once at construction. The collector lives for a
+    // single request and `model` is fixed, so caching these avoids re-hashing the `model`
+    // label via `with_label_values` on every chunk (and, for ITL, on every output token —
+    // it was previously resolved inside a `for _ in 0..num_tokens` loop). Each handle
+    // shares the underlying metric with its vec, so observations are equivalent.
+    output_tokens_counter: prometheus::IntCounter,
+    time_to_first_token: prometheus::Histogram,
+    inter_token_latency: prometheus::Histogram,
+    input_sequence_length: prometheus::Histogram,
+    cached_tokens: prometheus::Histogram,
     start_time: Instant,
     // we use is_first_token to distinguish TTFT from ITL. It is true by default and
     // flipped to false when the first token is returned and TTFT is published.
@@ -368,6 +532,10 @@ pub struct ResponseMetricCollector {
     // be computed.
     last_response_time: Option<Duration>,
     osl: usize,
+    isl: usize,
+    ttft_ms: Option<f64>,
+    itl_sum_secs: f64,
+    itl_count: u64,
     // we track if cached_tokens has been observed to ensure we only increment once per request
     cached_tokens_observed: bool,
     // we track if tokenize latency has been observed to ensure we only increment once per request
@@ -385,6 +553,11 @@ pub struct ResponseMetricCollector {
     decode_dp_rank: Option<u32>,
     // Decode worker type for Prometheus labeling - stored at routing time to avoid MDC lookup
     decode_worker_type: Option<String>,
+    // Cached per-worker ITL gauge handle. The decode-worker labels are latched once at
+    // routing time (`set_worker_info` only sets when unset), so this GaugeVec handle is
+    // resolved a single time and reused — the per-token observe path then does no label
+    // formatting (`worker_id.to_string()`) or label hashing, only `set`.
+    decode_itl_gauge: Option<prometheus::Gauge>,
 }
 
 impl Default for Metrics {
@@ -419,6 +592,7 @@ impl Metrics {
     /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
     /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 2.0, 13)
+    /// - `DYN_METRICS_EMBEDDING_LATENCY_{MIN,MAX,COUNT}` - End-to-end `/v1/embeddings` latency histogram (defaults: 0.001, 10.0, 14)
     ///
     /// ## Model Configuration Metrics
     ///
@@ -440,11 +614,16 @@ impl Metrics {
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
+        Self::new_with_prefix(std::env::var(env_metrics::DYN_METRICS_PREFIX).ok())
+    }
+
+    /// Create Metrics with an explicit optional prefix. `None` uses the standard
+    /// frontend prefix and does not read environment variables.
+    pub fn new_with_prefix(metrics_prefix: Option<String>) -> Self {
         // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
         // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
-        let raw_prefix = std::env::var(env_metrics::DYN_METRICS_PREFIX)
-            .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
+        let raw_prefix = metrics_prefix.unwrap_or_else(|| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
         if prefix != raw_prefix {
             tracing::warn!(
@@ -465,10 +644,28 @@ impl Metrics {
         )
         .unwrap();
 
+        let request_started_counter = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::REQUESTS_STARTED_TOTAL),
+                "Total number of LLM requests accepted by the frontend handler",
+            ),
+            &["model", "endpoint", "request_type"],
+        )
+        .unwrap();
+
         let inflight_gauge = IntGaugeVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
                 "Number of inflight requests",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
+        let active_requests_gauge = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::ACTIVE_REQUESTS),
+                "Number of requests currently being handled by the frontend, from HTTP handler entry to response completion",
             ),
             &["model"],
         )
@@ -491,7 +688,7 @@ impl Metrics {
 
         // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
         let (req_dur_min, req_dur_max, req_dur_count) =
-            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 256.0, 10);
+            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 512.0, 10);
         let request_duration_buckets =
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
@@ -569,6 +766,26 @@ impl Metrics {
                 "Inter-token latency in seconds",
             )
             .buckets(inter_token_latency_buckets),
+            &["model"],
+        )
+        .unwrap();
+
+        // Embedding latency buckets: pooling-model inference is typically
+        // sub-second (60-200 token inputs on L4-class GPUs land in the 5-50ms
+        // range), so 1ms..10s on a log scale gives p50/p99 resolution that
+        // the 1..512s `request_duration` buckets cannot.
+        let (emb_min, emb_max, emb_count) =
+            parse_bucket_config("DYN_METRICS_EMBEDDING_LATENCY", 0.001, 10.0, 14);
+        let embedding_latency_buckets = generate_log_buckets(emb_min, emb_max, emb_count);
+
+        let embedding_latency = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::EMBEDDING_LATENCY_SECONDS),
+                "End-to-end latency of /v1/embeddings requests, in seconds. \
+                 Distinct from request_duration_seconds so the bucket range can \
+                 cover sub-second pooling-model inference.",
+            )
+            .buckets(embedding_latency_buckets),
             &["model"],
         )
         .unwrap();
@@ -662,6 +879,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_max_seq_len_exceeded_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL),
+                "Total number of times migration was disabled by max_seq_len limit",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         let model_cancellation_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_CANCELLATION_TOTAL),
@@ -671,9 +897,20 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_rejection_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_REJECTION_TOTAL),
+                "Total number of requests rejected due to resource exhaustion",
+            ),
+            &["model", "endpoint"],
+        )
+        .unwrap();
+
         Metrics {
+            request_started_counter,
             request_counter,
             inflight_gauge,
+            active_requests_gauge,
             client_disconnect_gauge,
             http_queue_gauge,
             request_duration,
@@ -684,6 +921,7 @@ impl Metrics {
             output_tokens_counter,
             time_to_first_token,
             inter_token_latency,
+            embedding_latency,
             model_total_kv_blocks,
             model_max_num_seqs,
             model_max_num_batched_tokens,
@@ -691,7 +929,9 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
+            model_rejection_total,
         }
     }
 
@@ -743,17 +983,63 @@ impl Metrics {
             .inc()
     }
 
+    /// Increment the counter for requests accepted by the frontend handler.
+    fn inc_request_started_counter(
+        &self,
+        model: &str,
+        endpoint: &Endpoint,
+        request_type: &RequestType,
+    ) {
+        self.request_started_counter
+            .with_label_values(&[model, endpoint.as_str(), request_type.as_str()])
+            .inc()
+    }
+
     /// Get the number if inflight requests for the given model
     pub fn get_inflight_count(&self, model: &str) -> i64 {
         self.inflight_gauge.with_label_values(&[model]).get()
     }
 
+    /// Record one observation of the end-to-end latency of an
+    /// `/v1/embeddings` request, in seconds. Labeled by model.
+    ///
+    /// Negative values are dropped (they can only happen from a clock skew or
+    /// programming bug; recording them would corrupt percentile estimates).
+    pub fn observe_embedding_latency(&self, model: &str, seconds: f64) {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return;
+        }
+        self.embedding_latency
+            .with_label_values(&[model])
+            .observe(seconds);
+    }
+
+    /// Get the cumulative count of embedding latency observations for the given
+    /// model. Test helper.
+    #[cfg(test)]
+    pub fn embedding_latency_count(&self, model: &str) -> u64 {
+        self.embedding_latency
+            .with_label_values(&[model])
+            .get_sample_count()
+    }
+
+    /// Get the cumulative sum (seconds) of embedding latency observations for
+    /// the given model. Test helper.
+    #[cfg(test)]
+    pub fn embedding_latency_sum(&self, model: &str) -> f64 {
+        self.embedding_latency
+            .with_label_values(&[model])
+            .get_sample_sum()
+    }
+
     fn inc_inflight_gauge(&self, model: &str) {
-        self.inflight_gauge.with_label_values(&[model]).inc()
+        self.inflight_gauge.with_label_values(&[model]).inc();
+        self.active_requests_gauge.with_label_values(&[model]).inc();
     }
 
     fn dec_inflight_gauge(&self, model: &str) {
-        self.inflight_gauge.with_label_values(&[model]).dec()
+        self.inflight_gauge.with_label_values(&[model]).dec();
+        self.active_requests_gauge.with_label_values(&[model]).dec();
     }
 
     /// Increment the gauge for client disconnections
@@ -775,8 +1061,10 @@ impl Metrics {
     }
 
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.request_started_counter.clone()))?;
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
+        registry.register(Box::new(self.active_requests_gauge.clone()))?;
         registry.register(Box::new(self.client_disconnect_gauge.clone()))?;
         registry.register(Box::new(self.http_queue_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
@@ -787,6 +1075,7 @@ impl Metrics {
         registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
+        registry.register(Box::new(self.embedding_latency.clone()))?;
 
         // Register runtime configuration metrics
         registry.register(Box::new(self.model_total_kv_blocks.clone()))?;
@@ -796,7 +1085,11 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(
+            self.model_migration_max_seq_len_exceeded_total.clone(),
+        ))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
+        registry.register(Box::new(self.model_rejection_total.clone()))?;
 
         Ok(())
     }
@@ -834,7 +1127,7 @@ impl Metrics {
 
         self.model_context_length
             .with_label_values(&[&card.display_name])
-            .set(card.context_length as i64);
+            .set(card.effective_context_length() as i64);
 
         self.model_kv_cache_block_size
             .with_label_values(&[&card.display_name])
@@ -880,6 +1173,20 @@ impl Metrics {
             .get()
     }
 
+    /// Increment the counter for migrations disabled by max_seq_len being exceeded
+    pub fn inc_migration_max_seq_len_exceeded(&self, model: &str) {
+        self.model_migration_max_seq_len_exceeded_total
+            .with_label_values(&[model])
+            .inc();
+    }
+
+    /// Get the current count of migrations disabled by max_seq_len being exceeded
+    pub fn get_migration_max_seq_len_exceeded_count(&self, model: &str) -> u64 {
+        self.model_migration_max_seq_len_exceeded_total
+            .with_label_values(&[model])
+            .get()
+    }
+
     /// Increment the cancellation counter
     pub fn inc_cancellation(&self, labels: &CancellationLabels) {
         self.model_cancellation_total
@@ -891,6 +1198,20 @@ impl Metrics {
     pub fn get_cancellation_count(&self, labels: &CancellationLabels) -> u64 {
         self.model_cancellation_total
             .with_label_values(&[&labels.model, &labels.endpoint, &labels.request_type])
+            .get()
+    }
+
+    /// Increment the rejection counter for a request rejected due to resource exhaustion
+    pub fn inc_rejection(&self, model: &str, endpoint: Endpoint) {
+        self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
+            .inc();
+    }
+
+    /// Get the current rejection count for a model and endpoint
+    pub fn get_rejection_count(&self, model: &str, endpoint: Endpoint) -> u64 {
+        self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
             .get()
     }
 
@@ -911,6 +1232,7 @@ impl Metrics {
         model: &str,
         endpoint: Endpoint,
         streaming: bool,
+        request_id: &str,
     ) -> InflightGuard {
         let request_type = if streaming {
             RequestType::Stream
@@ -920,15 +1242,16 @@ impl Metrics {
 
         InflightGuard::new(
             self.clone(),
-            model.to_string().to_lowercase(),
+            model.to_string(),
             endpoint,
             request_type,
+            request_id.to_string(),
         )
     }
 
     /// Create a new [`ResponseMetricCollector`] for collecting per-response metrics (i.e., TTFT, ITL)
     pub fn create_response_collector(self: Arc<Self>, model: &str) -> ResponseMetricCollector {
-        ResponseMetricCollector::new(self, model.to_string().to_lowercase())
+        ResponseMetricCollector::new(self, model.to_string())
     }
 
     /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
@@ -936,7 +1259,7 @@ impl Metrics {
     /// This guard tracks requests from HTTP handler start until first token generation,
     /// providing visibility into HTTP processing queue time before actual LLM processing begins.
     pub fn create_http_queue_guard(self: Arc<Self>, model: &str) -> HttpQueueGuard {
-        HttpQueueGuard::new(self, model.to_string().to_lowercase())
+        HttpQueueGuard::new(self, model.to_string())
     }
 }
 
@@ -962,14 +1285,22 @@ impl InflightGuard {
         model: String,
         endpoint: Endpoint,
         request_type: RequestType,
+        request_id: String,
     ) -> Self {
-        // Start the timer
         let timer = Instant::now();
-
-        // Increment the inflight gauge when the guard is created
         metrics.inc_inflight_gauge(&model);
+        metrics.inc_request_started_counter(&model, &endpoint, &request_type);
 
-        // Return the RAII Guard
+        tracing::Span::current().record("model", model.as_str());
+
+        tracing::info!(
+            request_id = %request_id,
+            model = %model,
+            endpoint = %endpoint,
+            request_type = %request_type,
+            "request received"
+        );
+
         InflightGuard {
             metrics,
             model,
@@ -978,7 +1309,28 @@ impl InflightGuard {
             status: Status::Error,
             error_type: ErrorType::Internal,
             timer,
+            request_id,
+            span: tracing::Span::current(),
         }
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+    pub fn request_type(&self) -> &RequestType {
+        &self.request_type
+    }
+    pub fn error_type(&self) -> &ErrorType {
+        &self.error_type
+    }
+    pub fn elapsed_ms(&self) -> u128 {
+        self.timer.elapsed().as_millis()
     }
 
     pub(crate) fn mark_ok(&mut self) {
@@ -994,14 +1346,9 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
+        let _enter = self.span.enter();
         let duration = self.timer.elapsed().as_secs_f64();
-
-        // Decrement the gauge when the guard is dropped
         self.metrics.dec_inflight_gauge(&self.model);
-
-        // the frequency on incrementing the full request counter is relatively low
-        // if we were incrementing the counter on every forward pass, we'd use static CounterVec or
-        // discrete counter object without the more costly lookup required for the following calls
         self.metrics.inc_request_counter(
             &self.model,
             &self.endpoint,
@@ -1009,12 +1356,50 @@ impl Drop for InflightGuard {
             &self.status,
             &self.error_type,
         );
-
-        // Record the duration of the request
         self.metrics
             .request_duration
             .with_label_values(&[&self.model])
             .observe(duration);
+
+        let elapsed_ms = (duration * 1000.0) as u64;
+        let status_str = self.status.as_str();
+        match self.status {
+            Status::Error => {
+                let detail = match self.error_type {
+                    ErrorType::Cancelled => "cancelled before completion",
+                    ErrorType::ResponseTimeout => "backend stream inactivity timeout",
+                    ErrorType::Internal => "internal server error during processing",
+                    ErrorType::Validation => "invalid request parameters",
+                    ErrorType::NotFound => "model or resource not found",
+                    ErrorType::Overload => "service overloaded or rate limited",
+                    ErrorType::Unavailable => "no backend worker available",
+                    ErrorType::NotImplemented => "requested feature not implemented",
+                    ErrorType::None => "unknown error",
+                };
+                tracing::error!(
+                    request_id = %self.request_id,
+                    model = %self.model,
+                    endpoint = %self.endpoint,
+                    request_type = %self.request_type,
+                    status = %status_str,
+                    error_type = %self.error_type,
+                    error_detail = %detail,
+                    elapsed_ms = %elapsed_ms,
+                    "request completed"
+                );
+            }
+            Status::Success => {
+                tracing::info!(
+                    request_id = %self.request_id,
+                    model = %self.model,
+                    endpoint = %self.endpoint,
+                    request_type = %self.request_type,
+                    status = %status_str,
+                    elapsed_ms = %elapsed_ms,
+                    "request completed"
+                );
+            }
+        }
     }
 }
 
@@ -1026,9 +1411,11 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
+            Endpoint::Audios => write!(f, "audios"),
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
+            Endpoint::Generate => write!(f, "generate"),
         }
     }
 }
@@ -1041,9 +1428,11 @@ impl Endpoint {
             Endpoint::Embeddings => "embeddings",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
+            Endpoint::Audios => "audios",
             Endpoint::Responses => "responses",
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
+            Endpoint::Generate => "generate",
         }
     }
 }
@@ -1054,6 +1443,12 @@ impl RequestType {
             RequestType::Unary => frontend_service::request_type::UNARY,
             RequestType::Stream => frontend_service::request_type::STREAM,
         }
+    }
+}
+
+impl std::fmt::Display for RequestType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1073,22 +1468,46 @@ impl ErrorType {
             ErrorType::Validation => frontend_service::error_type::VALIDATION,
             ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
             ErrorType::Overload => frontend_service::error_type::OVERLOAD,
+            ErrorType::Unavailable => frontend_service::error_type::UNAVAILABLE,
             ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
+            ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
             ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
         }
     }
 }
 
+impl std::fmt::Display for ErrorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl ResponseMetricCollector {
     fn new(metrics: Arc<Metrics>, model: String) -> Self {
+        // Resolve the per-model handles once (cheap clones of the vec entries) so the
+        // per-chunk / per-token hot path in `observe_response` does no label hashing.
+        let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&[&model]);
+        let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
+        let inter_token_latency = metrics.inter_token_latency.with_label_values(&[&model]);
+        let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
+        let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
             model,
+            output_tokens_counter,
+            time_to_first_token,
+            inter_token_latency,
+            input_sequence_length,
+            cached_tokens,
             is_first_token: true,
             last_response_time: None,
             start_time: Instant::now(),
             osl: 0,
+            isl: 0,
+            ttft_ms: None,
+            itl_sum_secs: 0.0,
+            itl_count: 0,
             cached_tokens_observed: false,
             tokenize_latency_observed: false,
             detokenize_latency_total: Duration::ZERO,
@@ -1099,6 +1518,7 @@ impl ResponseMetricCollector {
             decode_worker_id: None,
             decode_dp_rank: None,
             decode_worker_type: None,
+            decode_itl_gauge: None,
         }
     }
 
@@ -1150,10 +1570,7 @@ impl ResponseMetricCollector {
             && !self.cached_tokens_observed
         {
             self.cached_tokens_observed = true;
-            self.metrics
-                .cached_tokens
-                .with_label_values(&[&self.model])
-                .observe(tokens as f64);
+            self.cached_tokens.observe(tokens as f64);
         }
     }
 
@@ -1189,23 +1606,21 @@ impl ResponseMetricCollector {
             return;
         }
 
+        // Store ISL for span recording on drop
+        self.isl = isl;
+
         // Increment the real-time output tokens counter
-        self.metrics
-            .output_tokens_counter
-            .with_label_values(&[&self.model])
-            .inc_by(num_tokens as u64);
+        self.output_tokens_counter.inc_by(num_tokens as u64);
 
         if self.is_first_token {
             // NOTE: when there are multiple tokens in the first response,
             // we use the full response time as TTFT and ignore the ITL
             self.is_first_token = false;
 
-            // Publish TTFT
+            // Publish TTFT and store for span recording
             let ttft = self.start_time.elapsed().as_secs_f64();
-            self.metrics
-                .time_to_first_token
-                .with_label_values(&[&self.model])
-                .observe(ttft);
+            self.ttft_ms = Some(ttft * 1000.0);
+            self.time_to_first_token.observe(ttft);
 
             // Update per-worker TTFT and input sequence tokens gauges - attributed to prefill worker.
             // Both gauges are updated atomically from the same request to correlate latency with input size.
@@ -1215,7 +1630,7 @@ impl ResponseMetricCollector {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .prefill_dp_rank
-                    .map_or("0".to_string(), |r| r.to_string());
+                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
                 let worker_type = self
                     .prefill_worker_type
                     .as_deref()
@@ -1231,10 +1646,7 @@ impl ResponseMetricCollector {
 
             // Publish ISL
             // TODO: publish ISL as soon as the tokenization process completes
-            self.metrics
-                .input_sequence_length
-                .with_label_values(&[&self.model])
-                .observe(isl as f64);
+            self.input_sequence_length.observe(isl as f64);
         }
 
         let current_duration = self.start_time.elapsed();
@@ -1242,28 +1654,42 @@ impl ResponseMetricCollector {
         if let Some(last_response_time) = self.last_response_time {
             let response_duration = current_duration - last_response_time;
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
+            self.itl_sum_secs += itl * num_tokens as f64;
+            self.itl_count += num_tokens as u64;
+            // Handle resolved once at construction — the observe loop no longer re-hashes
+            // the `model` label on every output token.
             for _ in 0..num_tokens {
-                self.metrics
-                    .inter_token_latency
-                    .with_label_values(&[&self.model])
-                    .observe(itl);
+                self.inter_token_latency.observe(itl);
             }
 
             // Update per-worker ITL gauge - attributed to decode worker.
             // Use stored worker_type (from routing time) to avoid MDC lookup.
             // Falls back to WORKER_TYPE_DECODE if not available.
-            if let Some(worker_id) = self.decode_worker_id {
+            //
+            // The worker labels are fixed for the request's lifetime (latched in
+            // `set_worker_info`), so resolve the GaugeVec handle once and cache it.
+            // This keeps the per-token path free of `to_string()` allocations and
+            // label hashing; subsequent tokens only call `set`.
+            if self.decode_itl_gauge.is_none()
+                && let Some(worker_id) = self.decode_worker_id
+            {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .decode_dp_rank
-                    .map_or("0".to_string(), |r| r.to_string());
+                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
                 let worker_type = self
                     .decode_worker_type
                     .as_deref()
                     .unwrap_or(WORKER_TYPE_DECODE);
-                WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
-                    .with_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type])
-                    .set(itl);
+                self.decode_itl_gauge =
+                    Some(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
+                        worker_id_str.as_str(),
+                        dp_rank_str.as_str(),
+                        worker_type,
+                    ]));
+            }
+            if let Some(gauge) = &self.decode_itl_gauge {
+                gauge.set(itl);
             }
         }
 
@@ -1282,11 +1708,36 @@ impl Drop for ResponseMetricCollector {
                 .observe(avg_detokenize_latency_ms);
         }
 
-        // Publish final OSL when the collector is dropped
-        self.metrics
-            .output_sequence_length
-            .with_label_values(&[&self.model])
-            .observe(self.osl as f64);
+        // Publish final OSL when the collector is dropped, but only for
+        // requests that actually produced output tokens. Recording zero for
+        // failed/cancelled requests would corrupt histogram averages (sum/count)
+        // and percentiles. Failures are already tracked by requests_total with
+        // status and error_type labels.
+        if self.osl > 0 {
+            self.metrics
+                .output_sequence_length
+                .with_label_values(&[&self.model])
+                .observe(self.osl as f64);
+        }
+
+        // Record request summary on the enclosing span.
+        // InflightGuard::Drop and on_response logs will inherit these.
+        let span = tracing::Span::current();
+        span.record("input_tokens", self.isl as u32);
+        span.record("output_tokens", self.osl as u32);
+        if let Some(ttft_ms) = self.ttft_ms {
+            span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
+        }
+        if self.itl_count > 0 {
+            let avg_ms = (self.itl_sum_secs / self.itl_count as f64) * 1000.0;
+            span.record("avg_itl_ms", format!("{:.2}", avg_ms).as_str());
+        }
+        if let Some(worker_id) = self.prefill_worker_id {
+            span.record("prefill_worker_id", worker_id);
+        }
+        if let Some(worker_id) = self.decode_worker_id {
+            span.record("decode_worker_id", worker_id);
+        }
     }
 }
 
@@ -1300,35 +1751,28 @@ pub fn process_response_and_observe_metrics<T>(
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
 ) {
-    use crate::preprocessor::LLMMetricAnnotation;
-
-    // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_cached_tokens(metrics.cached_tokens);
-        response_collector.observe_tokenize_latencies(
-            metrics.tokenize_latency,
-            metrics.detokenize_total_latency,
-            metrics.detokenize_count,
-        );
-        response_collector.set_worker_info(
-            metrics.prefill_worker_id,
-            metrics.prefill_dp_rank,
-            metrics.prefill_worker_type,
-            metrics.decode_worker_id,
-            metrics.decode_dp_rank,
-            metrics.decode_worker_type,
-        );
+        observe_llm_metrics(&metrics, response_collector, http_queue_guard);
+    }
+}
 
-        // Drop http_queue_guard on first token for non-streaming (same as streaming)
-        if response_collector.is_first_token()
-            && metrics.chunk_tokens > 0
-            && let Some(guard) = http_queue_guard.take()
-        {
-            drop(guard);
-        }
-
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+/// Process streaming metrics for chat-derived responses.
+///
+/// The typed metrics field is the hot path. Annotation parsing remains as a compatibility
+/// fallback for legacy/generated annotation frames.
+pub fn process_chat_response_and_observe_metrics(
+    annotated: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) {
+    if let Some(metrics) = annotated
+        .data
+        .as_ref()
+        .and_then(|data| data.llm_metrics.as_ref())
+    {
+        observe_llm_metrics(metrics, response_collector, http_queue_guard);
+    } else {
+        process_response_and_observe_metrics(annotated, response_collector, http_queue_guard);
     }
 }
 
@@ -1338,6 +1782,102 @@ pub struct EventConverter<T>(pub crate::types::Annotated<T>);
 impl<T> From<crate::types::Annotated<T>> for EventConverter<T> {
     fn from(annotated: crate::types::Annotated<T>) -> Self {
         EventConverter(annotated)
+    }
+}
+
+fn sse_json_data<T: Serialize>(event: Event, data: &T) -> Result<Event, axum::Error> {
+    // serde_json escapes literal LF/CR in string content, so the resulting JSON
+    // is one SSE data line and can avoid Axum json_data's per-write filtering.
+    let json = serde_json::to_string(data).map_err(axum::Error::new)?;
+    Ok(event.data(json))
+}
+
+fn observe_llm_metrics(
+    metrics: &LLMMetricAnnotation,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) {
+    response_collector.observe_current_osl(metrics.output_tokens);
+    response_collector.observe_cached_tokens(metrics.cached_tokens);
+    response_collector.observe_tokenize_latencies(
+        metrics.tokenize_latency,
+        metrics.detokenize_total_latency,
+        metrics.detokenize_count,
+    );
+    response_collector.set_worker_info(
+        metrics.prefill_worker_id,
+        metrics.prefill_dp_rank,
+        metrics.prefill_worker_type.clone(),
+        metrics.decode_worker_id,
+        metrics.decode_dp_rank,
+        metrics.decode_worker_type.clone(),
+    );
+
+    if response_collector.is_first_token()
+        && metrics.chunk_tokens > 0
+        && let Some(guard) = http_queue_guard.take()
+    {
+        drop(guard);
+    }
+
+    response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+}
+
+fn observe_annotation_metrics<T>(
+    annotated: &crate::types::Annotated<T>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) -> bool {
+    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
+        observe_llm_metrics(&metrics, response_collector, http_queue_guard);
+        true
+    } else {
+        false
+    }
+}
+
+fn annotated_to_sse_event<T: Serialize>(
+    annotated: crate::types::Annotated<T>,
+) -> Result<Option<Event>, axum::Error> {
+    let mut event = Event::default();
+
+    if let Some(ref data) = annotated.data {
+        event = sse_json_data(event, data)?;
+    }
+
+    if let Some(ref msg) = annotated.event {
+        if msg == "error" {
+            let error_message = if let Some(ref dynamo_err) = annotated.error
+                && !dynamo_err.message().is_empty()
+            {
+                dynamo_err.message().to_string()
+            } else if let Some(ref comments) = annotated.comment {
+                let joined = comments.join(" -- ");
+                if joined.trim().is_empty() {
+                    "unspecified error".to_string()
+                } else {
+                    joined
+                }
+            } else {
+                "unspecified error".to_string()
+            };
+            return Err(axum::Error::new(error_message));
+        }
+        event = event.event(msg);
+    }
+
+    if let Some(comments) = annotated.comment {
+        for comment in comments {
+            // Axum's Event::comment() panics on \n / \r
+            event = event.comment(comment.replace(['\n', '\r'], " "));
+        }
+    }
+
+    // Filter out metrics annotation events (events without SSE data payload)
+    if annotated.data.is_none() && annotated.event.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(event))
     }
 }
 
@@ -1352,74 +1892,64 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
 ) -> Result<Option<Event>, axum::Error> {
-    use crate::preprocessor::LLMMetricAnnotation;
-
     let mut annotated = annotated.0;
 
-    // update metrics
-    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_cached_tokens(metrics.cached_tokens);
-        response_collector.observe_tokenize_latencies(
-            metrics.tokenize_latency,
-            metrics.detokenize_total_latency,
-            metrics.detokenize_count,
-        );
-        response_collector.set_worker_info(
-            metrics.prefill_worker_id,
-            metrics.prefill_dp_rank,
-            metrics.prefill_worker_type,
-            metrics.decode_worker_id,
-            metrics.decode_dp_rank,
-            metrics.decode_worker_type,
-        );
-
-        // Drop http_queue_guard on first token for streaming
-        if response_collector.is_first_token()
-            && metrics.chunk_tokens > 0
-            && let Some(guard) = http_queue_guard.take()
-        {
-            drop(guard);
-        }
-
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
-
-        // Chomp the LLMMetricAnnotation so it's not returned in the response stream
-        // TODO: add a flag to control what is returned in the SSE stream
-        if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS) {
+    if observe_annotation_metrics(&annotated, response_collector, http_queue_guard) {
+        // Preserve the previous SSE behavior: observe legacy metrics annotation
+        // frames internally, then strip them before building the outbound event.
+        if annotated.event.as_deref() == Some(ANNOTATION_LLM_METRICS) {
             annotated.event = None;
             annotated.comment = None;
         }
     }
 
-    let mut event = Event::default();
-
-    if let Some(ref data) = annotated.data {
-        event = event.json_data(data)?;
+    // ANNOTATION_AUDIT_USAGE is audit-only and must never reach the client SSE
+    // stream (the audit DeltaAggregator consumed its usage upstream).
+    if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_AUDIT_USAGE) {
+        annotated.event = None;
+        annotated.comment = None;
+        annotated.data = None;
     }
 
-    if let Some(ref msg) = annotated.event {
-        if msg == "error" {
-            let msgs = annotated
-                .comment
-                .unwrap_or_else(|| vec!["unspecified error".to_string()]);
-            return Err(axum::Error::new(msgs.join(" -- ")));
-        }
-        event = event.event(msg);
+    annotated_to_sse_event(annotated)
+}
+
+/// Process chat-derived streaming responses with typed metrics before SSE conversion.
+///
+/// If the typed field is absent, this falls back to the same legacy annotation
+/// frame parsing and stripping behavior as `process_response_using_event_converter_and_observe_metrics`.
+pub fn process_chat_response_using_event_converter_and_observe_metrics(
+    annotated: EventConverter<NvCreateChatCompletionStreamResponse>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) -> Result<Option<Event>, axum::Error> {
+    let mut annotated = annotated.0;
+
+    if let Some(metrics) = annotated
+        .data
+        .as_ref()
+        .and_then(|data| data.llm_metrics.as_ref())
+    {
+        observe_llm_metrics(metrics, response_collector, http_queue_guard);
+    } else if observe_annotation_metrics(&annotated, response_collector, http_queue_guard)
+        && annotated.event.as_deref() == Some(ANNOTATION_LLM_METRICS)
+    {
+        // Legacy compatibility path: annotation frames were never emitted as
+        // client-visible SSE payloads after metrics collection.
+        annotated.event = None;
+        annotated.comment = None;
     }
 
-    if let Some(comments) = annotated.comment {
-        for comment in comments {
-            event = event.comment(comment);
-        }
+    // ANNOTATION_AUDIT_USAGE is audit-only: the audit DeltaAggregator already
+    // consumed its usage upstream, so strip the whole chunk — it must never
+    // reach the client SSE stream.
+    if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_AUDIT_USAGE) {
+        annotated.event = None;
+        annotated.comment = None;
+        annotated.data = None;
     }
 
-    // Filter out metrics annotation events (events without SSE data payload)
-    if annotated.data.is_none() && annotated.event.is_none() {
-        Ok(None)
-    } else {
-        Ok(Some(event))
-    }
+    annotated_to_sse_event(annotated)
 }
 
 /// Create a new router with optional DRT metrics integration.
@@ -1702,6 +2232,87 @@ mod tests {
     }
 
     #[test]
+    fn test_cached_handles_record_through_vec() {
+        // The collector resolves per-model handles once at construction; observing
+        // through them must update the same metric the vec exposes. Regression guard
+        // for the handle cache (incl. the per-token ITL loop using the cached handle).
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "cached-handle-model";
+
+        let mut collector = metrics.clone().create_response_collector(model);
+        // First chunk (3 tokens): TTFT + ISL observed once; no ITL yet.
+        collector.observe_response(42, 3);
+        // Second chunk (4 tokens): ITL observed once per token via the cached handle.
+        collector.observe_response(42, 4);
+
+        let ttft = metrics.time_to_first_token.with_label_values(&[model]);
+        assert_eq!(ttft.get_sample_count(), 1, "TTFT observed once");
+
+        let isl = metrics.input_sequence_length.with_label_values(&[model]);
+        assert_eq!(isl.get_sample_count(), 1, "ISL observed once");
+        assert_eq!(isl.get_sample_sum(), 42.0);
+
+        let itl = metrics.inter_token_latency.with_label_values(&[model]);
+        assert_eq!(
+            itl.get_sample_count(),
+            4,
+            "ITL observed once per token of 2nd chunk"
+        );
+
+        let out = metrics
+            .output_tokens_counter
+            .with_label_values(&[model])
+            .get();
+        assert_eq!(out, 7, "output tokens = 3 + 4 via cached counter handle");
+    }
+
+    #[test]
+    fn test_cached_decode_itl_gauge_records_for_worker() {
+        // The per-worker ITL gauge handle is resolved once (worker labels are latched
+        // at routing time via `set_worker_info`) and reused on every output token.
+        // Verify observations through the cached handle land on the same GaugeVec
+        // series the labels address. Regression guard for the per-token handle cache.
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).ok();
+        let model = "itl-gauge-model";
+
+        // Distinctive worker id so this never collides with other tests on the
+        // process-global WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.
+        let worker_id: u64 = 9_876_543_210;
+        let mut collector = metrics.clone().create_response_collector(model);
+        collector.set_worker_info(
+            None,
+            None,
+            None,
+            Some(worker_id),
+            Some(0),
+            Some("decode".to_string()),
+        );
+
+        // First chunk: TTFT only, no ITL yet (no prior response time) -> gauge unset.
+        collector.observe_response(10, 1);
+        // Elapse measurable time so ITL > 0, then a second chunk drives the cached
+        // per-worker ITL gauge.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        collector.observe_response(10, 1);
+
+        let worker_id_str = worker_id.to_string();
+        let gauge = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.with_label_values(&[
+            worker_id_str.as_str(),
+            "0",
+            "decode",
+        ]);
+        assert!(
+            gauge.get() > 0.0,
+            "cached per-worker ITL gauge must record a positive ITL through the vec, got {}",
+            gauge.get()
+        );
+    }
+
+    #[test]
     fn test_output_tokens_counter_zero_tokens() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
@@ -1967,6 +2578,224 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn metrics_annotations_stripped_from_client_sse() {
+        // PR #9390: two metric annotations must never leak to the client SSE.
+        // (1) Per-chunk `llm_metrics` rides on a content chunk: the content delta
+        //     must reach the client, but the metrics event/comment must be stripped.
+        // (2) The audit-only `audit_usage` chunk must be dropped entirely (the audit
+        //     DeltaAggregator already consumed its usage upstream).
+        use crate::preprocessor::{ANNOTATION_AUDIT_USAGE, LLMMetricAnnotation};
+        use crate::types::Annotated;
+        use axum::response::IntoResponse;
+        use axum::response::sse::Sse;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let mut collector = metrics.clone().create_response_collector("test-model");
+
+        let llm_metrics = LLMMetricAnnotation {
+            input_tokens: 7,
+            output_tokens: 3,
+            chunk_tokens: 1,
+            cached_tokens: Some(2),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: None,
+            detokenize_total_latency: None,
+            detokenize_count: None,
+        };
+        let metrics_comment = llm_metrics.to_annotation::<()>().unwrap().comment;
+        let metrics_json = metrics_comment.as_ref().expect("metrics comment present")[0].clone();
+
+        // (1) Per-chunk metrics on a content chunk (event = llm_metrics).
+        let content: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model",
+                "choices": [{"index": 0, "delta": {"content": "hello"}}]
+            }))
+            .unwrap();
+        let per_chunk = Annotated {
+            id: None,
+            data: Some(content),
+            event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
+            comment: metrics_comment.clone(),
+            error: None,
+        };
+
+        let mut http_queue_guard = None;
+        let event = process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(per_chunk),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+        .expect("conversion ok")
+        .expect("content chunk should yield a client event");
+
+        let sse = Sse::new(futures::stream::once(async move {
+            Ok::<_, std::convert::Infallible>(event)
+        }));
+        let body = sse.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let wire = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            wire.contains("hello"),
+            "content delta should reach the client: {wire}"
+        );
+        assert!(
+            !wire.contains(&metrics_json)
+                && !wire.contains("chunk_tokens")
+                && !wire.contains("input_tokens"),
+            "internal metrics leaked to client SSE: {wire}"
+        );
+
+        // (2) Audit-only usage chunk (event = audit_usage, carries usage data).
+        let usage: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model", "choices": [],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+            }))
+            .unwrap();
+        let audit_usage = Annotated {
+            id: None,
+            data: Some(usage),
+            event: Some(ANNOTATION_AUDIT_USAGE.to_string()),
+            comment: metrics_comment,
+            error: None,
+        };
+
+        let mut http_queue_guard = None;
+        let result = process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(audit_usage),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+        .expect("conversion ok");
+        assert!(
+            result.is_none(),
+            "audit_usage chunk must not be forwarded to the client SSE stream"
+        );
+    }
+
+    #[test]
+    fn test_chat_typed_metrics_fast_path_observes_without_annotation() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
+        let mut collector = metrics.clone().create_response_collector(model);
+        let mut annotated = make_chat_stream_annotated("hello");
+        annotated.data.as_mut().unwrap().llm_metrics = Some(LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 20,
+            chunk_tokens: 5,
+            cached_tokens: Some(15),
+            prefill_worker_id: Some(11),
+            prefill_dp_rank: Some(1),
+            prefill_worker_type: Some(WORKER_TYPE_PREFILL.to_string()),
+            decode_worker_id: Some(22),
+            decode_dp_rank: Some(2),
+            decode_worker_type: Some(WORKER_TYPE_DECODE.to_string()),
+            tokenize_latency: Some(Duration::from_millis(8)),
+            detokenize_total_latency: Some(Duration::from_micros(100)),
+            detokenize_count: Some(2),
+        });
+
+        assert!(annotated.event.is_none());
+        assert!(annotated.comment.is_none());
+
+        let mut http_queue_guard = Some(metrics.clone().create_http_queue_guard(model));
+        let result = process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        );
+
+        assert!(
+            http_queue_guard.is_none(),
+            "first positive chunk should release HTTP queue guard"
+        );
+        let event = result
+            .unwrap()
+            .expect("typed metrics data chunk should still produce an SSE event");
+        let json = extract_sse_data_json(event);
+        assert!(
+            json.get("llm_metrics").is_none(),
+            "typed metrics must be skipped on the SSE wire"
+        );
+
+        drop(collector);
+
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_tokenizer_metric_name)
+            .expect("histogram should be registered");
+        let tokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "tokenize"))
+            .expect("tokenize metric should exist");
+        assert_eq!(tokenize_metric.get_histogram().get_sample_count(), 1);
+        assert!(
+            (tokenize_metric.get_histogram().get_sample_sum() - 8.0).abs() < 0.001,
+            "tokenize latency should be 8.0ms"
+        );
+    }
+
+    #[test]
+    fn test_chat_stream_typed_metrics_are_skipped_in_json() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let without_metrics = make_chat_stream_annotated("hello").data.unwrap();
+        let mut with_metrics = without_metrics.clone();
+        with_metrics.llm_metrics = Some(LLMMetricAnnotation {
+            input_tokens: 1,
+            output_tokens: 2,
+            chunk_tokens: 1,
+            cached_tokens: Some(1),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: None,
+            detokenize_total_latency: None,
+            detokenize_count: None,
+        });
+
+        let without_json = serde_json::to_value(&without_metrics).unwrap();
+        let with_json = serde_json::to_value(&with_metrics).unwrap();
+
+        assert_eq!(with_json, without_json);
+        assert!(with_json.get("llm_metrics").is_none());
+    }
+
     #[test]
     fn test_non_streaming_path_observes_cached_tokens() {
         use crate::preprocessor::LLMMetricAnnotation;
@@ -2065,7 +2894,9 @@ mod tests {
         assert_eq!(ErrorType::Validation.as_str(), "validation");
         assert_eq!(ErrorType::NotFound.as_str(), "not_found");
         assert_eq!(ErrorType::Overload.as_str(), "overload");
+        assert_eq!(ErrorType::Unavailable.as_str(), "unavailable");
         assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
+        assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
         assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
     }
@@ -2082,7 +2913,7 @@ mod tests {
             let mut guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             guard.mark_ok();
         } // guard drops here
 
@@ -2098,6 +2929,16 @@ mod tests {
             ])
             .get();
         assert_eq!(counter_value, 1);
+
+        let started_counter_value = metrics
+            .request_started_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+            ])
+            .get();
+        assert_eq!(started_counter_value, 1);
     }
 
     #[test]
@@ -2112,7 +2953,7 @@ mod tests {
             let mut guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             guard.mark_error(ErrorType::Validation);
         } // guard drops here
 
@@ -2142,7 +2983,7 @@ mod tests {
             let _guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             // Don't call mark_ok() or mark_error() - simulate panic/unhandled error
         } // guard drops with default error_type=Internal
 
@@ -2161,6 +3002,126 @@ mod tests {
     }
 
     #[test]
+    fn test_active_requests_tracks_inflight_guard() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model-active";
+
+        // Both gauges start at 0
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
+
+        {
+            let _guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                true,
+                "req-1",
+            );
+
+            // Both gauges increment together
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+
+            {
+                let _guard2 = metrics.clone().create_inflight_guard(
+                    model,
+                    Endpoint::ChatCompletions,
+                    true,
+                    "req-2",
+                );
+                assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 2);
+                assert_eq!(
+                    metrics
+                        .active_requests_gauge
+                        .with_label_values(&[model])
+                        .get(),
+                    2
+                );
+            }
+            // guard2 dropped
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+        }
+        // guard dropped — both back to 0
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_lifecycle_constructors_preserve_model_label_casing() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "Llama-3.1-8B-Instruct";
+
+        let _inflight = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "req-case",
+        );
+        let mut collector = metrics.clone().create_response_collector(model);
+        collector.observe_response(100, 1);
+        let _queue = metrics.clone().create_http_queue_guard(model);
+
+        // Drop the lifecycle guards so their Drop impls record
+        // completion-time metrics (request_counter, request_duration,
+        // detokenize observations) before we gather. Without this the
+        // regression only covers constructor-time labels.
+        drop(_inflight);
+        drop(collector);
+        drop(_queue);
+
+        let metric_families = registry.gather();
+        let observed: Vec<String> = metric_families
+            .iter()
+            .flat_map(|mf| mf.get_metric())
+            .flat_map(|m| m.get_label())
+            .filter(|l| l.name() == "model")
+            .map(|l| l.value().to_string())
+            .collect();
+
+        assert!(
+            !observed.is_empty(),
+            "expected at least one metric to carry a model label"
+        );
+        for value in &observed {
+            assert_eq!(
+                value, model,
+                "model label was modified; expected original casing to be preserved"
+            );
+        }
+    }
+
+    #[test]
     fn test_all_error_types_recorded_correctly() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
@@ -2174,7 +3135,9 @@ mod tests {
             ErrorType::Validation,
             ErrorType::NotFound,
             ErrorType::Overload,
+            ErrorType::Unavailable,
             ErrorType::Cancelled,
+            ErrorType::ResponseTimeout,
             ErrorType::Internal,
             ErrorType::NotImplemented,
         ];
@@ -2182,7 +3145,7 @@ mod tests {
         for error_type in &error_types {
             let mut guard = metrics
                 .clone()
-                .create_inflight_guard(model, endpoint, false);
+                .create_inflight_guard(model, endpoint, false, "");
             guard.mark_error(error_type.clone());
             drop(guard);
         }
@@ -2221,7 +3184,7 @@ mod tests {
             let mut guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false, "");
             guard.mark_error(ErrorType::Validation);
             drop(guard);
         }
@@ -2230,7 +3193,7 @@ mod tests {
             let mut guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::Completions, false);
+                    .create_inflight_guard(model, Endpoint::Completions, false, "");
             guard.mark_error(ErrorType::Internal);
             drop(guard);
         }
@@ -2239,7 +3202,7 @@ mod tests {
             let mut guard =
                 metrics
                     .clone()
-                    .create_inflight_guard(model, Endpoint::Embeddings, false);
+                    .create_inflight_guard(model, Endpoint::Embeddings, false, "");
             guard.mark_ok();
             drop(guard);
         }
@@ -2282,5 +3245,273 @@ mod tests {
             ])
             .get();
         assert_eq!(success_count, 1);
+    }
+
+    fn run_event_converter(
+        annotated: crate::types::Annotated<String>,
+    ) -> Result<Option<Event>, axum::Error> {
+        let metrics = Arc::new(Metrics::new());
+        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut http_queue_guard: Option<HttpQueueGuard> = None;
+        process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+    }
+
+    fn run_chat_stream_event_converter(
+        annotated: crate::types::Annotated<
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+        >,
+    ) -> Result<Option<Event>, axum::Error> {
+        let metrics = Arc::new(Metrics::new());
+        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut http_queue_guard: Option<HttpQueueGuard> = None;
+        process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+    }
+
+    fn make_chat_stream_annotated(
+        content: &str,
+    ) -> crate::types::Annotated<
+        crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    > {
+        use dynamo_protocols::types::{
+            ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+            CreateChatCompletionStreamResponse,
+        };
+
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                content: Some(ChatCompletionMessageContent::Text(content.to_string())),
+                function_call: None,
+                tool_calls: None,
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+
+        crate::types::Annotated {
+            id: Some("test-id".to_string()),
+            data: Some(
+                crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
+                    inner: CreateChatCompletionStreamResponse {
+                        id: "test-id".to_string(),
+                        choices: vec![choice],
+                        created: 0,
+                        model: "test-model".to_string(),
+                        system_fingerprint: None,
+                        object: "chat.completion.chunk".to_string(),
+                        usage: None,
+                        service_tier: None,
+                    },
+                    nvext: None,
+                    llm_metrics: None,
+                },
+            ),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    fn extract_sse_data_json(event: Event) -> serde_json::Value {
+        let body = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(async move {
+                use axum::{
+                    body::to_bytes,
+                    response::{IntoResponse, Sse},
+                };
+                let stream = futures::stream::iter(vec![Ok::<Event, axum::Error>(event)]);
+                let response = Sse::new(stream).into_response();
+                let bytes = to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .expect("body bytes");
+                String::from_utf8(bytes.to_vec()).expect("utf8 body")
+            });
+
+        let data = body
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("SSE data line");
+        serde_json::from_str(data).unwrap_or_else(|e| {
+            panic!("failed to parse JSON from SSE data: {e}\nbody: {body}\ndata: {data}")
+        })
+    }
+
+    fn error_annotated(
+        error: Option<dynamo_runtime::error::DynamoError>,
+        comment: Option<Vec<String>>,
+    ) -> crate::types::Annotated<String> {
+        crate::types::Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment,
+            error,
+        }
+    }
+
+    #[test]
+    fn test_error_event_uses_dynamo_error_message() {
+        use dynamo_runtime::error::DynamoError;
+        let result = run_event_converter(error_annotated(
+            Some(DynamoError::msg("image load failed: 403 Forbidden")),
+            None,
+        ));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("403 Forbidden"));
+    }
+
+    #[test]
+    fn test_error_event_falls_back_to_comment() {
+        let result =
+            run_event_converter(error_annotated(None, Some(vec!["connection lost".into()])));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("connection lost"));
+    }
+
+    #[test]
+    fn test_error_event_unspecified_when_no_message() {
+        let result = run_event_converter(error_annotated(None, None));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+    }
+
+    #[test]
+    fn test_error_event_empty_comment_falls_through() {
+        let result = run_event_converter(error_annotated(None, Some(vec!["".into()])));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+    }
+
+    #[test]
+    fn test_event_converter_serializes_chat_stream_response_as_json_data() {
+        let event = run_chat_stream_event_converter(make_chat_stream_annotated("hello"))
+            .unwrap()
+            .expect("chat stream response should produce an SSE event");
+
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["id"], "test-id");
+        assert_eq!(json["object"], "chat.completion.chunk");
+        assert_eq!(json["choices"][0]["delta"]["content"], "hello");
+    }
+
+    #[test]
+    fn test_event_converter_json_data_round_trips_escaped_content() {
+        let content = "line1\nline2\r\"quoted\" \\\\ slash 你好 🚀";
+        let event = run_chat_stream_event_converter(make_chat_stream_annotated(content))
+            .unwrap()
+            .expect("chat stream response should produce an SSE event");
+
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["choices"][0]["delta"]["content"], content);
+    }
+
+    #[test]
+    fn test_comment_newlines_sanitized() {
+        let annotated = crate::types::Annotated::<String> {
+            data: Some("test".to_string()),
+            id: None,
+            event: Some("metrics".to_string()),
+            comment: Some(vec!["line1\nline2\r\nline3".into()]),
+            error: None,
+        };
+        let event = run_event_converter(annotated)
+            .unwrap()
+            .expect("data event with comment should be returned");
+        let debug = format!("{:?}", event);
+        assert!(
+            debug.contains(": line1 line2  line3\\n"),
+            "comment newlines should be replaced before Event::comment: {debug}"
+        );
+    }
+
+    #[test]
+    fn test_observe_embedding_latency_records_observation() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "embed-test";
+        assert_eq!(metrics.embedding_latency_count(model), 0);
+        assert_eq!(metrics.embedding_latency_sum(model), 0.0);
+
+        metrics.observe_embedding_latency(model, 0.005);
+        metrics.observe_embedding_latency(model, 0.020);
+
+        assert_eq!(metrics.embedding_latency_count(model), 2);
+        assert!((metrics.embedding_latency_sum(model) - 0.025).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_observe_embedding_latency_drops_invalid_values() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "embed-test";
+
+        metrics.observe_embedding_latency(model, -0.5);
+        metrics.observe_embedding_latency(model, f64::NAN);
+        metrics.observe_embedding_latency(model, f64::INFINITY);
+        metrics.observe_embedding_latency(model, f64::NEG_INFINITY);
+
+        assert_eq!(metrics.embedding_latency_count(model), 0);
+        assert_eq!(metrics.embedding_latency_sum(model), 0.0);
+
+        // Zero is allowed (boundary case for finite, non-negative).
+        metrics.observe_embedding_latency(model, 0.0);
+        assert_eq!(metrics.embedding_latency_count(model), 1);
+    }
+
+    #[test]
+    fn test_observe_embedding_latency_partitions_by_model() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let m1 = "embed-a";
+        let m2 = "embed-b";
+
+        metrics.observe_embedding_latency(m1, 0.010);
+        metrics.observe_embedding_latency(m1, 0.030);
+        metrics.observe_embedding_latency(m2, 0.005);
+
+        assert_eq!(metrics.embedding_latency_count(m1), 2);
+        assert_eq!(metrics.embedding_latency_count(m2), 1);
+        assert!((metrics.embedding_latency_sum(m1) - 0.040).abs() < 1e-9);
+        assert!((metrics.embedding_latency_sum(m2) - 0.005).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_embedding_latency_registered_in_registry() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        metrics.observe_embedding_latency("embed-test", 0.012);
+
+        let metric_families = registry.gather();
+        let found = metric_families.iter().any(|mf| {
+            mf.name()
+                .ends_with(frontend_service::EMBEDDING_LATENCY_SECONDS)
+        });
+        assert!(
+            found,
+            "embedding_latency_seconds histogram must be registered with the registry"
+        );
     }
 }

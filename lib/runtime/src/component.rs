@@ -63,7 +63,11 @@ mod namespace;
 mod registry;
 pub mod service;
 
-pub use client::Client;
+pub(crate) use client::EndpointDiscoverySource;
+pub(crate) use client::RoutingInstances;
+pub(crate) use client::RoutingOccupancyState;
+pub(crate) use client::get_or_create_routing_occupancy_state;
+pub use client::{Client, RoutingInstanceCounts};
 pub use endpoint::build_transport_type;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -71,8 +75,22 @@ pub use endpoint::build_transport_type;
 pub enum TransportType {
     #[serde(rename = "nats_tcp")]
     Nats(String),
-    Http(String),
     Tcp(String),
+}
+
+impl TransportType {
+    pub fn address(&self) -> &str {
+        match self {
+            TransportType::Nats(address) | TransportType::Tcp(address) => address,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceType {
+    Cpu,
+    Cuda,
 }
 
 #[derive(Default)]
@@ -92,17 +110,29 @@ pub struct Instance {
     pub namespace: String,
     pub instance_id: u64,
     pub transport: TransportType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_type: Option<DeviceType>,
 }
 
 impl Instance {
     pub fn id(&self) -> u64 {
         self.instance_id
     }
+
     pub fn endpoint_id(&self) -> EndpointId {
         EndpointId {
             namespace: self.namespace.clone(),
             component: self.component.clone(),
             name: self.endpoint.clone(),
+        }
+    }
+
+    pub fn endpoint_instance_id(&self) -> crate::discovery::EndpointInstanceId {
+        crate::discovery::EndpointInstanceId {
+            namespace: self.namespace.clone(),
+            component: self.component.clone(),
+            endpoint: self.endpoint.clone(),
+            instance_id: self.instance_id,
         }
     }
 }
@@ -215,6 +245,10 @@ impl MetricsHierarchy for Component {
 
     fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
+    }
+
+    fn connection_id(&self) -> Option<u64> {
+        Some(self.drt.connection_id())
     }
 }
 
@@ -378,6 +412,10 @@ impl MetricsHierarchy for Endpoint {
 
     fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
+    }
+
+    fn connection_id(&self) -> Option<u64> {
+        Some(self.component.drt().connection_id())
     }
 }
 

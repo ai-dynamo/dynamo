@@ -4,14 +4,15 @@
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, Callable, ContextManager
 
 from tests.router.common import (
     _test_router_basic,
     _test_router_decisions,
+    _test_router_decisions_disagg,
     _test_router_indexers_sync,
 )
-from tests.router.helper import get_runtime
+from tests.router.helper import generate_random_suffix, get_runtime
 from tests.utils.constants import DefaultPort
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 from tests.utils.test_output import resolve_test_output_path
@@ -160,6 +161,29 @@ def get_engine_endpoint(engine_workers, request_plane: str, component_name: str)
     return runtime.endpoint(f"{engine_workers.namespace}.{component_name}.generate")
 
 
+def _create_engine_process(
+    *,
+    engine_process_cls,
+    engine_args_name: str,
+    engine_args: dict[str, Any],
+    request,
+    request_plane: str,
+    default_process_kwargs: dict[str, Any],
+    engine_process_kwargs: dict[str, Any] | None,
+):
+    process_kwargs = (
+        default_process_kwargs
+        if engine_process_kwargs is None
+        else engine_process_kwargs
+    )
+    return engine_process_cls(
+        request,
+        request_plane=request_plane,
+        **{engine_args_name: engine_args},
+        **process_kwargs,
+    )
+
+
 def run_basic_router_test(
     *,
     engine_process_cls,
@@ -172,25 +196,38 @@ def run_basic_router_test(
     block_size: int,
     model_name: str,
     frontend_timeout: int = 180,
+    engine_process_kwargs: dict[str, Any] | None = None,
+    test_payload: dict[str, Any] | None = None,
+    num_requests: int = 10,
+    router_mode: str = "kv",
+    min_initial_workers: int | None = None,
 ):
-    with engine_process_cls(
-        request,
-        num_workers=num_workers,
-        single_gpu=single_gpu,
+    process = _create_engine_process(
+        engine_process_cls=engine_process_cls,
+        engine_args_name=engine_args_name,
+        engine_args=engine_args,
+        request=request,
         request_plane=request_plane,
-        **{engine_args_name: engine_args},
-    ) as engine_workers:
+        default_process_kwargs={
+            "num_workers": num_workers,
+            "single_gpu": single_gpu,
+        },
+        engine_process_kwargs=engine_process_kwargs,
+    )
+    with process as engine_workers:
         frontend_port = allocate_frontend_ports(request, 1)[0]
         _test_router_basic(
             engine_workers=engine_workers,
             block_size=block_size,
             request=request,
             frontend_port=frontend_port,
-            test_payload=build_test_payload(model_name),
-            num_requests=10,
+            test_payload=test_payload or build_test_payload(model_name),
+            num_requests=num_requests,
             frontend_timeout=frontend_timeout,
             store_backend="etcd",
             request_plane=request_plane,
+            router_mode=router_mode,
+            min_initial_workers=min_initial_workers,
         )
 
 
@@ -208,17 +245,34 @@ def run_router_decisions_test(
     single_gpu: bool,
     test_dp_rank: bool,
     extra_process_kwargs: dict[str, Any] | None = None,
+    initial_wait: float = 0.25,
+    engine_process_kwargs: dict[str, Any] | None = None,
+    test_kwargs: dict[str, Any] | None = None,
 ):
-    process_kwargs = extra_process_kwargs or {}
-    with engine_process_cls(
-        request,
-        num_workers=num_workers,
-        single_gpu=single_gpu,
+    default_process_kwargs = {
+        "num_workers": num_workers,
+        "single_gpu": single_gpu,
+        **(extra_process_kwargs or {}),
+    }
+    process = _create_engine_process(
+        engine_process_cls=engine_process_cls,
+        engine_args_name=engine_args_name,
+        engine_args=engine_args,
+        request=request,
         request_plane=request_plane,
-        **{engine_args_name: engine_args},
-        **process_kwargs,
-    ) as engine_workers:
+        default_process_kwargs=default_process_kwargs,
+        engine_process_kwargs=engine_process_kwargs,
+    )
+    with process as engine_workers:
         endpoint = get_engine_endpoint(engine_workers, request_plane, component_name)
+        scenario_kwargs = dict(test_kwargs or {})
+        for argument, attribute in (
+            ("standalone_indexer_url", "standalone_indexer_url"),
+            ("standalone_selector_url", "standalone_selector_url"),
+        ):
+            value = getattr(engine_workers, attribute, None)
+            if value is not None:
+                scenario_kwargs.setdefault(argument, value)
         _test_router_decisions(
             engine_workers,
             endpoint,
@@ -226,7 +280,73 @@ def run_router_decisions_test(
             request,
             test_dp_rank=test_dp_rank,
             block_size=block_size,
+            initial_wait=initial_wait,
+            **scenario_kwargs,
         )
+
+
+def run_disagg_router_decisions_test(
+    *,
+    engine_process_cls,
+    engine_args_name: str,
+    engine_args: dict[str, Any],
+    request,
+    request_plane: str,
+    model_name: str,
+    block_size: int,
+    num_prefill_workers: int,
+    num_decode_workers: int,
+    prefill_process_kwargs: dict[str, Any] | None = None,
+    decode_process_kwargs: dict[str, Any] | None = None,
+    worker_context_factory: Callable[[str], ContextManager[tuple[Any, Any]]]
+    | None = None,
+    test_payload: dict[str, Any] | None = None,
+    test_kwargs: dict[str, Any] | None = None,
+):
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    frontend_port = allocate_frontend_ports(request, 1)[0]
+
+    prefill_kwargs = {
+        "namespace": shared_namespace,
+        **(prefill_process_kwargs or {}),
+    }
+    decode_kwargs = {
+        "namespace": shared_namespace,
+        **(decode_process_kwargs or {}),
+    }
+
+    def run_test(prefill_workers, decode_workers):
+        _test_router_decisions_disagg(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=block_size,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=test_payload or build_test_payload(model_name),
+            request_plane=request_plane,
+            **(test_kwargs or {}),
+        )
+
+    if worker_context_factory is not None:
+        with worker_context_factory(shared_namespace) as workers:
+            run_test(*workers)
+        return
+
+    with engine_process_cls(
+        request,
+        num_workers=num_prefill_workers,
+        request_plane=request_plane,
+        **{engine_args_name: engine_args},
+        **prefill_kwargs,
+    ) as prefill_workers:
+        with engine_process_cls(
+            request,
+            num_workers=num_decode_workers,
+            request_plane=request_plane,
+            **{engine_args_name: engine_args},
+            **decode_kwargs,
+        ) as decode_workers:
+            run_test(prefill_workers, decode_workers)
 
 
 def run_indexers_sync_test(
@@ -242,18 +362,28 @@ def run_indexers_sync_test(
     block_size: int,
     model_name: str,
     num_workers: int,
+    extra_process_kwargs: dict[str, Any] | None = None,
+    engine_process_kwargs: dict[str, Any] | None = None,
 ):
     nats_process, _etcd_process = runtime_services_dynamic_ports
+    process_kwargs = extra_process_kwargs or {}
 
-    with engine_process_cls(
-        request,
-        num_workers=num_workers,
-        single_gpu=True,
+    process = _create_engine_process(
+        engine_process_cls=engine_process_cls,
+        engine_args_name=engine_args_name,
+        engine_args=engine_args,
+        request=request,
         request_plane=request_plane,
-        store_backend=store_backend,
-        durable_kv_events=durable_kv_events,
-        **{engine_args_name: engine_args},
-    ) as engine_workers:
+        default_process_kwargs={
+            "num_workers": num_workers,
+            "single_gpu": True,
+            "store_backend": store_backend,
+            "durable_kv_events": durable_kv_events,
+            **process_kwargs,
+        },
+        engine_process_kwargs=engine_process_kwargs,
+    )
+    with process as engine_workers:
         _test_router_indexers_sync(
             engine_workers=engine_workers,
             block_size=block_size,
@@ -264,4 +394,13 @@ def run_indexers_sync_test(
             test_nats_interruption=not durable_kv_events,
             nats_server=nats_process if not durable_kv_events else None,
             durable_kv_events=durable_kv_events,
+            standalone_indexer_url=getattr(
+                engine_workers, "standalone_indexer_url", None
+            ),
+            standalone_indexer_b_url=getattr(
+                engine_workers, "standalone_indexer_b_url", None
+            ),
+            test_zmq_replay=bool(
+                getattr(engine_workers, "standalone_indexer_url", None)
+            ),
         )
