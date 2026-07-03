@@ -65,15 +65,32 @@ def _load_engine_config_json(
     if not isinstance(values, dict):
         raise ValueError("--engine-config-json must contain a JSON object")
 
-    valid_keys = {
-        action.dest for action in parser._actions if action.dest != argparse.SUPPRESS
+    actions = {
+        action.dest: action
+        for action in parser._actions
+        if action.dest != argparse.SUPPRESS
     }
+    valid_keys = set(actions)
     unknown = sorted(set(values) - valid_keys)
     if unknown:
         raise ValueError(
             "Unknown vLLM engine argument(s) in --engine-config-json: "
             + ", ".join(unknown)
         )
+
+    # argparse does not run type converters on non-string namespace defaults.
+    # Reuse vLLM's converters so structured JSON options such as
+    # kv_transfer_config have the same types as their CLI equivalents.
+    for key, value in values.items():
+        action = actions[key]
+        if isinstance(value, dict) and action.type is not None:
+            try:
+                values[key] = action.type(json.dumps(value))
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Invalid vLLM engine argument {key!r} in "
+                    f"--engine-config-json: {error}"
+                ) from error
     return argparse.Namespace(**values)
 
 
@@ -344,9 +361,9 @@ def update_engine_config_with_dynamo(
     if fpm_enabled:
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
-            defaults[
-                "scheduler_cls"
-            ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            defaults["scheduler_cls"] = (
+                "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            )
             logger.info(
                 "Forward pass metrics enabled: scheduler_cls set to InstrumentedScheduler "
                 f"(port={envs.DYN_FORWARDPASS_METRIC_PORT})"

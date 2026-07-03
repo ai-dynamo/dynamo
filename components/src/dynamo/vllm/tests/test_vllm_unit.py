@@ -185,6 +185,26 @@ def test_engine_config_json_cli_values_take_precedence(tmp_path):
     assert config.engine_args.max_model_len == 8192
 
 
+def test_engine_config_json_converts_structured_vllm_args(tmp_path):
+    path = tmp_path / "engine.json"
+    path.write_text(
+        json.dumps(
+            {
+                "model": "Qwen/Qwen3-0.6B",
+                "kv_transfer_config": {
+                    "kv_connector": "NixlConnector",
+                    "kv_role": "kv_both",
+                },
+            }
+        )
+    )
+
+    config = parse_args(["--engine-config-json", str(path)])
+
+    assert config.engine_args.kv_transfer_config.kv_connector == "NixlConnector"
+    assert config.engine_args.kv_transfer_config.kv_role == "kv_both"
+
+
 def test_engine_config_json_rejects_unknown_vllm_args(tmp_path):
     path = tmp_path / "engine.json"
     path.write_text(
