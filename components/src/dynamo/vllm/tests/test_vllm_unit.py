@@ -9,6 +9,7 @@ import re
 import socket
 import sys
 import warnings
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1228,3 +1229,56 @@ def test_build_sampling_params_openai_maps_max_thinking_tokens():
     }
     sp = build_sampling_params_openai(request, default_sampling_params={})
     assert sp.thinking_token_budget == 1024
+
+
+@pytest.mark.asyncio
+async def test_generate_text_mode_applies_nvext_cache_salt():
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    captured = {}
+
+    class InputParams:
+        def get_input_param(self, request, use_tokenizer):
+            assert use_tokenizer is True
+            return [1, 2, 3]
+
+    class EngineClient:
+        def generate(self, prompt, *args, **kwargs):
+            captured["prompt"] = prompt
+
+            async def gen():
+                output = SimpleNamespace(index=0, text="ok", finish_reason=None)
+                yield SimpleNamespace(outputs=[output])
+
+            return gen()
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    handler = SimpleNamespace(
+        input_param_manager=InputParams(),
+        default_sampling_params={},
+        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
+        engine_client=EngineClient(),
+        _deferred_aborts={},
+        _shutdown_on_engine_dead=lambda exc: None,
+        _abort_monitor=abort_monitor,
+        _to_local_dp_rank=lambda rank: None,
+    )
+    context = SimpleNamespace(trace_headers=lambda: {})
+    request = {
+        "model": "test-model",
+        "prompt": "ignored after tokenization",
+        "nvext": {"cache_salt": "tenant-a"},
+    }
+
+    chunks = [
+        chunk
+        async for chunk in DecodeWorkerHandler._generate_text_mode(
+            handler, request, context, "req-1"
+        )
+    ]
+
+    assert chunks
+    assert captured["prompt"]["cache_salt"] == "tenant-a"
