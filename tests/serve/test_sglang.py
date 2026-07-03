@@ -399,7 +399,7 @@ sglang_configs = {
                 expected_response=["image", "bus", "train", "streetcar"],
                 temperature=0.0,
                 max_tokens=100,
-            )
+            ),
         ],
     ),
     "multimodal_agg_fd_qwen": SGLangConfig(
@@ -439,12 +439,31 @@ sglang_configs = {
         ],
         delayed_start=0,
         timeout=360,
+        env={
+            "DYN_MM_ENABLE_LIBJPEG": "1",
+            "DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST": "1",
+        },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             # Inline-base64 PNG: exercises strip_inline_data_urls in the
             # Rust frontend + NIXL RDMA transfer of decoded pixels — the
             # path that distinguishes FD from the plain URL path.
             make_image_payload_b64(["green"]),
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image", "bus", "train", "streetcar"],
+                temperature=0.0,
+                max_tokens=100,
+            ),
         ],
     ),
     "multimodal_agg_qwen": SGLangConfig(

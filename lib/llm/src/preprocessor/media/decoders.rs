@@ -48,7 +48,7 @@ pub struct MediaDecoder {
 impl MediaDecoder {
     pub(crate) fn warn_if_unavailable_backends(&self) {
         if let Some(image) = &self.image {
-            image.warn_if_unavailable_backend();
+            image.warn_if_libjpeg_unavailable();
         }
     }
 }

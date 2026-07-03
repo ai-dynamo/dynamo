@@ -35,14 +35,6 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-# Runtime dependency for DYN_MM_IMAGE_DECODER_BACKEND=libjpeg_turbo.
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        libturbojpeg && \
-    ldconfig && \
-    ldconfig -p | grep -q 'libturbojpeg.so.0' && \
-    rm -rf /var/lib/apt/lists/*
-
 RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
     CUBINS_DIR="$SITE_PACKAGES/flashinfer_cubin/cubins" && \
     if [ -d "$CUBINS_DIR" ]; then \
@@ -75,8 +67,8 @@ $NIXL_PLUGIN_DIR:\
 ${LD_LIBRARY_PATH:-}
 {% endif %}
 
-# Copy ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
-# libsw*.so*) for the Rust media-ffmpeg decoder, plus the LGPL CLI binary
+# Install libturbojpeg and copy ffmpeg from wheel_builder: versioned shared
+# libs (libav*.so*, libsw*.so*) for the Rust media-ffmpeg decoder, plus the LGPL CLI binary
 # (built with h264_nvenc + libvpx_vp9 encoders) that imageio targets via
 # IMAGEIO_FFMPEG_EXE for video encoding. Ungated by enable_media_ffmpeg
 # because the upstream lmsysorg/sglang base image always ships
@@ -84,14 +76,19 @@ ${LD_LIBRARY_PATH:-}
 # unconditionally below; the LGPL CLI must be present so imageio has
 # something to target.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libturbojpeg && \
+    rm -rf /var/lib/apt/lists/* && \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
     cp -nL /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
-    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
+    (cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true) && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
     cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
-    ldconfig
+    ldconfig && \
+    ldconfig -p | grep -q 'libturbojpeg.so.0'
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 
 {% if target not in ("dev", "local-dev") %}

@@ -62,7 +62,7 @@ Two environment variables loosen the defaults for non-public deployments:
 |----------|---------|--------|
 | `DYN_MM_ALLOW_INTERNAL` | `0` | Set to `1` to allow `http://`, private / internal IPs, and explicit ports. Intended for on-prem or local-dev setups where media lives on an internal network. |
 | `DYN_MM_LOCAL_PATH` | *(empty)* | Absolute directory prefix. When set, `file://` URIs and bare paths are allowed if they resolve inside this prefix. |
-| `DYN_MM_IMAGE_DECODER_BACKEND` | *(empty)* | Optional frontend image decoder backend. Leave unset for the default Rust `image::ImageReader`; set to `libjpeg_turbo` to opt into libjpeg-turbo for JPEG inputs. Dynamo runtime images include `libturbojpeg`; custom images must provide `libturbojpeg.so.0` or Dynamo logs a one-time warning and falls back to `image::ImageReader`. |
+| `DYN_MM_ENABLE_LIBJPEG` | `0` | Set to `1` to decode JPEG inputs with libjpeg-turbo. The default remains Rust `image::ImageReader`. Dynamo backend runtime images include `libturbojpeg`; custom images must provide `libturbojpeg.so.0` or Dynamo logs a one-time warning and falls back to `image::ImageReader`. |
 
 <Warning>
 **Never set `DYN_MM_ALLOW_INTERNAL=1` on public-facing deployments.** It opens SSRF paths to cloud metadata endpoints (AWS IMDS, GCE, Azure) and other internal services.

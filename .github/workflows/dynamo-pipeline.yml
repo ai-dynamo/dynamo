@@ -139,6 +139,8 @@ jobs:
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          # Fail rather than skip TurboJPEG tests when the runtime library is unavailable.
+          DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST: "1"
         shell: bash
         run: |
           /workspace/container/use-sccache.sh install

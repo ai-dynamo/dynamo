@@ -20,7 +20,7 @@ fn bench_jpeg_decode(c: &mut Criterion) {
         ("image_reader", image_decoder(serde_json::json!({}))),
         (
             "libjpeg_turbo",
-            image_decoder(serde_json::json!({"backend": "libjpeg_turbo"})),
+            image_decoder(serde_json::json!({"enable_libjpeg": true})),
         ),
     ];
 

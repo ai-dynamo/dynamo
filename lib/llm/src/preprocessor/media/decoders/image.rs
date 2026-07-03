@@ -15,6 +15,8 @@ use super::super::rdma::DecodedMediaData;
 use super::{DecodedMediaMetadata, Decoder};
 
 const DEFAULT_MAX_ALLOC: u64 = 128 * 1024 * 1024; // 128 MB
+// CI-only guard: an enabled JPEG test must exercise TurboJPEG, never its fallback.
+const REQUIRE_LIBJPEG_TURBO_TEST_ENV: &str = "DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST";
 static LIBJPEG_TURBO_UNAVAILABLE_WARNING: Once = Once::new();
 
 /// Image decoder limits - can only be set via server config, not runtime kwargs.
@@ -45,17 +47,9 @@ impl Default for ImageDecoderLimits {
 pub struct ImageDecoder {
     #[serde(default)]
     pub(crate) limits: ImageDecoderLimits,
-    /// Decoder backend. Defaults to the original Rust `image::ImageReader`.
+    /// Enable libjpeg-turbo for JPEG inputs. Defaults to `false`.
     #[serde(default)]
-    pub(crate) backend: ImageDecoderBackend,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ImageDecoderBackend {
-    #[default]
-    ImageReader,
-    LibjpegTurbo,
+    pub(crate) enable_libjpeg: bool,
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -85,31 +79,34 @@ impl Decoder for ImageDecoder {
 
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         let bytes = data.into_bytes()?;
-        self.warn_if_unavailable_backend();
+        self.warn_if_libjpeg_unavailable();
 
-        if self.backend == ImageDecoderBackend::LibjpegTurbo
-            && jpeg_turbo::is_jpeg(&bytes)
-            && let Some(jpeg) = jpeg_turbo::decode_jpeg(
-                &bytes,
-                self.limits.max_image_width,
-                self.limits.max_image_height,
-                self.limits.max_alloc,
-            )?
-        {
-            let color_type = match jpeg.channels {
-                1 => ColorType::L8,
-                3 => ColorType::Rgb8,
-                other => anyhow::bail!("Unsupported TurboJPEG channel count {other}"),
-            };
-            let shape = (jpeg.height as usize, jpeg.width as usize, jpeg.channels);
-            let array = Array3::from_shape_vec(shape, jpeg.data)?;
-            let mut decoded: DecodedMediaData = array.try_into()?;
-            decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
-                format: Some(ImageFormat::Jpeg),
-                color_type,
-                layout: ImageLayout::HWC,
-            }));
-            return Ok(decoded);
+        if self.enable_libjpeg && jpeg_turbo::is_jpeg(&bytes) {
+            let jpeg = require_libjpeg_result(
+                jpeg_turbo::decode_jpeg(
+                    &bytes,
+                    self.limits.max_image_width,
+                    self.limits.max_image_height,
+                    self.limits.max_alloc,
+                )?,
+                std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some(),
+            )?;
+            if let Some(jpeg) = jpeg {
+                let color_type = match jpeg.channels {
+                    1 => ColorType::L8,
+                    3 => ColorType::Rgb8,
+                    other => anyhow::bail!("Unsupported TurboJPEG channel count {other}"),
+                };
+                let shape = (jpeg.height as usize, jpeg.width as usize, jpeg.channels);
+                let array = Array3::from_shape_vec(shape, jpeg.data)?;
+                let mut decoded: DecodedMediaData = array.try_into()?;
+                decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
+                    format: Some(ImageFormat::Jpeg),
+                    color_type,
+                    layout: ImageLayout::HWC,
+                }));
+                return Ok(decoded);
+            }
         }
 
         let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
@@ -145,14 +142,32 @@ impl Decoder for ImageDecoder {
     }
 }
 
+fn require_libjpeg_result<T>(decoded: Option<T>, required: bool) -> Result<Option<T>> {
+    if required && decoded.is_none() {
+        anyhow::bail!(
+            "libjpeg-turbo was required by {REQUIRE_LIBJPEG_TURBO_TEST_ENV}, but the JPEG would \
+             have fallen back to image::ImageReader"
+        );
+    }
+    Ok(decoded)
+}
+
 impl ImageDecoder {
-    pub(crate) fn warn_if_unavailable_backend(&self) {
-        if self.backend == ImageDecoderBackend::LibjpegTurbo && !jpeg_turbo::available() {
+    pub(crate) fn warn_if_libjpeg_unavailable(&self) {
+        if self.enable_libjpeg && !jpeg_turbo::available() {
             LIBJPEG_TURBO_UNAVAILABLE_WARNING.call_once(|| {
-                tracing::warn!(
-                    "image decoder backend is set to libjpeg_turbo, but libturbojpeg could not be \
-                     loaded; falling back to image::ImageReader for JPEG inputs"
-                );
+                if std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some() {
+                    tracing::warn!(
+                        "libjpeg-turbo image decoding is required by \
+                         {REQUIRE_LIBJPEG_TURBO_TEST_ENV}, but libturbojpeg could not be loaded; \
+                         JPEG requests will fail"
+                    );
+                } else {
+                    tracing::warn!(
+                        "libjpeg-turbo image decoding is enabled, but libturbojpeg could not be \
+                         loaded; falling back to image::ImageReader for JPEG inputs"
+                    );
+                }
             });
         }
     }
@@ -254,7 +269,7 @@ mod tests {
                 max_image_height: max_height,
                 max_alloc: Some(DEFAULT_MAX_ALLOC),
             },
-            backend: ImageDecoderBackend::ImageReader,
+            enable_libjpeg: false,
         };
         let image_bytes = create_test_image(width, height, 3, format); // RGB
         let encoded_data = create_encoded_media_data(image_bytes);
@@ -337,7 +352,7 @@ mod tests {
         };
         let server_config = ImageDecoder {
             limits: server_limits.clone(),
-            backend: ImageDecoderBackend::ImageReader,
+            enable_libjpeg: false,
         };
 
         // Runtime config tries to override limits (should be ignored)
@@ -348,7 +363,7 @@ mod tests {
         };
         let runtime_config = ImageDecoder {
             limits: runtime_limits,
-            backend: ImageDecoderBackend::LibjpegTurbo,
+            enable_libjpeg: true,
         };
 
         let merged = server_config.with_runtime(Some(&runtime_config));
@@ -357,29 +372,38 @@ mod tests {
         assert_eq!(merged.limits.max_image_width, Some(100));
         assert_eq!(merged.limits.max_image_height, Some(100));
         assert_eq!(merged.limits.max_alloc, Some(1024));
-        assert_eq!(merged.backend, ImageDecoderBackend::LibjpegTurbo);
+        assert!(merged.enable_libjpeg);
     }
 
     #[test]
-    fn test_default_backend_is_image_reader() {
+    fn test_libjpeg_is_disabled_by_default() {
         let decoder = ImageDecoder::default();
-        assert_eq!(decoder.backend, ImageDecoderBackend::ImageReader);
+        assert!(!decoder.enable_libjpeg);
 
         let decoder: ImageDecoder = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(decoder.backend, ImageDecoderBackend::ImageReader);
+        assert!(!decoder.enable_libjpeg);
     }
 
     #[test]
-    fn test_config_can_select_libjpeg_turbo_backend() {
+    fn test_config_can_enable_libjpeg() {
         let decoder: ImageDecoder =
-            serde_json::from_value(serde_json::json!({"backend": "libjpeg_turbo"})).unwrap();
-        assert_eq!(decoder.backend, ImageDecoderBackend::LibjpegTurbo);
+            serde_json::from_value(serde_json::json!({"enable_libjpeg": true})).unwrap();
+        assert!(decoder.enable_libjpeg);
     }
 
     #[test]
-    fn test_libjpeg_turbo_backend_falls_back_for_non_jpeg() {
+    fn test_required_libjpeg_rejects_fallback() {
+        let error = require_libjpeg_result::<()>(None, true).unwrap_err();
+        assert!(error.to_string().contains(REQUIRE_LIBJPEG_TURBO_TEST_ENV));
+
+        assert!(require_libjpeg_result::<()>(None, false).unwrap().is_none());
+        assert_eq!(require_libjpeg_result(Some(1_u8), true).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn test_libjpeg_falls_back_for_non_jpeg() {
         let decoder = ImageDecoder {
-            backend: ImageDecoderBackend::LibjpegTurbo,
+            enable_libjpeg: true,
             ..Default::default()
         };
         let image_bytes = create_test_image(8, 9, 3, ImageFormat::Png);
@@ -397,9 +421,9 @@ mod tests {
     }
 
     #[test]
-    fn test_libjpeg_turbo_backend_falls_back_for_rgba_png() {
+    fn test_libjpeg_falls_back_for_rgba_png() {
         let decoder = ImageDecoder {
-            backend: ImageDecoderBackend::LibjpegTurbo,
+            enable_libjpeg: true,
             ..Default::default()
         };
         let image_bytes = create_test_image(8, 9, 4, ImageFormat::Png);
@@ -417,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn test_libjpeg_turbo_backend_enforces_configured_limits() {
+    fn test_libjpeg_enforces_configured_limits() {
         if !jpeg_turbo::available() {
             eprintln!("skipping libjpeg-turbo limit test: libturbojpeg not available");
             return;
@@ -429,7 +453,7 @@ mod tests {
                 max_image_height: None,
                 max_alloc: Some(DEFAULT_MAX_ALLOC),
             },
-            backend: ImageDecoderBackend::LibjpegTurbo,
+            enable_libjpeg: true,
         };
         let image_bytes = create_test_image(8, 8, 3, ImageFormat::Jpeg);
         let error = decoder
@@ -444,10 +468,10 @@ mod tests {
 
     #[test]
     fn test_libjpeg_turbo_pixels_match_pil_vllm_decode_when_available() {
-        let require = std::env::var_os("DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST").is_some();
+        let require = std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some();
         if !jpeg_turbo::available() {
             if require {
-                panic!("DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST is set but libturbojpeg is unavailable");
+                panic!("{REQUIRE_LIBJPEG_TURBO_TEST_ENV} is set but libturbojpeg is unavailable");
             }
             eprintln!("skipping PIL parity test: libturbojpeg not available");
             return;
@@ -464,7 +488,7 @@ mod tests {
         assert_eq!(decoded.data, expected_rgb);
 
         let decoder = ImageDecoder {
-            backend: ImageDecoderBackend::LibjpegTurbo,
+            enable_libjpeg: true,
             ..Default::default()
         };
         let decoded_media = decoder
@@ -485,17 +509,17 @@ mod tests {
 
     #[test]
     fn test_libjpeg_turbo_gray_jpeg_shape() {
-        let require = std::env::var_os("DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST").is_some();
+        let require = std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some();
         if !jpeg_turbo::available() {
             if require {
-                panic!("DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST is set but libturbojpeg is unavailable");
+                panic!("{REQUIRE_LIBJPEG_TURBO_TEST_ENV} is set but libturbojpeg is unavailable");
             }
             eprintln!("skipping grayscale JPEG test: libturbojpeg not available");
             return;
         }
 
         let decoder = ImageDecoder {
-            backend: ImageDecoderBackend::LibjpegTurbo,
+            enable_libjpeg: true,
             ..Default::default()
         };
         let image_bytes = create_test_image(8, 9, 1, ImageFormat::Jpeg);

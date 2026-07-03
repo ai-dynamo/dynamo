@@ -26,8 +26,8 @@ from dynamo.llm import MediaDecoder
 decoder = MediaDecoder()
 decoder.enable_image({"limits": {"max_image_width": 4096, "max_image_height": 4096, "max_alloc": 16*1024*1024}})
 # Optional: decode JPEG inputs with libjpeg-turbo when the shared library is installed.
-# The default backend remains "image_reader".
-# decoder.enable_image({"backend": "libjpeg_turbo", "limits": {"max_alloc": 16*1024*1024}})
+# The default remains image::ImageReader.
+# decoder.enable_image({"enable_libjpeg": True, "limits": {"max_alloc": 16*1024*1024}})
 decoder.enable_video({"fps": 2.0, "max_frames": 128, "limits": {"max_alloc": 1024*1024*128*3}})
 ```
 
@@ -47,7 +47,7 @@ register_model(
 ## Known Limitations
 
 > [!WARNING]
-> **Incompatible with `Dockerfile.frontend`**: Frontend media decoding is not supported when using `Dockerfile.frontend`. The frontend image built from `Dockerfile.frontend` does not include the required NIXL/UCX dependencies.
+> **Incompatible with `Dockerfile.frontend`**: Frontend media decoding, including libjpeg-turbo image decoding, is not supported when using `Dockerfile.frontend`. The standalone frontend image does not include the required NIXL/UCX dependencies or `libturbojpeg` runtime library.
 
 > [!WARNING]
 > **Requires GPU node**: The frontend must run on a node with GPU access. During media processing, decoded tensors are written to GPU memory via NIXL, which requires `libcuda.so.1` to be available. Running the frontend on a CPU-only node will fail with something like: `Failed to initialize required backends: [UCX: No UCX plugin found]`.
@@ -57,9 +57,9 @@ register_model(
 
 ## Image decoding options
 
-### Backend
-- **backend** (`"image_reader"` or `"libjpeg_turbo"`): Selects the image decoder implementation. The default is `"image_reader"`, which preserves the original Rust `image::ImageReader` path.
-- **libjpeg_turbo**: JPEG inputs are decoded through libjpeg-turbo's TurboJPEG API when `libturbojpeg.so.0` is available at runtime. Dynamo runtime images include `libturbojpeg`; custom images must provide the shared library or Dynamo logs a one-time warning and falls back to `image::ImageReader`. The implementation loads the shared library dynamically and falls back to `image::ImageReader` for non-JPEG inputs or when TurboJPEG cannot decode the image.
+### JPEG decoding
+- **enable_libjpeg** (bool): Set to `true` to decode JPEG inputs through libjpeg-turbo's TurboJPEG API. The default is `false`, which preserves the original Rust `image::ImageReader` path.
+- Dynamo backend runtime images include `libturbojpeg`; custom images must provide `libturbojpeg.so.0` or Dynamo logs a one-time warning and falls back to `image::ImageReader`. The standalone frontend image is excluded as described above. Non-JPEG inputs and JPEGs that TurboJPEG cannot decode also fall back to `image::ImageReader`.
 
 ### Limits (not overridable at runtime via `media_io_kwargs`)
 - **limits.max_image_width** (uint32, > 0): If the image width exceeds this value, abort the decoding.
