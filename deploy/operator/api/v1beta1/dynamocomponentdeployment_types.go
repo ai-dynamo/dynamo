@@ -112,7 +112,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// with standard defaults. All other containers in `podTemplate.spec.containers`
 	// are treated as user-managed sidecars: the operator does not inject
 	// defaults into them, so sidecars must specify required fields (e.g. `image`)
-	// themselves. Validation rejects pod templates where a
+	// themselves. The validation webhook rejects pod templates where a
 	// non-`"main"` container is missing a required field such as `image`.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
@@ -180,7 +180,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// The full container definition (image, args, envFrom, env) lives in
 	// `podTemplate` -- this eliminates the redundant `image`, `args`,
 	// `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.
-	// Validation rejects values that do not match any container
+	// The validation webhook rejects values that do not match any container
 	// name in `podTemplate.spec.containers`.
 	// +optional
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
