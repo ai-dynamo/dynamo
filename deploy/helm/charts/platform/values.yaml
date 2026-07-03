@@ -285,6 +285,15 @@ grove:
   tolerations: []
   # -- Affinity for Grove pods
   affinity: {}
+  # -- Grove operator configuration overrides. The bundled Grove subchart keeps
+  # Volcano disabled by default because the platform chart does not install
+  # Volcano or its PodGroup CRDs. Add a `volcano` profile only when Volcano is
+  # installed separately and `global.volcano-scheduler.enabled=true` is set.
+  config:
+    scheduler:
+      profiles:
+        - name: default-scheduler
+        - name: kai-scheduler
 
 # Kai Scheduler component - advanced workload scheduling
 # Installation is controlled by global.kai-scheduler.install above.

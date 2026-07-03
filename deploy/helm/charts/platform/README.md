@@ -178,6 +178,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.checkpoint.storage | object | `{}` | Optional PVC storage used when the snapshot-agent is installed outside workload namespaces with snapshot.storage.accessMode=podMount. Set create=true for operator-managed namespace PVCs, or omit/create=false to require an already-present PVC with the configured name. ReadWriteOnce can be used with podMount for sequential checkpoint/restore on suitable storage backends; use ReadWriteMany for concurrent multi-node access. |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
+| grove.config | object | `{"scheduler":{"profiles":[{"name":"default-scheduler"},{"name":"kai-scheduler"}]}}` | Grove operator configuration overrides. The bundled Grove subchart keeps Volcano disabled by default because the platform chart does not install Volcano or its PodGroup CRDs. Add a `volcano` profile only when Volcano is installed separately and `global.volcano-scheduler.enabled=true` is set. |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
@@ -255,6 +256,11 @@ global:
   grove:
     install: true   # Deploys the bundled Grove subchart (integration auto-enabled)
 ```
+
+The bundled Grove subchart defaults to the `default-scheduler` and
+`kai-scheduler` profiles only. To test Volcano, install Volcano separately,
+set `global.volcano-scheduler.enabled=true`, and add the `volcano` profile to
+`grove.config.scheduler.profiles`.
 
 Note: `global.*.install` controls whether the bundled subcharts are deployed. When set, integration is automatically enabled. `global.*.enabled` can be set independently when using externally-managed installations.
 
