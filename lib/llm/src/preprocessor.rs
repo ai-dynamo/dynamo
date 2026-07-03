@@ -1901,12 +1901,8 @@ impl OpenAIPreprocessor {
                 Some("kimi_k25")
             );
 
-        // Guided tool choice can produce either bare JSON or reasoning followed
-        // by a close marker and JSON. Most force-reasoning parsers keep the
-        // historical unconditional bypass because bare JSON would otherwise be
-        // swallowed as reasoning. Proven reasoner-gated Nemotron v3 variants
-        // instead inspect the first meaningful content: bare JSON bypasses the
-        // parser, while `reasoning</think>JSON` is split before the jail.
+        // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
+        // parsers inspect the stream shape before deciding whether to parse it.
         let is_guided_tool_choice = matches!(
             request.inner.tool_choice,
             Some(ChatCompletionToolChoiceOption::Required)
@@ -1922,6 +1918,7 @@ impl OpenAIPreprocessor {
             && Self::skips_guided_json_when_prompt_injected(reasoning_parser);
         let bypass_reasoning_for_bare_guided_json =
             inspect_force_reasoning_guided_output || inspect_prompt_injected_guided_output;
+        // Preserve the legacy bypass for force-reasoning parsers not yet opted in.
         let skip_reasoning_for_guided_json = is_guided_tool_choice
             && Self::is_force_reasoning_parser(reasoning_parser)
             && !inspect_force_reasoning_guided_output;
@@ -2727,6 +2724,7 @@ impl OpenAIPreprocessor {
                     match state.guided_json_bypass_decision {
                         Some(decision) => Some(decision),
                         None => {
+                            // Decide once from the first non-whitespace content.
                             let decision = response.data.as_ref().and_then(|data| {
                                 data.inner.choices.iter().find_map(|choice| {
                                     if let Some(ChatCompletionMessageContent::Text(text)) =
@@ -2753,9 +2751,7 @@ impl OpenAIPreprocessor {
 
                 // Process the response through reasoning parser if available
                 let processed_response = if guided_json_bypass_decision != Some(false) {
-                    // Bare JSON bypasses parsing. An undecided empty/whitespace
-                    // chunk also passes through; Immediate jail mode buffers it
-                    // until a later meaningful chunk establishes the shape.
+                    // Keep bare JSON and leading whitespace available to the tool jail.
                     response
                 } else if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
