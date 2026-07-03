@@ -1013,6 +1013,94 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn dropped_publisher_unregister_completes_within_graceful_shutdown() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(
+                    runtime,
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .expect("create distributed runtime");
+                let component = drt
+                    .namespace("event-publisher-shutdown-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component");
+
+                let publisher = EventPublisher::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create publisher");
+                let publisher_id = publisher.publisher_id();
+
+                let query = DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+                    "event-publisher-shutdown-test",
+                    "worker",
+                    "events",
+                ));
+                let instances = drt
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .expect("list event publishers");
+                assert_eq!(instances.len(), 1);
+                assert_eq!(instances[0].instance_id(), publisher_id);
+
+                let tracker = drt.graceful_shutdown_tracker();
+                assert_eq!(tracker.get_count(), 0);
+
+                let main_token = drt.runtime().primary_token();
+                let endpoint_token = drt.runtime().child_token();
+
+                // Dropping the publisher schedules the async discovery unregister.
+                // The drop path must synchronously take a graceful-shutdown guard so
+                // that `Runtime::shutdown` Phase 2 waits for the unregister task.
+                drop(publisher);
+                assert_eq!(
+                    tracker.get_count(),
+                    1,
+                    "dropping a publisher must register its unregister work with the graceful-shutdown tracker"
+                );
+
+                drt.runtime().shutdown();
+
+                tokio::time::timeout(std::time::Duration::from_secs(5), main_token.cancelled())
+                    .await
+                    .expect("graceful shutdown should complete once the unregister task finishes");
+
+                assert!(endpoint_token.is_cancelled());
+                assert_eq!(
+                    tracker.get_count(),
+                    0,
+                    "the unregister task must release its graceful-shutdown guard"
+                );
+
+                // Phase 3 (main token cancellation) only runs after Phase 2 drained
+                // the tracker, so the dropped publisher must already be unregistered.
+                let instances = drt
+                    .discovery()
+                    .list(query)
+                    .await
+                    .expect("list event publishers after shutdown");
+                assert!(
+                    instances.is_empty(),
+                    "unregister must complete within the graceful-shutdown window"
+                );
+            },
+        )
+        .await;
+    }
+
     #[test]
     fn test_event_scope_subject_prefix() {
         let ns_scope = EventScope::Namespace {
