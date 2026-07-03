@@ -3,9 +3,11 @@ package cuda
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,6 +90,158 @@ func TestBuildDeviceMap(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRestoreAndUnlockProcessTreePreservesPhaseBarrier(t *testing.T) {
+	pids := []int{101, 202, 303}
+	restoreStarted := make(chan int, len(pids))
+	releaseRestore := make(chan struct{})
+	unlockStarted := make(chan int, len(pids))
+	releaseUnlock := make(chan struct{})
+	type result struct {
+		timings RestorePhaseTimings
+		err     error
+	}
+	resultCh := make(chan result, 1)
+
+	go func() {
+		timings, err := restoreAndUnlockProcessTree(
+			context.Background(),
+			pids,
+			func(ctx context.Context, pid int) error {
+				restoreStarted <- pid
+				select {
+				case <-releaseRestore:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+			func(ctx context.Context, pid int) error {
+				unlockStarted <- pid
+				select {
+				case <-releaseUnlock:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+			func(context.Context, int) (string, error) {
+				return "", errors.New("unexpected state check")
+			},
+			logr.Discard(),
+		)
+		resultCh <- result{timings: timings, err: err}
+	}()
+
+	for range pids {
+		select {
+		case <-restoreStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("restore operations did not all start concurrently")
+		}
+	}
+	select {
+	case pid := <-unlockStarted:
+		t.Fatalf("unlock for pid %d started before all restores completed", pid)
+	default:
+	}
+
+	close(releaseRestore)
+	for range pids {
+		select {
+		case <-unlockStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("unlock operations did not all start concurrently")
+		}
+	}
+	close(releaseUnlock)
+
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			t.Fatalf("restoreAndUnlockProcessTree: %v", got.err)
+		}
+		if got.timings.RestoreDuration <= 0 ||
+			got.timings.UnlockDuration <= 0 ||
+			got.timings.TotalDuration <= 0 {
+			t.Fatalf("expected positive phase timings, got %+v", got.timings)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("restoreAndUnlockProcessTree did not complete")
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeWaitsAndOrdersErrors(t *testing.T) {
+	pids := []int{303, 101, 202}
+	var completed atomic.Int32
+	var unlockCalls atomic.Int32
+
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		pids,
+		func(_ context.Context, pid int) error {
+			defer completed.Add(1)
+			if pid == 202 {
+				time.Sleep(20 * time.Millisecond)
+				return nil
+			}
+			return fmt.Errorf("restore error %d", pid)
+		},
+		func(context.Context, int) error {
+			unlockCalls.Add(1)
+			return nil
+		},
+		func(context.Context, int) (string, error) {
+			return "", errors.New("unexpected state check")
+		},
+		logr.Discard(),
+	)
+	if err == nil {
+		t.Fatal("expected restore error")
+	}
+	if completed.Load() != int32(len(pids)) {
+		t.Fatalf("completed %d restores, want %d", completed.Load(), len(pids))
+	}
+	if unlockCalls.Load() != 0 {
+		t.Fatalf("unlock called %d times after restore failure", unlockCalls.Load())
+	}
+	errText := err.Error()
+	first := strings.Index(errText, "pid 303")
+	second := strings.Index(errText, "pid 101")
+	if first < 0 || second < 0 || first >= second {
+		t.Fatalf("errors are not in PID input order: %q", errText)
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeAcceptsAlreadyRunning(t *testing.T) {
+	pids := []int{101, 202}
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		pids,
+		func(context.Context, int) error {
+			return nil
+		},
+		func(_ context.Context, pid int) error {
+			return fmt.Errorf("unlock error %d", pid)
+		},
+		func(_ context.Context, pid int) (string, error) {
+			if pid == 101 {
+				return "running", nil
+			}
+			return "checkpointed", nil
+		},
+		logr.Discard(),
+	)
+	if err == nil {
+		t.Fatal("expected unlock error for non-running process")
+	}
+	if strings.Contains(err.Error(), "pid 101") {
+		t.Fatalf("already-running process returned an error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pid 202") {
+		t.Fatalf("missing PID attribution: %v", err)
 	}
 }
 
