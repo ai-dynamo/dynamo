@@ -19,10 +19,20 @@ from dynamo.frontend.prepost import _prepare_request
 
 HAS_QWEN3_TOOL_PARSER = (
     importlib.util.find_spec("vllm.tool_parsers.qwen3_engine_tool_parser") is not None
+    or importlib.util.find_spec("vllm.tool_parsers.qwen3coder_tool_parser") is not None
 )
 
-if HAS_QWEN3_TOOL_PARSER:
-    from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
+def _resolve_qwen3_tool_parser_class():
+    try:
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
+        return Qwen3EngineToolParser
+    except ImportError:
+        from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+
+        return Qwen3CoderToolParser
+
 
 # Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -420,7 +430,7 @@ class TestSchemaAwareToolParser:
         request_for_sampling, parser, _, _, _ = _prepare_request(
             OBJECT_TYPED_TOOL_REQUEST,
             tokenizer=tokenizer,
-            tool_parser_class=Qwen3EngineToolParser,
+            tool_parser_class=_resolve_qwen3_tool_parser_class(),
         )
         assert parser is not None, "Expected _prepare_request to construct the parser"
 
