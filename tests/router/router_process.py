@@ -45,7 +45,6 @@ class FrontendRouterProcess(ManagedProcess):
         frontend_port: int,
         namespace: str,
         store_backend: str = "etcd",
-        enforce_disagg: bool = False,
         blocks_threshold: float | str | None = None,
         tokens_threshold: int | str | None = None,
         tokens_threshold_frac: float | str | None = None,
@@ -75,9 +74,6 @@ class FrontendRouterProcess(ManagedProcess):
 
         if router_mode == "kv":
             command.extend(["--kv-cache-block-size", str(block_size)])
-
-        if enforce_disagg:
-            command.append("--enforce-disagg")
 
         if blocks_threshold is not None:
             command.extend(["--active-decode-blocks-threshold", str(blocks_threshold)])
