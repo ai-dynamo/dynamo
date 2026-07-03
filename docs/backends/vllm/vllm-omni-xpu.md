@@ -4,7 +4,7 @@
 title: vLLM-Omni
 ---
 
-Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-text, text-to-image, text-to-video, and text-to-audio (TTS) capabilities via OpenAI-compatible API endpoints.
+Dynamo supports multimodal generation on XPU through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes realtime speech-to-speech, text-to-image, text-to-video, image-to-video, and text-to-audio (TTS) capabilities through OpenAI-compatible API endpoints.
 
 ## Prerequisites
 
@@ -15,9 +15,6 @@ This guide assumes familiarity with deploying Dynamo with vLLM as described in t
 Dynamo container images include vLLM-Omni pre-installed. If you are using `pip install ai-dynamo[vllm]`, vLLM-Omni is **not** included automatically because the matching release is not yet available on PyPI. Install it separately from source:
 
 ```bash
-export VLLM_OMNI_TARGET_DEVICE=xpu
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-
 uv pip uninstall vllm-omni
 
 git clone -b release/v0.21.0rc1 https://github.com/vllm-project/vllm-omni
@@ -25,28 +22,38 @@ cd vllm-omni
 
 uv pip install --no-cache-dir ".[dev]" --no-build-isolation
 
-# remove torch bundled oneccl to avoid conflicts
 uv pip uninstall oneccl oneccl-devel
 ```
 Validated with `local-dev` container only.
+
+### XPU runtime settings
+
+The XPU launch scripts set the runtime environment before starting the vLLM-Omni worker:
+
+```bash
+export VLLM_OMNI_TARGET_DEVICE=xpu
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+```
+
+Set the same environment variables when you run `python -m dynamo.vllm.omni` directly instead of using the scripts under `examples/backends/vllm/launch/xpu/`.
 
 ## Supported Modalities
 
 | Modality | Endpoint(s) | `--output-modalities` |
 |---|---|---|
-| Text-to-Text | `/v1/chat/completions` | `text` (default) |
+| Realtime Speech-to-Speech | `/v1/realtime` | `audio` |
 | Text-to-Image | `/v1/chat/completions`, `/v1/images/generations` | `image` |
 | Text-to-Video | `/v1/videos` | `video` |
 | Image-to-Video | `/v1/videos` | `video` |
 | Text-to-Audio (TTS) | `/v1/audio/speech` | `audio` |
 
-The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`. When set to `audio`, the worker serves `/v1/audio/speech`.
+The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`. When set to `audio`, the worker serves `/v1/audio/speech`; with `--realtime`, it serves `/v1/realtime`.
 
 ## Tested Models
 
 | Modality | Models |
 |---|---|
-| Text-to-Text | `Qwen/Qwen2.5-Omni-7B` |
+| Realtime Speech-to-Speech | `Qwen/Qwen3-Omni-30B-A3B-Instruct` |
 | Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
 | Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` |
 | Image-to-Video | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` |
@@ -55,34 +62,31 @@ The `--output-modalities` flag determines which endpoint(s) the worker registers
 To run a non-default model, pass `--model` to any launch script:
 
 ```bash
+bash examples/backends/vllm/launch/xpu/agg_omni_realtime_xpu.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
 bash examples/backends/vllm/launch/xpu/agg_omni_image_xpu.sh --model AIDC-AI/Ovis-Image-7B
 bash examples/backends/vllm/launch/xpu/agg_omni_video_xpu.sh --model Wan-AI/Wan2.2-T2V-A14B-Diffusers
 ```
 
-## Text-to-Text
+## Realtime Speech-to-Speech
 
 Launch an aggregated deployment (frontend + omni worker):
 
 ```bash
-bash examples/backends/vllm/launch/xpu/agg_omni_xpu.sh
+bash examples/backends/vllm/launch/xpu/agg_omni_realtime_xpu.sh
 ```
 
-This starts `Qwen/Qwen2.5-Omni-7B` with a single-stage thinker config on one GPU.
+This starts `Qwen/Qwen3-Omni-30B-A3B-Instruct` with the realtime endpoint enabled on one XPU.
 
 Verify the deployment:
 
 ```bash
-curl -s http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen2.5-Omni-7B",
-    "messages": [{"role": "user", "content": "What is 2+2?"}],
-    "max_tokens": 50,
-    "stream": false
-  }'
+python examples/backends/vllm/launch/realtime_omni_client.py \
+  --url ws://localhost:8000/v1/realtime \
+  --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
+  --output-dir dynamo-realtime
 ```
 
-This script uses a custom stage config (`examples/backends/vllm/launch/stage_configs/single_stage_llm_xpu.yaml`) that configures the thinker stage for text generation. See [Stage Configuration](`#stage-configuration`) for details.
+The client sends OpenAI Realtime WebSocket events and writes generated audio chunks under `dynamo-realtime`.
 
 ## Text-to-Image
 
@@ -328,7 +332,7 @@ For S3 credential configuration, set the standard AWS environment variables (`AW
 
 ## Stage Configuration
 
-Omni pipelines are configured via YAML stage configs. See [`examples/backends/vllm/launch/stage_configs/single_stage_llm_xpu.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/stage_configs/single_stage_llm_xpu.yaml) for an example. For full documentation on stage config format and multi-stage pipelines, refer to the [vLLM-Omni Stage Configs documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/).
+Omni pipelines are configured via YAML stage configs. The XPU launch scripts use the built-in vLLM-Omni stage configs for supported models. For full documentation on stage config format and multi-stage pipelines, refer to the [vLLM-Omni Stage Configs documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/).
 
 ## Current Limitations
 
