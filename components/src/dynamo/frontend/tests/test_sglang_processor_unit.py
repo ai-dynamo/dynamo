@@ -42,6 +42,7 @@ from dynamo.frontend.sglang_processor import (
     SglangProcessor,
     _build_dynamo_preproc,
     _init_worker,
+    _load_chat_template,
     _map_finish_reason,
     _normalize_eos_token_ids,
     _runtime_config_parser_name,
@@ -1637,6 +1638,48 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
                 reasoning_parser_name=None,
             )
 
+    def test_chat_template_override_helpers(self, tmp_path):
+        """Chat template overrides can be supplied as a Jinja file path."""
+        template_file = tmp_path / "template.jinja"
+        template_file.write_text("custom template\\n\n", encoding="utf-8")
+
+        template = _load_chat_template(str(template_file))
+
+        assert template == "custom template\n"
+
+    def test_chat_template_override_expands_path(self, tmp_path, monkeypatch):
+        """Chat template file paths expand environment variables and home dirs."""
+        template_file = tmp_path / "template.jinja"
+        template_file.write_text("custom template", encoding="utf-8")
+
+        monkeypatch.setenv("CHAT_TEMPLATE_DIR", str(tmp_path))
+        assert _load_chat_template("$CHAT_TEMPLATE_DIR/template.jinja") == (
+            "custom template"
+        )
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _load_chat_template("~/template.jinja") == "custom template"
+
+    def test_chat_template_override_rejects_missing_path(self, tmp_path):
+        """Missing path-like chat templates fail at startup."""
+        missing_template = tmp_path / "missing.jinja"
+
+        with pytest.raises(FileNotFoundError, match="Chat template file not found"):
+            _load_chat_template(str(missing_template))
+
+    def test_chat_template_override_rejects_builtin_template_name(self):
+        """SGLang built-in template names are not supported in this path."""
+        with pytest.raises(ValueError, match="built-in chat template names"):
+            _load_chat_template("llama-2")
+
+    def test_chat_template_override_rejects_non_jinja_file(self, tmp_path):
+        """SGLang JSON template files are not supported in this path."""
+        template_file = tmp_path / "template.json"
+        template_file.write_text("{}", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="supports only .jinja"):
+            _load_chat_template(str(template_file))
+
     def test_init_worker_propagates_exclude_flag_true(self):
         """_init_worker sets the worker-global exclude_tools flag to True."""
         _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=True)
@@ -1648,6 +1691,27 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is False
         # Reset to default
         sglang_processor_module._w_exclude_tools_when_tool_choice_none = True
+
+    def test_init_worker_applies_chat_template_override(self, monkeypatch):
+        """Preprocess workers use the same chat template override as the main process."""
+
+        class FakeTokenizer:
+            chat_template = "original"
+
+        monkeypatch.setattr(
+            sglang_processor_module,
+            "get_tokenizer",
+            lambda model_path, trust_remote_code=False: FakeTokenizer(),
+        )
+
+        _init_worker(
+            MODEL,
+            None,
+            None,
+            exclude_tools_when_tool_choice_none=True,
+            chat_template="custom template",
+        )
+        assert sglang_processor_module._w_tokenizer.chat_template == "custom template"
 
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""

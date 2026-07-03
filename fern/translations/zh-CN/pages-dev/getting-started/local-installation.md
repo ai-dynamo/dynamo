@@ -210,6 +210,24 @@ docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-ru
 docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 ```
 
+**vLLM worker 启动失败：FlashInfer sampler 的 JIT 与 CUDA 13 wheels**
+
+在 CUDA 13 安装环境下运行 vLLM worker 时，worker 可能在启动阶段因 FlashInfer JIT 错误而中止：
+
+```text
+RuntimeError: Engine core initialization failed.
+...
+cuda/std/__cccl/cuda_toolkit.h:41: error: "CUDA compiler and CUDA toolkit headers are incompatible"
+```
+
+为 CUDA 13 安装解析出的 CUDA wheels 可能存在版本偏差：`torch` 将运行时头文件锁定到 13.0，而 vLLM 的 `tilelang` 依赖会拉取 `nvidia-cuda-nvcc` 13.2。FlashInfer 使用 `nvcc` 针对这些头文件编译其 sampler 内核，版本不匹配会导致构建失败。此问题在上游 [flashinfer#3493](https://github.com/flashinfer-ai/flashinfer/issues/3493) 中追踪。
+
+设置 `VLLM_USE_FLASHINFER_SAMPLER=0`，让 vLLM 回退到原生 sampler：
+
+```bash
+export VLLM_USE_FLASHINFER_SAMPLER=0
+```
+
 ## 后续步骤
 
 - [后端指南](../../../../../docs/backends/sglang/README.md) -- 后端特定配置和功能

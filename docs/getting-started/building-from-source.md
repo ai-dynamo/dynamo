@@ -77,9 +77,15 @@ uv pip install -e lib/gpu_memory_service
 
 ## 7. Install the Wheel
 
+Install Dynamo with a backend extra to pull the inference engine and its CUDA dependencies. Choose the backend you intend to run:
+
 ```bash
+# Use .[vllm] or .[sglang] instead to install the relevant framework dependencies
 uv pip install -e .
 ```
+
+> [!NOTE]
+> The base `uv pip install -e .` installs only the Dynamo runtime and frontend. A backend extra (`[vllm]`, or `[sglang]`) will install the relevant framework dependencies to run an inference worker. For the TensorRT-LLM backend, use the `tensorrtllm-runtime` container instead of installing via `uv pip` to ensure the right dependencies are installed. See [Local Installation](local-installation.md) for more details.
 
 ## 8. Verify the Build
 
@@ -134,6 +140,24 @@ The Rust `target/` directory can grow to 10+ GB during development. If builds fa
 
 ```bash
 cargo clean
+```
+
+**vLLM worker fails to start: FlashInfer sampler JIT and CUDA 13 wheels**
+
+When you run a vLLM worker from a CUDA 13 source install, the worker can abort during startup with a FlashInfer JIT error:
+
+```text
+RuntimeError: Engine core initialization failed.
+...
+cuda/std/__cccl/cuda_toolkit.h:41: error: "CUDA compiler and CUDA toolkit headers are incompatible"
+```
+
+The CUDA wheels resolved for a CUDA 13 install can be version-skewed: `torch` pins the runtime headers to 13.0, while vLLM's `tilelang` dependency pulls `nvidia-cuda-nvcc` 13.2. FlashInfer compiles its sampler kernel with `nvcc` against those headers, and the version mismatch fails the build. This is tracked upstream at [flashinfer#3493](https://github.com/flashinfer-ai/flashinfer/issues/3493).
+
+Set `VLLM_USE_FLASHINFER_SAMPLER=0` so vLLM falls back to its native sampler:
+
+```bash
+export VLLM_USE_FLASHINFER_SAMPLER=0
 ```
 
 ## Next Steps
