@@ -72,6 +72,7 @@ from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import (
     VllmEnginePauseController,
+    _apply_nvext_cache_salt,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -400,6 +401,7 @@ class VllmLLMEngine(LLMEngine):
             self.disaggregation_mode,
         )
         prompt = prepared_prompt.prompt
+        _apply_nvext_cache_salt(prepared_prompt.request, prompt)
 
         # Multimodal decode may replace token_ids with the expanded prefill
         # sequence. Sampling limits must use that same effective request.

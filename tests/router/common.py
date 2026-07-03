@@ -3157,7 +3157,7 @@ def _test_router_cache_salt_isolation(
     model_name: str,
     block_size: int,
 ):
-    """Verify cache-salted TRT-LLM events remain isolated in the router index."""
+    """Verify cache-salted engine events remain isolated in the router index."""
 
     async def test_sync():
         expected_num_instances = engine_workers.num_workers

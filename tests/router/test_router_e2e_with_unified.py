@@ -213,6 +213,38 @@ def test_unified_vllm_router_decisions_multiple_workers(
     )
 
 
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.vllm
+@pytest.mark.model(VLLM_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(6.9)
+@pytest.mark.requested_vllm_kv_cache_bytes(331_801_000)
+@pytest.mark.timeout(360)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_unified_vllm_cache_salt_isolation(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+) -> None:
+    """Cache-salted vLLM events remain isolated in the router index.
+
+    This crosses the real unified vLLM engine and its KV-event publisher, then
+    queries the router index independently for each tenant namespace.
+    """
+    run_cache_salt_isolation_test(
+        engine_process_cls=UnifiedVLLMProcess,
+        engine_args_name="vllm_args",
+        engine_args=VLLM_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=VLLM_MODEL_NAME,
+        block_size=VLLM_BLOCK_SIZE,
+        component_name="backend",
+    )
+
+
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.vllm
@@ -439,7 +471,7 @@ def test_unified_trtllm_cache_salt_isolation(
     predownload_models,
     request_plane,
 ) -> None:
-    """Identical prompts under different cache salts never share KV entries.
+    """Cache-salted TRT-LLM events remain isolated in the router index.
 
     This crosses the real unified TRT-LLM engine and its KV-event publisher,
     then queries the router index independently for each tenant namespace.
