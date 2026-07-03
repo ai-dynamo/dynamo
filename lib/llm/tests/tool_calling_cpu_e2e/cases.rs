@@ -349,6 +349,211 @@ async fn required_prompt_injected_reasoning_covers_json_and_structural_guidance(
 
 #[tokio::test]
 #[serial]
+async fn auto_glm_json_object_response_format_keeps_json_in_content() {
+    temp_env::async_with_vars(ENV, async {
+        let response = r#"{"city":"Paris","temperature_c":18}"#;
+        // JSON guidance may emit a bare object from token zero. Even though
+        // the GLM template prefilled `<think>`, that object is assistant
+        // content and must not be consumed as reasoning.
+        let requests = run_streaming_and_unary(
+            model_card_with_prompt_injected_reasoning_capability("glm45", "glm47", false, false),
+            scripted_text(&[r#"{"city":"Par"#, r#"is","temperature_c":18}"#]),
+            chat_body_with_response_format(
+                "auto",
+                vec![weather_tool()],
+                false,
+                json!({}),
+                json!({"type": "json_object"}),
+            ),
+            ExpectedResponse {
+                reasoning: None,
+                content: ContentExpectation::Exact(response),
+                calls: Vec::new(),
+                finish_reason: "stop",
+            },
+        )
+        .await;
+        assert_response_format_json_guidance(&requests, &json!({"type": "object"}));
+        assert!(requests.iter().all(|request| request.extra_args.is_none()));
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn auto_force_reasoning_json_object_response_format_keeps_json_in_content() {
+    temp_env::async_with_vars(ENV, async {
+        let response = r#"{"city":"Lima","temperature_c":24}"#;
+        let requests = run_streaming_and_unary(
+            model_card("nemotron_v3", "nemotron_nano", false, false),
+            scripted_text(&[r#"{"city":"Li"#, r#"ma","temperature_c":24}"#]),
+            chat_body_with_response_format(
+                "auto",
+                vec![weather_tool()],
+                false,
+                json!({"enable_thinking": true}),
+                json!({"type": "json_object"}),
+            ),
+            ExpectedResponse {
+                reasoning: None,
+                content: ContentExpectation::Exact(response),
+                calls: Vec::new(),
+                finish_reason: "stop",
+            },
+        )
+        .await;
+        assert_response_format_json_guidance(&requests, &json!({"type": "object"}));
+        assert!(requests.iter().all(|request| request.extra_args.is_none()));
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn none_glm_json_schema_response_format_keeps_json_in_content() {
+    temp_env::async_with_vars(ENV, async {
+        let response = r#"{"city":"Tokyo","temperature_c":22}"#;
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "temperature_c": {"type": "integer"}
+            },
+            "required": ["city", "temperature_c"],
+            "additionalProperties": false
+        });
+        let requests = run_streaming_and_unary(
+            model_card_with_prompt_injected_reasoning_capability("glm45", "glm47", false, false),
+            scripted_text(&[r#"{"city":"Tok"#, r#"yo","temperature_c":22}"#]),
+            chat_body_with_response_format(
+                "none",
+                vec![weather_tool()],
+                false,
+                json!({}),
+                json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "weather_response",
+                        "strict": true,
+                        "schema": schema.clone()
+                    }
+                }),
+            ),
+            ExpectedResponse {
+                reasoning: None,
+                content: ContentExpectation::Exact(response),
+                calls: Vec::new(),
+                finish_reason: "stop",
+            },
+        )
+        .await;
+        assert_response_format_json_guidance(&requests, &schema);
+        assert!(requests.iter().all(|request| request.extra_args.is_none()));
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn auto_glm_response_format_preserves_reasoning_with_capable_backend() {
+    temp_env::async_with_vars(ENV, async {
+        let response = r#"{"city":"Oslo","temperature_c":12}"#;
+        let requests = run_streaming_and_unary(
+            model_card_with_prompt_injected_reasoning("glm45", "glm47", false),
+            scripted_text(&[
+                "I should answer with structured JSON.",
+                "</thi",
+                "nk>",
+                response,
+            ]),
+            chat_body_with_response_format(
+                "auto",
+                vec![weather_tool()],
+                false,
+                json!({}),
+                json!({"type": "json_object"}),
+            ),
+            ExpectedResponse {
+                reasoning: Some("I should answer with structured JSON.".to_string()),
+                content: ContentExpectation::Exact(response),
+                calls: Vec::new(),
+                finish_reason: "stop",
+            },
+        )
+        .await;
+        assert_response_format_json_guidance(&requests, &json!({"type": "object"}));
+        assert_reasoning_metadata(&requests, false, &json!({}));
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn required_response_format_defers_to_tool_guidance() {
+    temp_env::async_with_vars(ENV, async {
+        let requests = run_streaming_and_unary(
+            model_card_with_prompt_injected_reasoning("glm45", "glm47", false),
+            scripted_text(&[
+                "I need the weather tool.",
+                "</think>",
+                r#"[{"name":"get_weather","parameters":{"location":"Berlin"}}]"#,
+            ]),
+            chat_body_with_response_format(
+                "required",
+                vec![weather_tool()],
+                false,
+                json!({}),
+                json!({"type": "json_object"}),
+            ),
+            ExpectedResponse {
+                reasoning: Some("I need the weather tool.".to_string()),
+                content: ContentExpectation::Empty,
+                calls: vec![ExpectedCall {
+                    name: "get_weather",
+                    arguments: json!({"location": "Berlin"}),
+                }],
+                finish_reason: "tool_calls",
+            },
+        )
+        .await;
+        assert_json_guidance(&requests, &[weather_tool()]);
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn auto_text_response_format_does_not_enable_guidance() {
+    temp_env::async_with_vars(ENV, async {
+        let requests = run_streaming_and_unary(
+            model_card_with_prompt_injected_reasoning("glm45", "glm47", false),
+            scripted_text(&[
+                "I can answer directly.",
+                "</think>",
+                "The temperature is 18 C.",
+            ]),
+            chat_body_with_response_format(
+                "auto",
+                vec![weather_tool()],
+                false,
+                json!({}),
+                json!({"type": "text"}),
+            ),
+            ExpectedResponse {
+                reasoning: Some("I can answer directly.".to_string()),
+                content: ContentExpectation::Exact("The temperature is 18 C."),
+                calls: Vec::new(),
+                finish_reason: "stop",
+            },
+        )
+        .await;
+        assert_no_guidance(&requests);
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn required_guided_json_fails_closed_without_backend_reasoning_capability() {
     temp_env::async_with_vars(ENV, async {
         let expected = ExpectedResponse {

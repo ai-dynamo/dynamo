@@ -240,7 +240,26 @@ fn model_card_with_prompt_injected_reasoning(
     tool_call_parser: &str,
     structural_tags: bool,
 ) -> ModelDeploymentCard {
-    let mut card = model_card(reasoning_parser, tool_call_parser, structural_tags, true);
+    model_card_with_prompt_injected_reasoning_capability(
+        reasoning_parser,
+        tool_call_parser,
+        structural_tags,
+        true,
+    )
+}
+
+fn model_card_with_prompt_injected_reasoning_capability(
+    reasoning_parser: &str,
+    tool_call_parser: &str,
+    structural_tags: bool,
+    reasoning_aware_guided_decoding: bool,
+) -> ModelDeploymentCard {
+    let mut card = model_card(
+        reasoning_parser,
+        tool_call_parser,
+        structural_tags,
+        reasoning_aware_guided_decoding,
+    );
     let template_dir = data_path("replays/tool-calling-cpu-e2e/prompt-injected");
     card.chat_template_file = PromptFormatterArtifact::chat_template_from_disk(&template_dir)
         .expect("failed to load prompt-injected chat template");
@@ -450,6 +469,23 @@ fn chat_body_with_template_kwargs(
         "stream_options": {"include_usage": true},
         "chat_template_kwargs": chat_template_kwargs
     })
+}
+
+fn chat_body_with_response_format(
+    tool_choice: &str,
+    tools: Vec<Value>,
+    parallel_tool_calls: bool,
+    chat_template_kwargs: Value,
+    response_format: Value,
+) -> Value {
+    let mut body = chat_body_with_template_kwargs(
+        tool_choice,
+        tools,
+        parallel_tool_calls,
+        chat_template_kwargs,
+    );
+    body["response_format"] = response_format;
+    body
 }
 
 async fn post_chat(svc: &RawChatHarness, body: &Value, streaming: bool) -> ObservedResponse {
@@ -668,6 +704,23 @@ fn assert_json_guidance(requests: &[PreprocessedRequest], tools: &[Value]) {
             );
             assert_eq!(alternative["required"], json!(["name", "parameters"]));
         }
+    }
+}
+
+fn assert_response_format_json_guidance(requests: &[PreprocessedRequest], schema: &Value) {
+    for request in requests {
+        let guided = request
+            .sampling_options
+            .guided_decoding
+            .as_ref()
+            .expect("response_format did not create guided decoding");
+        assert_eq!(guided.json.as_ref(), Some(schema));
+        assert!(guided.structural_tag.is_none());
+        assert!(guided.regex.is_none());
+        assert!(guided.choice.is_none());
+        assert!(guided.grammar.is_none());
+        assert!(guided.backend.is_none());
+        assert!(guided.whitespace_pattern.is_none());
     }
 }
 
