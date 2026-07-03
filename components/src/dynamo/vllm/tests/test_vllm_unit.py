@@ -410,6 +410,64 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     assert captured["enable_rl"] is True
 
 
+@pytest.mark.parametrize("reasoning_ended", [False, True])
+def test_unified_generate_forwards_reasoning_metadata(monkeypatch, reasoning_ended):
+    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+    from dynamo.vllm import llm_engine
+
+    captured = {}
+    parser_kwargs = {"chat_template_kwargs": {"reasoning_effort": "high"}}
+
+    def fake_build_sampling_params(*args, **kwargs):
+        return SimpleNamespace(extra_args=None)
+
+    async def fake_generate(
+        prompt,
+        sampling_params,
+        request_id,
+        *,
+        reasoning_ended=None,
+        reasoning_parser_kwargs=None,
+        **kwargs,
+    ):
+        captured["reasoning_ended"] = reasoning_ended
+        captured["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+        if False:
+            yield None
+
+    engine = llm_engine.VllmLLMEngine(
+        SimpleNamespace(model="test-model"),
+        CommonDisaggregationMode.AGGREGATED,
+        served_model_name="test-model",
+        component="backend",
+    )
+    engine.engine_client = SimpleNamespace(generate=fake_generate)
+    engine._default_sampling_params = {}
+    engine._model_max_len = 4096
+
+    monkeypatch.setattr(llm_engine, "build_sampling_params", fake_build_sampling_params)
+
+    async def run_generate():
+        context = SimpleNamespace(id=lambda: "req", trace_headers=lambda: None)
+        request = {
+            "model": "test-model",
+            "token_ids": [1, 2, 3],
+            "extra_args": {
+                "reasoning_ended": reasoning_ended,
+                "reasoning_parser_kwargs": parser_kwargs,
+            },
+        }
+        async for _ in engine.generate(request, context):
+            pass
+
+    asyncio.run(run_generate())
+
+    assert captured == {
+        "reasoning_ended": reasoning_ended,
+        "reasoning_parser_kwargs": parser_kwargs,
+    }
+
+
 @pytest.mark.asyncio
 async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
     """Return the Dynamo-normalized served model name from EngineConfig."""
@@ -422,6 +480,7 @@ async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
         model_config=SimpleNamespace(
             max_model_len=4096, get_diff_sampling_param=lambda: {}
         ),
+        structured_outputs_config=SimpleNamespace(reasoning_parser="glm45"),
         scheduler_config=SimpleNamespace(
             max_num_seqs=2,
             max_num_batched_tokens=8192,
@@ -471,6 +530,7 @@ async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
 
     assert engine_args.served_model_name == [served_model_name]
     assert config.served_model_name == served_model_name
+    assert config.runtime_data == {"vllm_reasoning_parser": "glm45"}
 
 
 def test_should_prefetch_model_for_default_load_format():
@@ -1035,6 +1095,70 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     }
     sp = build_sampling_params(request, default_sampling_params={})
     assert sp.thinking_token_budget == 1024
+
+
+def test_build_sampling_params_reconstructs_json_object_schema():
+    """The typed Dynamo protocol represents json_object as an object schema."""
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {
+            "guided_decoding": {"json": {"type": "object"}},
+        },
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+    sp = build_sampling_params(request, default_sampling_params={})
+
+    assert sp.structured_outputs is not None
+    assert sp.structured_outputs.json == {"type": "object"}
+    assert sp.structured_outputs.json_object is None
+
+
+def test_publish_vllm_reasoning_parser_runtime_data():
+    from dynamo.vllm.capacity import (
+        VLLM_REASONING_PARSER_RUNTIME_KEY,
+        publish_vllm_reasoning_parser_runtime_data,
+    )
+
+    calls = []
+    runtime_config = SimpleNamespace(
+        set_engine_specific=lambda key, value: calls.append((key, value))
+    )
+    vllm_config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(reasoning_parser="glm45")
+    )
+
+    publish_vllm_reasoning_parser_runtime_data(runtime_config, vllm_config)
+
+    assert calls == [(VLLM_REASONING_PARSER_RUNTIME_KEY, '"glm45"')]
+
+
+@pytest.mark.parametrize(
+    "vllm_config",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(structured_outputs_config=None),
+        SimpleNamespace(
+            structured_outputs_config=SimpleNamespace(reasoning_parser="")
+        ),
+    ],
+)
+def test_publish_vllm_reasoning_parser_runtime_data_omits_missing_parser(
+    vllm_config,
+):
+    from dynamo.vllm.capacity import publish_vllm_reasoning_parser_runtime_data
+
+    calls = []
+    runtime_config = SimpleNamespace(
+        set_engine_specific=lambda key, value: calls.append((key, value))
+    )
+
+    publish_vllm_reasoning_parser_runtime_data(runtime_config, vllm_config)
+
+    assert calls == []
 
 
 def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():

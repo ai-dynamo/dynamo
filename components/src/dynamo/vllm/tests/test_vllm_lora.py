@@ -369,6 +369,25 @@ async def test_load_lora_publishes_dp_and_capacity_metadata(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_load_lora_publishes_native_reasoning_parser(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine._vllm_config = SimpleNamespace(
+        structured_outputs_config=SimpleNamespace(reasoning_parser="glm45")
+    )
+    register, _ = _patch_discovery(monkeypatch)
+
+    result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+
+    assert result["status"] == "success"
+    runtime_config = register.await_args.kwargs["runtime_config"]
+    runtime_config.set_engine_specific.assert_called_once_with(
+        "vllm_reasoning_parser", '"glm45"'
+    )
+
+
+@pytest.mark.asyncio
 async def test_load_lora_idempotent_reload(monkeypatch):
     engine = _make_lora_engine(endpoint=object())
     manager = SimpleNamespace(download_lora=AsyncMock())

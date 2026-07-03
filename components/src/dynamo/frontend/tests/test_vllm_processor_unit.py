@@ -375,6 +375,271 @@ class TestReasoningParserMetadata:
         }
 
 
+class TestResponseFormatGuidedDecoding:
+    @staticmethod
+    def _validated_response_format(response_format):
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionRequest,
+        )
+
+        return ChatCompletionRequest.model_validate(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": response_format,
+            }
+        ).response_format
+
+    @pytest.mark.parametrize("validated", [False, True])
+    def test_json_object_uses_canonical_object_schema(
+        self, vllm_processor_module, validated
+    ):
+        response_format = {"type": "json_object"}
+        if validated:
+            response_format = self._validated_response_format(response_format)
+
+        assert vllm_processor_module._response_format_to_guided_decoding(
+            response_format
+        ) == {"json": {"type": "object"}}
+
+    @pytest.mark.parametrize("validated", [False, True])
+    def test_json_schema_preserves_nested_schema(
+        self, vllm_processor_module, validated
+    ):
+        schema = {
+            "type": "object",
+            "properties": {"fruit": {"type": "string"}},
+            "required": ["fruit"],
+        }
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "fruit", "schema": schema},
+        }
+        if validated:
+            response_format = self._validated_response_format(response_format)
+
+        assert vllm_processor_module._response_format_to_guided_decoding(
+            response_format
+        ) == {"json": schema}
+
+    @pytest.mark.parametrize("validated", [False, True])
+    def test_text_has_no_guided_decoding(self, vllm_processor_module, validated):
+        response_format = {"type": "text"}
+        if validated:
+            response_format = self._validated_response_format(response_format)
+
+        assert (
+            vllm_processor_module._response_format_to_guided_decoding(
+                response_format
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("validated", [False, True])
+    async def test_generator_routes_json_object_from_preprocessed_request(
+        self, vllm_processor_module, monkeypatch, validated
+    ):
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionRequest,
+        )
+
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Return JSON"}],
+            "response_format": {"type": "json_object"},
+        }
+        request_for_sampling = (
+            ChatCompletionRequest.model_validate(request)
+            if validated
+            else ChatCompletionRequest.model_construct(**request)
+        )
+
+        async def fake_preprocess(*args, **kwargs):
+            return SimpleNamespace(
+                request_for_sampling=request_for_sampling,
+                tool_parser=None,
+                chat_template_kwargs={},
+                engine_prompt={"prompt_token_ids": [1, 2, 3]},
+                prompt_token_ids=[1, 2, 3],
+            )
+
+        class FakeInputProcessor:
+            renderer = object()
+            generation_config_fields = {}
+
+            def process_inputs(self, request_id, prompt, sampling_params, tasks):
+                return SimpleNamespace(
+                    request_id=request_id,
+                    external_req_id=None,
+                    prompt_token_ids=[1, 2, 3],
+                    sampling_params=sampling_params,
+                    mm_features=None,
+                )
+
+        class FakeReasoningParser:
+            def __init__(self, tokenizer, *, chat_template_kwargs):
+                pass
+
+            def is_reasoning_end(self, prompt_token_ids):
+                return False
+
+        routed_engine = _FakeRoutedEngine([])
+        processor = vllm_processor_module.VllmProcessor(
+            tokenizer=SimpleNamespace(eos_token_ids=[2]),
+            input_processor=FakeInputProcessor(),
+            output_processor=_FakeOutputProcessor(),
+            tool_parser_class=None,
+            reasoning_parser_class=FakeReasoningParser,
+            routed_engine=routed_engine,
+            reasoning_parser_name="glm45",
+            vllm_reasoning_parser_name="glm45",
+        )
+
+        monkeypatch.setattr(
+            vllm_processor_module, "preprocess_chat_request", fake_preprocess
+        )
+        monkeypatch.setattr(
+            vllm_processor_module.InputProcessor,
+            "assign_request_id",
+            staticmethod(lambda request: None),
+        )
+        monkeypatch.setattr(
+            vllm_processor_module,
+            "StreamingPostProcessor",
+            lambda **kwargs: _FakePostProcessor(),
+        )
+
+        chunks = [chunk async for chunk in processor._generator_inner(request)]
+
+        assert chunks == []
+        assert routed_engine.requests[0]["sampling_options"]["guided_decoding"] == {
+            "json": {"type": "object"}
+        }
+        assert routed_engine.requests[0]["reasoning_ended"] is False
+
+    def test_structural_tag_pydantic_value_is_serialized_as_plain_dict(
+        self, vllm_processor_module
+    ):
+        structural_tag = {
+            "type": "structural_tag",
+            "structures": [{"begin": "<tool>", "end": "</tool>"}],
+        }
+
+        class ResponseFormatModel:
+            def model_dump(self, *, by_alias, exclude_none):
+                assert by_alias is True
+                assert exclude_none is True
+                return structural_tag
+
+        assert vllm_processor_module._response_format_to_guided_decoding(
+            ResponseFormatModel()
+        ) == {"structural_tag": structural_tag}
+
+    @pytest.mark.parametrize(
+        ("response_format", "message"),
+        [
+            (
+                {"type": "json_schema"},
+                "response_format.json_schema.schema is required",
+            ),
+            (
+                {
+                    "type": "json_schema",
+                    "json_schema": {"name": "invalid", "schema": []},
+                },
+                "response_format.json_schema.schema must be a JSON object",
+            ),
+        ],
+    )
+    def test_malformed_json_schema_is_invalid_argument(
+        self, vllm_processor_module, response_format, message
+    ):
+        with pytest.raises(vllm_processor_module.InvalidArgument, match=message):
+            vllm_processor_module._response_format_to_guided_decoding(
+                response_format
+            )
+
+
+class TestStructuredOutputReasoningParserGuard:
+    @pytest.mark.parametrize(
+        ("guided_decoding", "reasoning_ended"),
+        [
+            (None, False),
+            ({"json": {"type": "object"}}, None),
+            ({"json": {"type": "object"}}, True),
+        ],
+    )
+    def test_allows_requests_without_active_structured_reasoning(
+        self, vllm_processor_module, guided_decoding, reasoning_ended
+    ):
+        vllm_processor_module._validate_structured_output_reasoning_parser(
+            guided_decoding=guided_decoding,
+            reasoning_ended=reasoning_ended,
+            frontend_reasoning_parser="glm45",
+            vllm_reasoning_parser=None,
+        )
+
+    def test_allows_matching_native_parser(self, vllm_processor_module):
+        vllm_processor_module._validate_structured_output_reasoning_parser(
+            guided_decoding={"json": {"type": "object"}},
+            reasoning_ended=False,
+            frontend_reasoning_parser="glm45",
+            vllm_reasoning_parser="glm45",
+        )
+
+    def test_rejects_native_parser_without_frontend_parser(
+        self, vllm_processor_module
+    ):
+        with pytest.raises(
+            vllm_processor_module.InvalidArgument,
+            match="requires a matching frontend reasoning parser",
+        ):
+            vllm_processor_module._validate_structured_output_reasoning_parser(
+                guided_decoding={"json": {"type": "object"}},
+                reasoning_ended=None,
+                frontend_reasoning_parser=None,
+                vllm_reasoning_parser="glm45",
+            )
+
+    @pytest.mark.parametrize("worker_parser", [None, "deepseek_r1"])
+    def test_rejects_missing_or_mismatched_native_parser(
+        self, vllm_processor_module, worker_parser
+    ):
+        with pytest.raises(
+            vllm_processor_module.InvalidArgument,
+            match=r"worker's --reasoning-parser",
+        ):
+            vllm_processor_module._validate_structured_output_reasoning_parser(
+                guided_decoding={"json": {"type": "object"}},
+                reasoning_ended=False,
+                frontend_reasoning_parser="glm45",
+                vllm_reasoning_parser=worker_parser,
+            )
+
+
+@pytest.mark.parametrize(
+    ("runtime_config", "expected"),
+    [
+        ({"runtime_data": {"vllm_reasoning_parser": "glm45"}}, "glm45"),
+        ({"runtime_data": {}}, None),
+        ({"runtime_data": {"vllm_reasoning_parser": ""}}, None),
+        ({"runtime_data": {"vllm_reasoning_parser": 1}}, None),
+        ({"runtime_data": None}, None),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_runtime_config_vllm_reasoning_parser(
+    vllm_processor_module, runtime_config, expected
+):
+    mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
+
+    assert (
+        vllm_processor_module._runtime_config_vllm_reasoning_parser(mdc) == expected
+    )
+
+
 class _FakeOutputProcessor:
     def __init__(self):
         self.request_states = {}
@@ -466,6 +731,28 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    async def test_routed_engine_gets_response_format_guidance(
+        self, vllm_processor_module
+    ):
+        routed_engine = _FakeRoutedEngine()
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        preproc = _base_preproc()
+        preproc["sampling_options"]["guided_decoding"] = (
+            vllm_processor_module._response_format_to_guided_decoding(
+                {"type": "json_object"}
+            )
+        )
+        preproc["reasoning_ended"] = False
+
+        await _run_generate(processor, preproc)
+
+        routed_request = routed_engine.requests[0]
+        assert routed_request["sampling_options"]["guided_decoding"] == {
+            "json": {"type": "object"}
+        }
+        assert routed_request["extra_args"]["reasoning_ended"] is False
+
     @pytest.mark.asyncio
     async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
         routed_engine = _FakeRoutedEngine()

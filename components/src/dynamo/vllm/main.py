@@ -57,6 +57,7 @@ from .capacity import (
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
+    publish_vllm_reasoning_parser_runtime_data,
 )
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
@@ -719,6 +720,7 @@ async def register_vllm_model(
     if worker_type != WorkerType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
+    publish_vllm_reasoning_parser_runtime_data(runtime_config, vllm_config)
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
     )

@@ -37,6 +37,8 @@ from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_fe
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.vllm.capacity import VLLM_REASONING_PARSER_RUNTIME_KEY
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import (
@@ -48,7 +50,6 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
-
 
 _FINISH_REASON_MAP: dict[str, FinishReason] = {
     "eos": FinishReason.STOP,
@@ -85,6 +86,23 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     if type(context_length) is not int or context_length <= 0:
         return None
     return context_length
+
+
+def _runtime_config_vllm_reasoning_parser(
+    mdc: ModelDeploymentCard,
+) -> str | None:
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return None
+
+    runtime_data = runtime_config.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return None
+
+    reasoning_parser = runtime_data.get(VLLM_REASONING_PARSER_RUNTIME_KEY)
+    if not isinstance(reasoning_parser, str) or not reasoning_parser:
+        return None
+    return reasoning_parser
 
 
 def _mm_feature_modality(feature: Any) -> str:
@@ -167,6 +185,83 @@ def _build_reasoning_parser_metadata(
     return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
 
 
+def _response_format_to_guided_decoding(
+    response_format: Any,
+) -> dict[str, Any] | None:
+    """Convert an OpenAI response format to Dynamo's routed constraint shape.
+
+    The default request-validation fast path leaves ``response_format`` as a
+    plain dict, while validated requests carry a Pydantic model. Normalize both
+    without invoking ``ChatCompletionRequest.to_sampling_params()``, which also
+    applies unrelated sampling defaults and mutates the request.
+
+    ``json_object`` is intentionally represented as the equivalent minimal JSON
+    schema. Dynamo's Rust ``GuidedDecodingOptions`` wire type does not expose
+    vLLM's ``json_object`` field, but already transports JSON schemas end to end.
+    """
+    if response_format is None:
+        return None
+
+    if not isinstance(response_format, dict):
+        model_dump = getattr(response_format, "model_dump", None)
+        if not callable(model_dump):
+            return None
+        response_format = model_dump(by_alias=True, exclude_none=True)
+
+    response_format_type = response_format.get("type")
+    if response_format_type in (None, "text"):
+        return None
+    if response_format_type == "json_object":
+        return {"json": {"type": "object"}}
+    if response_format_type == "structural_tag":
+        return {"structural_tag": response_format}
+    if response_format_type != "json_schema":
+        return None
+
+    json_schema = response_format.get("json_schema")
+    if not isinstance(json_schema, dict) or json_schema.get("schema") is None:
+        raise InvalidArgument(
+            "response_format.json_schema.schema is required when "
+            "response_format.type is 'json_schema'"
+        )
+    schema = json_schema["schema"]
+    if not isinstance(schema, dict):
+        raise InvalidArgument("response_format.json_schema.schema must be a JSON object")
+    return {"json": schema}
+
+
+def _validate_structured_output_reasoning_parser(
+    *,
+    guided_decoding: dict[str, Any] | None,
+    reasoning_ended: bool | None,
+    frontend_reasoning_parser: str | None,
+    vllm_reasoning_parser: str | None,
+) -> None:
+    """Require the engine parser while structured output follows reasoning."""
+    if guided_decoding is None:
+        return
+    if vllm_reasoning_parser and not frontend_reasoning_parser:
+        raise InvalidArgument(
+            "response_format with a native vLLM reasoning parser requires a "
+            "matching frontend reasoning parser"
+        )
+    if reasoning_ended is not False:
+        return
+    if (
+        frontend_reasoning_parser
+        and vllm_reasoning_parser == frontend_reasoning_parser
+    ):
+        return
+
+    worker_parser = vllm_reasoning_parser or "<unset>"
+    frontend_parser = frontend_reasoning_parser or "<unset>"
+    raise InvalidArgument(
+        "response_format while reasoning is active requires the vLLM worker's "
+        "--reasoning-parser to match the frontend reasoning parser; "
+        f"frontend={frontend_parser!r}, worker={worker_parser!r}"
+    )
+
+
 def _inject_routing_metadata(
     dynamo_preproc: dict[str, Any],
     target: dict[str, Any],
@@ -201,6 +296,8 @@ class VllmProcessor:
         routed_engine: RoutedEngine,
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
+        reasoning_parser_name: str | None = None,
+        vllm_reasoning_parser_name: str | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -208,6 +305,8 @@ class VllmProcessor:
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
+        self.reasoning_parser_name = reasoning_parser_name
+        self.vllm_reasoning_parser_name = vllm_reasoning_parser_name
         self.exclude_tools_when_tool_choice_none = True
         self.block_size = block_size
         self.enable_auto_tool_choice = enable_auto_tool_choice
@@ -419,6 +518,9 @@ class VllmProcessor:
         chat_template_kwargs = pre.chat_template_kwargs
         engine_prompt = pre.engine_prompt
         tokens = pre.prompt_token_ids
+        response_format_guided_decoding = _response_format_to_guided_decoding(
+            request_for_sampling.response_format
+        )
 
         if request_for_sampling.max_completion_tokens is not None:
             max_tokens = request_for_sampling.max_completion_tokens
@@ -505,6 +607,12 @@ class VllmProcessor:
             request_for_sampling,
             tokens,
         )
+        _validate_structured_output_reasoning_parser(
+            guided_decoding=response_format_guided_decoding,
+            reasoning_ended=reasoning_ended,
+            frontend_reasoning_parser=self.reasoning_parser_name,
+            vllm_reasoning_parser=self.vllm_reasoning_parser_name,
+        )
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
         sp = vllm_preproc.sampling_params
@@ -543,6 +651,10 @@ class VllmProcessor:
             dynamo_preproc["reasoning_ended"] = reasoning_ended
         if reasoning_parser_kwargs is not None:
             dynamo_preproc["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+        if response_format_guided_decoding is not None:
+            dynamo_preproc["sampling_options"][
+                "guided_decoding"
+            ] = response_format_guided_decoding
 
         # Extract MM routing metadata and prepare transfer.
         cleanup_items: list = []
@@ -953,8 +1065,10 @@ class EngineFactory:
         else:
             tool_parser_class = None
 
-        reasoning_parser_name = self.flags.reasoning_parser or mdc.runtime_config().get(
-            "reasoning_parser"
+        vllm_reasoning_parser_name = _runtime_config_vllm_reasoning_parser(mdc)
+        reasoning_parser_name = (
+            self.flags.reasoning_parser
+            or mdc.runtime_config().get("reasoning_parser")
         )
         if reasoning_parser_name:
             reasoning_parser_class = ReasoningParserManager.get_reasoning_parser(
@@ -974,6 +1088,8 @@ class EngineFactory:
             routed_engine,
             block_size=block_size,
             enable_auto_tool_choice=enable_auto_tool_choice,
+            reasoning_parser_name=reasoning_parser_name,
+            vllm_reasoning_parser_name=vllm_reasoning_parser_name,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

@@ -69,10 +69,16 @@ from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
 )
-from dynamo.vllm.capacity import per_rank_kv_blocks
+from dynamo.vllm.capacity import (
+    get_vllm_reasoning_parser_runtime_data,
+    per_rank_kv_blocks,
+    publish_vllm_reasoning_parser_runtime_data,
+)
 
 from .handlers import (
     VllmEnginePauseController,
+    _engine_generate_reasoning_kwargs,
+    _request_reasoning_metadata,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -342,6 +348,7 @@ class VllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.engine_args.model,
             served_model_name=self._served_model_name,
+            runtime_data=get_vllm_reasoning_parser_runtime_data(vllm_config),
             llm=LlmRegistration(
                 context_length=self._model_max_len,
                 kv_cache_block_size=block_size,
@@ -368,11 +375,15 @@ class VllmLLMEngine(LLMEngine):
         prompt = TokensPrompt(prompt_token_ids=token_ids)
 
         # TODO: remove dict() once build_sampling_params accepts GenerateRequest
+        request_dict = dict(request)
         sampling_params = build_sampling_params(
-            dict(request),
+            request_dict,
             self._default_sampling_params,
             self._model_max_len,
             enable_rl=self.enable_rl,
+        )
+        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(
+            request_dict
         )
 
         # vLLM's KV transfer is internal to NixlConnector
@@ -448,6 +459,11 @@ class VllmLLMEngine(LLMEngine):
             data_parallel_rank=local_dp_rank,
             lora_request=lora_request,
             **telemetry.engine_trace_kwargs(context),
+            **_engine_generate_reasoning_kwargs(
+                self.engine_client,
+                reasoning_ended,
+                reasoning_parser_kwargs,
+            ),
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
@@ -744,6 +760,10 @@ class VllmLLMEngine(LLMEngine):
         if model_type != ModelType.Prefill:
             runtime_config.tool_call_parser = self._dyn_tool_call_parser
             runtime_config.reasoning_parser = self._dyn_reasoning_parser
+        if self._vllm_config is not None:
+            publish_vllm_reasoning_parser_runtime_data(
+                runtime_config, self._vllm_config
+            )
 
         # Carry the worker's DP-rank range and capacity metadata (the same
         # effective vLLM values the base-model MDC publishes via EngineConfig in

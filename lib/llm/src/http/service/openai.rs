@@ -1434,6 +1434,16 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
+        use dynamo_runtime::error::{BackendError, ErrorType};
+
+        let typed_status = event.error.as_ref().and_then(|error| {
+            matches!(
+                error.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+            .then_some(StatusCode::BAD_REQUEST)
+        });
+
         // Extract error string: prefer DynamoError field, fallback to legacy comment.
         // Use message() instead of to_string() for DynamoError to avoid prefixing
         // the ErrorType (e.g., "Unknown: {...}"), which would break JSON parsing.
@@ -1462,12 +1472,16 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             let code = error_payload
                 .code
                 .and_then(|c| StatusCode::from_u16(c).ok())
+                .or(typed_status)
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let message = error_payload.message.unwrap_or(error_str);
             return Some((message, code));
         }
 
-        return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
+        return Some((
+            error_str,
+            typed_status.unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        ));
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
@@ -4509,6 +4523,36 @@ mod tests {
                     .contains("Backend service unavailable")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_typed_invalid_argument() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("worker --reasoning-parser does not match frontend")
+                    .build(),
+            ),
+        };
+
+        let result = check_for_backend_error(stream::iter(vec![error_event])).await;
+
+        let error_response = match result {
+            Err(error_response) => error_response,
+            Ok(_) => panic!("typed invalid argument must fail"),
+        };
+        assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(error_response.1.message.contains("--reasoning-parser"));
     }
 
     #[tokio::test]

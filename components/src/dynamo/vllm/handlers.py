@@ -90,6 +90,7 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.capacity import publish_vllm_reasoning_parser_runtime_data
 from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
@@ -2205,6 +2206,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             )
                             runtime_config.reasoning_parser = (
                                 self.config.dyn_reasoning_parser
+                            )
+                            publish_vllm_reasoning_parser_runtime_data(
+                                runtime_config, self.engine_client.vllm_config
                             )
 
                             # Match the base-model registration topology (see

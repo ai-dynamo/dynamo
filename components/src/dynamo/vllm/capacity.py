@@ -9,6 +9,43 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+VLLM_REASONING_PARSER_RUNTIME_KEY = "vllm_reasoning_parser"
+
+
+def get_vllm_reasoning_parser(vllm_config: Any) -> str | None:
+    """Return the engine-level parser that gates vLLM structured output."""
+    structured_outputs_config = getattr(
+        vllm_config, "structured_outputs_config", None
+    )
+    reasoning_parser = getattr(structured_outputs_config, "reasoning_parser", None)
+    if not isinstance(reasoning_parser, str) or not reasoning_parser:
+        return None
+    return reasoning_parser
+
+
+def get_vllm_reasoning_parser_runtime_data(
+    vllm_config: Any,
+) -> dict[str, str] | None:
+    """Build engine metadata without conflating it with Dynamo postprocessing."""
+    reasoning_parser = get_vllm_reasoning_parser(vllm_config)
+    if reasoning_parser is None:
+        return None
+    return {VLLM_REASONING_PARSER_RUNTIME_KEY: reasoning_parser}
+
+
+def publish_vllm_reasoning_parser_runtime_data(
+    runtime_config: Any, vllm_config: Any
+) -> None:
+    """Publish the native parser on legacy ModelRuntimeConfig registrations."""
+    reasoning_parser = get_vllm_reasoning_parser(vllm_config)
+    if reasoning_parser is None:
+        return
+
+    # ModelRuntimeConfig parses this argument as JSON before storing it.
+    runtime_config.set_engine_specific(
+        VLLM_REASONING_PARSER_RUNTIME_KEY, json.dumps(reasoning_parser)
+    )
+
 
 def per_rank_kv_blocks(
     total_kv_blocks: int | None, data_parallel_size: int
