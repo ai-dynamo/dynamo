@@ -118,6 +118,7 @@ fn load_test_data(file_path: &str) -> TestData {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -1425,6 +1426,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             event: None,
             comment: None,
@@ -1910,6 +1912,114 @@ mod tests {
         assert!(
             validate_finish_reason(&output_chunks, FinishReason::Length),
             "finish_reason validation failed for recovered orphan DeepSeek V3.1 call"
+        );
+    }
+
+    // The jail moved to dynamo-parsers and operates on the shared
+    // `Create` payload, so the boundary adapter (apply_tool_calling_jail) must
+    // buffer the dynamo-only typed `llm_metrics` and re-attach it. This asserts
+    // the buffered chunk_tokens sum and latest output_tokens survive the jail on
+    // a tool-call stream (they'd all be None without the buffer/re-attach).
+    #[tokio::test]
+    async fn jail_preserves_llm_metrics_across_buffered_tool_call() {
+        use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
+        use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_protocols::types::{
+            ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
+            CreateChatCompletionStreamResponse, Role,
+        };
+        use dynamo_runtime::protocols::annotated::Annotated;
+        use futures::StreamExt;
+
+        fn chunk(
+            text: &str,
+            chunk_tokens: usize,
+            output_tokens: usize,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            #[allow(deprecated)]
+            let choice = ChatChoiceStream {
+                index: 0,
+                delta: ChatCompletionStreamResponseDelta {
+                    role: Some(Role::Assistant),
+                    content: Some(ChatCompletionMessageContent::Text(text.to_string())),
+                    tool_calls: None,
+                    function_call: None,
+                    refusal: None,
+                    reasoning_content: None,
+                },
+                finish_reason: None,
+                logprobs: None,
+            };
+            Annotated {
+                data: Some(NvCreateChatCompletionStreamResponse {
+                    inner: CreateChatCompletionStreamResponse {
+                        id: "id".to_string(),
+                        object: "chat.completion.chunk".to_string(),
+                        created: 0,
+                        model: "m".to_string(),
+                        choices: vec![choice],
+                        usage: None,
+                        service_tier: None,
+                        system_fingerprint: None,
+                    },
+                    nvext: None,
+                    llm_metrics: Some(LLMMetricAnnotation {
+                        input_tokens: 7,
+                        output_tokens,
+                        chunk_tokens,
+                        cached_tokens: None,
+                        prefill_worker_id: None,
+                        prefill_dp_rank: None,
+                        prefill_worker_type: None,
+                        decode_worker_id: None,
+                        decode_dp_rank: None,
+                        decode_worker_type: None,
+                        tokenize_latency: None,
+                        detokenize_total_latency: None,
+                        detokenize_count: None,
+                    }),
+                }),
+                id: None,
+                event: None,
+                comment: None,
+                error: None,
+            }
+        }
+
+        // Hermes tool call split across two metric-bearing chunks -> the jail
+        // buffers both, then emits one tool-call chunk.
+        let chunks = vec![
+            chunk("<tool_call>\n{\"name\": \"get_weather\", \"arg", 3, 3),
+            chunk("uments\": {\"location\": \"SF\"}}\n</tool_call>", 4, 7),
+        ];
+        let out: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("hermes".to_string()),
+            None,
+            None,
+            false,
+            Box::pin(futures::stream::iter(chunks)),
+        )
+        .collect()
+        .await;
+
+        let total_chunk_tokens: usize = out
+            .iter()
+            .filter_map(|a| a.data.as_ref().and_then(|d| d.llm_metrics.as_ref()))
+            .map(|m| m.chunk_tokens)
+            .sum();
+        assert_eq!(
+            total_chunk_tokens, 7,
+            "buffered chunk_tokens (3+4) must survive the jail; got {total_chunk_tokens}"
+        );
+        let max_osl = out
+            .iter()
+            .filter_map(|a| a.data.as_ref().and_then(|d| d.llm_metrics.as_ref()))
+            .map(|m| m.output_tokens)
+            .max();
+        assert_eq!(
+            max_osl,
+            Some(7),
+            "final cumulative output_tokens must survive the jail"
         );
     }
 }

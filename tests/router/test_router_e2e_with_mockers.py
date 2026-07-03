@@ -23,6 +23,7 @@ from tests.router.common import (
     _test_disagg_direct_mode,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
+    _test_distributed_session_affinity,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
@@ -58,6 +59,26 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = ROUTER_MODEL_NAME
 COUNTER_WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "counter_worker.py")
+
+
+@pytest.fixture(autouse=True)
+def _pin_nats_event_plane_for_mocker(request, monkeypatch):
+    """Pin the NATS event plane for etcd-backed mocker tests.
+
+    The mock engine publishes KV cache events instantly -- before the in-process
+    router's ZMQ subscription has connected (ZMQ slow-joiner) -- so on the (now
+    default) ZMQ event plane the router observes zero events and the routing
+    assertions fail. Real engines start slowly enough to avoid this, so the
+    vLLM/SGLang router e2e tests cover the ZMQ default; only the fast mocker needs
+    NATS here. file-backed variants keep the ZMQ default, and an explicitly set
+    DYN_EVENT_PLANE (e.g. via durable_kv_events) is left untouched.
+    """
+    callspec = getattr(request.node, "callspec", None)
+    store_backend = callspec.params.get("store_backend", "etcd") if callspec else "etcd"
+    if store_backend != "file" and not os.environ.get("DYN_EVENT_PLANE"):
+        monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
+    yield
+
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -116,10 +137,10 @@ _FAST_SPEEDUP = 100.0
 ROUTER_DISAGG_OVERLOAD_529_CASES = (
     pytest.param(
         {
-            # A single prefill worker is sufficient to verify
-            # overloaded -> no free prefill worker -> 529, and --enforce-disagg
-            # means the model only lists once the prefill router has activated,
-            # so frontend readiness already gates on prefill registration.
+            # A single prefill worker is sufficient to verify overloaded -> no
+            # free prefill worker -> 529. Registered worker types make the model
+            # list only after the prefill router activates, so frontend readiness
+            # already gates on prefill registration.
             "num_prefill": 1,
             "num_decode": 1,
             "max_tokens": 1,
@@ -467,6 +488,44 @@ def test_mocker_two_kv_router(
             num_requests=NUM_REQUESTS,
             store_backend=store_backend,
             skip_consumer_verification=not durable_kv_events,  # Skip JetStream checks in NATS Core mode
+        )
+
+
+@pytest.mark.parametrize("store_backend", ["etcd", "file"])
+@pytest.mark.timeout(180)
+def test_mocker_distributed_session_affinity(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    file_storage_backend,
+    store_backend,
+    monkeypatch,
+):
+    """Shared claims override conflicting KV-prefix routing on another frontend."""
+    current_log = os.environ.get("DYN_LOG", "info")
+    monkeypatch.setenv(
+        "DYN_LOG",
+        f"{current_log},dynamo_llm::session_affinity::coordinator=debug",
+    )
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "durable_kv_events": False,
+    }
+
+    with MockerProcess(
+        request,
+        mocker_args=mocker_args,
+        num_mockers=NUM_MOCKERS,
+        store_backend=store_backend,
+    ) as mockers:
+        _test_distributed_session_affinity(
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            router_ports=allocate_frontend_ports(request, 2),
+            test_payload=TEST_PAYLOAD,
+            store_backend=store_backend,
         )
 
 

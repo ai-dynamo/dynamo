@@ -77,10 +77,30 @@ generate_endpoint.serve_endpoint(
 
 | Component | Default Behavior | Rationale |
 |-----------|------------------|-----------|
-| **Frontend** | N/A (HTTP server) | HTTP server handles its own shutdown |
+| **Frontend** | HTTP draining | Stop admitting new requests while existing response bodies complete |
 | **Prefill Workers** | `graceful_shutdown=True` | Prefill operations must complete to avoid wasted computation |
 | **Decode Workers** | `graceful_shutdown=True` | Decode operations should complete to avoid wasted computation |
 | **Router** | `graceful_shutdown=True` | Ensure routing decisions complete |
+
+### Frontend HTTP Draining
+
+During frontend HTTP shutdown, Dynamo first marks the frontend as draining. While
+draining:
+
+- `/health` returns `503 Service Unavailable`, allowing Kubernetes or ingress
+  controllers to remove the frontend from ready endpoints.
+- `/live` continues to return `200 OK` so liveness checks do not restart the
+  frontend while admitted responses are still draining.
+- New OpenAI-compatible requests are rejected with `503 Service Unavailable`.
+- Requests that have already been admitted continue until their response body
+  completes, including streaming responses.
+- Accepted `/v1/realtime` WebSocket sessions remain tracked until the WebSocket
+  task exits, even though the HTTP upgrade response has already completed.
+
+The frontend waits for admitted inference requests to finish until
+`DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires. The default timeout is 5
+seconds. After the timeout, the frontend enters stopping and cancels runtime
+state.
 
 ### Migration Integration
 
@@ -182,12 +202,13 @@ async def _initiate_shutdown(self, error: Exception):
 
 1. Kubernetes sends `SIGTERM` to the pod
 2. Dynamo initiates graceful shutdown
-3. Pod has `terminationGracePeriodSeconds` to complete (default: 30s)
+3. Dynamo operator-created pods have `terminationGracePeriodSeconds` to complete (default: 60s)
 4. If not terminated, Kubernetes sends `SIGKILL`
 
-### Recommended Configuration
+### Customize the termination grace period
 
-For production deployments, configure adequate termination grace period:
+Set `terminationGracePeriodSeconds` based on your workloads and utilization. For example, use 180 seconds to allow
+more time for request draining:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -196,7 +217,7 @@ spec:
   services:
     VllmWorker:
       extraPodSpec:
-        terminationGracePeriodSeconds: 60  # Allow time for request draining
+        terminationGracePeriodSeconds: 180  # Allow time for request draining
 ```
 
 ### Health Check Integration
@@ -211,9 +232,9 @@ Kubernetes uses health endpoints to determine pod readiness:
 
 ### 1. Set Appropriate Grace Periods
 
-Match `terminationGracePeriodSeconds` to your expected request completion time:
+Match `terminationGracePeriodSeconds` to your expected request completion time and utilization:
 - Short requests (\< 10s): 30s grace period
-- Long generation (> 30s): 120s+ grace period
+- Long generation (> 30s) or high utilization: 120s+ grace period
 
 ### 2. Enable Request Migration
 

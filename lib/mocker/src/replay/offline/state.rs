@@ -14,8 +14,6 @@ use crate::scheduler::{
     EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandEffects,
     SchedulerCommandResult, SchedulerLifecycleEvent,
 };
-#[cfg(feature = "kvbm-offload")]
-use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -468,6 +466,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1; 8],
                 max_output_tokens: 12,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(1)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),

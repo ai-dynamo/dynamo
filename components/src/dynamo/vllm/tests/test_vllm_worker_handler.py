@@ -1419,6 +1419,99 @@ class TestEmbeddingWorkerHandlerCancellation:
         # cancel-and-await pass must not have touched the engine.
         assert aborted == []
 
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_dimensions_forwarded_to_pooling_params(self):
+        """``dimensions`` is forwarded to vLLM via ``PoolingParams`` rather
+        than applied as post-hoc truncation in the handler.
+
+        vLLM's pooler then does the Matryoshka reduction (truncate +
+        re-normalize) and validates that the model supports it. The handler
+        must NOT slice the returned vector itself, so it emits exactly what
+        the engine produced.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: dict = {}
+        # vLLM's pooler has already reduced to the requested ``dimensions``, so
+        # the stub returns a 128-dim vector (not 3) -- otherwise the handler's
+        # oversized-dimensions guard would (correctly) reject it.
+        vec = [i * 0.01 for i in range(128)]
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured["pooling_params"] = pooling_params
+            output = MagicMock()
+            output.outputs.data = torch.tensor(vec)
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["hello"], "model": "test-model", "dimensions": 128}
+        responses = [r async for r in handler.generate(request, context)]
+
+        pp = captured["pooling_params"]
+        assert pp.task == "embed"
+        assert pp.dimensions == 128
+        # No post-hoc truncation: the handler returns exactly the vector vLLM
+        # produced (the 128-float stub here), trusting the pooler to have
+        # already applied the dimensionality reduction.
+        expected_b64 = mod._encode_floats_to_base64(vec)
+        assert responses[0]["data"][0]["embedding"] == expected_b64
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_no_dimensions_omits_pooling_dimensions(self):
+        """Without ``dimensions`` the handler requests ``task="embed"`` only,
+        leaving ``PoolingParams.dimensions`` unset so vLLM returns the model's
+        native embedding size.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: dict = {}
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured["pooling_params"] = pooling_params
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["hello"], "model": "test-model"}
+        _ = [r async for r in handler.generate(request, context)]
+
+        pp = captured["pooling_params"]
+        assert pp.task == "embed"
+        assert pp.dimensions is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_oversized_dimensions_raises(self):
+        """When vLLM silently clamps an oversized ``dimensions`` request (a
+        model enabled via ``--hf-overrides '{"is_matryoshka": true}'`` with no
+        ``matryoshka_dimensions`` list), the handler raises a clear error
+        instead of returning a shorter-than-requested vector.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            # vLLM clamped to the model's native size (3 dims here) even though
+            # 2048 was requested.
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": ["hello"], "model": "test-model", "dimensions": 2048}
+        with pytest.raises(ValueError, match="exceeds model embedding dimension"):
+            async for _ in handler.generate(request, context):
+                pass
+
 
 class TestPadMmHashesTo64:
     """The frontend forwards canonical 16-char hex mm_hashes; vLLM must pad
@@ -1457,6 +1550,73 @@ class TestRLAdminRouteHardening:
                 resp = await fn(body)
                 assert resp["status"] == "error", (fn.__name__, body, resp)
                 assert "JSON object" in resp["message"]
+
+    @pytest.mark.asyncio
+    async def test_distributed_update_can_match_async_rl_semantics(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        resp = await handler.update_weights_from_distributed(
+            {
+                "allow_unpaused": True,
+                "reset_prefix_cache": False,
+                "engine_rpc": "update_weights",
+                "weight_version": 7,
+                "update_info": {"names": ["weight"]},
+            }
+        )
+
+        assert resp == {"status": "ok", "version": 7}
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "update_weights",
+            kwargs={"update_info": {"names": ["weight"]}},
+        )
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_distributed_update_rejects_unpaused_cache_reset(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        resp = await handler.update_weights_from_distributed(
+            {"allow_unpaused": True, "engine_rpc": "update_weights"}
+        )
+
+        assert resp["status"] == "error"
+        assert "cannot reset the prefix cache" in resp["message"]
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_distributed_update_preserves_safe_defaults(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        handler._paused = False
+        resp = await handler.update_weights_from_distributed({})
+        assert resp["status"] == "error"
+        handler.engine_client.collective_rpc.assert_not_awaited()
+
+        handler._paused = True
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "finish_weight_update"}
+        )
+        assert resp["status"] == "ok"
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "finish_weight_update", kwargs={}
+        )
+        handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_abort_request_surfaces_deferred_abort_failure(self):

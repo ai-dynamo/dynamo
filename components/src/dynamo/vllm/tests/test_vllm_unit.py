@@ -9,6 +9,7 @@ import re
 import socket
 import sys
 import warnings
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -27,6 +28,7 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -281,8 +283,6 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
     config = parse_args()
     assert config.headless is True
 
-    from dynamo.vllm.main import build_headless_namespace
-
     ns = build_headless_namespace(config)
 
     # Required by run_headless()
@@ -344,6 +344,7 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         served_model_name="Qwen/Qwen3-0.6B",
         model="Qwen/Qwen3-0.6B",
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
+        headless=False,
         component="backend",
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
@@ -1215,3 +1216,69 @@ class TestEmbeddingWorkerFlag:
             ValueError, match="--embedding-worker cannot be combined with multimodal"
         ):
             parse_args()
+
+
+def test_build_sampling_params_openai_maps_max_thinking_tokens():
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = {
+        "model": "test-model",
+        "prompt": "Solve: 1+1.",
+        "max_tokens": 32,
+        "nvext": {"max_thinking_tokens": 1024},
+    }
+    sp = build_sampling_params_openai(request, default_sampling_params={})
+    assert sp.thinking_token_budget == 1024
+
+
+@pytest.mark.asyncio
+async def test_generate_text_mode_applies_nvext_cache_salt():
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    captured = {}
+
+    class InputParams:
+        def get_input_param(self, request, use_tokenizer):
+            assert use_tokenizer is True
+            return [1, 2, 3]
+
+    class EngineClient:
+        def generate(self, prompt, *args, **kwargs):
+            captured["prompt"] = prompt
+
+            async def gen():
+                output = SimpleNamespace(index=0, text="ok", finish_reason=None)
+                yield SimpleNamespace(outputs=[output])
+
+            return gen()
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    handler = SimpleNamespace(
+        input_param_manager=InputParams(),
+        default_sampling_params={},
+        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
+        engine_client=EngineClient(),
+        _deferred_aborts={},
+        _shutdown_on_engine_dead=lambda exc: None,
+        _abort_monitor=abort_monitor,
+        _to_local_dp_rank=lambda rank: None,
+    )
+    context = SimpleNamespace(trace_headers=lambda: {})
+    request = {
+        "model": "test-model",
+        "prompt": "ignored after tokenization",
+        "nvext": {"cache_salt": "tenant-a"},
+    }
+
+    chunks = [
+        chunk
+        async for chunk in DecodeWorkerHandler._generate_text_mode(
+            handler, request, context, "req-1"
+        )
+    ]
+
+    assert chunks
+    assert captured["prompt"]["cache_salt"] == "tenant-a"

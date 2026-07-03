@@ -116,6 +116,70 @@ jobs:
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
 
+# ============================================================================
+# Power Agent
+# ============================================================================
+
+  power-agent:
+    name: Power Agent
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push power agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: power-agent
+          target: runtime  # push the slim shipped stage, not the test stage
+          image_tag: ${{ github.sha }}-power-agent
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-power-agent
+      - name: Refresh BuildKit builder
+        # The runtime build above can leave the remote BuildKit connection stale;
+        # re-establish it (re-routing only if unhealthy) before the test build.
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          flavor: general
+          arch: linux/amd64
+      - name: Run unit tests inside the container image
+        # Build the Dockerfile `test` stage (FROM runtime): its RUN pytest runs
+        # the suite against the exact shipped image (Python 3.12 + baked deps),
+        # validating the container itself rather than a pip-installed runner env.
+        # Reuses the builder + ECR Docker Hub mirror the build step set up above
+        # (runtime layers are a cache hit); no --push/--load runs pytest without
+        # exporting the never-shipped test image.
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker buildx build --builder b-${{ github.run_id }}-${{ github.run_attempt }} \
+            --target test \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            -f deploy/power-agent/Dockerfile deploy/power-agent
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
+        with:
+          version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
+      - name: Lint and render (production + dev)
+        run: |
+          CHART=deploy/helm/charts/power-agent
+          helm lint "$CHART" --set image.tag=ci-test
+          # Production DaemonSet render (default daemonset.enabled=true).
+          helm template power-agent "$CHART" --set image.tag=ci-test >/dev/null
+          # Dev-pod render: uses dev.image.* and must NOT require the production
+          # image.tag (regression guard for the daemonset-gated validation).
+          helm template power-agent "$CHART" \
+            --set daemonset.enabled=false \
+            --set dev.enabled=true \
+            --set dev.nodeName=ci-node >/dev/null
+
   # ============================================================================
   # BUILD JOBS
   # ============================================================================
@@ -383,6 +447,30 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       run_gpu_tests: false
+    secrets: inherit
+
+  vllm-kvbm-tests:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [config, vllm-build]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: post-merge
+      test_suite_name: kvbm
+      test_type: KVBM Test
+      # KVBM post-merge coverage currently targets the aws-dev-02 H100 cluster.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      container_workspace: /workspace
+      kvbm_mla_backend: FLASH_ATTN_MLA
+      run_cpu_only_tests: false
+      run_gpu_tests: true
+      gpu_test_markers: post_merge and h100 and kvbm and gpu_1 and (kvbm_consolidator or kvbm_determinism)
+      # Observed runtime is about 50 minutes when run sequentially:
+      # consolidator ~9m, cache reset ~13m, concurrency ~27m.
+      gpu_test_timeout_minutes: 120
     secrets: inherit
 
   sglang-test:
@@ -1162,7 +1250,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-agent, snapshot-placeholder-vllm, snapshot-placeholder-sglang, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-agent, snapshot-placeholder-vllm, snapshot-placeholder-sglang, power-agent, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
