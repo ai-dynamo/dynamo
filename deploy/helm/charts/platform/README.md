@@ -100,7 +100,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | file://components/operator | dynamo-operator | 1.3.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.9 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.10 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
 
 ## Values
@@ -219,7 +219,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 |-----------------|---------------|-------|
 | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
-| 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.9 |
+| 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
 
 After installing them separately, enable Dynamo integration:
 

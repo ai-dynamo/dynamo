@@ -155,7 +155,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > |-----------------|---------------|-------|
 > | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
-> | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.9 |
+> | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
 
 #### LWS + Volcano
 
