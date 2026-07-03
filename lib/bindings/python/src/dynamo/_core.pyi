@@ -1264,6 +1264,19 @@ class FpmEventSubscriber:
         """
         ...
 
+    def recv_envelope(self) -> Optional[tuple[int, int, int, bytes]]:
+        """
+        Blocking receive of the next message with event-plane metadata.
+
+        This shares recv mode with ``recv()`` and releases the GIL while
+        waiting. It cannot be used after ``start_tracking()``.
+
+        Returns:
+            ``(publisher_id, sequence, published_at_ms, payload)`` or None
+            if the stream is closed.
+        """
+        ...
+
     def start_tracking(self) -> None:
         """
         Start background tracking of the latest FPM per (worker_id, dp_rank).

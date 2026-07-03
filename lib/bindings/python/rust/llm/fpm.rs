@@ -422,7 +422,9 @@ pub(crate) struct FpmEventSubscriber {
 
     // recv mode state (lazily initialised on first recv() call)
     recv_started: Arc<AtomicBool>,
-    rx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>>,
+    rx: Arc<
+        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ReceivedFpmEvent>>>,
+    >,
 
     // tracking mode state
     tracking_started: Arc<AtomicBool>,
@@ -436,6 +438,101 @@ pub(crate) struct FpmEventSubscriber {
     // construct WorkerInfo from the same MDC stream the liveness watch
     // uses, without the subscriber having to interpret card fields itself.
     worker_model_cards: Arc<DashMap<String, String>>,
+}
+
+struct ReceivedFpmEvent {
+    publisher_id: u64,
+    sequence: u64,
+    published_at: u64,
+    payload: Vec<u8>,
+}
+
+impl FpmEventSubscriber {
+    fn ensure_recv_started(&self) -> PyResult<()> {
+        if self.tracking_started.load(Ordering::SeqCst) {
+            return Err(PyRuntimeError::new_err(
+                "Cannot receive events after start_tracking()",
+            ));
+        }
+
+        if self.recv_started.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let component = self.component.clone();
+        let cancel = self.cancel.clone();
+        let (tx, rx_new) = tokio::sync::mpsc::unbounded_channel::<ReceivedFpmEvent>();
+
+        {
+            let mut guard = self.rx.lock().map_err(|e| to_pyerr(format!("{e}")))?;
+            *guard = Some(rx_new);
+        }
+
+        let rt = component.drt().runtime().secondary();
+        rt.spawn(async move {
+            let mut subscriber =
+                match EventSubscriber::for_component(&component, FPM_TOPIC).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("FPM subscriber (recv): failed to create: {e}");
+                        return;
+                    }
+                };
+
+            tracing::info!("FPM subscriber (recv): listening for forward-pass-metrics events");
+
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        tracing::info!("FPM subscriber (recv): shutting down");
+                        break;
+                    }
+                    event = subscriber.next() => {
+                        match event {
+                            Some(Ok(envelope)) => {
+                                let received = ReceivedFpmEvent {
+                                    publisher_id: envelope.publisher_id,
+                                    sequence: envelope.sequence,
+                                    published_at: envelope.published_at,
+                                    payload: envelope.payload.to_vec(),
+                                };
+                                if tx.send(received).is_err() {
+                                    tracing::info!(
+                                        "FPM subscriber (recv): receiver dropped, exiting"
+                                    );
+                                    break;
+                                }
+                            }
+                            Some(Err(e)) => {
+                                tracing::warn!("FPM subscriber (recv): event error: {e}");
+                            }
+                            None => {
+                                tracing::info!("FPM subscriber (recv): stream ended");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    fn blocking_recv_event(&self, py: Python) -> PyResult<Option<ReceivedFpmEvent>> {
+        self.ensure_recv_started()?;
+        let rx = self.rx.clone();
+        py.allow_threads(move || {
+            let mut guard = rx
+                .lock()
+                .map_err(|e| to_pyerr(format!("lock poisoned: {e}")))?;
+            match guard.as_mut() {
+                Some(rx) => Ok(rx.blocking_recv()),
+                None => Ok(None),
+            }
+        })
+    }
 }
 
 #[pymethods]
@@ -469,77 +566,23 @@ impl FpmEventSubscriber {
     ///
     /// Returns the raw msgspec payload, or None if the stream is closed.
     fn recv(&self, py: Python) -> PyResult<Option<Vec<u8>>> {
-        if self.tracking_started.load(Ordering::SeqCst) {
-            return Err(PyRuntimeError::new_err(
-                "Cannot call recv() after start_tracking()",
-            ));
-        }
+        Ok(self.blocking_recv_event(py)?.map(|event| event.payload))
+    }
 
-        // Lazily start the recv-mode subscriber task on the first call.
-        if !self.recv_started.swap(true, Ordering::SeqCst) {
-            let component = self.component.clone();
-            let cancel = self.cancel.clone();
-            let (tx, rx_new) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-
-            {
-                let mut guard = self.rx.lock().map_err(|e| to_pyerr(format!("{e}")))?;
-                *guard = Some(rx_new);
-            }
-
-            let rt = component.drt().runtime().secondary();
-            rt.spawn(async move {
-                let mut subscriber =
-                    match EventSubscriber::for_component(&component, FPM_TOPIC).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::error!("FPM subscriber (recv): failed to create: {e}");
-                            return;
-                        }
-                    };
-
-                tracing::info!("FPM subscriber (recv): listening for forward-pass-metrics events");
-
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel.cancelled() => {
-                            tracing::info!("FPM subscriber (recv): shutting down");
-                            break;
-                        }
-                        event = subscriber.next() => {
-                            match event {
-                                Some(Ok(envelope)) => {
-                                    if tx.send(envelope.payload.to_vec()).is_err() {
-                                        tracing::info!(
-                                            "FPM subscriber (recv): receiver dropped, exiting"
-                                        );
-                                        break;
-                                    }
-                                }
-                                Some(Err(e)) => {
-                                    tracing::warn!("FPM subscriber (recv): event error: {e}");
-                                }
-                                None => {
-                                    tracing::info!("FPM subscriber (recv): stream ended");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        let rx = self.rx.clone();
-        py.allow_threads(move || {
-            let mut guard = rx
-                .lock()
-                .map_err(|e| to_pyerr(format!("lock poisoned: {e}")))?;
-            match guard.as_mut() {
-                Some(rx) => Ok(rx.blocking_recv()),
-                None => Ok(None),
-            }
-        })
+    /// Blocking receive of the next message with its event-plane envelope metadata.
+    ///
+    /// Returns `(publisher_id, sequence, published_at_ms, payload)` or `None` if
+    /// the stream is closed.  This shares recv mode with `recv()`; callers may use
+    /// either method, but neither can be used after `start_tracking()`.
+    fn recv_envelope(&self, py: Python) -> PyResult<Option<(u64, u64, u64, Vec<u8>)>> {
+        Ok(self.blocking_recv_event(py)?.map(|event| {
+            (
+                event.publisher_id,
+                event.sequence,
+                event.published_at,
+                event.payload,
+            )
+        }))
     }
 
     /// Start background tracking of the latest FPM per `(worker_id, dp_rank)`.
