@@ -90,7 +90,6 @@ use tracing_subscriber::layer::SubscriberExt;
 use std::time::Duration;
 use tracing::{info, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::environment_names::logging as env_logging;
 
@@ -293,6 +292,45 @@ fn span_events_for_logging() -> FmtSpan {
     } else {
         FmtSpan::NONE
     }
+}
+
+/// Install `subscriber` as the process-global default, returning whether the
+/// install happened.
+///
+/// Mirrors `SubscriberInitExt::try_init` but distinguishes its two failure
+/// modes, which have opposite outcomes:
+///
+/// - the global dispatcher is already set (e.g. a host application in an
+///   embedded context) → the subscriber was NOT installed → returns `false`
+///   so callers can skip dependent side effects;
+/// - the dispatcher install succeeded but a `log`-crate logger already exists
+///   (e.g. a scoped `set_default` elsewhere installed `LogTracer`, the
+///   original double-init trigger) → the subscriber IS live, only the
+///   `log` bridge couldn't be re-registered → warns and returns `true`.
+///
+/// `try_init` collapses both into `Err`. Failures are reported via
+/// `tracing::warn!` rather than stderr: on every failure path a live
+/// dispatcher exists (ours or a pre-existing one) to route the event, and
+/// stderr would bypass JSONL formatting.
+fn install_global_subscriber(subscriber: impl Into<tracing::Dispatch>) -> bool {
+    if let Err(e) = tracing::dispatcher::set_global_default(subscriber.into()) {
+        tracing::warn!(
+            "dynamo logging: global tracing subscriber already set, skipping install: {e}"
+        );
+        return false;
+    }
+    // The dispatcher is ours from here. Bridge `log` records into `tracing`
+    // as `try_init` would, propagating the max-level hint so disabled `log`
+    // records are skipped cheaply.
+    if let Err(e) = tracing_log::LogTracer::builder()
+        .with_max_level(tracing_log::AsLog::as_log(
+            &tracing::level_filters::LevelFilter::current(),
+        ))
+        .init()
+    {
+        tracing::warn!("dynamo logging: `log` logger already registered, leaving it in place: {e}");
+    }
+    true
 }
 
 fn log_otel_init_status(service_name: &str, endpoint_opt: Option<(OtlpProtocol, String)>) {
@@ -1232,10 +1270,25 @@ pub fn init() {
 
 #[cfg(feature = "tokio-console")]
 fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
-    let tokio_console_layer = console_subscriber::ConsoleLayer::builder()
+    // Build the console layer and server separately (rather than
+    // `Builder::spawn()`, which starts the server immediately) so the server
+    // only starts if our subscriber actually installs. Otherwise a lost init
+    // race would leave a console server thread listening with no layer
+    // feeding it.
+    let (console_layer, console_server) = console_subscriber::ConsoleLayer::builder()
         .with_default_env()
         .server_addr(([0, 0, 0, 0], console_subscriber::Server::DEFAULT_PORT))
-        .spawn();
+        .build();
+    // Replicates the filter `Builder::spawn()` applies to the layer: only
+    // tokio/runtime instrumentation reaches the console layer.
+    fn console_filter(meta: &tracing::Metadata<'_>) -> bool {
+        if meta.is_event() {
+            return meta.target().starts_with("runtime") || meta.target().starts_with("tokio");
+        }
+        meta.name().starts_with("runtime.") || meta.target().starts_with("tokio")
+    }
+    let tokio_console_layer =
+        console_layer.with_filter(tracing_subscriber::filter::FilterFn::new(console_filter));
     let tokio_console_target = tracing_subscriber::filter::Targets::new()
         .with_default(LevelFilter::ERROR)
         .with_target("runtime", LevelFilter::TRACE)
@@ -1245,13 +1298,31 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
         .with_writer(std::io::stderr)
         .with_filter(filters(load_config()));
-    tracing_subscriber::registry()
-        .with(l)
-        .with(tokio_console_layer.with_filter(tokio_console_target))
-        .try_init()
-        .unwrap_or_else(|e| {
-            eprintln!("dynamo logging: subscriber already initialized, skipping install: {e}")
-        });
+    let installed = install_global_subscriber(
+        tracing_subscriber::registry()
+            .with(l)
+            .with(tokio_console_layer.with_filter(tokio_console_target)),
+    );
+    if installed {
+        // What `Builder::spawn()` does, deferred until the subscriber is
+        // ours: serve on a dedicated single-threaded runtime, with tracing
+        // disabled on that thread so the server does not instrument itself.
+        std::thread::Builder::new()
+            .name("console_subscriber".into())
+            .spawn(move || {
+                let _subscriber_guard =
+                    tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .enable_time()
+                    .build()
+                    .expect("console subscriber runtime initialization failed");
+                runtime
+                    .block_on(console_server.serve())
+                    .expect("console subscriber server failed");
+            })
+            .expect("console subscriber could not spawn thread");
+    }
     Ok(())
 }
 
@@ -1352,14 +1423,6 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             (provider, None, None)
         };
 
-        // Register the provider globally so direct OTel API users
-        // (`opentelemetry::global::tracer(...)`) hit the same exporter as
-        // the tracing-opentelemetry bridge below. Without this, ad-hoc
-        // OTel spans created via `global::tracer()` go to the default
-        // no-op provider and are silently dropped.
-        // Cheap — `SdkTracerProvider` is Arc-shared internally.
-        opentelemetry::global::set_tracer_provider(tracer_provider.clone());
-
         let tracer = tracer_provider.tracer(service_name.to_string());
         let otel_logs_layer = logger_provider_opt
             .as_ref()
@@ -1367,42 +1430,51 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
 
         macro_rules! init_otel_subscriber {
             ($fmt_layer:expr) => {
-                tracing_subscriber::registry()
-                    .with(
-                        tracing_opentelemetry::layer()
-                            .with_tracer(tracer)
-                            .with_filter(otel_filter_layer),
-                    )
-                    .with(otel_logs_layer)
-                    .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
-                    .with($fmt_layer)
-                    .try_init()
-                    .unwrap_or_else(|e| {
-                        eprintln!(
-                            "dynamo logging: subscriber already initialized, skipping install: {e}"
+                install_global_subscriber(
+                    tracing_subscriber::registry()
+                        .with(
+                            tracing_opentelemetry::layer()
+                                .with_tracer(tracer)
+                                .with_filter(otel_filter_layer),
                         )
-                    });
+                        .with(otel_logs_layer)
+                        .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
+                        .with($fmt_layer),
+                )
             };
         }
 
-        if jsonl_enabled {
+        let installed = if jsonl_enabled {
             let l = fmt::layer()
                 .with_ansi(false)
                 .with_span_events(span_events_for_logging())
                 .event_format(CustomJsonFormatter::new())
                 .with_writer(std::io::stderr)
                 .with_filter(fmt_filter_layer);
-            init_otel_subscriber!(l);
+            init_otel_subscriber!(l)
         } else {
             let l = fmt::layer()
                 .with_ansi(!disable_ansi_logging())
                 .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
                 .with_writer(std::io::stderr)
                 .with_filter(fmt_filter_layer);
-            init_otel_subscriber!(l);
-        }
+            init_otel_subscriber!(l)
+        };
 
-        log_otel_init_status(&service_name, endpoint_opt);
+        // Register the provider globally so direct OTel API users
+        // (`opentelemetry::global::tracer(...)`) hit the same exporter as
+        // the tracing-opentelemetry bridge above. Without this, ad-hoc
+        // OTel spans created via `global::tracer()` go to the default
+        // no-op provider and are silently dropped.
+        // Cheap — `SdkTracerProvider` is Arc-shared internally.
+        // Gated on the install: if we lost the init race, swapping the
+        // global provider would orphan its batch-exporter threads and
+        // clobber a host application's provider; left unregistered, the
+        // provider shuts its exporters down on drop.
+        if installed {
+            opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+            log_otel_init_status(&service_name, endpoint_opt);
+        }
     } else {
         let l = fmt::layer()
             .with_ansi(!disable_ansi_logging())
@@ -1410,12 +1482,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
 
-        tracing_subscriber::registry()
-            .with(l)
-            .try_init()
-            .unwrap_or_else(|e| {
-                eprintln!("dynamo logging: subscriber already initialized, skipping install: {e}")
-            });
+        install_global_subscriber(tracing_subscriber::registry().with(l));
     }
 
     Ok(())
@@ -2129,9 +2196,12 @@ pub mod tests {
 
     #[test]
     fn inject_trace_headers_preserves_current_span_flags() {
-        let _guard = tracing_subscriber::registry()
-            .with(DistributedTraceIdLayer)
-            .set_default();
+        // The free function scopes only the dispatcher; the trait method
+        // `SubscriberInitExt::set_default` would also permanently install the
+        // global `LogTracer`, leaking state into later tests.
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(DistributedTraceIdLayer),
+        );
         let span = tracing::info_span!(
             "root",
             trace_id = "11111111111111111111111111111111",
@@ -2151,9 +2221,12 @@ pub mod tests {
 
     #[test]
     fn request_span_preserves_inbound_trace_flags() {
-        let _guard = tracing_subscriber::registry()
-            .with(DistributedTraceIdLayer)
-            .set_default();
+        // The free function scopes only the dispatcher; the trait method
+        // `SubscriberInitExt::set_default` would also permanently install the
+        // global `LogTracer`, leaking state into later tests.
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(DistributedTraceIdLayer),
+        );
         let req = Request::builder()
             .header(
                 "traceparent",
@@ -2186,10 +2259,11 @@ pub mod tests {
             .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOff)
             .build();
         let tracer = provider.tracer("test");
-        let _guard = tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(tracer))
-            .with(DistributedTraceIdLayer)
-            .set_default();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .with(DistributedTraceIdLayer),
+        );
         let span = tracing::info_span!("root");
         let _enter = span.enter();
         let mut headers = std::collections::HashMap::new();
@@ -2211,10 +2285,11 @@ pub mod tests {
             .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
             .build();
         let tracer = provider.tracer("test");
-        let _guard = tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(tracer))
-            .with(DistributedTraceIdLayer)
-            .set_default();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(tracer))
+                .with(DistributedTraceIdLayer),
+        );
         let span = tracing::info_span!("root");
         let _enter = span.enter();
         let mut headers = std::collections::HashMap::new();

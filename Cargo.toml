@@ -150,6 +150,7 @@ tracing-subscriber = { version = "0.3", features = [
     "local-time",
     "json",
 ] }
+tracing-log = { version = "0.2" }
 tracing-opentelemetry = { version = "0.32.0" }
 opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["trace", "logs", "rt-tokio"] }
