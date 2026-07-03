@@ -16,7 +16,7 @@ Tail logs:
 
 Check Prometheus metrics (port {{ .Values.agent.prometheusPort }} on each pod):
 
-  - dynamo_power_agent_applied_limit_watts{gpu="N"}             # current live power limit per GPU (watts)
+  - dynamo_power_agent_applied_limit_watts{gpu="N"}             # last applied/observed limit per GPU index (watts; stale DCGM index series can linger after re-enumeration)
   - dynamo_power_agent_multi_pod_gpu_total{disposition=...}      # multi-pod conflict counts
   - dynamo_power_agent_safe_default_applied_total                # safe-default fallbacks
   - dynamo_power_agent_apply_failures_total                      # actuator write failures (cap NOT live)

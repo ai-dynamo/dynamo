@@ -472,6 +472,58 @@ class TestDeviceCount(unittest.TestCase):
         self.assertEqual(actuator.device_count(), 0)
 
 
+class TestDeviceCountRediscoversEmptyTopology(unittest.TestCase):
+    """A transiently-empty startup topology must SELF-HEAL without a restart.
+
+    `_discovered_gpu_ids` is refreshed only by init()/reconnect, and reconnect
+    fires only on a CONNECTION_NOT_VALID raised by a real hostengine call. With
+    zero cached GPUs the reconcile loop iterates range(0), issues no hostengine
+    call, so nothing ever triggers a rediscovery — an agent that connected
+    before the hostengine finished enumerating GPUs would loop forever enforcing
+    no caps. device_count() must re-probe discovery when the cache is empty so
+    GPUs appearing after startup are picked up on the next cycle.
+    """
+
+    def test_device_count_reprobes_and_recovers_when_empty(self):
+        # Startup race: init() ran before any GPU was enumerated.
+        actuator, modules, handle, _ = _make_initialized_actuator(gpu_ids=())
+        self.assertEqual(actuator._discovered_gpu_ids, [])
+        discovery = handle.GetSystem.return_value.discovery
+        # GPUs enumerate afterward; the very next device_count() must find them.
+        discovery.GetAllGpuIds.return_value = [10, 20]
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            recovered = actuator.device_count()
+
+        self.assertEqual(recovered, 2)
+        self.assertEqual(actuator._discovered_gpu_ids, [10, 20])
+
+    def test_device_count_non_empty_does_not_reprobe(self):
+        actuator, modules, handle, _ = _make_initialized_actuator(gpu_ids=(0, 1))
+        discovery = handle.GetSystem.return_value.discovery
+        discovery.GetAllGpuIds.reset_mock()
+
+        self.assertEqual(actuator.device_count(), 2)
+        # A populated cache is authoritative — no extra discovery RPC.
+        discovery.GetAllGpuIds.assert_not_called()
+
+    def test_device_count_reprobe_failure_keeps_last_known(self):
+        """A sustained outage during the re-probe must not raise or wipe the
+        cache: device_count stays at the last-known value (0 here) and the
+        reconcile cycle proceeds."""
+        actuator, modules, handle, _ = _make_initialized_actuator(gpu_ids=())
+        DCGMError = modules["dcgm_structs"].DCGMError
+        CONNECTION_NOT_VALID = modules["dcgm_structs"].DCGM_ST_CONNECTION_NOT_VALID
+        discovery = handle.GetSystem.return_value.discovery
+        discovery.GetAllGpuIds.side_effect = DCGMError(CONNECTION_NOT_VALID)
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            # init() is a no-op so the reconnect retry re-raises → best-effort swallow.
+            with patch.object(actuator, "init", side_effect=lambda: None):
+                self.assertEqual(actuator.device_count(), 0)
+        self.assertEqual(actuator._discovered_gpu_ids, [])
+
+
 class TestGetUuid(unittest.TestCase):
     """get_uuid MUST use the synchronous device-info API.
 
@@ -968,6 +1020,32 @@ class TestConstraintsW(unittest.TestCase):
 
         self.assertIn("blank DCGM power limit minPowerLimit", str(ctx.exception))
 
+    def test_constraints_w_rejects_blank_power_limits_without_dcgmvalue(self):
+        """Blank detection must not depend on importing dcgmvalue.
+
+        The GetGpuAttributes path can surface numeric blank/not-found sentinels
+        as finite positive numbers; if dcgmvalue is unavailable or changes
+        shape, those must still fail closed instead of becoming fake watt caps.
+        """
+        modules = _make_dcgm_modules()
+        actuator, modules, handle, _ = _make_initialized_actuator(modules=modules)
+        discovery = handle.GetSystem.return_value.discovery
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            b"GPU-x", min_w=0x7FFFFFF1, max_w=700
+        )
+        modules_without_dcgmvalue = {
+            name: module for name, module in modules.items() if name != "dcgmvalue"
+        }
+
+        with patch.dict(
+            "sys.modules",
+            {**modules_without_dcgmvalue, "dcgmvalue": None, "pynvml": MagicMock()},
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                actuator.constraints_w(0)
+
+        self.assertIn("blank DCGM power limit minPowerLimit", str(ctx.exception))
+
 
 class TestCurrentWAndDefaultW(unittest.TestCase):
     """current_w / default_w read `powerLimits.curPowerLimit` /
@@ -1296,6 +1374,56 @@ class TestApplyCap(unittest.TestCase):
         self.assertEqual(actuator.managed_uuids(), set())
         self.assertNotIn(0, actuator._managed_uuid_by_idx)
         self.assertNotIn(0, power_agent._managed_gpu_indices)
+
+    def test_apply_cap_absorbs_constraints_read_dcgm_error(self):
+        """A DCGMError from the pre-write constraints read (surviving the
+        read's own reconnect) is ABSORBED into apply_failures_total and the
+        requested watts returned unclamped — no Set, nothing tracked. Without
+        this the error escaped to reconcile_once's generic guard, so the failed
+        apply never ticked apply_failures_total despite the method documenting
+        it does.
+        """
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        DCGMError = modules["dcgm_structs"].DCGMError
+        GENERIC_ERROR = modules["dcgm_structs"].DCGM_ST_GENERIC_ERROR
+
+        with patch.object(
+            actuator, "_power_limits_with_uuid", side_effect=DCGMError(GENERIC_ERROR)
+        ):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
+
+        self.assertEqual(result, 300)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        metrics.apply_failures_total.inc.assert_called_once()
+        self.assertEqual(actuator.managed_uuids(), set())
+
+    def test_apply_cap_propagates_constraints_coercion_error(self):
+        """A blank/garbage power-limit VALUE (RuntimeError from coercion) is
+        deliberately NOT absorbed — DCGM returning nonsense must surface loudly,
+        mirroring the narrow `except DCGMError` on the write path. It escapes to
+        reconcile_once's per-GPU guard rather than being silently counted as a
+        routine apply failure.
+        """
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        pl = MagicMock()
+        pl.minPowerLimit = modules["dcgmvalue"].DCGM_INT32_BLANK  # blank sentinel
+        pl.maxPowerLimit = 700
+
+        with patch.object(
+            actuator, "_power_limits_with_uuid", return_value=(pl, "GPU-A")
+        ):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                with self.assertRaises(RuntimeError):
+                    actuator.apply_cap(0, 300, expected_uuid="GPU-A")
+
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
 
     def test_apply_cap_uses_caller_supplied_identity_without_recapture(self):
         """PID-snapshot anchor: when the caller supplies

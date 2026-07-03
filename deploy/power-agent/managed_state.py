@@ -57,9 +57,20 @@ MANAGED_STATE_PATH = "/var/lib/dynamo-power-agent/managed_gpus.json"
 # after SIGTERM), which restores each one to default TGP before exit.
 managed_gpu_indices: set[int] = set()
 
-# Persisted across restarts (``MANAGED_STATE_PATH``): the UUIDs this agent has
-# ever capped. Used for UUID-gated cold-start orphan recovery so a restart
-# only touches GPUs it actually owns. Always mutated in place — never rebind
-# this name, or the alias that ``power_agent.py`` and ``actuator.py`` hold
-# would split and re-introduce the dual-copy bug described above.
+# Persisted across restarts (``MANAGED_STATE_PATH``): the UUIDs this agent
+# currently OWNS a below-default cap on — added on a successful cap write and
+# PRUNED again once that cap is released/restored to default (runtime release,
+# SIGTERM sweep, or cold-start orphan recovery). It is NOT an append-only "ever
+# capped" ledger (that is ``DcgmActuator._capped_uuids``); it is the live,
+# cross-incarnation ownership set used for UUID-gated cold-start orphan recovery
+# so a restart only touches GPUs it still owns. Always mutated in place — never
+# rebind this name, or the alias that ``power_agent.py`` and ``actuator.py``
+# hold would split and re-introduce the dual-copy bug described above.
 previously_managed: set[str] = set()
+
+# UUIDs whose cap acquisition completed (hardware cap is live and in-memory
+# ownership was recorded) but whose durable ADD to MANAGED_STATE_PATH failed.
+# This must be shared for the same reason as ``previously_managed``: cap writes
+# run through the actuator's canonical ``import power_agent`` module, while the
+# reconcile loop that flushes the retry queue runs in the entrypoint module.
+pending_acquisition: set[str] = set()

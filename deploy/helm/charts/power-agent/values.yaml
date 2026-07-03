@@ -74,7 +74,7 @@ agent:
   #          operator's nvidia-dcgm hostengine version (NVIDIA's guidance is
   #          client >= hostengine, not merely the same major). Pin the image's
   #          DCGM client to the `dcgm` tag your GPU Operator deploys for its
-  #          nvidia-dcgm hostengine (the image default is DCGM 4.5.2; confirm
+  #          nvidia-dcgm hostengine (the image default is DCGM 4.5.3; confirm
   #          against your operator's nvidia-dcgm image tag) and bump the
   #          Dockerfile DCGM_IMAGE arg in lockstep when the operator moves. A
   #          3.x hostengine is unsupported.

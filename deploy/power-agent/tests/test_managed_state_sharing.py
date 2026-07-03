@@ -6,10 +6,11 @@
 In production the daemon entrypoint runs ``power_agent.py`` as the
 top-level ``__main__`` module, while ``actuator.py`` reaches it via
 ``import power_agent`` — two distinct module objects in ``sys.modules``.
-If the managed-GPU sets lived in ``power_agent.py`` they would fork into
-two independent copies: the actuator would record freshly-capped GPUs into
-one while the SIGTERM handler restored from the other (always empty), so
-every cap would silently leak past graceful shutdown.
+If the managed-GPU sets or acquisition retry queue lived in ``power_agent.py``
+they would fork into two independent copies: the actuator would record
+freshly-capped GPUs into one while the SIGTERM/reconcile paths read from the
+other (always empty), so caps could leak past graceful shutdown or lose their
+deferred durable-state retry.
 
 The fix hosts that state in ``managed_state`` (imported by canonical name
 from both sites) and aliases ``power_agent._managed_gpu_indices`` /
@@ -19,7 +20,9 @@ invariants that make the fix work:
   1. the ``power_agent`` names ARE the ``managed_state`` objects (identity);
   2. a cap recorded straight into ``managed_state`` (as the actuator's
      separate module copy would) is visible to the SIGTERM restore loop; and
-  3. startup orphan-recovery reloads state IN PLACE — it must never rebind
+  3. a failed acquisition persist queued by the actuator module is visible to
+     the reconcile-loop flush; and
+  4. startup orphan-recovery reloads state IN PLACE — it must never rebind
      the alias, which would re-introduce the dual-copy bug.
 """
 
@@ -41,6 +44,11 @@ class TestSharedStateIdentity(unittest.TestCase):
 
     def test_previously_managed_is_shared_object(self):
         self.assertIs(power_agent._previously_managed, managed_state.previously_managed)
+
+    def test_pending_acquisition_is_shared_object(self):
+        self.assertIs(
+            power_agent._pending_acquisition, managed_state.pending_acquisition
+        )
 
     def test_state_path_matches(self):
         self.assertEqual(
@@ -79,6 +87,29 @@ class TestActuatorWritesVisibleToShutdown(unittest.TestCase):
 
         actuator.restore_default.assert_called_once_with(3)
         actuator.shutdown.assert_called_once()
+
+
+class TestActuatorPendingAcquisitionVisibleToReconcile(unittest.TestCase):
+    """A failed durable ADD queued through the actuator's module copy must be
+    flushed by the running daemon's reconcile loop."""
+
+    def setUp(self):
+        managed_state.previously_managed.clear()
+        managed_state.pending_acquisition.clear()
+
+    def tearDown(self):
+        managed_state.previously_managed.clear()
+        managed_state.pending_acquisition.clear()
+
+    def test_pending_acquisition_recorded_in_managed_state_flushes(self):
+        managed_state.previously_managed.add("GPU-x")
+        managed_state.pending_acquisition.add("GPU-x")
+
+        with patch.object(power_agent, "_persist_managed_gpus") as persist:
+            power_agent._flush_pending_acquisitions()
+
+        persist.assert_called_once_with(power_agent._previously_managed)
+        self.assertEqual(managed_state.pending_acquisition, set())
 
 
 class TestOrphanReloadKeepsAlias(unittest.TestCase):

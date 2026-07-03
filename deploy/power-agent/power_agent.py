@@ -77,13 +77,6 @@ logger = logging.getLogger("power_agent")
 
 POWER_ANNOTATION_KEY = "dynamo.nvidia.com/gpu-power-limit"
 RECONCILE_INTERVAL_S = 15
-# Upper bound (seconds) on each Kubernetes pod-list request. Shutdown cleanup
-# runs from run()'s finally only AFTER the in-flight reconcile returns, so an
-# unbounded list against a hung apiserver could stall the whole cycle past the
-# pod's terminationGracePeriodSeconds (30s in the chart) and be SIGKILLed before
-# caps are restored. Bounding well under the grace period keeps a stuck request
-# from stranding live caps; the failed list just skips the cycle (fail-safe).
-K8S_LIST_TIMEOUT_S = 10
 # Sourced from `managed_state` so every launch path (and the actuator's
 # separate `import power_agent` module copy) agrees on one location.
 _MANAGED_STATE_PATH = managed_state.MANAGED_STATE_PATH
@@ -264,7 +257,11 @@ def _nvml_uuid(handle) -> str:
 # retried — a later SIGKILL / node crash then loses the ONLY orphan-recovery
 # record and strands the live cap. Retried (persistence ONLY, never a hardware
 # re-apply) by `_flush_pending_acquisitions` at the top of every reconcile.
-_pending_acquisition: set[str] = set()
+#
+# This one must also live in `managed_state`: cap writes run through the
+# actuator's canonical `import power_agent` copy, while reconcile flushes the
+# entrypoint's `__main__` copy. A module-local queue would split and never flush.
+_pending_acquisition: set[str] = managed_state.pending_acquisition
 
 
 def _record_managed_gpu_by_uuid(uuid: str) -> None:
@@ -841,7 +838,10 @@ def _shutdown_cleanup(actuator: Actuator) -> None:
             if restore_result is False:
                 logger.warning(
                     "Skipped default TGP restore for GPU %d via %s actuator "
-                    "(managed GPU no longer visible)",
+                    "(cap not conclusively released: GPU no longer locatable, "
+                    "or its identity could not be confirmed at write time — "
+                    "re-enumeration/unverifiable); leaving it managed so the "
+                    "UUID sweep and next-startup orphan recovery retry.",
                     gpu_idx,
                     actuator.name,
                 )
@@ -1304,13 +1304,11 @@ class PowerAgent:
                     namespace=self.k8s_namespace,
                     field_selector=field_selector,
                     resource_version="0",
-                    _request_timeout=K8S_LIST_TIMEOUT_S,
                 )
             else:
                 result = self._core_v1.list_pod_for_all_namespaces(
                     field_selector=field_selector,
                     resource_version="0",
-                    _request_timeout=K8S_LIST_TIMEOUT_S,
                 )
             return result.items
         except Exception as e:
@@ -1700,8 +1698,8 @@ def main() -> None:
 if __name__ == "__main__":
     # Launched as `python /app/power_agent.py`, this file is module `__main__`
     # while the actuator reaches the agent via `import power_agent` — two
-    # distinct module objects. That is SAFE here because all shared mutable
+    # distinct module objects. That is SAFE here because cross-module mutable
     # state lives in `managed_state` (imported by canonical name from both),
     # so the two module copies' `_managed_gpu_indices` / `_previously_managed`
-    # aliases converge on one set. See managed_state.py.
+    # / `_pending_acquisition` aliases converge on one set. See managed_state.py.
     main()

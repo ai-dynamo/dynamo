@@ -20,7 +20,7 @@ import unittest
 from unittest.mock import MagicMock
 
 import power_agent
-from power_agent import K8S_LIST_TIMEOUT_S, PowerAgent
+from power_agent import PowerAgent
 
 
 def _make_agent(core_v1, device_count: int = 2) -> PowerAgent:
@@ -70,10 +70,11 @@ class TestListPodsExplicitResult(unittest.TestCase):
 
         _, kwargs = core_v1.list_pod_for_all_namespaces.call_args
         self.assertEqual(kwargs.get("resource_version"), "0")
-        # Bounded so a hung apiserver cannot stall reconcile past the pod's
-        # termination grace period and be SIGKILLed before cleanup restores caps.
-        self.assertEqual(kwargs.get("_request_timeout"), K8S_LIST_TIMEOUT_S)
-        self.assertLess(K8S_LIST_TIMEOUT_S, 30)
+        # Do not add a client-side read timeout here. A timed-out LIST can still
+        # be expensive server-side, and retrying every reconcile cycle can make
+        # apiserver load worse under priority-and-fairness throttling. Rely on
+        # apiserver-side throttling/backpressure instead.
+        self.assertNotIn("_request_timeout", kwargs)
         core_v1.list_namespaced_pod.assert_not_called()
 
     def test_namespaced_list_served_from_watch_cache(self):
@@ -88,7 +89,7 @@ class TestListPodsExplicitResult(unittest.TestCase):
         _, kwargs = core_v1.list_namespaced_pod.call_args
         self.assertEqual(kwargs.get("resource_version"), "0")
         self.assertEqual(kwargs.get("namespace"), "dynamo")
-        self.assertEqual(kwargs.get("_request_timeout"), K8S_LIST_TIMEOUT_S)
+        self.assertNotIn("_request_timeout", kwargs)
         core_v1.list_pod_for_all_namespaces.assert_not_called()
 
 

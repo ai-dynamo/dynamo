@@ -23,9 +23,9 @@ it for its lifetime.
 
 Lazy imports
 ------------
-Every method that touches `pynvml`, `pydcgm`, `dcgm_structs`,
-`dcgm_agent`, or `dcgm_fields` imports it inside the method body
-rather than at module top. Three reasons:
+Every method that touches `pynvml`, `pydcgm`, `dcgm_structs`, or
+`dcgmvalue` imports it inside the method body rather than at module
+top. Three reasons:
 
   1. The NVML-only deployment (the chart default) must not pay the
      `libdcgm.so` dlopen cost (~3 s on slow base images).
@@ -45,6 +45,11 @@ from typing import Any, Callable, Optional, Protocol, TypeVar, runtime_checkable
 logger = logging.getLogger("power_agent.actuator")
 
 T = TypeVar("T")
+
+# Smallest numeric DCGM blank sentinel. All numeric DCGM blank / not-found /
+# not-supported sentinels are far above any real GPU power limit, so reject the
+# whole range instead of depending on `dcgmvalue` being importable on this path.
+_DCGM_NUMERIC_BLANK_MIN = float(0x7FFFFFF0)
 
 
 class _GpuIdentityMismatch(Exception):
@@ -177,9 +182,15 @@ class Actuator(Protocol):
     def restore_default(self, gpu_idx: int) -> Optional[bool]:
         """Restore the factory-default TGP for the GPU.
 
-        Return False only when the restore was intentionally skipped because
-        the managed physical GPU is no longer visible; None/True mean the
-        restore path completed.
+        Return False when the restore was intentionally SKIPPED and the cap may
+        still be live, so the caller must retain ownership. On the DCGM path
+        that covers three cases: the managed physical GPU is no longer locatable
+        (re-enumerated away and not found), the resolved index's identity could
+        not be confirmed at write time (a proven mid-write re-enumeration OR an
+        unverifiable identity read — the guarded write fails closed), or the
+        identity-bound power read found the index re-enumerated onto a different
+        GPU. None/True mean the restore path completed (True restored a live
+        below-default cap; None means nothing of ours remained).
         """
         ...
 
@@ -824,7 +835,57 @@ class DcgmActuator:
     # ------------------------------------------------------------------
 
     def device_count(self) -> int:
+        # `_discovered_gpu_ids` is populated by `init()` and refreshed ONLY by a
+        # `_with_reconnect` re-init, which fires only on a
+        # `DCGM_ST_CONNECTION_NOT_VALID` raised by an actual hostengine call. An
+        # EMPTY cached topology is therefore a trap: the reconcile loop iterates
+        # `range(0)`, issues no hostengine call, so nothing can raise
+        # CONNECTION_NOT_VALID, so discovery is never rebuilt — an agent that
+        # connected before the hostengine finished enumerating GPUs (agent /
+        # nvidia-dcgm startup-ordering race) or hit a transient empty discovery
+        # would loop forever over zero GPUs, silently enforcing NO caps. Re-probe
+        # discovery when the cache is empty so GPUs that appear after startup are
+        # picked up on the next reconcile cycle without a restart. NVML has no
+        # analogue: its `device_count()` reads `nvmlDeviceGetCount()` live.
+        if not self._discovered_gpu_ids:
+            self._rediscover_gpu_ids()
         return len(self._discovered_gpu_ids)
+
+    def _rediscover_gpu_ids(self) -> None:
+        """Best-effort refresh of `_discovered_gpu_ids` from the hostengine.
+
+        Recovery for a transiently-empty topology (see `device_count`). Runs the
+        discovery read inside `_with_reconnect` so a stale handle reconnects and
+        re-enumerates first. Fully best-effort: a still-empty result or ANY read
+        failure keeps the last-known set and never raises (a rediscovery fault
+        must not abort the reconcile cycle). A non-empty refresh invalidates the
+        cross-library identity map so it rebuilds against the new ordering on the
+        next `list_running_pids`.
+        """
+        if self._system is None:
+            return
+        try:
+            discovered = self._with_reconnect(
+                lambda: sorted(self._system.discovery.GetAllGpuIds())
+            )
+        except Exception as e:
+            logger.warning(
+                "DCGM GPU re-discovery failed; keeping last-known %d GPU(s): %s",
+                len(self._discovered_gpu_ids),
+                e,
+            )
+            return
+        if discovered and discovered != self._discovered_gpu_ids:
+            logger.info(
+                "DCGM GPU discovery refreshed: %d GPU(s) now visible (was %d); "
+                "recovered a transiently-empty topology without a restart.",
+                len(discovered),
+                len(self._discovered_gpu_ids),
+            )
+            self._discovered_gpu_ids = discovered
+            # Ordering may have changed; force the identity map to rebuild.
+            self._dcgm_uuid_by_idx = None
+            self._nvml_index_by_uuid = None
 
     def get_uuid(self, gpu_idx: int) -> str:
         """Read the GPU UUID via the synchronous device-info API.
@@ -1122,29 +1183,7 @@ class DcgmActuator:
                 f"GPU {gpu_idx}: {value!r}"
             )
 
-        blank_values = set()
-        try:
-            import dcgmvalue
-
-            blank_values.update(
-                {
-                    float(dcgmvalue.DCGM_INT32_BLANK),
-                    float(dcgmvalue.DCGM_INT64_BLANK),
-                    float(dcgmvalue.DCGM_FP64_BLANK),
-                }
-            )
-        except (ImportError, AttributeError):
-            # The blank-sentinel lookup can be unavailable in exactly two benign
-            # ways: dcgmvalue is not importable here (ImportError — unit tests
-            # and some paths do not vendor it), or a DCGM binding revision
-            # renamed/dropped one of the *_BLANK constants (AttributeError).
-            # In both cases the finite/positive checks below still reject the
-            # dangerous non-numeric values, so it is safe to skip the extra
-            # blank filter. Any OTHER exception here is unexpected (e.g. a real
-            # bug) and must NOT be swallowed — let it surface.
-            pass
-
-        if numeric in blank_values:
+        if numeric >= _DCGM_NUMERIC_BLANK_MIN:
             raise RuntimeError(
                 f"DcgmActuator: blank DCGM power limit {field_name} for "
                 f"GPU {gpu_idx}: {value!r}"
@@ -1232,7 +1271,32 @@ class DcgmActuator:
         # Protocol return contract (the effective post-clamp watts) on the
         # fail-closed early-outs below. The read handles its own stale-handle
         # recovery.
-        pl, constraints_uuid = self._power_limits_with_uuid(gpu_idx)
+        #
+        # A DCGMError that SURVIVES that recovery (a non-connection error, or a
+        # connection loss still failing after the single reconnect) is absorbed
+        # into `apply_failures_total` and the requested watts returned unclamped
+        # — the same fallback `NvmlActuator.apply_cap` uses when its constraints
+        # read fails. No Set happens, so no cap is made live, which is exactly
+        # what `apply_failures_total` counts; absorbing it here (rather than
+        # letting it escape to `reconcile_once`'s generic per-GPU guard) keeps
+        # this method consistent with its documented "DCGMError absorbed" return
+        # contract. A blank/garbage power-limit VALUE is a `RuntimeError` from
+        # `_coerce_power_limit_watts`, NOT a DCGMError, and is deliberately left
+        # to surface (DCGM returning nonsense must be loud) — mirroring the
+        # narrow `except dcgm_structs.DCGMError` on the write below.
+        import dcgm_structs
+
+        try:
+            pl, constraints_uuid = self._power_limits_with_uuid(gpu_idx)
+        except dcgm_structs.DCGMError as e:
+            logger.error(
+                "DCGM constraints read for GPU %d failed; skipping cap write "
+                "and counting an apply failure: %s",
+                gpu_idx,
+                e,
+            )
+            self._metrics.apply_failures_total.inc()
+            return watts
         min_w = self._coerce_power_limit_watts(
             pl.minPowerLimit, "minPowerLimit", gpu_idx
         )
