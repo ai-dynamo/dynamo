@@ -40,6 +40,7 @@ def _resolve_qwen3_tool_parser_class():
 
         return Qwen3CoderToolParser
 
+
 # Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
