@@ -11,11 +11,7 @@ requests. It wraps Dynamo's native KV router and adds a program-level scheduler
 with tool-boundary pause/resume, porting the scheduler from the ThunderAgent
 paper.
 
-**Conceptual docs live in [docs/agents/thunderagent-router.md](/docs/agents/thunderagent-router.md)** —
-the scheduler model, the 5s scheduler tick (resume → pause), tool-boundary
-pause/resume semantics, the utilization-driven control loop and its full knob
-table, the architecture diagram, and the scheduler observability logs. This
-README keeps only the build/run/repro specifics that belong next to the code.
+**Conceptual docs live in [docs/agents/thunderagent-router.md](/docs/agents/thunderagent-router.md)** — the scheduler model, tool-boundary pause/resume semantics, the utilization-driven control loop, and observability. This README contains the source build and the complete Harbor/Pi A/B walkthrough.
 
 ## Install
 
@@ -100,29 +96,309 @@ at that endpoint (producers connect) and `tool_start` / `tool_end` /
 `tool_call_id` pairs, giving you the full LLM-turn ↔ tool-gap timeline per
 agent.
 
-## Reproducing with Pi
+## Harbor/Pi A/B walkthrough
 
-The maintained smoke path is Pi through the Dynamo provider, not the old private mini-SWE-agent fork. Start the workers, this router, and the frontend as described above, then wait for the frontend to advertise the served model:
+This walkthrough runs the same SWE-bench Verified task through ThunderAgent and the stock Dynamo KV router. Harbor owns the task container, Pi runs inside it, and the model stack runs on the host. The example uses one 8-GPU node, two TP4 vLLM workers, and MiniMax-M2. There is no HiCache, Mooncake, shared cache, or frontend admission control in either arm.
+
+The [agent-plugins `DynamoPi` adapter](https://github.com/ai-dynamo/agent-plugins/blob/main/pi-plugin/harbor_dynamo_pi.py) is required. It installs the Dynamo provider in each Harbor task container and maps Harbor's per-trial ID to one stable `x-dynamo-session-id` across all Pi turns. The ThunderAgent arm also sends one terminal session request so the router can release the completed program; the stock KV arm disables that request because it has no lifecycle consumer.
+
+### 1. Check out and install Dynamo, Harbor, and the Pi adapter
+
+Use Python 3.12 and a machine with Docker, Node.js, and eight visible GPUs. Build Dynamo from the branch under test rather than installing a released wheel.
 
 ```bash
-curl -fsS http://127.0.0.1:8000/v1/models
+export DYNAMO_DIR=$HOME/src/dynamo
+export HARBOR_DIR=$HOME/src/harbor
+export PLUGINS_DIR=$HOME/src/agent-plugins
+
+git clone https://github.com/ai-dynamo/dynamo "$DYNAMO_DIR"
+git clone https://github.com/harbor-framework/harbor "$HARBOR_DIR"
+git clone https://github.com/ai-dynamo/agent-plugins "$PLUGINS_DIR"
+
+cd "$DYNAMO_DIR"
+uv venv --python 3.12 --seed .venv
+source .venv/bin/activate
+uv pip install pip 'maturin[patchelf]'
+(cd lib/bindings/python && maturin develop --uv)
+uv pip install -e lib/gpu_memory_service
+uv pip install -e '.[vllm]'
+
+cd "$HARBOR_DIR"
+uv sync
+
+git -C "$DYNAMO_DIR" rev-parse HEAD
+git -C "$HARBOR_DIR" rev-parse HEAD
+git -C "$PLUGINS_DIR" rev-parse HEAD
 ```
 
-Install the [Pi Dynamo provider](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin) from a checkout, then send a sessionized turn through the frontend:
+The Harbor commands below were validated with Harbor `0.16.0` and Pi `0.72.1`. Record all three revisions with the run artifacts.
+
+### 2. Start the ThunderAgent arm
+
+Run the following from one terminal. The public model name is registered by ThunderAgent; the two workers use an internal name so the frontend cannot bypass it.
 
 ```bash
-git clone https://github.com/ai-dynamo/agent-plugins.git
-cd agent-plugins/pi-plugin
-npm install && npm run build
-pi install "$PWD"
+export DYNAMO_DIR=$HOME/src/dynamo
+cd "$DYNAMO_DIR"
+source .venv/bin/activate
 
-export DYNAMO_BASE_URL=http://127.0.0.1:8000/v1
-export DYNAMO_API_KEY=dummy
-export DYN_AGENT_SESSION_ID=ta-repro-$(uuidgen)
-pi --model dynamo/<served-model-name> -p 'Reply exactly READY.'
+export MODEL_PATH=MiniMaxAI/MiniMax-M2
+export PUBLIC_MODEL=MiniMaxAI/MiniMax-M2
+export WORKER_MODEL=dyn-internal-minimax-m2
+export RUN_DIR=$DYNAMO_DIR/runs/ta-$(date -u +%Y%m%dT%H%M%SZ)
+export DYN_DISCOVERY_BACKEND=file
+export DYN_FILE_KV=$RUN_DIR/file-kv
+export DYN_REQUEST_PLANE=tcp
+export DYN_EVENT_PLANE=zmq
+mkdir -p "$RUN_DIR/logs" "$DYN_FILE_KV"
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+DYN_SYSTEM_PORT=8181 \
+DYN_FORWARDPASS_METRIC_PORT=20081 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
+python -m dynamo.vllm \
+  --model "$MODEL_PATH" \
+  --served-model-name "$WORKER_MODEL" \
+  --tensor-parallel-size 4 \
+  --kv-cache-dtype fp8 \
+  --block-size 16 \
+  --enable-prefix-caching \
+  --dyn-tool-call-parser minimax_m2 \
+  --dyn-reasoning-parser minimax_append_think \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
+  >"$RUN_DIR/logs/worker-0.log" 2>&1 &
+WORKER_0_PID=$!
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 \
+DYN_SYSTEM_PORT=8182 \
+DYN_FORWARDPASS_METRIC_PORT=20082 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
+python -m dynamo.vllm \
+  --model "$MODEL_PATH" \
+  --served-model-name "$WORKER_MODEL" \
+  --tensor-parallel-size 4 \
+  --kv-cache-dtype fp8 \
+  --block-size 16 \
+  --enable-prefix-caching \
+  --dyn-tool-call-parser minimax_m2 \
+  --dyn-reasoning-parser minimax_append_think \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20090","enable_kv_cache_events":true}' \
+  >"$RUN_DIR/logs/worker-1.log" 2>&1 &
+WORKER_1_PID=$!
+
+DYN_SYSTEM_PORT=8183 python -m dynamo.thunderagent_router \
+  --endpoint dynamo.backend.generate \
+  --model-name "$PUBLIC_MODEL" \
+  --model-path "$MODEL_PATH" \
+  --dyn-tool-call-parser minimax_m2 \
+  --dyn-reasoning-parser minimax_append_think \
+  --router-block-size 16 \
+  --router-reset-states \
+  --shared-cache-type none \
+  --pause-threshold 0.95 \
+  --pause-target 0.80 \
+  --soft-demote-threshold 0.80 \
+  --resume-hysteresis 0.10 \
+  --resume-timeout-seconds 1800 \
+  --scheduler-interval-seconds 5 \
+  >"$RUN_DIR/logs/thunderagent.log" 2>&1 &
+THUNDERAGENT_PID=$!
+
+DYN_SYSTEM_PORT=8184 python -m dynamo.frontend \
+  --http-host 0.0.0.0 \
+  --http-port 8100 \
+  --router-mode round-robin \
+  --router-reset-states \
+  --shared-cache-type none \
+  --admission-control none \
+  >"$RUN_DIR/logs/frontend.log" 2>&1 &
+FRONTEND_PID=$!
+
+until [ "$(curl -fsS "http://127.0.0.1:8100/v1/models/$WORKER_MODEL/ready" | jq '[.namespaces[].worker_types.aggregated.workers // 0] | add')" = 2 ]; do sleep 5; done
+until curl -fsS http://127.0.0.1:8100/v1/models | grep -Fq "$PUBLIC_MODEL"; do sleep 5; done
+curl -fsS "http://127.0.0.1:8100/v1/models/$WORKER_MODEL/ready" | jq
+curl -fsS http://127.0.0.1:8100/v1/models | jq
+echo "$RUN_DIR"
 ```
 
-The provider sends `x-dynamo-session-id` on every LLM request. `DYN_REQUEST_TRACE` is optional and controls Dynamo trace collection/tool-event relay only; it does not control session headers. With `DYN_REQUEST_TRACE=1` on the frontend, confirm the trace row carries the same session ID before running a larger Harbor/SWE-bench cohort. See [Agent Harnesses](/docs/agents/agent-harnesses.md#pi) for the provider contract.
+The four processes remain attached to this shell as background jobs. If readiness never succeeds, inspect the four files in `$RUN_DIR/logs` instead of restarting blindly.
+
+### 3. Run the ThunderAgent task through Harbor
+
+Run this from a second terminal. `DYNAMO_BASE_URL` must use an address reachable from the task container, not `127.0.0.1` under Docker's default bridge network.
+
+```bash
+export HARBOR_DIR=$HOME/src/harbor
+export PLUGINS_DIR=$HOME/src/agent-plugins
+cd "$HARBOR_DIR"
+source .venv/bin/activate
+
+export PUBLIC_MODEL=MiniMaxAI/MiniMax-M2
+export RUN_DIR=/absolute/path/printed/by/the/stack/terminal
+export PI_PLUGIN_DIR=$PLUGINS_DIR/pi-plugin
+export PYTHONPATH=$PI_PLUGIN_DIR${PYTHONPATH:+:$PYTHONPATH}
+export DYNAMO_HOST=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
+export DYNAMO_BASE_URL=http://$DYNAMO_HOST:8100/v1
+
+curl -fsS "$DYNAMO_BASE_URL/models" | jq
+docker run --rm curlimages/curl:8.11.1 -fsS "$DYNAMO_BASE_URL/models"
+
+harbor run \
+  --dataset swebench-verified@1.0 \
+  --include-task-name astropy__astropy-12907 \
+  --agent harbor_dynamo_pi:DynamoPi \
+  --model "dynamo/$PUBLIC_MODEL" \
+  --agent-kwarg version=0.72.1 \
+  --agent-env "DYNAMO_BASE_URL=$DYNAMO_BASE_URL" \
+  --agent-env DYNAMO_API_KEY=dynamo-local \
+  --agent-env DYN_AGENT_SESSION_FINAL=1 \
+  --mounts "[{\"type\":\"bind\",\"source\":\"$PI_PLUGIN_DIR\",\"target\":\"/opt/pi-dynamo-provider\",\"read_only\":true}]" \
+  --n-concurrent 1 \
+  --n-concurrent-agents 1 \
+  --max-retries 0 \
+  --agent-setup-timeout-multiplier 10 \
+  --no-force-build \
+  --no-delete \
+  --environment-kwarg keep_containers=true \
+  --jobs-dir "$RUN_DIR/harbor" \
+  --job-name ta-verified-one \
+  --yes
+```
+
+`--no-delete --environment-kwarg keep_containers=true` stops completed task containers without running `docker compose down` on the hot path. This avoids completed containers holding Harbor concurrency slots under load and preserves them for inspection.
+
+Check that the task produced Pi output and that ThunderAgent observed the lifecycle:
+
+```bash
+find "$RUN_DIR/harbor/ta-verified-one" -name pi.txt -o -name results.json
+rg 'scheduler\.tick|Paused program|Resumed program|terminal' "$RUN_DIR/logs/thunderagent.log"
+```
+
+No pause/resume lines are expected from a one-task smoke; those only appear after the working set reaches the configured thresholds.
+
+### 4. Stop ThunderAgent and start the stock KV arm
+
+Return to the first terminal and stop every process from the first arm. A fair comparison starts fresh workers and an empty file-discovery directory.
+
+```bash
+kill "$FRONTEND_PID" "$THUNDERAGENT_PID" "$WORKER_0_PID" "$WORKER_1_PID"
+wait "$FRONTEND_PID" "$THUNDERAGENT_PID" "$WORKER_0_PID" "$WORKER_1_PID" 2>/dev/null || true
+docker ps -a --filter status=exited
+# On a dedicated benchmark host, remove the stopped containers from the TA job.
+docker container prune -f
+
+export WORKER_MODEL=MiniMaxAI/MiniMax-M2
+export RUN_DIR=$DYNAMO_DIR/runs/kv-$(date -u +%Y%m%dT%H%M%SZ)
+export DYN_FILE_KV=$RUN_DIR/file-kv
+mkdir -p "$RUN_DIR/logs" "$DYN_FILE_KV"
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+DYN_SYSTEM_PORT=8181 \
+DYN_FORWARDPASS_METRIC_PORT=20081 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
+python -m dynamo.vllm \
+  --model "$MODEL_PATH" \
+  --served-model-name "$WORKER_MODEL" \
+  --tensor-parallel-size 4 \
+  --kv-cache-dtype fp8 \
+  --block-size 16 \
+  --enable-prefix-caching \
+  --dyn-tool-call-parser minimax_m2 \
+  --dyn-reasoning-parser minimax_append_think \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
+  >"$RUN_DIR/logs/worker-0.log" 2>&1 &
+WORKER_0_PID=$!
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 \
+DYN_SYSTEM_PORT=8182 \
+DYN_FORWARDPASS_METRIC_PORT=20082 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
+python -m dynamo.vllm \
+  --model "$MODEL_PATH" \
+  --served-model-name "$WORKER_MODEL" \
+  --tensor-parallel-size 4 \
+  --kv-cache-dtype fp8 \
+  --block-size 16 \
+  --enable-prefix-caching \
+  --dyn-tool-call-parser minimax_m2 \
+  --dyn-reasoning-parser minimax_append_think \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20090","enable_kv_cache_events":true}' \
+  >"$RUN_DIR/logs/worker-1.log" 2>&1 &
+WORKER_1_PID=$!
+
+DYN_SYSTEM_PORT=8184 python -m dynamo.frontend \
+  --http-host 0.0.0.0 \
+  --http-port 8100 \
+  --router-mode kv \
+  --router-reset-states \
+  --shared-cache-type none \
+  --admission-control none \
+  >"$RUN_DIR/logs/frontend.log" 2>&1 &
+FRONTEND_PID=$!
+
+until [ "$(curl -fsS "http://127.0.0.1:8100/v1/models/$PUBLIC_MODEL/ready" | jq '[.namespaces[].worker_types.aggregated.workers // 0] | add')" = 2 ]; do sleep 5; done
+curl -fsS "http://127.0.0.1:8100/v1/models/$PUBLIC_MODEL/ready" | jq
+curl -fsS http://127.0.0.1:8100/v1/models | jq
+echo "$RUN_DIR"
+```
+
+### 5. Run the same task through stock KV routing
+
+In the Harbor terminal, point `RUN_DIR` at the stock arm and run the same command with terminal control disabled:
+
+```bash
+export RUN_DIR=/absolute/path/printed/by/the/stock/stack/terminal
+
+harbor run \
+  --dataset swebench-verified@1.0 \
+  --include-task-name astropy__astropy-12907 \
+  --agent harbor_dynamo_pi:DynamoPi \
+  --model "dynamo/$PUBLIC_MODEL" \
+  --agent-kwarg version=0.72.1 \
+  --agent-env "DYNAMO_BASE_URL=$DYNAMO_BASE_URL" \
+  --agent-env DYNAMO_API_KEY=dynamo-local \
+  --agent-env DYN_AGENT_SESSION_FINAL=0 \
+  --mounts "[{\"type\":\"bind\",\"source\":\"$PI_PLUGIN_DIR\",\"target\":\"/opt/pi-dynamo-provider\",\"read_only\":true}]" \
+  --n-concurrent 1 \
+  --n-concurrent-agents 1 \
+  --max-retries 0 \
+  --agent-setup-timeout-multiplier 10 \
+  --no-force-build \
+  --no-delete \
+  --environment-kwarg keep_containers=true \
+  --jobs-dir "$RUN_DIR/harbor" \
+  --job-name kv-verified-one \
+  --yes
+
+find "$RUN_DIR/harbor/kv-verified-one" -name pi.txt -o -name results.json
+```
+
+The two Harbor commands differ only in the job name and `DYN_AGENT_SESSION_FINAL`. Stable session headers are still sent in the stock arm; they are identity metadata and do not enable ThunderAgent or sticky routing.
+
+### 6. Scale the comparison
+
+After both one-task smokes pass, use the same frozen task list and concurrency for both arms. For an exploratory 32-task run, replace `--include-task-name ...` with `--n-tasks 32` and set both concurrency options to 32. For a reported result, use repeated `--include-task-name <task-id>` arguments from a checked-in manifest because registry order is not a stable cohort. Add `--disable-verification` only when measuring serving throughput rather than solve rate.
+
+Start Tachometer before each Harbor run if you need server-side metrics:
+
+```bash
+tachometer-scraper \
+  --endpoint frontend=http://127.0.0.1:8100/metrics \
+  --endpoint worker0=http://127.0.0.1:8181/metrics \
+  --endpoint worker1=http://127.0.0.1:8182/metrics \
+  --freq 1.0 \
+  --storage "$RUN_DIR/tachometer"
+```
+
+Add `--endpoint thunderagent=http://127.0.0.1:8183/metrics` for the ThunderAgent arm. Run each arm from fresh server processes, pre-pull task images before the measured interval, and preserve the Harbor job directory and server logs. Stop the stock processes when finished:
+
+```bash
+kill "$FRONTEND_PID" "$WORKER_0_PID" "$WORKER_1_PID"
+wait "$FRONTEND_PID" "$WORKER_0_PID" "$WORKER_1_PID" 2>/dev/null || true
+docker ps -a --filter status=exited
+```
+
+Inspect the stopped Harbor containers before removing the ones belonging to the completed jobs.
 
 ## Citation
 
