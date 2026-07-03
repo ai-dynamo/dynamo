@@ -11,7 +11,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{Path as AxumPath, State},
     http::Request,
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -19,7 +19,7 @@ use axum::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use base64::Engine as _;
 use bytes::Bytes;
@@ -33,7 +33,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
+    disconnect::{
+        ConnectionHandle, StreamCompletion, create_connection_monitor, monitor_for_disconnects,
+        monitor_for_disconnects_with_completion,
+    },
     error::HttpError,
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
@@ -71,6 +74,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::responses::{IncludeEnum, Tool, ToolChoiceParam, Truncation};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -2188,6 +2192,27 @@ async fn handler_responses(
     response
 }
 
+async fn handler_delete_response(
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    AxumPath(response_id): AxumPath<String>,
+) -> Result<Response, ErrorResponse> {
+    let deleted = state
+        .responses_context_store()
+        .delete(&response_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(response_id, error = %e, "Failed to delete stateful Responses context");
+            ErrorMessage::internal_server_error("Failed to delete stateful Responses context")
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "id": response_id,
+        "object": "response",
+        "deleted": deleted
+    }))
+    .into_response())
+}
+
 #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
 async fn responses(
     state: Arc<service_v2::State>,
@@ -2236,6 +2261,33 @@ async fn responses(
         return Ok(resp.into_response());
     }
 
+    if let Err(err_response) = validate_response_fields_generic(&request) {
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        return Err(err_response);
+    }
+
+    let expanded_response_context = state
+        .responses_context_store()
+        .prepare_request(&mut request)
+        .await
+        .map_err(|error| {
+            tracing::error!(request_id = %request.id(), %error, "Failed to prepare stateful Responses request");
+            let err_response = match error {
+                not_found
+                @ super::stateful_responses::PrepareResponseError::PreviousResponseNotFound(_) => {
+                    ErrorMessage::from_http_error(HttpError {
+                        code: StatusCode::NOT_FOUND.as_u16(),
+                        message: not_found.to_string(),
+                    })
+                }
+                _ => ErrorMessage::internal_server_error(
+                    "Failed to prepare stateful Responses request",
+                ),
+            };
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
@@ -2252,13 +2304,11 @@ async fn responses(
         text: request.inner.text.clone(),
         service_tier: request.inner.service_tier,
         include: request.inner.include.clone(),
+        top_logprobs: request.inner.top_logprobs,
+        completion_token_logprobs: request.completion_token_logprobs_requested(),
         truncation: request.inner.truncation,
-        // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
-        // the response serializer can default to 0.0 without hardcoding at the
-        // build site. When upstream (or our shadow) adds the fields, sourcing
-        // from the request becomes a one-line change here.
-        presence_penalty: None,
-        frequency_penalty: None,
+        presence_penalty: request.extensions.presence_penalty,
+        frequency_penalty: request.extensions.frequency_penalty,
         // Pass-through metadata — accepted on the request, echoed back on the
         // response so the caller can confirm receipt. Dynamo doesn't act on
         // these; see `validate_response_unsupported_fields` for rationale.
@@ -2348,22 +2398,18 @@ async fn responses(
     let ctx = engine_stream.context();
 
     if streaming {
-        // For streaming responses, we return HTTP 200 immediately without checking for errors.
-        // Once HTTP 200 OK is sent, we cannot change the status code, so any backend errors
-        // must be delivered as SSE events in the stream. This is standard SSE behavior.
-        stream_handle.arm(); // allows the system to detect client disconnects and cancel the LLM generation
-
-        // Streaming path: convert chat completion stream chunks to Responses API SSE events.
-        // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
-        // inner stream response data and convert it to Responses API events.
+        stream_handle.arm();
         use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
 
         let mut converter = match responses_ctx {
             Some(ctx) => ResponseStreamConverter::with_context(model.clone(), response_params, ctx),
             None => ResponseStreamConverter::new(model.clone(), response_params),
         };
-
         let mut http_queue_guard = Some(http_queue_guard);
+        let state_for_store = state.clone();
+        let expanded_for_store = expanded_response_context.clone();
+        let completion = StreamCompletion::default();
+        let completion_in_stream = completion.clone();
 
         let mut engine_stream = Box::pin(engine_stream);
         let full_stream = async_stream::stream! {
@@ -2402,7 +2448,24 @@ async fn responses(
                 converter.append_error_events(&mut events);
             } else {
                 converter.append_end_events(&mut events);
+                let completed_response = converter.completed_response();
+                if let Err(err) = state_for_store
+                    .responses_context_store()
+                    .persist_response(&expanded_for_store, &completed_response)
+                    .await
+                {
+                    tracing::error!(%err, "failed to persist streamed stateful Responses context");
+                    completion_in_stream.mark_failed();
+                    events.extend(converter.emit_failed_event(
+                        completed_response.output,
+                        "server_error",
+                        "Failed to persist stateful Responses context.",
+                    ));
+                } else {
+                    events.extend(converter.emit_completed_event(completed_response));
+                }
             }
+
             for event in events.drain(..) {
                 yield event.map_err(axum::Error::new);
             }
@@ -2410,7 +2473,13 @@ async fn responses(
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+        let stream = monitor_for_disconnects_with_completion(
+            full_stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            completion,
+        );
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive() {
@@ -2466,6 +2535,18 @@ async fn responses(
                     err_response
                 })?;
 
+        if let Err(err) = state
+            .responses_context_store()
+            .persist_response(&expanded_response_context, &response.inner)
+            .await
+        {
+            tracing::error!(%err, "failed to persist stateful Responses context");
+            let err_response =
+                ErrorMessage::internal_server_error("Failed to persist stateful Responses context");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            return Err(err_response);
+        }
+
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
         // assembled but never delivered. Override to cancelled.
@@ -2487,11 +2568,6 @@ pub fn validate_response_unsupported_fields(
     if inner.background == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
-        ));
-    }
-    if inner.previous_response_id.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
         ));
     }
     if inner.prompt.is_some() {
@@ -2517,7 +2593,79 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
         ));
     }
+    if inner.conversation.is_some() {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`conversation` is not supported.",
+        ));
+    }
+    if inner.stream_options.is_some() {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`stream_options` is not supported.",
+        ));
+    }
+    if inner.include.as_ref().is_some_and(|include| {
+        include
+            .iter()
+            .any(|item| !matches!(item, IncludeEnum::MessageOutputTextLogprobs))
+    }) {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string()
+                + "Only `message.output_text.logprobs` is supported in `include`.",
+        ));
+    }
+    if inner
+        .reasoning
+        .as_ref()
+        .is_some_and(|reasoning| reasoning.summary.is_some())
+    {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`reasoning.summary` is not supported.",
+        ));
+    }
+    if inner
+        .text
+        .as_ref()
+        .is_some_and(|text| text.verbosity.is_some())
+    {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`text.verbosity` is not supported.",
+        ));
+    }
+    if matches!(inner.truncation, Some(Truncation::Auto)) {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "`truncation: auto` is not supported.",
+        ));
+    }
+    if inner
+        .tools
+        .as_ref()
+        .is_some_and(|tools| tools.iter().any(|tool| !matches!(tool, Tool::Function(_))))
+    {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string() + "Only function tools are supported.",
+        ));
+    }
+    if inner.tool_choice.as_ref().is_some_and(|choice| {
+        !matches!(
+            choice,
+            ToolChoiceParam::Function(_) | ToolChoiceParam::Mode(_)
+        )
+    }) {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string()
+                + "Only function or none/auto/required tool choices are supported.",
+        ));
+    }
     None
+}
+
+pub fn validate_response_fields_generic(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
+    ValidateRequest::validate(request).map_err(|error| {
+        ErrorMessage::from_http_error(HttpError {
+            code: StatusCode::BAD_REQUEST.as_u16(),
+            message: VALIDATION_PREFIX.to_string() + &error.to_string(),
+        })
+    })
 }
 
 // todo - abstract this to the top level lib.rs to be reused
@@ -2832,13 +2980,16 @@ pub fn responses_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/responses".to_string());
+    let delete_path = format!("{}/{{response_id}}", path.trim_end_matches('/'));
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let delete_doc = RouteDoc::new(axum::http::Method::DELETE, &delete_path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .route(&delete_path, delete(handler_delete_response))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
-    (vec![doc], router)
+    (vec![doc, delete_doc], router)
 }
 
 async fn images(
@@ -3557,6 +3708,7 @@ mod tests {
 
     fn make_base_request() -> NvCreateResponse {
         NvCreateResponse {
+            extensions: Default::default(),
             inner: CreateResponse {
                 input: Input::Text("hello".into()),
                 model: Some("test-model".into()),
@@ -3868,13 +4020,14 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_unsupported_fields_accepts_store() {
+    fn test_validate_unsupported_fields_accepts_stateful_fields() {
         let mut request = make_base_request();
         request.inner.store = Some(true);
+        request.inner.previous_response_id = Some("prev-id".into());
         let result = validate_response_unsupported_fields(&request);
         assert!(
             result.is_none(),
-            "store should be supported for audit opt-in"
+            "store and previous_response_id should be supported"
         );
     }
 
@@ -3883,10 +4036,6 @@ mod tests {
         #[allow(clippy::type_complexity)]
         let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
             ("background", Box::new(|r| r.background = Some(true))),
-            (
-                "previous_response_id",
-                Box::new(|r| r.previous_response_id = Some("prev-id".into())),
-            ),
             (
                 "prompt",
                 Box::new(|r| {
@@ -3906,6 +4055,56 @@ mod tests {
             let result = validate_response_unsupported_fields(&req);
             assert!(result.is_some(), "Expected rejection for `{field}`");
         }
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_rejects_unimplemented_semantics() {
+        let cases = [
+            ("conversation", serde_json::json!("conv_123")),
+            ("include", serde_json::json!(["file_search_call.results"])),
+            (
+                "stream_options",
+                serde_json::json!({"include_obfuscation": false}),
+            ),
+            ("reasoning", serde_json::json!({"summary": "auto"})),
+            (
+                "text",
+                serde_json::json!({
+                    "format": {"type": "text"},
+                    "verbosity": "low"
+                }),
+            ),
+            ("truncation", serde_json::json!("auto")),
+            ("tools", serde_json::json!([{"type": "local_shell"}])),
+            ("tool_choice", serde_json::json!({"type": "shell"})),
+        ];
+
+        for (field, value) in cases {
+            let mut payload = serde_json::json!({
+                "model": "test-model",
+                "input": "hello"
+            });
+            payload.as_object_mut().unwrap().insert(field.into(), value);
+            let request: NvCreateResponse = serde_json::from_value(payload).unwrap();
+            assert!(
+                validate_response_unsupported_fields(&request).is_some(),
+                "expected `{field}` to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_response_fields_generic_rejects_unknown_parameter() {
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "input": "hello",
+            "unknown_parameter": true
+        }))
+        .unwrap();
+
+        let error = validate_response_fields_generic(&request).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.message.contains("unknown_parameter"));
     }
 
     /// Pass-through metadata fields (`prompt_cache_key`,

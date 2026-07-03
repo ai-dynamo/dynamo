@@ -113,18 +113,23 @@ impl DeltaGenerator {
             .collect::<Vec<f32>>();
 
         let return_as_ids = self.options.return_tokens_as_token_ids;
-        let content = top_logprobs.map(|top_logprobs| {
+        let content = Some(
             toks.iter()
                 .zip(tok_lps)
-                .zip(top_logprobs)
-                .map(|(((t, tid), lp), top_lps)| {
+                .enumerate()
+                .map(|(index, ((t, tid), lp))| {
                     let token_str = if return_as_ids {
                         format!("token_id:{}", tid)
                     } else {
                         t.clone()
                     };
-                    let converted =
-                        convert_backend_top_logprobs(&top_lps, t, *tid, lp, return_as_ids);
+                    let converted = top_logprobs
+                        .as_ref()
+                        .and_then(|per_token| per_token.get(index))
+                        .map(|top_lps| {
+                            convert_backend_top_logprobs(top_lps, t, *tid, lp, return_as_ids)
+                        })
+                        .unwrap_or_default();
                     dynamo_protocols::types::ChatCompletionTokenLogprob {
                         token: token_str.clone(),
                         logprob: lp,
@@ -132,8 +137,8 @@ impl DeltaGenerator {
                         top_logprobs: converted,
                     }
                 })
-                .collect()
-        });
+                .collect(),
+        );
 
         Some(dynamo_protocols::types::ChatChoiceLogprobs {
             content,
@@ -560,6 +565,31 @@ mod tests {
             .expect("choice generation");
 
         assert_eq!(response.inner.choices[0].index, 2);
+    }
+
+    #[test]
+    fn test_chosen_token_logprobs_do_not_require_top_logprobs() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        request.inner.top_logprobs = Some(0);
+        request.return_tokens_as_token_ids = Some(true);
+        let mut generator = request.response_generator("req-chosen-logprobs".to_string());
+        let mut output = final_backend_output();
+        output.log_probs = Some(vec![-0.25]);
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+        let content = response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .and_then(|logprobs| logprobs.content.as_ref())
+            .expect("chosen-token logprobs");
+
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].token, "token_id:1");
+        assert_eq!(content[0].logprob, -0.25);
+        assert!(content[0].top_logprobs.is_empty());
     }
 
     #[test]

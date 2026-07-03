@@ -25,6 +25,56 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `DYN_HTTP_BODY_LIMIT_MB` | `192` | Maximum request body size in MB |
 | `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | Graceful shutdown timeout in seconds |
 
+## Stateful Responses
+
+The `/v1/responses` endpoint stores response context when `store` is `true` or omitted. A later request can continue that context by setting `previous_response_id`. `DELETE /v1/responses/{response_id}` removes a stored context.
+
+The Rust frontend reads these environment variables:
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `DYN_STATEFUL_RESPONSES_STORE_URL` | `memory` | Context store URL. Supported schemes depend on build features; see below. |
+| `DYN_STATEFUL_RESPONSES_STORE_NAMESPACE` | `dynamo/stateful-responses` | Isolates keys when several deployments or features share one database. All replicas serving one deployment must use the same value. |
+| `DYN_STATEFUL_RESPONSES_DEFAULT_TTL_SECS` | `2592000` (30 days) | Context lifetime. Set to `0`, `false`, `none`, or `never` to disable expiration. |
+| `DYN_STATEFUL_RESPONSES_TTL_SWEEP_SECS` | `3600` (1 hour) | Expired-context sweep interval for stores without native TTL. Set to `0`, `false`, `none`, or `never` to disable sweeping. |
+
+Store URL schemes:
+
+| URL | Build requirement | Intended use |
+|-----|-------------------|--------------|
+| `memory` | None | Development or a single frontend process. State is lost on restart and is not shared across replicas. |
+| `redis://user:password@host:6379/0` | `key-value-store-redis` feature | Shared Redis or Valkey deployment. Use `rediss://` for TLS. Redis performs expiration natively. |
+| `postgresql://user:password@host/database` | `key-value-store-postgres` feature | Shared PostgreSQL or PostgreSQL-compatible CockroachDB deployment. URL parameters configure TLS. |
+| `tikv://pd1:2379,pd2:2379/prefix` | `key-value-store-tikv` feature | Shared TiKV deployment. The optional URL prefix overrides `DYN_STATEFUL_RESPONSES_STORE_NAMESPACE`. |
+
+For high availability, every frontend replica must use the same shared store and namespace. The memory store cannot preserve `previous_response_id` continuity when requests move between replicas.
+
+TTL values are relative durations. Redis and TiKV apply them natively, while PostgreSQL computes expiry from the database clock, so frontend clock skew does not change retention. Each replica may run cleanup for stores without native TTL; cleanup starts after the configured interval and PostgreSQL deletes at most 1000 expired rows per pass.
+
+Redis URLs are passed directly to the Redis client, including ACL username, password, database, and the `rediss://` TLS scheme. TLS uses the host's native certificate roots.
+
+PostgreSQL URLs are passed directly to SQLx. Use `sslmode`, `sslrootcert`, `sslcert`, and `sslkey` URL parameters when TLS or mutual TLS is required. The frontend idempotently ensures the `dynamo_key_value_store` table and expiry index exist at startup. The runtime role needs `CREATE` permission unless both objects are preprovisioned.
+
+The current TiKV URL accepts PD endpoints and an optional key prefix. It does not expose TiKV TLS or authentication settings, so use it only on a trusted network until secure client configuration is added. `DELETE` is intended for immutable response IDs; its returned existence flag is advisory if callers concurrently reuse the same key.
+
+Redis example:
+
+```bash
+export DYN_STATEFUL_RESPONSES_STORE_URL="rediss://dynamo:${REDIS_PASSWORD}@redis.example:6380/0"
+export DYN_STATEFUL_RESPONSES_STORE_NAMESPACE='production/responses'
+export DYN_STATEFUL_RESPONSES_DEFAULT_TTL_SECS=86400
+python -m dynamo.frontend --http-port 8000
+```
+
+PostgreSQL or CockroachDB example:
+
+```bash
+export DYN_STATEFUL_RESPONSES_STORE_URL="postgresql://dynamo:${DB_PASSWORD}@db.example:26257/dynamo?sslmode=verify-full&sslrootcert=/etc/dynamo/ca.crt"
+export DYN_STATEFUL_RESPONSES_STORE_NAMESPACE='production/responses'
+export DYN_STATEFUL_RESPONSES_DEFAULT_TTL_SECS=86400
+python -m dynamo.frontend --http-port 8000
+```
+
 ## Router
 
 | CLI Argument | Env Var | Default | Description |
@@ -141,6 +191,7 @@ The frontend exposes the following HTTP endpoints:
 | `POST` | `/v1/completions` | Text completions |
 | `POST` | `/v1/embeddings` | Text embeddings |
 | `POST` | `/v1/responses` | Responses API |
+| `DELETE` | `/v1/responses/{response_id}` | Delete stored Responses context |
 | `POST` | `/v1/images/generations` | Image generation |
 | `POST` | `/v1/videos/generations` | Video generation |
 | `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
