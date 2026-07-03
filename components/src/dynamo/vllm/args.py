@@ -63,11 +63,15 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
     return config.__dict__
 
 
-def parse_args(argv: list[str] | None = None) -> Config:
+def parse_args(
+    argv: list[str] | None = None, *, fpm_trace_relay_supported: bool = True
+) -> Config:
     """Parse command-line arguments for the vLLM backend.
 
     Args:
         argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
+        fpm_trace_relay_supported: Whether this entry point constructs the
+            Dynamo relay required for trace-based FPM activation.
 
     Returns:
         Config: Parsed configuration object.
@@ -114,7 +118,11 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
     cross_validate_config(dynamo_config, engine_config)
     update_dynamo_config_with_engine(dynamo_config, engine_config)
-    update_engine_config_with_dynamo(dynamo_config, engine_config)
+    update_engine_config_with_dynamo(
+        dynamo_config,
+        engine_config,
+        fpm_trace_relay_supported=fpm_trace_relay_supported,
+    )
 
     dynamo_config.engine_args = engine_config
     return dynamo_config
@@ -226,8 +234,45 @@ def update_dynamo_config_with_engine(
     dynamo_config.connector = []  # type: ignore[assignment]
 
 
+def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
+    """Return the worker role when trace-based FPM activation is unsupported."""
+    if dynamo_config.embedding_worker:
+        return "embedding"
+    if dynamo_config.headless:
+        return "headless"
+    if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
+        return "multimodal encode"
+    return None
+
+
+def _forward_pass_metrics_enabled(
+    dynamo_config: Config, *, fpm_trace_relay_supported: bool = True
+) -> bool:
+    """Resolve FPM activation without changing the legacy explicit-port path."""
+    if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+        return True
+    if not dynamo_config.fpm_trace:
+        return False
+
+    unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
+    if unsupported_role is None and not fpm_trace_relay_supported:
+        unsupported_role = "unified backend"
+    if unsupported_role is None:
+        return True
+
+    logger.warning(
+        "--fpm-trace/DYN_FPM_TRACE is enabled, but vLLM %s workers do not create a Dynamo "
+        "FPM relay. Trace-based FPM activation is disabled for this worker.",
+        unsupported_role,
+    )
+    return False
+
+
 def update_engine_config_with_dynamo(
-    dynamo_config: Config, engine_config: AsyncEngineArgs
+    dynamo_config: Config,
+    engine_config: AsyncEngineArgs,
+    *,
+    fpm_trace_relay_supported: bool = True,
 ) -> None:
     """Update engine config based on Dynamo config."""
     if engine_config.enable_prefix_caching is None:
@@ -267,7 +312,11 @@ def update_engine_config_with_dynamo(
         f"(use_kv_events={dynamo_config.use_kv_events})"
     )
 
-    if envs.forward_pass_metrics_enabled():
+    fpm_enabled = _forward_pass_metrics_enabled(
+        dynamo_config,
+        fpm_trace_relay_supported=fpm_trace_relay_supported,
+    )
+    if fpm_enabled:
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
             defaults[
@@ -281,7 +330,7 @@ def update_engine_config_with_dynamo(
             fpm_source = (
                 "DYN_FORWARDPASS_METRIC_PORT is set"
                 if envs.is_set("DYN_FORWARDPASS_METRIC_PORT")
-                else "DYN_FPM_TRACE is enabled"
+                else "--fpm-trace/DYN_FPM_TRACE is enabled"
             )
             logger.warning(
                 f"{fpm_source} but scheduler_cls "
@@ -297,7 +346,7 @@ def update_engine_config_with_dynamo(
                 "Benchmark data will be collected but not served via endpoint."
             )
         existing_cls = getattr(engine_config, "scheduler_cls", None)
-        if existing_cls is None and not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+        if existing_cls is None and not fpm_enabled:
             defaults[
                 "scheduler_cls"
             ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"

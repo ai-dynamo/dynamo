@@ -4,30 +4,31 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
+
+use dynamo_runtime::utils::GracefulTaskGuard;
 
 use crate::telemetry::jsonl_gz::{JsonlGzipSinkOptions, JsonlGzipWriter};
 
 use super::config::{
-    self, DEFAULT_JSONL_BUFFER_BYTES, DEFAULT_JSONL_FLUSH_INTERVAL_MS, FpmTraceMode, FpmTracePolicy,
+    DEFAULT_JSONL_BUFFER_BYTES, DEFAULT_JSONL_FLUSH_INTERVAL_MS, FpmTraceMode, FpmTracePolicy,
 };
-use super::{FpmTraceEvent, subscribe};
+use super::{FpmTraceEvent, FpmTraceInner};
 
-static INITIALIZATION_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 static PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Debug, Serialize)]
-struct FpmTraceSource {
-    namespace: String,
-    component: String,
-    producer_id: String,
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub(super) struct FpmTraceSource {
+    pub(super) namespace: String,
+    pub(super) component: String,
+    pub(super) producer_id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -39,7 +40,10 @@ struct FpmTraceRecord {
     fpm: Value,
 }
 
-type FpmKey = (String, i64);
+// A producer can expose multiple Dynamo components through one shared trace
+// worker. Keep their sampled state independent even when backend worker IDs
+// and data-parallel ranks overlap.
+type FpmKey = (FpmTraceSource, String, i64);
 
 fn require_nonnegative_integer(object: &Map<String, Value>, field: &str) -> anyhow::Result<()> {
     let valid = object.get(field).is_some_and(|value| {
@@ -120,7 +124,6 @@ fn validate_canonical_fpm(object: &Map<String, Value>) -> anyhow::Result<()> {
 
 fn decode_event(
     event: FpmTraceEvent,
-    source: &FpmTraceSource,
     capture_mode: FpmTraceMode,
 ) -> anyhow::Result<(FpmKey, i64, FpmTraceRecord)> {
     let fpm: Value = rmp_serde::from_slice(&event.payload).context("decoding FPM msgpack")?;
@@ -144,12 +147,13 @@ fn decode_event(
         .filter(|counter_id| *counter_id >= 0)
         .ok_or_else(|| anyhow::anyhow!("FPM payload has no non-negative integer counter_id"))?;
 
+    let source = (*event.source).clone();
     Ok((
-        (worker_id, dp_rank),
+        (source.clone(), worker_id, dp_rank),
         counter_id,
         FpmTraceRecord {
             schema: "dynamo.fpm.trace.v1",
-            source: source.clone(),
+            source,
             capture_mode,
             observed_at_unix_ms: event.observed_at_unix_ms,
             fpm,
@@ -175,7 +179,7 @@ fn sanitize_producer_id(producer_id: &str) -> String {
     }
 }
 
-fn producer_output_path(base_path: &str, producer_id: &str) -> String {
+pub(super) fn producer_output_path(base_path: &str, producer_id: &str) -> String {
     let prefix = base_path
         .strip_suffix(".jsonl.gz")
         .or_else(|| base_path.strip_suffix(".jsonl"))
@@ -221,38 +225,17 @@ fn preflight_writable_parent(output_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(super) async fn spawn_worker_from_env(
-    namespace: &str,
-    component: &str,
-    producer_id: &str,
-    shutdown: CancellationToken,
-) -> anyhow::Result<bool> {
-    if INITIALIZATION_ATTEMPTED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return Ok(false);
-    }
-
-    let source = FpmTraceSource {
-        namespace: namespace.to_string(),
-        component: component.to_string(),
-        producer_id: producer_id.to_string(),
-    };
-    // Initialization is deliberately single-shot, including failures. A
-    // multi-DP process constructs one relay per rank; retrying an unwritable
-    // path here would emit the same warning once per rank.
-    spawn_worker(source, config::policy().clone(), shutdown).await?;
-    Ok(true)
-}
-
-async fn spawn_worker(
-    source: FpmTraceSource,
+pub(super) async fn spawn_worker(
     policy: FpmTracePolicy,
-    shutdown: CancellationToken,
+    receiver: broadcast::Receiver<FpmTraceEvent>,
+    owner: Arc<FpmTraceInner>,
+    graceful_guard: Option<GracefulTaskGuard>,
 ) -> anyhow::Result<()> {
-    let output_path = producer_output_path(&policy.output_path, &source.producer_id);
-    preflight_writable_parent(&output_path)?;
+    let output_path = producer_output_path(&policy.output_path, &owner.producer_id);
+    let preflight_path = output_path.clone();
+    tokio::task::spawn_blocking(move || preflight_writable_parent(&preflight_path))
+        .await
+        .context("joining FPM trace write preflight")??;
     let writer = JsonlGzipWriter::new(
         output_path.clone(),
         JsonlGzipSinkOptions {
@@ -265,20 +248,21 @@ async fn spawn_worker(
     )
     .await
     .with_context(|| format!("opening FPM gzip JSONL trace at {output_path}"))?;
-    let receiver = subscribe();
-
+    let completion = MarkClosedOnDrop(owner.clone());
     tokio::spawn(async move {
+        // The guard keeps runtime shutdown in phase 2 until this task has
+        // drained the queue and awaited writer close.
+        let _graceful_guard = graceful_guard;
+        // Constructed outside the async block, so task abort before its first
+        // poll still marks the producer closed and wakes registry waiters. It
+        // is declared after the graceful guard so it drops first on return.
+        let _completion = completion;
+        // Keeping the owner alive keeps this producer discoverable in the
+        // registry until its writer has finished closing.
         match policy.mode {
-            FpmTraceMode::Full => run_full(receiver, writer, shutdown, source).await,
+            FpmTraceMode::Full => run_full(receiver, writer, owner.clone()).await,
             FpmTraceMode::Sampled => {
-                run_sampled(
-                    receiver,
-                    writer,
-                    shutdown,
-                    policy.sample_interval_ms,
-                    source,
-                )
-                .await
+                run_sampled(receiver, writer, owner.clone(), policy.sample_interval_ms).await
             }
         }
     });
@@ -286,12 +270,16 @@ async fn spawn_worker(
     Ok(())
 }
 
-async fn send_decoded(
-    writer: &JsonlGzipWriter<FpmTraceRecord>,
-    event: FpmTraceEvent,
-    source: &FpmTraceSource,
-) {
-    match decode_event(event, source, FpmTraceMode::Full) {
+struct MarkClosedOnDrop(Arc<FpmTraceInner>);
+
+impl Drop for MarkClosedOnDrop {
+    fn drop(&mut self) {
+        self.0.mark_closed();
+    }
+}
+
+async fn send_decoded(writer: &JsonlGzipWriter<FpmTraceRecord>, event: FpmTraceEvent) {
+    match decode_event(event, FpmTraceMode::Full) {
         Ok((_, _, record)) => {
             if writer.send(record).await.is_err() {
                 tracing::warn!("FPM trace writer closed; dropping record");
@@ -301,23 +289,47 @@ async fn send_decoded(
     }
 }
 
+fn report_lag(owner: &FpmTraceInner, dropped: u64, during_shutdown: bool) {
+    let total_dropped = owner.record_dropped(dropped);
+    tracing::warn!(
+        producer_id = %owner.producer_id,
+        dropped,
+        total_dropped,
+        during_shutdown,
+        "FPM trace queue lagged; older records were overwritten"
+    );
+}
+
+fn report_drop_summary(owner: &FpmTraceInner) {
+    let dropped = owner.dropped.load(Ordering::Relaxed);
+    if dropped > 0 {
+        tracing::warn!(
+            producer_id = %owner.producer_id,
+            dropped,
+            "FPM trace closed after dropping records"
+        );
+    }
+}
+
 async fn run_full(
     mut receiver: broadcast::Receiver<FpmTraceEvent>,
     writer: JsonlGzipWriter<FpmTraceRecord>,
-    shutdown: CancellationToken,
-    source: FpmTraceSource,
+    owner: Arc<FpmTraceInner>,
 ) {
     loop {
         tokio::select! {
             biased;
-            _ = shutdown.cancelled() => {
+            _ = owner.shutdown.cancelled() => {
+                // Stop new publishes and wait for publishers that crossed the
+                // acceptance boundary. The subsequent try_recv loop is then a
+                // stable drain of the bounded queue.
+                owner.stop_accepting().await;
                 loop {
                     match receiver.try_recv() {
-                        Ok(event) => send_decoded(&writer, event, &source).await,
-                        Err(broadcast::error::TryRecvError::Lagged(dropped)) => tracing::warn!(
-                            dropped,
-                            "FPM trace bus lagged during shutdown; dropped records"
-                        ),
+                        Ok(event) => send_decoded(&writer, event).await,
+                        Err(broadcast::error::TryRecvError::Lagged(dropped)) => {
+                            report_lag(&owner, dropped, true);
+                        }
                         Err(
                             broadcast::error::TryRecvError::Empty
                             | broadcast::error::TryRecvError::Closed
@@ -327,19 +339,21 @@ async fn run_full(
                 if let Err(error) = writer.close().await {
                     tracing::warn!(%error, "FPM trace writer failed to close cleanly");
                 }
+                report_drop_summary(&owner);
                 return;
             }
             message = receiver.recv() => {
                 match message {
-                    Ok(event) => send_decoded(&writer, event, &source).await,
-                    Err(broadcast::error::RecvError::Lagged(dropped)) => tracing::warn!(
-                        dropped,
-                        "FPM trace bus lagged; dropped records"
-                    ),
+                    Ok(event) => send_decoded(&writer, event).await,
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        report_lag(&owner, dropped, false);
+                    }
                     Err(broadcast::error::RecvError::Closed) => {
+                        owner.stop_accepting().await;
                         if let Err(error) = writer.close().await {
                             tracing::warn!(%error, "FPM trace writer failed to close cleanly");
                         }
+                        report_drop_summary(&owner);
                         return;
                     }
                 }
@@ -357,9 +371,8 @@ fn retain_latest(
     latest: &mut BTreeMap<FpmKey, PendingSample>,
     last_emitted: &BTreeMap<FpmKey, i64>,
     event: FpmTraceEvent,
-    source: &FpmTraceSource,
 ) {
-    match decode_event(event, source, FpmTraceMode::Sampled) {
+    match decode_event(event, FpmTraceMode::Sampled) {
         Ok((key, counter_id, record)) => {
             if last_emitted.get(&key) == Some(&counter_id) {
                 return;
@@ -388,9 +401,8 @@ async fn flush_latest(
 async fn run_sampled(
     mut receiver: broadcast::Receiver<FpmTraceEvent>,
     writer: JsonlGzipWriter<FpmTraceRecord>,
-    shutdown: CancellationToken,
+    owner: Arc<FpmTraceInner>,
     sample_interval_ms: u64,
-    source: FpmTraceSource,
 ) {
     let interval = Duration::from_millis(sample_interval_ms.max(1));
     let mut flush_tick = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
@@ -401,14 +413,14 @@ async fn run_sampled(
     loop {
         tokio::select! {
             biased;
-            _ = shutdown.cancelled() => {
+            _ = owner.shutdown.cancelled() => {
+                owner.stop_accepting().await;
                 loop {
                     match receiver.try_recv() {
-                        Ok(event) => retain_latest(&mut latest, &last_emitted, event, &source),
-                        Err(broadcast::error::TryRecvError::Lagged(dropped)) => tracing::warn!(
-                            dropped,
-                            "FPM trace bus lagged during shutdown; dropped records"
-                        ),
+                        Ok(event) => retain_latest(&mut latest, &last_emitted, event),
+                        Err(broadcast::error::TryRecvError::Lagged(dropped)) => {
+                            report_lag(&owner, dropped, true);
+                        }
                         Err(
                             broadcast::error::TryRecvError::Empty
                             | broadcast::error::TryRecvError::Closed
@@ -419,6 +431,7 @@ async fn run_sampled(
                 if let Err(error) = writer.close().await {
                     tracing::warn!(%error, "FPM trace writer failed to close cleanly");
                 }
+                report_drop_summary(&owner);
                 return;
             }
             _ = flush_tick.tick() => {
@@ -426,16 +439,17 @@ async fn run_sampled(
             }
             message = receiver.recv() => {
                 match message {
-                    Ok(event) => retain_latest(&mut latest, &last_emitted, event, &source),
-                    Err(broadcast::error::RecvError::Lagged(dropped)) => tracing::warn!(
-                        dropped,
-                        "FPM trace bus lagged; dropped records"
-                    ),
+                    Ok(event) => retain_latest(&mut latest, &last_emitted, event),
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        report_lag(&owner, dropped, false);
+                    }
                     Err(broadcast::error::RecvError::Closed) => {
+                        owner.stop_accepting().await;
                         flush_latest(&writer, &mut latest, &mut last_emitted).await;
                         if let Err(error) = writer.close().await {
                             tracing::warn!(%error, "FPM trace writer failed to close cleanly");
                         }
+                        report_drop_summary(&owner);
                         return;
                     }
                 }
@@ -447,9 +461,11 @@ async fn run_sampled(
 #[cfg(test)]
 mod tests {
     use std::io::Read;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     use bytes::Bytes;
     use flate2::read::MultiGzDecoder;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::telemetry::jsonl_gz::segment_path;
@@ -497,11 +513,16 @@ mod tests {
         FpmTraceEvent {
             observed_at_unix_ms: counter_id as u64 * 100,
             payload: Bytes::from(payload),
+            source: Arc::new(source()),
         }
     }
 
     fn event(worker_id: &str, dp_rank: i64, counter_id: i64) -> FpmTraceEvent {
         event_with_wall_time(worker_id, dp_rank, counter_id, 0.01)
+    }
+
+    fn key(worker_id: &str, dp_rank: i64) -> FpmKey {
+        (source(), worker_id.to_string(), dp_rank)
     }
 
     async fn test_writer(path: &Path) -> JsonlGzipWriter<FpmTraceRecord> {
@@ -534,6 +555,24 @@ mod tests {
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
+    }
+
+    fn owner(
+        sender: broadcast::Sender<FpmTraceEvent>,
+        shutdown: CancellationToken,
+    ) -> Arc<FpmTraceInner> {
+        Arc::new(FpmTraceInner {
+            producer_id: "producer-1".to_string(),
+            sender,
+            shutdown,
+            accepting: AtomicBool::new(true),
+            publishers_in_flight: AtomicUsize::new(0),
+            publishers_idle: tokio::sync::Notify::new(),
+            leases: AtomicUsize::new(1),
+            dropped: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+            closed_notify: tokio::sync::Notify::new(),
+        })
     }
 
     #[test]
@@ -572,35 +611,47 @@ mod tests {
     fn sampled_mode_keeps_latest_event_per_worker_and_rank() {
         let mut latest = BTreeMap::new();
         let last_emitted = BTreeMap::new();
-        let source = source();
-        retain_latest(&mut latest, &last_emitted, event("worker-a", 0, 1), &source);
-        retain_latest(&mut latest, &last_emitted, event("worker-a", 0, 2), &source);
-        retain_latest(&mut latest, &last_emitted, event("worker-a", 1, 3), &source);
+        retain_latest(&mut latest, &last_emitted, event("worker-a", 0, 1));
+        retain_latest(&mut latest, &last_emitted, event("worker-a", 0, 2));
+        retain_latest(&mut latest, &last_emitted, event("worker-a", 1, 3));
 
         assert_eq!(latest.len(), 2);
-        assert_eq!(
-            latest[&("worker-a".to_string(), 0)]
-                .record
-                .observed_at_unix_ms,
-            200
+        assert_eq!(latest[&key("worker-a", 0)].record.observed_at_unix_ms, 200);
+        assert_eq!(latest[&key("worker-a", 1)].record.observed_at_unix_ms, 300);
+        assert_eq!(latest[&key("worker-a", 0)].record.fpm["counter_id"], 2);
+    }
+
+    #[test]
+    fn sampled_mode_keeps_components_with_overlapping_worker_ids_independent() {
+        let mut latest = BTreeMap::new();
+        let last_emitted = BTreeMap::new();
+        let backend = event("worker-a", 0, 1);
+        let mut prefill = event("worker-a", 0, 2);
+        prefill.source = Arc::new(FpmTraceSource {
+            component: "prefill".to_string(),
+            ..source()
+        });
+
+        retain_latest(&mut latest, &last_emitted, backend);
+        retain_latest(&mut latest, &last_emitted, prefill);
+
+        assert_eq!(latest.len(), 2);
+        assert_eq!(latest[&key("worker-a", 0)].counter_id, 1);
+        let prefill_key = (
+            FpmTraceSource {
+                component: "prefill".to_string(),
+                ..source()
+            },
+            "worker-a".to_string(),
+            0,
         );
-        assert_eq!(
-            latest[&("worker-a".to_string(), 1)]
-                .record
-                .observed_at_unix_ms,
-            300
-        );
-        assert_eq!(
-            latest[&("worker-a".to_string(), 0)].record.fpm["counter_id"],
-            2
-        );
+        assert_eq!(latest[&prefill_key].counter_id, 2);
     }
 
     #[test]
     fn sampled_state_stays_bounded_to_one_record_per_rank() {
         let mut latest = BTreeMap::new();
         let last_emitted = BTreeMap::new();
-        let source = source();
 
         for counter_id in 1..=32 {
             for dp_rank in 0..256 {
@@ -608,7 +659,6 @@ mod tests {
                     &mut latest,
                     &last_emitted,
                     event("worker-a", dp_rank, counter_id),
-                    &source,
                 );
             }
         }
@@ -621,15 +671,10 @@ mod tests {
     fn sampled_mode_does_not_reemit_the_last_counter() {
         let mut latest = BTreeMap::new();
         let mut last_emitted = BTreeMap::new();
-        let key = ("worker-a".to_string(), 0);
+        let key = key("worker-a", 0);
         last_emitted.insert(key, 9);
 
-        retain_latest(
-            &mut latest,
-            &last_emitted,
-            event("worker-a", 0, 9),
-            &source(),
-        );
+        retain_latest(&mut latest, &last_emitted, event("worker-a", 0, 9));
 
         assert!(latest.is_empty());
     }
@@ -639,8 +684,9 @@ mod tests {
         let malformed = FpmTraceEvent {
             observed_at_unix_ms: 1,
             payload: Bytes::from_static(b"not-msgpack"),
+            source: Arc::new(source()),
         };
-        assert!(decode_event(malformed, &source(), FpmTraceMode::Full).is_err());
+        assert!(decode_event(malformed, FpmTraceMode::Full).is_err());
     }
 
     #[test]
@@ -658,14 +704,14 @@ mod tests {
         let incomplete = FpmTraceEvent {
             observed_at_unix_ms: 1,
             payload: Bytes::from(payload),
+            source: Arc::new(source()),
         };
-        assert!(decode_event(incomplete, &source(), FpmTraceMode::Full).is_err());
+        assert!(decode_event(incomplete, FpmTraceMode::Full).is_err());
     }
 
     #[test]
     fn trace_record_carries_stable_schema_source_and_mode() {
-        let (_, _, record) =
-            decode_event(event("worker-a", 2, 7), &source(), FpmTraceMode::Sampled).unwrap();
+        let (_, _, record) = decode_event(event("worker-a", 2, 7), FpmTraceMode::Sampled).unwrap();
         let value = serde_json::to_value(record).unwrap();
         assert_eq!(value["schema"], "dynamo.fpm.trace.v1");
         assert_eq!(value["source"]["namespace"], "dynamo");
@@ -682,7 +728,8 @@ mod tests {
         let writer = test_writer(&path).await;
         let (sender, receiver) = broadcast::channel(8);
         let shutdown = CancellationToken::new();
-        let task = tokio::spawn(run_full(receiver, writer, shutdown.clone(), source()));
+        let owner = owner(sender.clone(), shutdown.clone());
+        let task = tokio::spawn(run_full(receiver, writer, owner));
 
         sender
             .send(event_with_wall_time("worker-a", 0, 1, 0.01))
@@ -717,13 +764,8 @@ mod tests {
         let writer = test_writer(&path).await;
         let (sender, receiver) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
-        let task = tokio::spawn(run_sampled(
-            receiver,
-            writer,
-            shutdown.clone(),
-            100,
-            source(),
-        ));
+        let owner = owner(sender.clone(), shutdown.clone());
+        let task = tokio::spawn(run_sampled(receiver, writer, owner, 100));
 
         sender.send(event("worker-a", 0, 1)).unwrap();
         sender.send(event("worker-a", 0, 2)).unwrap();
@@ -765,18 +807,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounded_trace_receiver_reports_lag_instead_of_blocking_sender() {
+    async fn bounded_trace_queue_retains_newest_and_counts_overwritten_records() {
         let (sender, mut receiver) = broadcast::channel(2);
+        let owner = owner(sender.clone(), CancellationToken::new());
         sender.send(event("worker-a", 0, 1)).unwrap();
         sender.send(event("worker-a", 0, 2)).unwrap();
         sender.send(event("worker-a", 0, 3)).unwrap();
 
-        assert!(matches!(
-            receiver.recv().await,
-            Err(broadcast::error::RecvError::Lagged(1))
-        ));
-        let next = receiver.recv().await.unwrap();
-        let (_, counter_id, _) = decode_event(next, &source(), FpmTraceMode::Full).unwrap();
-        assert_eq!(counter_id, 2);
+        let dropped = match receiver.recv().await {
+            Err(broadcast::error::RecvError::Lagged(dropped)) => dropped,
+            result => panic!("expected lag, got {result:?}"),
+        };
+        report_lag(&owner, dropped, false);
+        assert_eq!(owner.dropped.load(Ordering::Relaxed), 1);
+
+        let second = receiver.recv().await.unwrap();
+        let third = receiver.recv().await.unwrap();
+        let (_, second_counter, _) = decode_event(second, FpmTraceMode::Full).unwrap();
+        let (_, third_counter, _) = decode_event(third, FpmTraceMode::Full).unwrap();
+        assert_eq!((second_counter, third_counter), (2, 3));
+    }
+
+    #[tokio::test]
+    async fn worker_completion_notifies_registry_even_after_task_panic() {
+        let (sender, _receiver) = broadcast::channel(1);
+        let owner = owner(sender, CancellationToken::new());
+        let completion = MarkClosedOnDrop(owner.clone());
+
+        let task = tokio::spawn(async move {
+            let _completion = completion;
+            panic!("simulated trace worker panic");
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        owner.wait_closed().await;
+        assert!(owner.closed.load(Ordering::Acquire));
+        assert!(!owner.accepting.load(Ordering::Acquire));
     }
 }

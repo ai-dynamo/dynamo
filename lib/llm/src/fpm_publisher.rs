@@ -32,28 +32,37 @@ const FPM_VERSION: i32 = 1;
 /// Matches Python `_FpmPublisherThread.HEARTBEAT_INTERVAL`.
 const IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
-fn report_fpm_trace_init(result: anyhow::Result<()>) {
-    if let Err(error) = result {
-        tracing::warn!(
-            %error,
-            "FPM trace initialization failed; continuing without local persistence"
-        );
+fn report_fpm_trace_init(
+    result: anyhow::Result<Option<crate::fpm_trace::FpmTrace>>,
+) -> Option<crate::fpm_trace::FpmTrace> {
+    match result {
+        Ok(trace) => trace,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "FPM trace initialization failed; continuing without local persistence"
+            );
+            None
+        }
     }
 }
 
-async fn init_fpm_trace(component: &Component) {
+async fn init_fpm_trace(component: &Component) -> Option<crate::fpm_trace::FpmTrace> {
     let namespace = component.namespace().name();
     let component_name = component.name().to_string();
     let producer_id = component.drt().connection_id().to_string();
+    let runtime_id = component.drt().runtime().id().to_string();
     report_fpm_trace_init(
         crate::fpm_trace::init_from_env_with_shutdown(
+            &runtime_id,
             &namespace,
             &component_name,
             &producer_id,
-            component.drt().primary_token(),
+            component.drt().child_token(),
+            Some(component.drt().register_graceful_task()),
         )
         .await,
-    );
+    )
 }
 
 fn tap_relay_fpm_with<F>(payload: &bytes::Bytes, tap: F)
@@ -63,9 +72,11 @@ where
     tap(payload.clone());
 }
 
-fn tap_relay_fpm(payload: &bytes::Bytes) {
-    if crate::fpm_trace::is_active() {
-        tap_relay_fpm_with(payload, crate::fpm_trace::publish_payload);
+fn tap_relay_fpm(payload: &bytes::Bytes, trace: Option<&crate::fpm_trace::FpmTrace>) {
+    if let Some(trace) = trace {
+        tap_relay_fpm_with(payload, |payload| {
+            trace.publish_payload(payload);
+        });
     }
 }
 
@@ -76,9 +87,11 @@ where
     tap(bytes::Bytes::copy_from_slice(payload));
 }
 
-fn tap_direct_fpm(payload: &[u8]) {
-    if crate::fpm_trace::is_active() {
-        tap_direct_fpm_with(payload, crate::fpm_trace::publish_payload);
+fn tap_direct_fpm(payload: &[u8], trace: Option<&crate::fpm_trace::FpmTrace>) {
+    if let Some(trace) = trace {
+        tap_direct_fpm_with(payload, |payload| {
+            trace.publish_payload(payload);
+        });
     }
 }
 
@@ -99,13 +112,13 @@ impl FpmEventRelay {
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
-        rt.block_on(init_fpm_trace(&component));
+        let trace = rt.block_on(init_fpm_trace(&component));
 
         let publisher =
             rt.block_on(async { EventPublisher::for_component(&component, FPM_TOPIC).await })?;
 
         rt.spawn(async move {
-            Self::relay_loop(zmq_endpoint, publisher, cancel_clone).await;
+            Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace).await;
         });
 
         Ok(Self { cancel })
@@ -120,6 +133,7 @@ impl FpmEventRelay {
         zmq_endpoint: String,
         publisher: EventPublisher,
         cancel: CancellationToken,
+        trace: Option<crate::fpm_trace::FpmTrace>,
     ) {
         let socket = match connect_sub_socket(&zmq_endpoint, None).await {
             Ok(socket) => socket,
@@ -145,7 +159,7 @@ impl FpmEventRelay {
                             // ZMQ multipart: [topic, seq, payload]
                             if frames.len() == 3 {
                                 let payload = bytes::Bytes::from(frames.swap_remove(2));
-                                tap_relay_fpm(&payload);
+                                tap_relay_fpm(&payload, trace.as_ref());
                                 if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                     tracing::warn!("FPM relay: event plane publish failed: {e}");
                                 }
@@ -316,7 +330,7 @@ impl FpmDirectPublisher {
         let cancel = CancellationToken::new();
 
         let publisher = EventPublisher::for_component(&component, FPM_TOPIC).await?;
-        init_fpm_trace(&component).await;
+        let trace = init_fpm_trace(&component).await;
 
         // Shared channel: per-dp_rank tasks send snapshots here. A single publisher task
         // serializes them into a reusable buffer and preserves event-plane publish ordering.
@@ -342,7 +356,7 @@ impl FpmDirectPublisher {
                                     pending.counter_id,
                                 ) {
                                     Ok(()) => {
-                                        tap_direct_fpm(&payload);
+                                        tap_direct_fpm(&payload, trace.as_ref());
                                         if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                             tracing::warn!("FPM direct publisher: event plane publish failed: {e}");
                                         }
@@ -449,7 +463,7 @@ mod tests {
     fn fpm_trace_initialization_errors_are_soft() {
         // Trace persistence is auxiliary. Reporting an initialization failure
         // must not turn it into a constructor error for either FPM publisher.
-        report_fpm_trace_init(Err(anyhow::anyhow!("unwritable trace path")));
+        assert!(report_fpm_trace_init(Err(anyhow::anyhow!("unwritable trace path"))).is_none());
     }
 
     #[test]

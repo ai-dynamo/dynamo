@@ -7,6 +7,7 @@
 //! batched into uncompressed bytes, and appended as gzip members. Segments roll
 //! when uncompressed bytes or record-line thresholds are exceeded.
 
+use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -63,8 +64,12 @@ where
     pub async fn new(path: String, options: JsonlGzipSinkOptions) -> anyhow::Result<Self> {
         let shutdown = CancellationToken::new();
         let (tx, rx) = mpsc::channel::<T>(2048);
-        let mut writer = GzipBatchWriter::new(path.clone(), options)
-            .with_context(|| format!("opening gzip jsonl sink at {path}"))?;
+        let display_path = path.clone();
+        let mut writer =
+            tokio::task::spawn_blocking(move || GzipBatchWriter::<T>::new(path, options))
+                .await
+                .context("gzip jsonl sink initializer panicked")?
+                .with_context(|| format!("opening gzip jsonl sink at {display_path}"))?;
         let worker_shutdown = shutdown.clone();
 
         let worker =
@@ -114,6 +119,8 @@ struct GzipBatchWriter<T: Serialize> {
     current_index: u64,
     start_time: Instant,
     batch: Vec<u8>,
+    active_file: Option<File>,
+    prune_pending: bool,
     segment_uncompressed_bytes: u64,
     segment_lines: u64,
     options: JsonlGzipSinkOptions,
@@ -140,6 +147,8 @@ impl<T: Serialize> GzipBatchWriter<T> {
             current_index,
             start_time: Instant::now(),
             batch: Vec::with_capacity(options.buffer_bytes.max(1)),
+            active_file: None,
+            prune_pending: true,
             segment_uncompressed_bytes: 0,
             segment_lines: 0,
             options,
@@ -192,6 +201,8 @@ impl<T: Serialize> GzipBatchWriter<T> {
 
     fn roll_segment(&mut self) {
         self.current_index = self.current_index.saturating_add(1);
+        self.active_file = None;
+        self.prune_pending = true;
         self.segment_uncompressed_bytes = 0;
         self.segment_lines = 0;
     }
@@ -201,22 +212,41 @@ impl<T: Serialize> GzipBatchWriter<T> {
             return Ok(());
         }
 
-        let path = segment_path(&self.base_path, self.current_index);
         let batch = std::mem::take(&mut self.batch);
         let base_path = self.base_path.clone();
+        let current_index = self.current_index;
         let max_segments = self.options.max_segments;
+        let active_file = self.active_file.take();
+        let prune_pending = self.prune_pending;
 
-        tokio::task::spawn_blocking(move || {
-            write_gzip_member(path, batch)?;
-            if let Some(max_segments) = max_segments
-                && let Err(err) = prune_segments(&base_path, max_segments)
-            {
-                tracing::warn!("gzip jsonl sink failed to prune old segments: {err}");
-            }
-            Ok::<(), anyhow::Error>(())
+        let (active_file, current_index, result) = tokio::task::spawn_blocking(move || {
+            let (mut active_file, current_index, path) = match active_file {
+                Some(file) => (file, current_index, segment_path(&base_path, current_index)),
+                None => match create_available_segment(&base_path, current_index) {
+                    Ok(segment) => segment,
+                    Err(err) => return (None, current_index, Err(err)),
+                },
+            };
+
+            let result = write_gzip_member(&mut active_file, &path, batch).map(|()| {
+                if prune_pending
+                    && let Some(max_segments) = max_segments
+                    && let Err(err) = prune_segments(&base_path, max_segments)
+                {
+                    tracing::warn!("gzip jsonl sink failed to prune old segments: {err}");
+                }
+            });
+            (Some(active_file), current_index, result)
         })
         .await
-        .context("gzip jsonl writer task panicked")??;
+        .context("gzip jsonl writer task panicked")?;
+
+        self.active_file = active_file;
+        self.current_index = current_index;
+        if result.is_ok() {
+            self.prune_pending = false;
+        }
+        result?;
 
         Ok(())
     }
@@ -275,19 +305,55 @@ async fn run_gzip_writer<T: Serialize>(
     }
 }
 
-fn write_gzip_member(path: PathBuf, batch: Vec<u8>) -> anyhow::Result<()> {
+fn ensure_segment_parent(path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating gzip jsonl directory {}", parent.display()))?;
     }
+    Ok(())
+}
 
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("opening gzip jsonl segment {}", path.display()))?;
+fn create_available_segment(
+    base_path: &Path,
+    initial_index: u64,
+) -> anyhow::Result<(File, u64, PathBuf)> {
+    let initial_path = segment_path(base_path, initial_index);
+    // Check the parent outside the collision loop. An `AlreadyExists` error
+    // from directory creation is not evidence that a segment index is taken.
+    ensure_segment_parent(&initial_path)?;
+
+    let mut index = initial_index;
+    loop {
+        let path = segment_path(base_path, index);
+        // `create_new` is atomic and fails for every existing filesystem
+        // object, including symlinks. Keeping this handle for the segment's
+        // lifetime also prevents later flushes from following a replacement
+        // symlink.
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((file, index, path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                index = index.checked_add(1).ok_or_else(|| {
+                    anyhow!(
+                        "no available gzip jsonl segment index for {}",
+                        base_path.display()
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("creating gzip jsonl segment {}", path.display()));
+            }
+        }
+    }
+}
+
+fn write_gzip_member(file: &mut File, path: &Path, batch: Vec<u8>) -> anyhow::Result<()> {
     let writer = BufWriter::new(file);
     let mut encoder = GzEncoder::new(writer, Compression::default());
     encoder
@@ -312,7 +378,7 @@ pub fn segment_path(base_path: &Path, index: u64) -> PathBuf {
 }
 
 fn next_segment_index(base_path: &Path) -> anyhow::Result<u64> {
-    match existing_segments(base_path)?.last() {
+    match matching_segments(base_path)?.occupied.last() {
         Some((index, _)) => index.checked_add(1).ok_or_else(|| {
             anyhow!(
                 "no available gzip jsonl segment index for {}",
@@ -335,7 +401,7 @@ fn prune_segments_with(
     max_segments: usize,
     mut remove: impl FnMut(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let segments = existing_segments(base_path)?;
+    let segments = matching_segments(base_path)?.prunable;
     let remove_count = segments.len().saturating_sub(max_segments);
     for (_, path) in segments.into_iter().take(remove_count) {
         remove(&path)?;
@@ -343,37 +409,47 @@ fn prune_segments_with(
     Ok(())
 }
 
-fn existing_segments(base_path: &Path) -> anyhow::Result<Vec<(u64, PathBuf)>> {
+struct MatchingSegments {
+    occupied: Vec<(u64, PathBuf)>,
+    prunable: Vec<(u64, PathBuf)>,
+}
+
+fn matching_segments(base_path: &Path) -> anyhow::Result<MatchingSegments> {
     let first_segment = segment_path(base_path, 0);
     let parent = first_segment
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     if !parent.try_exists()? {
-        return Ok(Vec::new());
+        return Ok(MatchingSegments {
+            occupied: Vec::new(),
+            prunable: Vec::new(),
+        });
     }
 
-    let mut segments = Vec::new();
+    let mut occupied = Vec::new();
+    let mut prunable = Vec::new();
     for entry in std::fs::read_dir(parent)
         .with_context(|| format!("listing gzip jsonl directory {}", parent.display()))?
     {
         let entry = entry.with_context(|| {
             format!("reading gzip jsonl directory entry in {}", parent.display())
         })?;
-        if !entry
-            .file_type()
-            .with_context(|| format!("reading file type for {}", entry.path().display()))?
-            .is_file()
-        {
-            continue;
-        }
         let Some(index) = segment_index(base_path, &entry.path()) else {
             continue;
         };
-        segments.push((index, entry.path()));
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("reading file type for {}", path.display()))?;
+        occupied.push((index, path.clone()));
+        if file_type.is_file() {
+            prunable.push((index, path));
+        }
     }
-    segments.sort_unstable_by_key(|(index, _)| *index);
-    Ok(segments)
+    occupied.sort_unstable_by_key(|(index, _)| *index);
+    prunable.sort_unstable_by_key(|(index, _)| *index);
+    Ok(MatchingSegments { occupied, prunable })
 }
 
 fn segment_index(base_path: &Path, candidate: &Path) -> Option<u64> {
@@ -530,6 +606,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overlapping_writers_claim_distinct_segments_on_first_flush() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_trace");
+        let options = JsonlGzipSinkOptions {
+            buffer_bytes: 1024,
+            flush_interval: Duration::from_secs(60),
+            roll_uncompressed_bytes: 1024 * 1024,
+            roll_lines: None,
+            max_segments: None,
+        };
+        let first = JsonlGzipWriter::<TestRecord>::new(path.display().to_string(), options.clone())
+            .await
+            .unwrap();
+        let second = JsonlGzipWriter::<TestRecord>::new(path.display().to_string(), options)
+            .await
+            .unwrap();
+
+        first
+            .send(TestRecord {
+                id: 1,
+                name: "first writer".to_string(),
+            })
+            .await
+            .unwrap();
+        first.close().await.unwrap();
+        second
+            .send(TestRecord {
+                id: 2,
+                name: "second writer".to_string(),
+            })
+            .await
+            .unwrap();
+        second.close().await.unwrap();
+
+        assert!(read_gzip_jsonl(&segment_path(&path, 0)).contains("first writer"));
+        assert!(read_gzip_jsonl(&segment_path(&path, 1)).contains("second writer"));
+    }
+
+    #[tokio::test]
     async fn retention_prunes_only_exact_prefix_after_new_segment_is_written() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test_trace");
@@ -566,6 +681,52 @@ mod tests {
         assert!(segment_path(&path, 2).exists());
         assert!(unrelated.exists());
         assert!(backup.exists());
+    }
+
+    #[tokio::test]
+    async fn repeated_flush_of_active_segment_does_not_rescan_retention() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_trace");
+        let oldest = segment_path(&path, 0);
+        std::fs::write(&oldest, b"old zero").unwrap();
+        std::fs::write(segment_path(&path, 1), b"old one").unwrap();
+
+        let mut writer = GzipBatchWriter::<TestRecord>::new(
+            path.display().to_string(),
+            JsonlGzipSinkOptions {
+                buffer_bytes: 1024,
+                flush_interval: Duration::from_secs(60),
+                roll_uncompressed_bytes: 1024 * 1024,
+                roll_lines: None,
+                max_segments: Some(2),
+            },
+        )
+        .unwrap();
+        writer
+            .push(&TestRecord {
+                id: 2,
+                name: "first flush".to_string(),
+            })
+            .await
+            .unwrap();
+        writer.flush_batch().await.unwrap();
+
+        assert!(!oldest.exists());
+        std::fs::write(&oldest, b"created after the segment was opened").unwrap();
+
+        writer
+            .push(&TestRecord {
+                id: 3,
+                name: "second flush".to_string(),
+            })
+            .await
+            .unwrap();
+        writer.flush_batch().await.unwrap();
+
+        assert!(oldest.exists());
+        let content = read_gzip_jsonl(&segment_path(&path, 2));
+        assert!(content.contains("first flush"));
+        assert!(content.contains("second flush"));
     }
 
     #[tokio::test]
@@ -678,13 +839,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_replacement_does_not_prune_existing_segments() {
+    async fn occupied_directory_uses_next_index_and_is_not_pruned() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test_trace");
         let old = segment_path(&path, 0);
-        let blocked_replacement = segment_path(&path, 1);
+        let occupied = segment_path(&path, 1);
         std::fs::write(&old, b"old").unwrap();
-        std::fs::create_dir(&blocked_replacement).unwrap();
+        std::fs::create_dir(&occupied).unwrap();
 
         let writer: JsonlGzipWriter<TestRecord> = JsonlGzipWriter::new(
             path.display().to_string(),
@@ -705,10 +866,54 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(writer.close().await.is_err());
+        writer.close().await.unwrap();
 
-        assert!(old.exists());
-        assert!(blocked_replacement.is_dir());
+        assert!(!old.exists());
+        assert!(occupied.is_dir());
+        assert!(read_gzip_jsonl(&segment_path(&path, 2)).contains("cannot write"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn segment_creation_skips_symlink_created_after_allocation() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_trace");
+        let target = dir.path().join("target");
+        let original = b"must remain unchanged";
+        std::fs::write(&target, original).unwrap();
+
+        let mut writer = GzipBatchWriter::<TestRecord>::new(
+            path.display().to_string(),
+            JsonlGzipSinkOptions {
+                buffer_bytes: 1024,
+                flush_interval: Duration::from_secs(60),
+                roll_uncompressed_bytes: 1024 * 1024,
+                roll_lines: None,
+                max_segments: Some(1),
+            },
+        )
+        .unwrap();
+        symlink(&target, segment_path(&path, 0)).unwrap();
+
+        writer
+            .push(&TestRecord {
+                id: 1,
+                name: "must not reach target".to_string(),
+            })
+            .await
+            .unwrap();
+        writer.flush_batch().await.unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        assert!(
+            std::fs::symlink_metadata(segment_path(&path, 0))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(read_gzip_jsonl(&segment_path(&path, 1)).contains("must not reach target"));
     }
 
     #[test]

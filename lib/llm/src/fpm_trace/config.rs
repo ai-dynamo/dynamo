@@ -57,29 +57,18 @@ fn parse_bool(value: &str) -> anyhow::Result<bool> {
     }
 }
 
-fn positive_u64_from_env(name: &str, default: u64) -> anyhow::Result<u64> {
+fn positive_integer_from_env<T>(name: &str, default: T) -> anyhow::Result<T>
+where
+    T: Copy + From<u8> + PartialEq + std::str::FromStr,
+{
     let Some(value) = std::env::var(name).ok() else {
         return Ok(default);
     };
     let parsed = value
         .trim()
-        .parse::<u64>()
+        .parse::<T>()
         .map_err(|_| anyhow::anyhow!("{name} must be a positive integer"))?;
-    if parsed == 0 {
-        anyhow::bail!("{name} must be greater than zero");
-    }
-    Ok(parsed)
-}
-
-fn positive_usize_from_env(name: &str, default: usize) -> anyhow::Result<usize> {
-    let Some(value) = std::env::var(name).ok() else {
-        return Ok(default);
-    };
-    let parsed = value
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| anyhow::anyhow!("{name} must be a positive integer"))?;
-    if parsed == 0 {
+    if parsed == T::from(0) {
         anyhow::bail!("{name} must be greater than zero");
     }
     Ok(parsed)
@@ -105,15 +94,15 @@ fn load_enabled_policy() -> anyhow::Result<FpmTracePolicy> {
         enabled: true,
         output_path,
         mode,
-        sample_interval_ms: positive_u64_from_env(
+        sample_interval_ms: positive_integer_from_env(
             env_fpm_trace::DYN_FPM_SAMPLE_INTERVAL_MS,
             DEFAULT_SAMPLE_INTERVAL_MS,
         )?,
-        jsonl_gz_roll_bytes: positive_u64_from_env(
+        jsonl_gz_roll_bytes: positive_integer_from_env(
             env_fpm_trace::DYN_FPM_JSONL_GZ_ROLL_BYTES,
             DEFAULT_JSONL_GZ_ROLL_BYTES,
         )?,
-        max_segments: positive_usize_from_env(
+        max_segments: positive_integer_from_env(
             env_fpm_trace::DYN_FPM_MAX_SEGMENTS,
             DEFAULT_MAX_SEGMENTS,
         )?,
