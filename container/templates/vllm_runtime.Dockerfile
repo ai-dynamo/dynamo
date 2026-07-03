@@ -242,20 +242,25 @@ RUN set -eux; \
 RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.py,target=/tmp/validate_torch_compile_smoke.py,readonly \
     python3 /tmp/validate_torch_compile_smoke.py
 
-# Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
-# libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
-# IMAGEIO_FFMPEG_EXE. Ungated by enable_media_ffmpeg because the base GPL ffmpeg
-# was just purged, so the LGPL CLI must always be present for the omni
-# video-export path to have something to encode with.
+# Copy LGPL ffmpeg and OpenCV from wheel_builder: versioned shared libs
+# for media decoders, plus the LGPL ffmpeg CLI binary that imageio/diffusers
+# target via IMAGEIO_FFMPEG_EXE. Ungated by enable_media_ffmpeg because the base
+# GPL ffmpeg was just purged, so the LGPL CLI must always be present for the
+# omni video-export path to have something to encode with.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
-    mkdir -p /usr/local/lib/pkgconfig && \
+    mkdir -p /usr/local/lib/pkgconfig /usr/local/src && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -rnL /tmp/usr/local/include/opencv4 /usr/local/include/ && \
     cp -nL /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
-    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
+    (cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true) && \
+    cp -nL /tmp/usr/local/lib/libopencv*.so* /usr/local/lib/ && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -nL /tmp/usr/local/lib/pkgconfig/opencv4.pc /usr/local/lib/pkgconfig/ && \
     cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
     cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
-    ldconfig
+    cp -r /tmp/usr/local/src/opencv /usr/local/src/ && \
+    ldconfig && \
+    ldconfig -p | grep -q 'libopencv_core.so'
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 {% endif %}
 

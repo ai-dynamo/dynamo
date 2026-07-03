@@ -51,6 +51,8 @@ register_model(
 
 > [!WARNING]
 > **Video decoding**: Video decoding needs to be enabled via the `dynamo-llm/media-ffmpeg` rust feature. The following ffmpeg dynamic libraries must be available on the system: `libavcodec`, `libavdevice`, `libavfilter`, `libavformat`, `libswresample`, `libswscale`. These are available in dynamo dockerfiles rendered with `enable_media_ffmpeg` set to true in `container/context.yaml`.
+>
+> **OpenCV video backend**: the default video backend is `video_rs`. The optional `opencv` backend requires building `dynamo-llm` or `dynamo-py3` with `media-opencv-video` and linking OpenCV. Dynamo container builds install OpenCV from source in `wheel_builder` and copy the runtime libraries into framework images. If `backend: "opencv"` is selected in a build without that feature, Dynamo logs a warning once and falls back to `video_rs`.
 
 ## Image decoding options
 
@@ -60,6 +62,9 @@ register_model(
 - **limits.max_alloc** (uint64, > 0): Maximum allowed total allocation (RAM) of the decoder in bytes
 
 ## Video decoding options
+### Backend
+- **backend**: `"video_rs"` (default) or `"opencv"`. The `opencv` backend is video-only and requires the `media-opencv-video` build feature plus OpenCV shared libraries at runtime.
+
 ### Sampling
 There are two ways to configure video sampling: either with a fixed number of frames, or with FPS-based sampling. Sampled frames are distributed uniformly in both cases.
 

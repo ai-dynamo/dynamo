@@ -42,9 +42,13 @@ dynamo:
   hwloc_version: 2.12.2
   enable_kvbm: "true"
   enable_media_ffmpeg: "false"
+  enable_media_opencv_video: "false"
   enable_gpu_memory_service: "true"
+  # Native media libraries built from source in wheel_builder and copied into
+  # framework runtime images.
   ffmpeg_version: "8.1"
-  # ffmpeg build inputs (only consumed when ENABLE_MEDIA_FFMPEG=true).
+  opencv_version: "4.13.0"
+  # ffmpeg build inputs.
   nv_codec_headers_ref: "n13.0.19.0"
   libvpx_ref: "v1.14.1"
   sccache_version: "v0.14.0"
@@ -81,6 +85,7 @@ vllm:
   nixl_ref: v1.1.0
   max_jobs: "10"
   enable_media_ffmpeg: "false"
+  enable_media_opencv_video: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   enable_modelexpress: "true"
@@ -122,6 +127,7 @@ sglang:
   # build doesn't leak into the runtime image.
   nixl_ref: v1.0.1
   enable_media_ffmpeg: "true"
+  enable_media_opencv_video: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
   enable_modelexpress: "true"

@@ -45,6 +45,15 @@ pub struct MediaDecoder {
     // TODO: audio decoder
 }
 
+impl MediaDecoder {
+    pub(crate) fn warn_if_unavailable_backends(&self) {
+        #[cfg(feature = "media-ffmpeg")]
+        if let Some(video) = &self.video {
+            video.warn_if_unavailable_backend();
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum DecodedMediaMetadata {
     Image(ImageMetadata),

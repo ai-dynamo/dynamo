@@ -358,6 +358,54 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
 
+{% if "enable_media_opencv_video" in context[framework] %}
+# Always build OpenCV from source so the optional Rust OpenCV video backend has
+# consistent headers/libs across distro and upstream runtime base images. Build
+# it after FFmpeg so OpenCV videoio links against Dynamo's in-tree LGPL FFmpeg.
+ARG OPENCV_VERSION
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
+    fi && \
+    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH:-} && \
+    cd /tmp && \
+    curl --retry 5 --retry-delay 3 -L \
+        -o opencv-${OPENCV_VERSION}.tar.gz \
+        https://github.com/opencv/opencv/archive/refs/tags/${OPENCV_VERSION}.tar.gz && \
+    tar xf opencv-${OPENCV_VERSION}.tar.gz && \
+    cd opencv-${OPENCV_VERSION} && \
+    cmake -S . -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_PREFIX_PATH=/usr/local \
+        -DBUILD_LIST=core,imgproc,imgcodecs,videoio \
+        -DBUILD_SHARED_LIBS=ON \
+        -DOPENCV_GENERATE_PKGCONFIG=ON \
+        -DWITH_FFMPEG=ON \
+        -DWITH_GSTREAMER=OFF \
+        -DWITH_OPENCL=OFF \
+        -DWITH_IPP=OFF \
+        -DWITH_ITT=OFF \
+        -DWITH_TBB=OFF \
+        -DBUILD_TESTS=OFF \
+        -DBUILD_PERF_TESTS=OFF \
+        -DBUILD_EXAMPLES=OFF \
+        -DBUILD_opencv_apps=OFF \
+        -DBUILD_JAVA=OFF \
+        -DBUILD_opencv_python2=OFF \
+        -DBUILD_opencv_python3=OFF && \
+    cmake --build build --parallel $(nproc) && \
+    cmake --install build && \
+    test "$(pkg-config --modversion opencv4)" = "${OPENCV_VERSION}" && \
+    /tmp/use-sccache.sh show-stats "OpenCV" && \
+    ldconfig && \
+    mkdir -p /usr/local/src/opencv && \
+    mv /tmp/opencv-${OPENCV_VERSION}* /usr/local/src/opencv/
+{% endif %}
+
 # Build and install UCX
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -505,6 +553,9 @@ COPY components/ /opt/dynamo/components/
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
 ARG ENABLE_MEDIA_FFMPEG
+{% if "enable_media_opencv_video" in context[framework] %}
+ARG ENABLE_MEDIA_OPENCV_VIDEO
+{% endif %}
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
@@ -521,11 +572,20 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
-    else \
-        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
+    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:${PKG_CONFIG_PATH:-} && \
+    MEDIA_FEATURES="" && \
+{% if "enable_media_opencv_video" in context[framework] %}
+    if [ "$ENABLE_MEDIA_OPENCV_VIDEO" = "true" ]; then \
+        MEDIA_FEATURES="media-opencv-video,"; \
+    elif [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        MEDIA_FEATURES="media-ffmpeg,"; \
     fi && \
+{% else %}
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        MEDIA_FEATURES="media-ffmpeg,"; \
+    fi && \
+{% endif %}
+    maturin build --release --features "${MEDIA_FEATURES}kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry

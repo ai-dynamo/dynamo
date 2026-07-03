@@ -3,6 +3,7 @@
 
 use std::io::Write;
 use std::os::fd::AsRawFd;
+use std::sync::Once;
 
 use anyhow::Result;
 use ffmpeg_next::Rational;
@@ -22,6 +23,7 @@ use crate::preprocessor::media::{
 /// Small time buffer (seconds) to avoid edge cases when seeking near frame boundaries
 const FRAME_TIME_BUFFER_SECS: f64 = 0.001;
 const DEFAULT_MAX_ALLOC: u64 = 512 * 1024 * 1024; // 512 MB
+static OPENCV_UNAVAILABLE_WARNING: Once = Once::new();
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -39,9 +41,21 @@ impl Default for VideoDecoderLimits {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoDecoderBackend {
+    #[default]
+    VideoRs,
+    #[serde(rename = "opencv")]
+    OpenCv,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VideoDecoder {
+    #[serde(default)]
+    pub(crate) backend: VideoDecoderBackend,
+
     #[serde(default)]
     pub(crate) limits: VideoDecoderLimits,
 
@@ -66,15 +80,12 @@ pub struct VideoMetadata {
     pub(crate) sampled_timestamps: Vec<f64>,
 }
 
-fn get_num_requested_frames(
+fn get_num_requested_frames_from_metadata(
     config: &VideoDecoder,
-    decoder: &video_rs::decode::Decoder,
+    duration_secs: f64,
+    frame_rate: f64,
+    mut total_frames: u64,
 ) -> Result<u64> {
-    // careful, duration and frames come from file metadata, might be inaccurate
-    let duration_secs = decoder.duration()?.as_secs() as f64;
-    let frame_rate = decoder.frame_rate() as f64;
-
-    let mut total_frames = decoder.frames().unwrap_or(0);
     if total_frames == 0 && duration_secs > 0.0 && frame_rate > 0.0 {
         total_frames = (duration_secs * frame_rate) as u64;
     }
@@ -101,6 +112,19 @@ fn get_num_requested_frames(
     );
 
     Ok(requested_frames)
+}
+
+fn get_num_requested_frames(
+    config: &VideoDecoder,
+    decoder: &video_rs::decode::Decoder,
+) -> Result<u64> {
+    // careful, duration and frames come from file metadata, might be inaccurate
+    get_num_requested_frames_from_metadata(
+        config,
+        decoder.duration()?.as_secs() as f64,
+        decoder.frame_rate() as f64,
+        decoder.frames().unwrap_or(0),
+    )
 }
 
 fn get_target_times(
@@ -199,19 +223,8 @@ fn decode_frame_at_timestamp(
     anyhow::bail!("No frame found for timestamp {target_timestamp:.3}s");
 }
 
-impl Decoder for VideoDecoder {
-    fn with_runtime(&self, runtime: Option<&Self>) -> Self {
-        match runtime {
-            Some(r) => {
-                let mut d = r.clone();
-                d.limits.clone_from(&self.limits);
-                d
-            }
-            None => self.clone(),
-        }
-    }
-
-    fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
+impl VideoDecoder {
+    fn validate_config(&self) -> Result<()> {
         anyhow::ensure!(
             self.fps.is_none() || self.num_frames.is_none(),
             "fps and num_frames cannot be specified at the same time"
@@ -222,9 +235,24 @@ impl Decoder for VideoDecoder {
             "max_frames and num_frames cannot be specified at the same time"
         );
 
+        Ok(())
+    }
+
+    pub(crate) fn warn_if_unavailable_backend(&self) {
+        if self.backend == VideoDecoderBackend::OpenCv && !opencv_backend_available() {
+            OPENCV_UNAVAILABLE_WARNING.call_once(|| {
+                tracing::warn!(
+                    "Video decoder backend `opencv` was selected, but this build does not include \
+                     the `media-opencv-video` feature; falling back to `video_rs`"
+                );
+            });
+        }
+    }
+
+    fn decode_video_rs(&self, bytes: Vec<u8>) -> Result<DecodedMediaData> {
         // video-rs wants a file path, we use memfile for in-memory file
         let mut mem_file = MemFile::create("video", CreateOptions::new().allow_sealing(true))?;
-        mem_file.write_all(&data.into_bytes()?)?; // one-liner so result of into_bytes will be dropped asap
+        mem_file.write_all(&bytes)?;
         mem_file.add_seals(Seal::Write | Seal::Shrink | Seal::Grow)?;
         let fd_path = format!("/proc/self/fd/{}", mem_file.as_raw_fd());
         let location = Location::File(fd_path.into());
@@ -285,25 +313,282 @@ impl Decoder for VideoDecoder {
             }
         }
 
-        let num_frames_decoded = sampled_timestamps.len();
-
-        anyhow::ensure!(
-            num_frames_decoded > 0,
-            "Failed to decode any frames, check for video corruption"
-        );
-
-        // Truncate buffer to actual frames decoded (in case some failed in non-strict mode)
-        all_frames.truncate(num_frames_decoded * frame_size);
-
-        let shape = (num_frames_decoded, height as usize, width as usize, 3);
-        let array = Array4::from_shape_vec(shape, all_frames)?;
-        let mut decoded: DecodedMediaData = array.try_into()?;
-        decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Video(VideoMetadata {
+        video_array_from_frames(
+            all_frames,
+            sampled_timestamps,
+            requested_frames,
+            width,
+            height,
             source_fps,
             source_duration,
-            sampled_timestamps,
-        }));
-        Ok(decoded)
+        )
+    }
+
+    #[cfg(not(feature = "media-opencv-video"))]
+    fn decode_opencv(&self, _bytes: &[u8]) -> Result<Option<DecodedMediaData>> {
+        self.warn_if_unavailable_backend();
+        Ok(None)
+    }
+
+    #[cfg(feature = "media-opencv-video")]
+    fn decode_opencv(&self, bytes: &[u8]) -> Result<Option<DecodedMediaData>> {
+        Ok(Some(decode_video_with_opencv(self, bytes)?))
+    }
+}
+
+fn opencv_backend_available() -> bool {
+    cfg!(feature = "media-opencv-video")
+}
+
+fn video_array_from_frames(
+    mut all_frames: Vec<u8>,
+    sampled_timestamps: Vec<f64>,
+    requested_frames: u64,
+    width: u32,
+    height: u32,
+    source_fps: f64,
+    source_duration: f64,
+) -> Result<DecodedMediaData> {
+    let num_frames_decoded = sampled_timestamps.len();
+
+    anyhow::ensure!(
+        num_frames_decoded > 0,
+        "Failed to decode any frames, check for video corruption"
+    );
+
+    let frame_size = width as usize * height as usize * 3;
+    anyhow::ensure!(
+        all_frames.len() >= num_frames_decoded * frame_size,
+        "Decoded video buffer is smaller than decoded frame metadata"
+    );
+
+    // Truncate buffer to actual frames decoded (in case some failed in non-strict mode)
+    all_frames.truncate(num_frames_decoded * frame_size);
+
+    let shape = (num_frames_decoded, height as usize, width as usize, 3);
+    let array = Array4::from_shape_vec(shape, all_frames)?;
+    let mut decoded: DecodedMediaData = array.try_into()?;
+    decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Video(VideoMetadata {
+        source_fps,
+        source_duration,
+        sampled_timestamps,
+    }));
+    anyhow::ensure!(
+        num_frames_decoded <= requested_frames as usize,
+        "Decoded more frames than requested"
+    );
+    Ok(decoded)
+}
+
+#[cfg(feature = "media-opencv-video")]
+fn video_temp_suffix(bytes: &[u8]) -> &'static str {
+    if bytes.len() >= 12 && bytes.get(4..8) == Some(b"ftyp") {
+        return ".mp4";
+    }
+    if bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        return ".webm";
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"AVI ") {
+        return ".avi";
+    }
+    if bytes.starts_with(b"OggS") {
+        return ".ogv";
+    }
+    if bytes.starts_with(&[0x00, 0x00, 0x01, 0xba]) {
+        return ".mpg";
+    }
+    ".video"
+}
+
+#[cfg(feature = "media-opencv-video")]
+fn decode_video_with_opencv(config: &VideoDecoder, bytes: &[u8]) -> Result<DecodedMediaData> {
+    use opencv::{core::Mat, prelude::*, videoio};
+
+    let mut input_file = tempfile::Builder::new()
+        .prefix("dynamo-video-")
+        .suffix(video_temp_suffix(bytes))
+        .tempfile()?;
+    input_file.write_all(bytes)?;
+    input_file.flush()?;
+
+    let input = input_file.path().to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "OpenCV video path is not valid UTF-8: {}",
+            input_file.path().display()
+        )
+    })?;
+
+    let mut capture = open_opencv_video_capture(input)?;
+    let total_frames = capture.get(videoio::CAP_PROP_FRAME_COUNT)?.round().max(0.0) as u64;
+    let source_fps = capture.get(videoio::CAP_PROP_FPS)?;
+    let source_duration = if source_fps.is_finite() && source_fps > 0.0 {
+        total_frames as f64 / source_fps
+    } else {
+        0.0
+    };
+
+    let requested_frames =
+        get_num_requested_frames_from_metadata(config, source_duration, source_fps, total_frames)?;
+    let target_times = get_target_times(requested_frames, source_duration, source_fps)?;
+
+    let width = capture.get(videoio::CAP_PROP_FRAME_WIDTH)?.round().max(0.0) as u32;
+    let height = capture
+        .get(videoio::CAP_PROP_FRAME_HEIGHT)?
+        .round()
+        .max(0.0) as u32;
+    anyhow::ensure!(
+        width > 0 && height > 0,
+        "Invalid video dimensions {width}x{height}"
+    );
+
+    let max_alloc = config.limits.max_alloc.unwrap_or(u64::MAX);
+    anyhow::ensure!(
+        (width as u64) * (height as u64) * requested_frames * 3 <= max_alloc,
+        "Video dimensions {requested_frames}x{width}x{height}x3 exceed max alloc {max_alloc}"
+    );
+
+    let frame_size = width as usize * height as usize * 3;
+    let total_size = requested_frames as usize * frame_size;
+    let mut all_frames = vec![0u8; total_size];
+    let mut sampled_timestamps: Vec<f64> = Vec::with_capacity(requested_frames as usize);
+
+    let mut bgr_frame = Mat::default();
+    let mut rgb_frame = Mat::default();
+
+    for time in target_times.iter() {
+        let frame_index = opencv_target_frame_index(*time, source_fps, total_frames);
+        let offset = sampled_timestamps.len() * frame_size;
+        let frame_buffer = &mut all_frames[offset..offset + frame_size];
+
+        match decode_opencv_frame_at_index(
+            &mut capture,
+            &mut bgr_frame,
+            &mut rgb_frame,
+            frame_index,
+            width,
+            height,
+            frame_buffer,
+        ) {
+            Ok(()) => sampled_timestamps.push(frame_index as f64 / source_fps),
+            Err(error) => {
+                if config.strict {
+                    anyhow::bail!(
+                        "OpenCV frame decode error at timestamp {:.3}s: {}",
+                        time.as_secs(),
+                        error
+                    );
+                }
+                continue;
+            }
+        }
+    }
+
+    video_array_from_frames(
+        all_frames,
+        sampled_timestamps,
+        requested_frames,
+        width,
+        height,
+        source_fps,
+        source_duration,
+    )
+}
+
+#[cfg(feature = "media-opencv-video")]
+fn open_opencv_video_capture(input: &str) -> Result<opencv::videoio::VideoCapture> {
+    use opencv::{prelude::*, videoio};
+
+    let capture = videoio::VideoCapture::from_file(input, videoio::CAP_FFMPEG)?;
+    if capture.is_opened()? {
+        return Ok(capture);
+    }
+
+    let capture = videoio::VideoCapture::from_file(input, videoio::CAP_ANY)?;
+    if capture.is_opened()? {
+        return Ok(capture);
+    }
+
+    anyhow::bail!("OpenCV could not open video: {input}")
+}
+
+#[cfg(feature = "media-opencv-video")]
+fn opencv_target_frame_index(target_time: Time, source_fps: f64, total_frames: u64) -> u64 {
+    let index = ((target_time.as_secs() as f64) * source_fps).ceil() as u64;
+    index.min(total_frames.saturating_sub(1))
+}
+
+#[cfg(feature = "media-opencv-video")]
+fn decode_opencv_frame_at_index(
+    capture: &mut opencv::videoio::VideoCapture,
+    bgr_frame: &mut opencv::core::Mat,
+    rgb_frame: &mut opencv::core::Mat,
+    frame_index: u64,
+    expected_width: u32,
+    expected_height: u32,
+    output_buffer: &mut [u8],
+) -> Result<()> {
+    use opencv::{imgproc, prelude::*, videoio};
+
+    anyhow::ensure!(
+        capture.set(videoio::CAP_PROP_POS_FRAMES, frame_index as f64)?,
+        "OpenCV could not seek to sampled frame {frame_index}"
+    );
+
+    anyhow::ensure!(
+        capture.read(bgr_frame)? && !bgr_frame.empty(),
+        "OpenCV produced no frame at sampled frame {frame_index}"
+    );
+
+    let color_code = match bgr_frame.channels() {
+        3 => imgproc::COLOR_BGR2RGB,
+        4 => imgproc::COLOR_BGRA2RGB,
+        channels => anyhow::bail!("OpenCV produced unsupported {channels}-channel frame"),
+    };
+    imgproc::cvt_color_def(bgr_frame, rgb_frame, color_code)?;
+
+    let decoded_width = u32::try_from(rgb_frame.cols())
+        .map_err(|_| anyhow::anyhow!("OpenCV produced invalid frame width"))?;
+    let decoded_height = u32::try_from(rgb_frame.rows())
+        .map_err(|_| anyhow::anyhow!("OpenCV produced invalid frame height"))?;
+    anyhow::ensure!(
+        decoded_width == expected_width && decoded_height == expected_height,
+        "OpenCV frame dimensions {decoded_width}x{decoded_height} differ from metadata {expected_width}x{expected_height}"
+    );
+
+    let rgb_bytes = rgb_frame.data_bytes()?;
+    anyhow::ensure!(
+        rgb_bytes.len() >= output_buffer.len(),
+        "OpenCV produced {} RGB bytes for {decoded_width}x{decoded_height} frame, expected {}",
+        rgb_bytes.len(),
+        output_buffer.len()
+    );
+    output_buffer.copy_from_slice(&rgb_bytes[..output_buffer.len()]);
+    Ok(())
+}
+
+impl Decoder for VideoDecoder {
+    fn with_runtime(&self, runtime: Option<&Self>) -> Self {
+        match runtime {
+            Some(r) => {
+                let mut d = r.clone();
+                d.limits.clone_from(&self.limits);
+                d
+            }
+            None => self.clone(),
+        }
+    }
+
+    fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
+        self.validate_config()?;
+
+        let bytes = data.into_bytes()?;
+        if self.backend == VideoDecoderBackend::OpenCv
+            && let Some(decoded) = self.decode_opencv(&bytes)?
+        {
+            return Ok(decoded);
+        }
+
+        self.decode_video_rs(bytes)
     }
 }
 
@@ -344,11 +629,54 @@ mod tests {
     }
 
     #[test]
+    fn test_default_backend_is_video_rs() {
+        assert_eq!(
+            VideoDecoder::default().backend,
+            VideoDecoderBackend::VideoRs
+        );
+    }
+
+    #[test]
+    fn test_parse_opencv_backend_config() {
+        let decoder: VideoDecoder = serde_json::from_value(serde_json::json!({
+            "backend": "opencv",
+            "num_frames": 1,
+        }))
+        .unwrap();
+
+        assert_eq!(decoder.backend, VideoDecoderBackend::OpenCv);
+        assert_eq!(decoder.num_frames, Some(1));
+    }
+
+    #[test]
+    fn test_decode_video_opencv_backend_or_fallback() {
+        let (encoded_data, width, height, _total_frames) = load_test_video("240p_10.mp4");
+
+        let decoder = VideoDecoder {
+            backend: VideoDecoderBackend::OpenCv,
+            limits: VideoDecoderLimits::default(),
+            fps: None,
+            max_frames: None,
+            num_frames: Some(2),
+            strict: false,
+        };
+
+        let decoded = decoder.decode(encoded_data).unwrap();
+
+        assert_eq!(decoded.tensor_info.shape[0], 2);
+        assert_eq!(decoded.tensor_info.shape[1], height as usize);
+        assert_eq!(decoded.tensor_info.shape[2], width as usize);
+        assert_eq!(decoded.tensor_info.shape[3], 3);
+        assert_eq!(decoded.tensor_info.dtype, DataType::UINT8);
+    }
+
+    #[test]
     fn test_decode_video_num_frames() {
         let (encoded_data, width, height, _total_frames) = load_test_video("240p_10.mp4");
 
         let requested_frames = 5u64;
         let decoder = VideoDecoder {
+            backend: VideoDecoderBackend::VideoRs,
             limits: VideoDecoderLimits::default(),
             fps: None,
             max_frames: None,
@@ -371,6 +699,7 @@ mod tests {
 
         let target_fps = 0.5f64;
         let decoder = VideoDecoder {
+            backend: VideoDecoderBackend::VideoRs,
             limits: VideoDecoderLimits::default(),
             fps: Some(target_fps),
             max_frames: None,
@@ -404,6 +733,7 @@ mod tests {
         let (encoded_data, width, height, _) = load_test_video(video_file);
 
         let decoder = VideoDecoder {
+            backend: VideoDecoderBackend::VideoRs,
             limits: VideoDecoderLimits { max_alloc },
             fps: None,
             max_frames: None,
@@ -432,6 +762,7 @@ mod tests {
         let (encoded_data, ..) = load_test_video("240p_10.mp4");
 
         let decoder = VideoDecoder {
+            backend: VideoDecoderBackend::VideoRs,
             limits: VideoDecoderLimits::default(),
             fps: Some(2.0f64),
             max_frames: None,
@@ -478,6 +809,7 @@ mod tests {
             max_alloc: Some(1024),
         };
         let server_config = VideoDecoder {
+            backend: VideoDecoderBackend::VideoRs,
             limits: server_limits,
             fps: Some(1.0),
             ..Default::default()
@@ -489,6 +821,7 @@ mod tests {
             max_alloc: Some(999999),
         };
         let runtime_config = VideoDecoder {
+            backend: VideoDecoderBackend::OpenCv,
             limits: runtime_limits,
             fps: Some(60.0),
             ..Default::default()
@@ -501,5 +834,19 @@ mod tests {
 
         // Check that other fields are overridden
         assert_eq!(merged.fps, Some(60.0));
+        assert_eq!(merged.backend, VideoDecoderBackend::OpenCv);
+    }
+
+    #[cfg(feature = "media-opencv-video")]
+    #[test]
+    fn test_video_temp_suffix_detects_common_containers() {
+        let mut mp4 = vec![0; 12];
+        mp4[4..8].copy_from_slice(b"ftyp");
+        assert_eq!(video_temp_suffix(&mp4), ".mp4");
+        assert_eq!(video_temp_suffix(&[0x1a, 0x45, 0xdf, 0xa3]), ".webm");
+        assert_eq!(video_temp_suffix(b"RIFFxxxxAVI "), ".avi");
+        assert_eq!(video_temp_suffix(b"OggS"), ".ogv");
+        assert_eq!(video_temp_suffix(&[0x00, 0x00, 0x01, 0xba]), ".mpg");
+        assert_eq!(video_temp_suffix(b"unknown"), ".video");
     }
 }

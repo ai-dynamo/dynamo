@@ -101,6 +101,18 @@ packages:
       - sglang-runtime
       - sglang-runtime-efa
 
+  - name: OpenCV
+    # Built from source in wheel_builder and copied into runtime images for the
+    # optional Rust OpenCV video decoder backend.
+    version: "4.13.0"
+    license: Apache-2.0
+    source: https://github.com/opencv/opencv
+    images:
+      - vllm-runtime
+      - vllm-runtime-efa
+      - sglang-runtime
+      - sglang-runtime-efa
+
   # UCX — Unified Communication X, built from source in wheel_builder and used by
   # the NIXL transport. Installed to /usr/local (no dpkg metadata).
   - name: UCX

@@ -52,6 +52,10 @@ ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
 
 ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
+{% if "enable_media_opencv_video" in context[framework] -%}
+ARG ENABLE_MEDIA_OPENCV_VIDEO={{ context[framework].enable_media_opencv_video }}
+ARG OPENCV_VERSION={{ context.dynamo.opencv_version }}
+{% endif -%}
 ARG NV_CODEC_HEADERS_REF={{ context.dynamo.nv_codec_headers_ref }}
 ARG LIBVPX_REF={{ context.dynamo.libvpx_ref }}
 {% if device == "cuda" -%}
