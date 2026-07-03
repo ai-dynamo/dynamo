@@ -74,10 +74,13 @@ For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
 | `--migration-limit` | `DYN_MIGRATION_LIMIT` | `0` | Max request migrations per worker disconnect. 0 = disabled |
-| `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `1.0` | KV cache utilization fraction (0.0–1.0) for busy detection. Pass `None` to disable |
-| `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | `10000000` | Absolute token count for prefill busy detection. Pass `None` to disable |
-| `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | `64.0` | Fraction of `max_num_batched_tokens` for prefill busy detection. OR logic with absolute threshold. Pass `None` to disable |
-| `--admission-control` | `DYN_ADMISSION_CONTROL` | `none` | Admission control mode. `token-capacity` applies the busy thresholds above; `none` clears them. Router queueing remains controlled by `--router-queue-threshold` |
+| `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | — | KV cache utilization fraction (0.0–1.0) for busy detection. Setting a value independently enables this rejection check |
+| `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | — | Absolute token count for prefill busy detection. Setting a value independently enables this rejection check |
+| `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | — | Fraction of `max_num_batched_tokens` for prefill busy detection. Setting a value independently enables this rejection check and uses OR logic with the absolute threshold |
+
+The removed `--admission-control` and `DYN_ADMISSION_CONTROL` settings no longer gate these
+thresholds. See [Request Rejection](../../fault-tolerance/request-rejection.md#migrate-from-admission-control)
+for migration instructions.
 
 ## Model Discovery
 
