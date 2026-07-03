@@ -87,11 +87,11 @@ Dynamo automatically selects the best available orchestrator for multinode deplo
 #### Scheduler Integration:
 - **With Grove**: Dynamo uses Grove for multinode orchestration when the Grove API is available, unless you set `nvidia.com/enable-grove: "false"` on the DGD resource. Scheduler integration is configured separately:
   - KAI-Scheduler: set `global.kai-scheduler.install=true` to install the bundled KAI-Scheduler chart and enable integration, or set `global.kai-scheduler.enabled=true` when KAI-Scheduler is already installed externally and its API is available. Select queues with `nvidia.com/kai-scheduler-queue`.
-  - Volcano: Dynamo does not install Volcano. Set `global.volcano-scheduler.enabled=true` only when Volcano is already installed and the Volcano API is available. Select queues with `nvidia.com/volcano-queue`.
+  - **EXPERIMENTAL:** Volcano: Dynamo does not install Volcano. Set `global.volcano-scheduler.enabled=true` only when Volcano is already installed and the Volcano API is available. Select queues with `nvidia.com/volcano-queue`.
   - KAI-Scheduler and Volcano scheduler integration are mutually exclusive for a single Dynamo operator configuration because both set pod `schedulerName`. Helm rejects configurations that enable both integrations.
 - **With LWS**: Uses Volcano scheduler for gang scheduling and resource coordination
 
-> **Note:** Volcano itself is a mature CNCF scheduler. The Dynamo/Grove Volcano scheduler integration is newly introduced and experimental. It is opt-in and intended for clusters where Volcano is already installed and understood by the platform operator.
+> **EXPERIMENTAL:** The Dynamo/Grove Volcano scheduler integration is newly introduced and opt-in. Volcano itself is a mature CNCF scheduler, but this integration is intended for clusters where Volcano is already installed and understood by the platform operator.
 >
 > Changing `global.volcano-scheduler.enabled` affects how the Dynamo operator reconciles Grove-backed DGD resources. When enabled, Dynamo generates Grove resources that use `schedulerName: volcano` and propagates the Volcano queue annotation. Treat this Helm value as a scheduling-mode change for existing Grove-backed DGDs, not as a metadata-only toggle.
 
