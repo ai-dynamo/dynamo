@@ -39,6 +39,19 @@ use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
+fn is_cancelled(error: &Error) -> bool {
+    match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
+}
+
+fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error: &Error) {
+    if is_cancelled(error) {
+        return;
+    }
+    if let Some(operation) = operation.take() {
+        operation.invalidate();
+    }
+}
+
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
@@ -158,15 +171,17 @@ impl KvPushRouter {
         let worker = operation.target().and_then(affinity_worker);
         match self.select_request(request, phase, false, worker).await {
             Ok(selection) => Ok((selection, Some(operation))),
-            Err(error) if match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[]) => {
-                Err(error)
-            }
+            Err(error) if is_cancelled(&error) => Err(error),
             Err(_) if operation.target().is_some() && explicit.is_none() => {
                 operation.invalidate();
                 let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
                     .await?;
-                match self.select_request(request, phase, false, None).await {
+                let retry_worker = retry.target().and_then(affinity_worker);
+                match self
+                    .select_request(request, phase, false, retry_worker)
+                    .await
+                {
                     Ok(selection) => Ok((selection, Some(retry))),
                     Err(retry_error) => {
                         retry.invalidate();
@@ -408,9 +423,7 @@ impl KvPushRouter {
         {
             Ok(guard) => guard,
             Err(error) => {
-                if let Some(operation) = operation.take() {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -422,9 +435,7 @@ impl KvPushRouter {
             Ok(metadata) => metadata,
             Err(error) => {
                 guard.abort().await;
-                if let Some(operation) = operation.take() {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -435,9 +446,7 @@ impl KvPushRouter {
         {
             Ok(stream) => stream,
             Err(error) => {
-                if let Some(operation) = operation.take() {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -534,9 +543,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let guard = match self.track_selection(&request, &mut selection, false).await {
             Ok(guard) => guard,
             Err(error) => {
-                if let Some(operation) = operation.take() {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -551,9 +558,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         {
             Ok(stream) => stream,
             Err(error) => {
-                if let Some(operation) = operation.take() {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -693,6 +698,42 @@ mod tests {
     async fn session_affinity_disabled_does_not_create_coordinator() {
         let (router, runtime) = router(None).await;
         assert!(router.affinity.is_none());
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_affinity_post_selection_cancellation_preserves_binding() {
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+        let affinity = router.affinity.as_ref().unwrap();
+        let session_id = SessionAffinityId::new("cancelled-after-selection");
+        let original_target = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(0),
+        };
+        let AffinityAcquire::Initialize(initializer) =
+            affinity.acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("first request must initialize");
+        };
+        drop(initializer.commit(original_target).unwrap());
+
+        let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
+        let cancellation = cancelled_error("cancelled-after-selection-request");
+        invalidate_on_non_cancellation(&mut operation, &cancellation);
+        assert!(operation.is_some());
+        drop(operation);
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(original_target)
+        );
+
+        let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
+        let failure = anyhow::anyhow!("dispatch failed");
+        invalidate_on_non_cancellation(&mut operation, &failure);
+        assert!(operation.is_none());
+        assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
 
         drop(router);
         runtime.shutdown();
