@@ -1909,6 +1909,8 @@ impl OpenAIPreprocessor {
                 | Some(ChatCompletionToolChoiceOption::Named(_))
         );
         let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
+        // Force parsers opt in by capability; prompt-seeded parsers opt in per request.
+        // Structural-tag tool formats do not use this guided-JSON detection path.
         let inspect_force_reasoning_guided_output = is_guided_tool_choice
             && !uses_tool_call_structural_tag
             && Self::supports_reasoning_before_guided_json(reasoning_parser);
@@ -3468,6 +3470,7 @@ mod tests {
         assert!(!f(Some(true), None, None));
     }
 
+    /// Verifies which force-reasoning parsers use guided-output shape detection.
     #[test]
     fn test_reasoning_before_guided_json_parser_allowlist() {
         for parser in [
@@ -3585,6 +3588,7 @@ mod tests {
         );
     }
 
+    /// Verifies template reasoning controls are forwarded to a configured parser.
     #[test]
     fn test_backend_extra_args_forwards_reasoning_template_args() {
         for enable_thinking in [true, false] {
@@ -3611,6 +3615,7 @@ mod tests {
         }
     }
 
+    /// Verifies parser metadata is omitted when no reasoning parser is configured.
     #[test]
     fn test_backend_extra_args_omits_reasoning_metadata_without_configured_parser() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
@@ -3629,6 +3634,7 @@ mod tests {
         assert!(extra_args.get("reasoning_parser_kwargs").is_none());
     }
 
+    /// Verifies no parser metadata is added when template arguments are absent.
     #[test]
     fn test_backend_extra_args_omits_reasoning_metadata_without_template_args() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
