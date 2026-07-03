@@ -87,7 +87,7 @@ uv pip install -e .
 ```
 
 > [!NOTE]
-> The base `uv pip install -e .` installs only the Dynamo runtime and frontend. A backend extra (`[vllm]`, `[sglang]`, or `[trtllm]`) will install the relevant framework dependencies to run an inference worker. TensorRT-LLM cannot be installed with `uv` — it needs `pip` with the NVIDIA package index (`uv` cannot resolve a transitive Git URL dependency). See [Local Installation](local-installation.md) or the [TRT-LLM backend guide](../backends/trtllm/README.md).
+> The base `uv pip install -e .` installs only the Dynamo runtime and frontend. A backend extra (`[vllm]`, or `[sglang]`) will install the relevant framework dependencies to run an inference worker. For the TensorRT-LLM backend, use the `tensorrtllm-runtime` container instead of installing via `uv pip` to ensure the right dependencies are installed. See [Local Installation](local-installation.md) for more details.
 
 ## 8. Verify the Build
 
