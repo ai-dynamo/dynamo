@@ -44,6 +44,10 @@ USER dynamo
 
 FROM debian:bookworm-slim AS github_runner_tools
 
+# glibc-family libs (loader, libc, libm) are excluded from the harvest: they
+# must resolve from the base image. A copied bookworm libm shadows the base's
+# newer one via LD_LIBRARY_PATH and breaks its consumers — libpython needs
+# GLIBC_2.38 symbols that bookworm's 2.36 libm lacks.
 RUN set -eux; \
     tools="bash tail tar gzip cat grep env tr head mkdir chmod mv sleep find"; \
     mkdir -p /github-runner-tools/usr/local/bin /github-runner-tools/opt/dynamo/lib; \
@@ -52,7 +56,7 @@ RUN set -eux; \
         cp -L "${tool_path}" "/github-runner-tools/usr/local/bin/${tool}"; \
         ldd "${tool_path}" \
             | awk '/=> \// { print $3 } /^\// { print $1 }' \
-            | grep -Ev '/(ld-linux|libc\.so)' \
+            | grep -Ev '/(ld-linux|libc\.so|libm\.so)' \
             | while read -r lib_path; do \
                 cp -L "${lib_path}" "/github-runner-tools/opt/dynamo/lib/$(basename "${lib_path}")"; \
             done; \
