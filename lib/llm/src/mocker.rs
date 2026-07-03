@@ -791,6 +791,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let max_output_tokens = planned_output_token_ids
             .as_ref()
             .map_or(requested_max_output_tokens, Vec::len);
+        let effective_max_output_tokens =
+            self.engine_args
+                .max_model_len
+                .map_or(max_output_tokens, |max_model_len| {
+                    max_output_tokens.min(max_model_len.saturating_sub(request.token_ids.len()))
+                });
         let native_timing = self
             .native_metrics
             .request_timing(&request.model, dp_rank, is_prefill, request_start)
@@ -1013,14 +1019,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             break;
                         };
 
-                        // A terminally rejected request never ran (its footprint
-                        // exceeds the KV pool): emit no token and do not complete the
-                        // bootstrap room — surface the rejection and end the stream
-                        // before any token/prefill bookkeeping.
+                        // A terminally rejected request never ran because it violated
+                        // a worker admission limit. Emit no token and do not complete
+                        // the bootstrap room; surface the rejection before any
+                        // token/prefill bookkeeping.
                         if signal.rejected {
                             handoff_cancel.cancel();
                             let _ = stream_tx.send(LLMEngineOutput::error(
-                                "request rejected: KV footprint exceeds pool capacity".to_string(),
+                                "request rejected: request exceeds worker admission limits".to_string(),
                             ));
                             break;
                         }
@@ -1043,7 +1049,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             ..Default::default()
                         };
 
-                        if signal.completed && token_count < max_output_tokens {
+                        if signal.completed && token_count < effective_max_output_tokens {
                             let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
                             break;
                         }
@@ -1239,6 +1245,22 @@ mod tests {
             .unwrap()
     }
 
+    fn decode_request(prompt_tokens: usize, max_tokens: u32) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("mock".to_string())
+            .token_ids(vec![1; prompt_tokens])
+            .stop_conditions(StopConditions {
+                max_tokens: Some(max_tokens),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .eos_token_ids(vec![])
+            .annotations(vec![])
+            .build()
+            .unwrap()
+    }
+
     #[tokio::test(start_paused = true)]
     async fn no_bootstrap_prefill_delays_terminal_finish_once() {
         let args = MockEngineArgs::builder()
@@ -1281,6 +1303,43 @@ mod tests {
         let finish = stream.next().await.unwrap();
         assert!(finish.token_ids.is_empty());
         assert!(finish.finish_reason.is_some());
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn context_capped_completion_maps_to_length() {
+        let args = MockEngineArgs::builder()
+            .max_model_len(Some(4))
+            .build()
+            .unwrap();
+        let engine = MockEngine::new(args);
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+        engine.request_senders.set(vec![request_tx]).unwrap();
+
+        let mut stream = engine
+            .generate(SingleIn::new(decode_request(3, 4)))
+            .await
+            .unwrap();
+        let request = request_rx.recv().await.unwrap();
+        assert_eq!(request.max_output_tokens, 4);
+        let request_id = request.uuid.unwrap();
+        engine
+            .active_requests
+            .get(&request_id)
+            .unwrap()
+            .send(OutputSignal {
+                uuid: request_id,
+                token_id: Some(42),
+                completed: true,
+                rejected: false,
+                handoff_delay_ms: None,
+            })
+            .unwrap();
+
+        let token = stream.next().await.unwrap();
+        assert_eq!(token.token_ids.len(), 1);
+        assert!(token.finish_reason.is_none());
+        assert_eq!(stream.next().await.unwrap(), LLMEngineOutput::length());
         assert!(stream.next().await.is_none());
     }
 

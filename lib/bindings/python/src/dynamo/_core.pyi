@@ -1572,7 +1572,7 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            enforce_disagg: Strictly enforce disaggregated mode, failing requests if no prefill workers are available
+            enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
         """
         ...
 
@@ -1965,6 +1965,7 @@ class MockEngineArgs:
         enable_g4_storage: bool = False,
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
+        max_model_len: Optional[int] = None,
     ) -> None:
         ...
 
@@ -1982,6 +1983,9 @@ class MockEngineArgs:
 
     @num_gpu_blocks.setter
     def num_gpu_blocks(self, value: int) -> None: ...
+
+    @property
+    def max_model_len(self) -> Optional[int]: ...
 
     @property
     def max_num_seqs(self) -> Optional[int]: ...
