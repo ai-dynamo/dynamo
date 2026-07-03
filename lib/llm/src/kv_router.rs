@@ -312,6 +312,8 @@ where
                 &kv_router_config,
                 indexer.clone(),
                 workers_with_configs.clone(),
+                model_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                worker_type,
             )
             .await?;
         } else {

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use dynamo_kv_router::protocols::{DpRank, WorkerId};
 use dynamo_runtime::component::Component;
-use dynamo_runtime::traits::DistributedRuntimeProvider;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use super::worker_query_directory::WorkerQueryEndpointDirectory;
 use super::worker_query_state::RecoveryKey;
@@ -17,6 +17,7 @@ use crate::kv_router::metrics::RouterWorkerStatusMetrics;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 const REGISTRATION_GRACE_PERIOD: Duration = Duration::from_secs(10);
+const EXPECTED_WORKER_ABSENCE_HOLD_DOWN: Duration = Duration::from_secs(10);
 const ERROR_REPEAT_INTERVAL: Duration = Duration::from_secs(60);
 const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -29,8 +30,14 @@ struct MismatchReport {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct HealthEvaluation {
     reports: Vec<MismatchReport>,
-    recovered_workers: Vec<WorkerId>,
+    cleared_workers: Vec<WorkerId>,
     mismatch_worker_count: usize,
+}
+
+#[derive(Debug)]
+struct MissingEndpoint {
+    missing_since: Instant,
+    unexpected_since: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -41,7 +48,7 @@ struct ReportedMismatch {
 
 #[derive(Debug, Default)]
 struct KvEventSourceHealthMonitor {
-    missing_since: HashMap<RecoveryKey, Instant>,
+    missing_endpoints: HashMap<RecoveryKey, MissingEndpoint>,
     reported: HashMap<WorkerId, ReportedMismatch>,
 }
 
@@ -53,20 +60,39 @@ impl KvEventSourceHealthMonitor {
         discovered_endpoints: &HashSet<RecoveryKey>,
     ) -> HealthEvaluation {
         let expected_endpoints = expected_query_endpoints(workers_with_configs);
-        let missing_endpoints: HashSet<_> = expected_endpoints
-            .difference(discovered_endpoints)
-            .copied()
-            .collect();
-
-        self.missing_since
-            .retain(|key, _| missing_endpoints.contains(key));
-        for key in &missing_endpoints {
-            self.missing_since.entry(*key).or_insert(now);
+        for key in expected_endpoints.difference(discovered_endpoints) {
+            self.missing_endpoints
+                .entry(*key)
+                .and_modify(|missing| missing.unexpected_since = None)
+                .or_insert(MissingEndpoint {
+                    missing_since: now,
+                    unexpected_since: None,
+                });
         }
 
+        self.missing_endpoints.retain(|key, missing| {
+            if discovered_endpoints.contains(key) {
+                return false;
+            }
+            if expected_endpoints.contains(key) {
+                missing.unexpected_since = None;
+                return true;
+            }
+
+            let unexpected_since = missing.unexpected_since.get_or_insert(now);
+            now.duration_since(*unexpected_since) < EXPECTED_WORKER_ABSENCE_HOLD_DOWN
+        });
+
         let mut matured_by_worker: BTreeMap<WorkerId, Vec<DpRank>> = BTreeMap::new();
-        for (key, missing_since) in &self.missing_since {
-            if now.duration_since(*missing_since) >= REGISTRATION_GRACE_PERIOD {
+        for (key, missing) in &self.missing_endpoints {
+            let worker_is_expected = expected_endpoints.contains(key);
+            let rank_was_reported = self
+                .reported
+                .get(&key.0)
+                .is_some_and(|reported| reported.missing_dp_ranks.contains(&key.1));
+            if now.duration_since(missing.missing_since) >= REGISTRATION_GRACE_PERIOD
+                && (worker_is_expected || rank_was_reported)
+            {
                 matured_by_worker.entry(key.0).or_default().push(key.1);
             }
         }
@@ -74,13 +100,13 @@ impl KvEventSourceHealthMonitor {
             ranks.sort_unstable();
         }
 
-        let recovered_workers: Vec<_> = self
+        let cleared_workers: Vec<_> = self
             .reported
             .keys()
             .filter(|worker_id| !matured_by_worker.contains_key(worker_id))
             .copied()
             .collect();
-        for worker_id in &recovered_workers {
+        for worker_id in &cleared_workers {
             self.reported.remove(worker_id);
         }
 
@@ -109,12 +135,14 @@ impl KvEventSourceHealthMonitor {
 
         HealthEvaluation {
             reports,
-            recovered_workers,
+            cleared_workers,
             mismatch_worker_count: matured_by_worker.len(),
         }
     }
 }
 
+// TODO: Centralize DP-rank expansion with the scheduler/topology code once a shared
+// cross-crate helper exists.
 fn expected_query_endpoints(
     workers_with_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
 ) -> HashSet<RecoveryKey> {
@@ -136,9 +164,13 @@ pub(super) fn spawn_kv_event_source_health_monitor(
     component: Component,
     mut workers_with_configs: RuntimeConfigWatch,
     query_endpoints: Arc<WorkerQueryEndpointDirectory>,
+    model: String,
+    worker_type: &'static str,
+    cancellation_token: CancellationToken,
 ) {
-    let cancellation_token = component.drt().primary_token();
     let metrics = RouterWorkerStatusMetrics::from_component(&component);
+    let target_namespace = component.namespace().name().to_string();
+    let target_component = component.name().to_string();
 
     tokio::spawn(async move {
         let mut monitor = KvEventSourceHealthMonitor::default();
@@ -147,6 +179,7 @@ pub(super) fn spawn_kv_event_source_health_monitor(
 
         loop {
             tokio::select! {
+                biased;
                 _ = cancellation_token.cancelled() => break,
                 _ = interval.tick() => {}
                 result = workers_with_configs.changed() => {
@@ -162,27 +195,37 @@ pub(super) fn spawn_kv_event_source_health_monitor(
                 monitor.evaluate(Instant::now(), &configs, &discovered_endpoints)
             };
 
-            metrics.set_kv_event_source_mismatch_workers(evaluation.mismatch_worker_count);
+            metrics.set_kv_event_source_mismatch_workers(
+                &model,
+                worker_type,
+                &target_namespace,
+                &target_component,
+                evaluation.mismatch_worker_count,
+            );
 
             for report in evaluation.reports {
                 tracing::error!(
                     worker_id = report.worker_id,
                     missing_dp_ranks = ?report.missing_dp_ranks,
-                    "KV EVENT ROUTING MISCONFIGURATION: worker {} is missing worker-local KV indexer query endpoints for DP ranks {:?}. The router expects worker KV events, so cache overlap will remain empty for these ranks and cache-aware routing will be ineffective. For Dynamo vLLM this usually means --kv-events-config was omitted. Add --kv-events-config '{{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:PORT\",\"enable_kv_cache_events\":true}}' to the worker, or intentionally use --no-router-kv-events for approximate routing. Continuing to serve.",
-                    report.worker_id,
-                    report.missing_dp_ranks,
+                    model,
+                    worker_type,
+                    target_namespace,
+                    target_component,
+                    "KV event routing degraded: expected worker-local KV indexer query endpoints were not discovered. Cache overlap will remain empty for the affected ranks and cache-aware routing will be ineffective. For Dynamo vLLM, verify that the worker has --kv-events-config '{{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:PORT\",\"enable_kv_cache_events\":true}}'; if it is configured, check router endpoint discovery health. To intentionally use approximate routing, set --no-router-kv-events. Continuing to serve.",
                 );
             }
 
-            for worker_id in evaluation.recovered_workers {
+            for worker_id in evaluation.cleared_workers {
                 tracing::info!(
                     worker_id,
-                    "KV event source mismatch cleared: all expected worker-local KV indexer query endpoints are now registered"
+                    model,
+                    worker_type,
+                    target_namespace,
+                    target_component,
+                    "KV event source mismatch no longer active; endpoints are registered or the worker is no longer expected"
                 );
             }
         }
-
-        metrics.set_kv_event_source_mismatch_workers(0);
     });
 }
 
@@ -279,11 +322,66 @@ mod tests {
             &discovered,
         );
         assert_eq!(recovered.mismatch_worker_count, 0);
-        assert_eq!(recovered.recovered_workers, vec![7]);
+        assert_eq!(recovered.cleared_workers, vec![7]);
     }
 
     #[test]
-    fn worker_removal_clears_active_mismatch() {
+    fn transient_worker_absence_during_grace_preserves_missing_timer() {
+        let mut monitor = KvEventSourceHealthMonitor::default();
+        let mut configs = HashMap::from([(7, worker_config(0, 1))]);
+        let discovered = HashSet::new();
+        let now = Instant::now();
+
+        monitor.evaluate(now, &configs, &discovered);
+        configs.clear();
+        assert_eq!(
+            monitor.evaluate(now + Duration::from_secs(5), &configs, &discovered),
+            HealthEvaluation::default()
+        );
+        assert_eq!(
+            monitor.evaluate(now + REGISTRATION_GRACE_PERIOD, &configs, &discovered),
+            HealthEvaluation::default()
+        );
+
+        configs.insert(7, worker_config(0, 1));
+        let matured = monitor.evaluate(
+            now + REGISTRATION_GRACE_PERIOD + Duration::from_secs(1),
+            &configs,
+            &discovered,
+        );
+        assert_eq!(matured.mismatch_worker_count, 1);
+        assert_eq!(matured.reports.len(), 1);
+    }
+
+    #[test]
+    fn transient_worker_absence_keeps_reported_mismatch_active() {
+        let mut monitor = KvEventSourceHealthMonitor::default();
+        let mut configs = HashMap::from([(7, worker_config(0, 1))]);
+        let discovered = HashSet::new();
+        let now = Instant::now();
+
+        monitor.evaluate(now, &configs, &discovered);
+        monitor.evaluate(now + REGISTRATION_GRACE_PERIOD, &configs, &discovered);
+
+        let absence_started = now + REGISTRATION_GRACE_PERIOD + Duration::from_secs(1);
+        configs.clear();
+        let absent = monitor.evaluate(absence_started, &configs, &discovered);
+        assert_eq!(absent.mismatch_worker_count, 1);
+        assert!(absent.cleared_workers.is_empty());
+
+        configs.insert(7, worker_config(0, 1));
+        let restored = monitor.evaluate(
+            absence_started + EXPECTED_WORKER_ABSENCE_HOLD_DOWN - Duration::from_secs(1),
+            &configs,
+            &discovered,
+        );
+        assert_eq!(restored.mismatch_worker_count, 1);
+        assert!(restored.reports.is_empty());
+        assert!(restored.cleared_workers.is_empty());
+    }
+
+    #[test]
+    fn sustained_worker_removal_clears_active_mismatch_after_hold_down() {
         let mut monitor = KvEventSourceHealthMonitor::default();
         let mut configs = HashMap::from([(7, worker_config(0, 1))]);
         let discovered = HashSet::new();
@@ -294,13 +392,18 @@ mod tests {
         assert_eq!(matured.mismatch_worker_count, 1);
 
         configs.clear();
-        let recovered = monitor.evaluate(
-            now + REGISTRATION_GRACE_PERIOD + Duration::from_secs(1),
+        let absence_started = now + REGISTRATION_GRACE_PERIOD + Duration::from_secs(1);
+        let held = monitor.evaluate(absence_started, &configs, &discovered);
+        assert_eq!(held.mismatch_worker_count, 1);
+        assert!(held.cleared_workers.is_empty());
+
+        let cleared = monitor.evaluate(
+            absence_started + EXPECTED_WORKER_ABSENCE_HOLD_DOWN,
             &configs,
             &discovered,
         );
-        assert_eq!(recovered.mismatch_worker_count, 0);
-        assert_eq!(recovered.recovered_workers, vec![7]);
+        assert_eq!(cleared.mismatch_worker_count, 0);
+        assert_eq!(cleared.cleared_workers, vec![7]);
     }
 
     #[test]

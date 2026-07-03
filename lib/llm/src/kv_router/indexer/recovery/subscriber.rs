@@ -29,6 +29,8 @@ async fn start_kv_router_background_event_plane(
     indexer: Indexer,
     transport_kind: EventTransportKind,
     workers_with_configs: RuntimeConfigWatch,
+    model: String,
+    worker_type: &'static str,
 ) -> Result<()> {
     let cancellation_token = component.drt().primary_token();
 
@@ -47,8 +49,14 @@ async fn start_kv_router_background_event_plane(
 
     // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
     // No blocking wait — recovery happens asynchronously as endpoints are discovered.
-    let worker_query_client =
-        WorkerQueryClient::spawn(component.clone(), indexer, workers_with_configs).await?;
+    let worker_query_client = WorkerQueryClient::spawn(
+        component.clone(),
+        indexer,
+        workers_with_configs,
+        model,
+        worker_type,
+    )
+    .await?;
     let kv_event_subject = format!(
         "namespace.{}.component.{}.{}",
         component.namespace().name(),
@@ -120,6 +128,8 @@ pub async fn start_subscriber(
     kv_router_config: &KvRouterConfig,
     indexer: Indexer,
     workers_with_configs: RuntimeConfigWatch,
+    model: String,
+    worker_type: &'static str,
 ) -> Result<()> {
     let transport_kind = component.drt().default_event_transport_kind();
 
@@ -165,6 +175,8 @@ pub async fn start_subscriber(
             indexer,
             transport_kind,
             workers_with_configs,
+            model,
+            worker_type,
         )
         .await
     }

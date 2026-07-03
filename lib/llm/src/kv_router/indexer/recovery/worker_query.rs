@@ -88,31 +88,51 @@ impl WorkerQueryClient {
         })
     }
 
-    /// Create a new WorkerQueryClient and spawn its background discovery loop.
+    /// Create a new WorkerQueryClient and spawn its background discovery and KV event
+    /// source health-monitor loops.
     ///
     /// The background loop watches `ComponentEndpoints` discovery for query endpoints,
     /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
     /// events when all dp_ranks for a worker disappear.
+    /// The health monitor compares those endpoints with runtime worker configuration
+    /// and reports workers whose expected KV event sources are missing.
     pub async fn spawn(
         component: Component,
         indexer: Indexer,
         workers_with_configs: RuntimeConfigWatch,
+        model: String,
+        worker_type: &'static str,
     ) -> Result<Arc<Self>> {
         let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
         let client = Self::new(component.clone(), indexer, transport);
 
+        let discovery_cancel = component.drt().primary_token();
+        // TODO: Parent recovery tasks with a router-scoped token once the subscriber
+        // lifecycle owns one instead of relying on the runtime-wide token.
+        let health_cancel = discovery_cancel.child_token();
         spawn_kv_event_source_health_monitor(
             component.clone(),
             workers_with_configs,
             client.query_endpoints.clone(),
+            model,
+            worker_type,
+            health_cancel.clone(),
         );
 
         let client_bg = client.clone();
-        let cancel_token = component.drt().primary_token();
         tokio::spawn(async move {
-            if let Err(e) = client_bg.run_discovery_loop(cancel_token).await {
-                tracing::error!("WorkerQueryClient discovery loop failed: {e}");
+            match client_bg.run_discovery_loop(discovery_cancel.clone()).await {
+                Err(error) => {
+                    tracing::error!(%error, "WorkerQueryClient discovery loop failed");
+                }
+                Ok(()) if !discovery_cancel.is_cancelled() => {
+                    tracing::error!(
+                        "WorkerQueryClient discovery stream ended unexpectedly; stopping the KV event source health monitor because endpoint state may be stale"
+                    );
+                }
+                Ok(()) => {}
             }
+            health_cancel.cancel();
         });
 
         Ok(client)

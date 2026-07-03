@@ -62,6 +62,8 @@ use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec
 use crate::http::service::metrics::generate_log_buckets;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
+const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
+const TARGET_COMPONENT_LABEL: &str = "target_component";
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -196,7 +198,7 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 /// Component-scoped router gauges for worker discovery.
 pub(crate) struct RouterWorkerStatusMetrics {
     pub registered: IntGaugeVec,
-    pub kv_event_source_mismatch_workers: IntGauge,
+    pub kv_event_source_mismatch_workers: IntGaugeVec,
 }
 
 static ROUTER_WORKER_STATUS_METRICS: OnceLock<Arc<RouterWorkerStatusMetrics>> = OnceLock::new();
@@ -220,9 +222,15 @@ impl RouterWorkerStatusMetrics {
                     )
                     .expect("failed to create router_worker_registered gauge");
                 let kv_event_source_mismatch_workers = metrics
-                    .create_intgauge(
+                    .create_intgaugevec(
                         router::KV_EVENT_SOURCE_MISMATCH_WORKERS,
                         "Number of workers expected to publish KV events but missing worker-local KV indexer query endpoints",
+                        &[
+                            labels::MODEL,
+                            labels::WORKER_TYPE,
+                            TARGET_NAMESPACE_LABEL,
+                            TARGET_COMPONENT_LABEL,
+                        ],
                         &[],
                     )
                     .expect("failed to create router_kv_event_source_mismatch_workers gauge");
@@ -249,8 +257,17 @@ impl RouterWorkerStatusMetrics {
         let _ = self.registered.remove_label_values(labels);
     }
 
-    pub fn set_kv_event_source_mismatch_workers(&self, count: usize) {
-        self.kv_event_source_mismatch_workers.set(count as i64);
+    pub fn set_kv_event_source_mismatch_workers(
+        &self,
+        model: &str,
+        worker_type: &str,
+        target_namespace: &str,
+        target_component: &str,
+        count: usize,
+    ) {
+        self.kv_event_source_mismatch_workers
+            .with_label_values(&[model, worker_type, target_namespace, target_component])
+            .set(count as i64);
     }
 }
 
@@ -861,13 +878,21 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                 &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
             )
             .unwrap(),
-            kv_event_source_mismatch_workers: IntGauge::new(
-                format!(
-                    "{}_{}",
-                    name_prefix::COMPONENT,
-                    router::KV_EVENT_SOURCE_MISMATCH_WORKERS
+            kv_event_source_mismatch_workers: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::COMPONENT,
+                        router::KV_EVENT_SOURCE_MISMATCH_WORKERS
+                    ),
+                    "Number of workers expected to publish KV events but missing worker-local KV indexer query endpoints",
                 ),
-                "Number of workers expected to publish KV events but missing worker-local KV indexer query endpoints",
+                &[
+                    labels::MODEL,
+                    labels::WORKER_TYPE,
+                    TARGET_NAMESPACE_LABEL,
+                    TARGET_COMPONENT_LABEL,
+                ],
             )
             .unwrap(),
         };
@@ -879,7 +904,8 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
             .unwrap();
 
         metrics.set_registered(123, 0, "decode");
-        metrics.set_kv_event_source_mismatch_workers(2);
+        metrics.set_kv_event_source_mismatch_workers("model-a", "decode", "ns-a", "decode", 2);
+        metrics.set_kv_event_source_mismatch_workers("model-a", "prefill", "ns-a", "prefill", 0);
 
         let output = gather_pef(&registry);
         assert!(
@@ -889,7 +915,15 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
             "\nActual PEF:\n{output}"
         );
         assert!(
-            output.contains("dynamo_component_router_kv_event_source_mismatch_workers 2"),
+            output.contains(
+                "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"decode\",target_namespace=\"ns-a\",worker_type=\"decode\"} 2"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_kv_event_source_mismatch_workers{model=\"model-a\",target_component=\"prefill\",target_namespace=\"ns-a\",worker_type=\"prefill\"} 0"
+            ),
             "\nActual PEF:\n{output}"
         );
 
