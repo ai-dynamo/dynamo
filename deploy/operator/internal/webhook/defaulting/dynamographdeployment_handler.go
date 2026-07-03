@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"strings"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -35,9 +34,8 @@ import (
 )
 
 const (
-	dgdDefaultingWebhookName         = "dynamographdeployment-defaulting-webhook"
-	dgdV1Alpha1DefaultingWebhookPath = "/mutate-nvidia-com-v1alpha1-dynamographdeployment"
-	dgdV1Beta1DefaultingWebhookPath  = "/mutate/nvidia.com/v1beta1/dynamographdeployments"
+	dgdDefaultingWebhookName = "dynamographdeployment-defaulting-webhook"
+	dgdDefaultingWebhookPath = "/mutate/nvidia.com/v1beta1/dynamographdeployments"
 )
 
 // DGDDefaulter is a mutating webhook handler that stamps DynamoGraphDeployments
@@ -46,13 +44,6 @@ const (
 type DGDDefaulter struct {
 	OperatorVersion string
 	GroveEnabled    bool
-}
-
-// dgdV1Alpha1Defaulter keeps the previous endpoint available during the
-// v1alpha1-to-v1beta1 admission migration. It applies v1beta1 defaulting and
-// converts the result back to the object version used by the legacy endpoint.
-type dgdV1Alpha1Defaulter struct {
-	defaulter *DGDDefaulter
 }
 
 // NewDGDDefaulter creates a new DGDDefaulter with the given operator version.
@@ -71,6 +62,8 @@ func NewDGDDefaulter(operatorVersion string, groveEnabled bool) *DGDDefaulter {
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
+	logger := log.FromContext(ctx).WithName(dgdDefaultingWebhookName)
+
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK); err != nil {
 		return err
 	}
@@ -79,14 +72,6 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	if !ok {
 		return fmt.Errorf("expected DynamoGraphDeployment but got %T", obj)
 	}
-	return d.defaultV1Beta1(ctx, dgd)
-}
-
-func (d *DGDDefaulter) defaultV1Beta1(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) error {
-	logger := log.FromContext(ctx).WithName(dgdDefaultingWebhookName)
 
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
@@ -134,45 +119,9 @@ func (d *DGDDefaulter) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeploymen
 
 // RegisterWithManager registers the defaulting webhook with the manager.
 func (d *DGDDefaulter) RegisterWithManager(mgr manager.Manager) error {
-	betaWebhook := admission.
+	webhook := admission.
 		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeployment{}, d).
 		WithRecoverPanic(true)
-	mgr.GetWebhookServer().Register(dgdV1Beta1DefaultingWebhookPath, betaWebhook)
-
-	// Keep the v1alpha1 endpoint in the binary before the Helm registration
-	// moves to v1beta1. This lets an upgrade switch the registration only after
-	// all running operators already serve both endpoints.
-	alphaDefaulter := &dgdV1Alpha1Defaulter{defaulter: d}
-	alphaWebhook := admission.
-		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, alphaDefaulter).
-		WithRecoverPanic(true)
-	mgr.GetWebhookServer().Register(dgdV1Alpha1DefaultingWebhookPath, alphaWebhook)
-	return nil
-}
-
-func (d *dgdV1Alpha1Defaulter) Default(ctx context.Context, obj runtime.Object) error {
-	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
-		return err
-	}
-
-	alpha, ok := obj.(*nvidiacomv1alpha1.DynamoGraphDeployment)
-	if !ok {
-		return fmt.Errorf("expected DynamoGraphDeployment but got %T", obj)
-	}
-
-	beta, err := internalwebhook.ConvertDynamoGraphDeploymentToV1Beta1(alpha)
-	if err != nil {
-		return err
-	}
-	if err := d.defaulter.defaultV1Beta1(ctx, beta); err != nil {
-		return err
-	}
-
-	converted, err := internalwebhook.ConvertDynamoGraphDeploymentToV1Alpha1(beta)
-	if err != nil {
-		return err
-	}
-	converted.TypeMeta = alpha.TypeMeta
-	*alpha = *converted
+	mgr.GetWebhookServer().Register(dgdDefaultingWebhookPath, webhook)
 	return nil
 }
