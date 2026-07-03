@@ -17,10 +17,25 @@ pub async fn create_lease(
     ttl: u64,
     token: CancellationToken,
 ) -> anyhow::Result<u64> {
+    if token.is_cancelled() {
+        anyhow::bail!("lease creation cancelled");
+    }
+
     let mut lease_client = connector.get_client().lease_client();
     let lease = lease_client.grant(ttl as i64, None).await?;
 
     let id = lease.id() as u64;
+    if token.is_cancelled() {
+        if let Err(e) = lease_client.revoke(id as i64).await {
+            tracing::warn!(
+                lease_id = id,
+                error = %e,
+                "Failed to revoke lease after cancellation during creation"
+            );
+        }
+        anyhow::bail!("lease creation cancelled");
+    }
+
     let ttl = lease.ttl() as u64;
     let child = token.child_token();
 

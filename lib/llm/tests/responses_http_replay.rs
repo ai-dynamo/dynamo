@@ -415,6 +415,10 @@ async fn function_call_output_round_trip_reaches_the_chat_engine() {
             .find(|item| item["type"] == "function_call")
             .expect("first response did not contain a function call")
             .clone();
+        let call_id = function_call["call_id"]
+            .as_str()
+            .expect("function call missing call_id")
+            .to_string();
 
         let second_response = post_responses(
             &svc,
@@ -428,7 +432,7 @@ async fn function_call_output_round_trip_reaches_the_chat_engine() {
                     function_call,
                     {
                         "type": "function_call_output",
-                        "call_id": "call_list_directory",
+                        "call_id": call_id,
                         "output": "[\"a.txt\"]"
                     }
                 ]
