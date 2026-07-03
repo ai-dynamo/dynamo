@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use dynamo_runtime::protocols::annotated::AnnotationsProvider;
+use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
@@ -22,7 +22,6 @@ use crate::protocols::common::extensions::{
 
 pub mod aggregator;
 mod delta;
-pub mod jail;
 pub mod tool_parser_v2;
 
 pub use aggregator::DeltaAggregator;
@@ -30,8 +29,9 @@ pub use delta::DeltaGenerator;
 
 use dynamo_parsers::tool_calling::{ToolCallResponse, ToolCallResponseChunk};
 use dynamo_protocols::types::{
-    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk, FunctionCall,
-    FunctionCallStream, FunctionType,
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
+    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
+    FunctionCall, FunctionCallStream, FunctionType,
 };
 
 /// Map a parser-native [`ToolCallResponse`] onto the protocol/wire
@@ -237,6 +237,45 @@ pub struct NvCreateChatCompletionStreamResponse {
     /// client-facing OpenAI-compatible streams.
     #[serde(skip)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
+}
+
+/// Build one synthetic stream choice from an existing response template.
+///
+/// Both streaming tool-call paths use this constructor when an engine omits a
+/// terminal choice. Accounting data belongs only on the usage chunk and must
+/// not be copied onto the synthetic choice.
+pub(super) fn stream_choice_chunk_from_template(
+    template: &NvCreateChatCompletionStreamResponse,
+    index: u32,
+    content: Option<ChatCompletionMessageContent>,
+    tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
+    finish_reason: Option<FinishReason>,
+) -> Annotated<NvCreateChatCompletionStreamResponse> {
+    let mut response = template.clone();
+    response.inner.usage = None;
+    response.llm_metrics = None;
+    #[allow(deprecated)]
+    let choice = ChatChoiceStream {
+        index,
+        delta: ChatCompletionStreamResponseDelta {
+            role: None,
+            content,
+            tool_calls,
+            function_call: None,
+            refusal: None,
+            reasoning_content: None,
+        },
+        finish_reason,
+        logprobs: None,
+    };
+    response.inner.choices = vec![choice];
+    Annotated {
+        data: Some(response),
+        id: None,
+        event: None,
+        comment: None,
+        error: None,
+    }
 }
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
