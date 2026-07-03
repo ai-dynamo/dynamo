@@ -31,6 +31,7 @@ func main() {
 		CUDADeviceMap:  *cudaDeviceMap,
 		CgroupRoot:     *cgroupRoot,
 		TargetPodIP:    *targetPodIP,
+		ProcRoot:       "/proc",
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

@@ -3,9 +3,13 @@ package cuda
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,6 +93,317 @@ func TestBuildDeviceMap(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRestoreAndUnlockProcessTreePreservesPhaseBarrier(t *testing.T) {
+	pids := []int{101, 202, 303}
+	procRoot := fakeProcRoot(t, map[int]string{
+		101: "PATH=/bin",
+		202: "PATH=/bin",
+		303: "PATH=/bin",
+	})
+	restoreStarted := make(chan int, len(pids))
+	releaseRestore := make(chan struct{})
+	unlockStarted := make(chan int, len(pids))
+	releaseUnlock := make(chan struct{})
+	type result struct {
+		timings RestorePhaseTimings
+		err     error
+	}
+	resultCh := make(chan result, 1)
+
+	go func() {
+		timings, err := restoreAndUnlockProcessTree(
+			context.Background(),
+			pids,
+			procRoot,
+			func(ctx context.Context, pid int) error {
+				restoreStarted <- pid
+				select {
+				case <-releaseRestore:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+			func(ctx context.Context, pid int) error {
+				unlockStarted <- pid
+				select {
+				case <-releaseUnlock:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+			func(context.Context, int) (string, error) {
+				return "", errors.New("unexpected state check")
+			},
+			logr.Discard(),
+		)
+		resultCh <- result{timings: timings, err: err}
+	}()
+
+	for range pids {
+		select {
+		case <-restoreStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("restore operations did not all start concurrently")
+		}
+	}
+	select {
+	case pid := <-unlockStarted:
+		t.Fatalf("unlock for pid %d started before all restores completed", pid)
+	default:
+	}
+
+	close(releaseRestore)
+	for range pids {
+		select {
+		case <-unlockStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatal("unlock operations did not all start concurrently")
+		}
+	}
+	close(releaseUnlock)
+
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			t.Fatalf("restoreAndUnlockProcessTree: %v", got.err)
+		}
+		if got.timings.RestoreDuration <= 0 ||
+			got.timings.UnlockDuration <= 0 ||
+			got.timings.TotalDuration <= 0 {
+			t.Fatalf("expected positive phase timings, got %+v", got.timings)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("restoreAndUnlockProcessTree did not complete")
+	}
+}
+
+func TestRestoreAndUnlockProcessTreePreservesSerialPhaseBarrier(t *testing.T) {
+	pids := []int{303, 101, 202}
+	procRoot := fakeProcRoot(t, map[int]string{
+		303: "CUDA_CHECKPOINT_JOB_FILE=/tmp/job",
+		101: "PATH=/bin",
+		202: "PATH=/bin",
+	})
+	var calls []string
+
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		pids,
+		procRoot,
+		func(_ context.Context, pid int) error {
+			calls = append(calls, fmt.Sprintf("restore:%d", pid))
+			return nil
+		},
+		func(_ context.Context, pid int) error {
+			calls = append(calls, fmt.Sprintf("unlock:%d", pid))
+			return nil
+		},
+		func(context.Context, int) (string, error) {
+			return "", errors.New("unexpected state check")
+		},
+		logr.Discard(),
+	)
+	if err != nil {
+		t.Fatalf("restoreAndUnlockProcessTree: %v", err)
+	}
+
+	want := []string{
+		"restore:303",
+		"restore:101",
+		"restore:202",
+		"unlock:303",
+		"unlock:101",
+		"unlock:202",
+	}
+	if strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls %v, want %v", calls, want)
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeWaitsAndOrdersErrors(t *testing.T) {
+	pids := []int{303, 101, 202}
+	procRoot := fakeProcRoot(t, map[int]string{
+		303: "PATH=/bin",
+		101: "PATH=/bin",
+		202: "PATH=/bin",
+	})
+	var completed atomic.Int32
+	var unlockCalls atomic.Int32
+
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		pids,
+		procRoot,
+		func(_ context.Context, pid int) error {
+			defer completed.Add(1)
+			if pid == 202 {
+				time.Sleep(20 * time.Millisecond)
+				return nil
+			}
+			return fmt.Errorf("restore error %d", pid)
+		},
+		func(context.Context, int) error {
+			unlockCalls.Add(1)
+			return nil
+		},
+		func(context.Context, int) (string, error) {
+			return "", errors.New("unexpected state check")
+		},
+		logr.Discard(),
+	)
+	if err == nil {
+		t.Fatal("expected restore error")
+	}
+	if completed.Load() != int32(len(pids)) {
+		t.Fatalf("completed %d restores, want %d", completed.Load(), len(pids))
+	}
+	if unlockCalls.Load() != 0 {
+		t.Fatalf("unlock called %d times after restore failure", unlockCalls.Load())
+	}
+	errText := err.Error()
+	first := strings.Index(errText, "pid 303")
+	second := strings.Index(errText, "pid 101")
+	if first < 0 || second < 0 || first >= second {
+		t.Fatalf("errors are not in PID input order: %q", errText)
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeAcceptsAlreadyRunning(t *testing.T) {
+	pids := []int{101, 202}
+	procRoot := fakeProcRoot(t, map[int]string{
+		101: "PATH=/bin",
+		202: "PATH=/bin",
+	})
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		pids,
+		procRoot,
+		func(context.Context, int) error {
+			return nil
+		},
+		func(_ context.Context, pid int) error {
+			return fmt.Errorf("unlock error %d", pid)
+		},
+		func(_ context.Context, pid int) (string, error) {
+			if pid == 101 {
+				return "running", nil
+			}
+			return "checkpointed", nil
+		},
+		logr.Discard(),
+	)
+	if err == nil {
+		t.Fatal("expected unlock error for non-running process")
+	}
+	if strings.Contains(err.Error(), "pid 101") {
+		t.Fatalf("already-running process returned an error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pid 202") {
+		t.Fatalf("missing PID attribution: %v", err)
+	}
+}
+
+func TestCanRestoreConcurrently(t *testing.T) {
+	tests := []struct {
+		name     string
+		environs map[int]string
+		pids     []int
+		mutate   func(t *testing.T, procRoot string)
+		want     bool
+		reason   string
+	}{
+		{
+			name: "all independent",
+			environs: map[int]string{
+				101: "PATH=/bin",
+				202: "OTHER=value",
+			},
+			pids:   []int{101, 202},
+			want:   true,
+			reason: "independent",
+		},
+		{
+			name: "shared job file",
+			environs: map[int]string{
+				101: "CUDA_CHECKPOINT_JOB_FILE=/tmp/job",
+				202: "PATH=/bin",
+			},
+			pids:   []int{101, 202},
+			reason: "pid 101 has CUDA_CHECKPOINT_JOB_FILE set",
+		},
+		{
+			name: "mixed processes",
+			environs: map[int]string{
+				101: "PATH=/bin",
+				202: "CUDA_CHECKPOINT_JOB_FILE=/tmp/job",
+			},
+			pids:   []int{101, 202},
+			reason: "pid 202 has CUDA_CHECKPOINT_JOB_FILE set",
+		},
+		{
+			name: "read failure",
+			environs: map[int]string{
+				101: "PATH=/bin",
+			},
+			pids:   []int{101, 202},
+			reason: "could not inspect target pid 202 environment",
+		},
+		{
+			name: "malformed environment",
+			environs: map[int]string{
+				101: "PATH=/bin",
+			},
+			pids: []int{101},
+			mutate: func(t *testing.T, procRoot string) {
+				t.Helper()
+				path := filepath.Join(procRoot, "101", "environ")
+				if err := os.WriteFile(path, []byte("PATH=/bin"), 0o600); err != nil {
+					t.Fatalf("write malformed environment: %v", err)
+				}
+			},
+			reason: "could not parse target pid 101 environment",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			procRoot := fakeProcRoot(t, tc.environs)
+			if tc.mutate != nil {
+				tc.mutate(t, procRoot)
+			}
+
+			got, reason := canRestoreConcurrently(procRoot, tc.pids)
+			if got != tc.want {
+				t.Fatalf("canRestoreConcurrently() = %t, want %t", got, tc.want)
+			}
+			if !strings.Contains(reason, tc.reason) {
+				t.Fatalf("reason %q does not contain %q", reason, tc.reason)
+			}
+		})
+	}
+}
+
+func fakeProcRoot(t *testing.T, environs map[int]string) string {
+	t.Helper()
+	procRoot := t.TempDir()
+	for pid, environ := range environs {
+		dir := filepath.Join(procRoot, strconv.Itoa(pid))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("create fake proc pid directory: %v", err)
+		}
+		data := []byte{}
+		if environ != "" {
+			data = append([]byte(environ), 0)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "environ"), data, 0o600); err != nil {
+			t.Fatalf("write fake process environment: %v", err)
+		}
+	}
+	return procRoot
 }
 
 type testPodResourcesServer struct {

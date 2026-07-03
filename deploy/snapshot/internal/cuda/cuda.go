@@ -2,12 +2,17 @@
 package cuda
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -31,7 +36,9 @@ type CheckpointPhaseTimings struct {
 }
 
 type RestorePhaseTimings struct {
-	TotalDuration time.Duration
+	RestoreDuration time.Duration
+	UnlockDuration  time.Duration
+	TotalDuration   time.Duration
 }
 
 // GetPodGPUUUIDs resolves GPU UUIDs for a pod/container from kubelet
@@ -258,29 +265,169 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 }
 
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) (RestorePhaseTimings, error) {
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, procRoot string, log logr.Logger) (RestorePhaseTimings, error) {
+	return restoreAndUnlockProcessTree(
+		ctx,
+		cudaPIDs,
+		procRoot,
+		func(ctx context.Context, pid int) error {
+			return restoreProcess(ctx, pid, deviceMap, log)
+		},
+		func(ctx context.Context, pid int) error {
+			return unlock(ctx, pid, log)
+		},
+		getState,
+		log,
+	)
+}
+
+type pidOperation func(context.Context, int) error
+type processStateOperation func(context.Context, int) (string, error)
+
+func restoreAndUnlockProcessTree(
+	ctx context.Context,
+	cudaPIDs []int,
+	procRoot string,
+	restore pidOperation,
+	unlock pidOperation,
+	getProcessState processStateOperation,
+	log logr.Logger,
+) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 
-	start := time.Now()
-	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
-		}
+	concurrent, reason := canRestoreConcurrently(procRoot, cudaPIDs)
+	mode := "serial"
+	if concurrent {
+		mode = "concurrent"
 	}
+	log.Info(
+		"Selected CUDA restore execution mode",
+		"mode", mode,
+		"reason", reason,
+	)
 
-	for _, pid := range cudaPIDs {
-		if err := unlock(ctx, pid, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			state, stateErr := getState(ctx, pid)
+	start := time.Now()
+	restoreStart := time.Now()
+	err := runPIDOperations(ctx, cudaPIDs, "restore", concurrent, restore)
+	timings.RestoreDuration = time.Since(restoreStart)
+	timings.TotalDuration = time.Since(start)
+	if err != nil {
+		return timings, err
+	}
+	log.Info(
+		"CUDA process restore phase completed",
+		"pid_count", len(cudaPIDs),
+		"duration", timings.RestoreDuration,
+	)
+
+	unlockStart := time.Now()
+	err = runPIDOperations(ctx, cudaPIDs, "unlock", concurrent, func(ctx context.Context, pid int) error {
+		if err := unlock(ctx, pid); err != nil {
+			state, stateErr := getProcessState(ctx, pid)
 			if stateErr == nil && state == "running" {
 				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
-				continue
+				return nil
 			}
-			return timings, err
+			if stateErr != nil {
+				return errors.Join(
+					err,
+					fmt.Errorf("get process state after unlock failure: %w", stateErr),
+				)
+			}
+			return err
 		}
-	}
+		return nil
+	})
+	timings.UnlockDuration = time.Since(unlockStart)
 	timings.TotalDuration = time.Since(start)
+	if err != nil {
+		return timings, err
+	}
+	log.Info(
+		"CUDA process unlock phase completed",
+		"pid_count", len(cudaPIDs),
+		"duration", timings.UnlockDuration,
+	)
 
 	return timings, nil
+}
+
+func runPIDOperations(
+	ctx context.Context,
+	cudaPIDs []int,
+	action string,
+	concurrent bool,
+	operation pidOperation,
+) error {
+	if !concurrent {
+		for _, pid := range cudaPIDs {
+			if err := operation(ctx, pid); err != nil {
+				return fmt.Errorf("CUDA %s failed for pid %d: %w", action, pid, err)
+			}
+		}
+		return nil
+	}
+
+	errs := make([]error, len(cudaPIDs))
+	var wg sync.WaitGroup
+	wg.Add(len(cudaPIDs))
+	for i, pid := range cudaPIDs {
+		i, pid := i, pid
+		go func() {
+			defer wg.Done()
+			if err := operation(ctx, pid); err != nil {
+				errs[i] = fmt.Errorf("CUDA %s failed for pid %d: %w", action, pid, err)
+			}
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+func canRestoreConcurrently(procRoot string, cudaPIDs []int) (bool, string) {
+	for _, pid := range cudaPIDs {
+		environPath := filepath.Join(procRoot, strconv.Itoa(pid), "environ")
+		environ, err := os.ReadFile(environPath)
+		if err != nil {
+			return false, fmt.Sprintf(
+				"could not inspect target pid %d environment: %v",
+				pid,
+				err,
+			)
+		}
+		hasJobFile, err := hasCheckpointJobFile(environ)
+		if err != nil {
+			return false, fmt.Sprintf(
+				"could not parse target pid %d environment: %v",
+				pid,
+				err,
+			)
+		}
+		if hasJobFile {
+			return false, fmt.Sprintf(
+				"target pid %d has CUDA_CHECKPOINT_JOB_FILE set",
+				pid,
+			)
+		}
+	}
+	return true, "every target process was positively identified as independent"
+}
+
+func hasCheckpointJobFile(environ []byte) (bool, error) {
+	if len(environ) == 0 {
+		return false, nil
+	}
+	if environ[len(environ)-1] != 0 {
+		return false, errors.New("environment is not NUL-terminated")
+	}
+	for _, entry := range bytes.Split(environ[:len(environ)-1], []byte{0}) {
+		key, _, ok := bytes.Cut(entry, []byte{'='})
+		if !ok || len(key) == 0 {
+			return false, errors.New("environment contains malformed entry")
+		}
+		if bytes.Equal(key, []byte("CUDA_CHECKPOINT_JOB_FILE")) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

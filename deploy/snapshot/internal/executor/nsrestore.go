@@ -21,6 +21,7 @@ type RestoreOptions struct {
 	CUDADeviceMap  string
 	CgroupRoot     string
 	TargetPodIP    string
+	ProcRoot       string
 }
 
 type RestoreInNamespaceResult struct {
@@ -32,6 +33,9 @@ type RestoreInNamespaceResult struct {
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
 func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logger) (*RestoreInNamespaceResult, error) {
+	if opts.ProcRoot == "" {
+		opts.ProcRoot = "/proc"
+	}
 	restoreStart := time.Now()
 	log.Info("Starting nsrestore workflow",
 		"checkpoint_path", opts.CheckpointPath,
@@ -129,12 +133,12 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	timings.criuRestoreDuration = time.Since(criuRestoreStart)
 
 	cudaStart := time.Now()
-	processes, err := snapshotruntime.ReadProcessTable("/proc")
+	processes, err := snapshotruntime.ReadProcessTable(opts.ProcRoot)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read restored process table: %w", err)
 	}
 	log.V(1).Info("Restored process table snapshot",
-		"proc_root", "/proc",
+		"proc_root", opts.ProcRoot,
 		"criu_callback_pid", restoredPID,
 		"process_count", len(processes),
 		"manifest_cuda_pids", m.CUDA.PIDs,
@@ -162,7 +166,13 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log)
+		_, err = cuda.RestoreAndUnlockProcessTree(
+			ctx,
+			restorePIDs,
+			opts.CUDADeviceMap,
+			opts.ProcRoot,
+			log,
+		)
 		if err != nil {
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}
