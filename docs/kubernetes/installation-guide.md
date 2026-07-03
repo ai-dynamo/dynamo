@@ -158,7 +158,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > | 1.3.x           | >= v0.13.4    | v0.1.0-alpha.8 |
 > | 1.4.x           | >= v0.13.4    | v0.1.0-alpha.10 |
 >
-> Grove must be upgraded in lockstep with Dynamo across Grove topology API changes. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and should not be paired with Grove versions that renamed the resource to `ClusterTopologyBinding` (`v0.1.0-alpha.9` and newer). Dynamo 1.4.x expects the renamed `ClusterTopologyBinding` API and requires Grove `v0.1.0-alpha.10`, which also includes the Volcano scheduler backend support used by Dynamo's experimental Volcano integration.
+> Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
 #### LWS + Volcano
 
