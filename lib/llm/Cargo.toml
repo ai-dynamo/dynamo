@@ -68,7 +68,6 @@ dynamo-renderer = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
-aho-corasick = "1.1"
 anyhow = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-parsers = { workspace = true }

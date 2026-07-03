@@ -47,11 +47,26 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker(worker_id) => {
-                    self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
+                WorkerTask::RemoveWorker {
+                    worker_id,
+                    sweep_tree,
+                } => {
+                    self.erase_worker_coverage(
+                        &mut lookup,
+                        WorkerRemovalTarget::WorkerId(worker_id),
+                        sweep_tree,
+                    );
                 }
-                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
-                    self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
+                WorkerTask::RemoveWorkerDpRank {
+                    worker_id,
+                    dp_rank,
+                    sweep_tree,
+                } => {
+                    self.erase_worker_coverage(
+                        &mut lookup,
+                        WorkerRemovalTarget::DpRank(WorkerWithDpRank::new(worker_id, dp_rank)),
+                        sweep_tree,
+                    );
                 }
                 WorkerTask::CleanupStaleChildren => {
                     self.run_cleanup_task();
