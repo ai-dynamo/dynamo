@@ -151,7 +151,7 @@ Set these values on the EPP component unless the deployment manifest says otherw
 
 | Setting | Default | Effect |
 |---|---:|---|
-| `DYN_ENFORCE_DISAGG` | `false` | When `true`, fail requests if prefill routing is unavailable. When `false`, fall back to aggregated routing until prefill workers appear. |
+| `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |
 | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` | Controls device-local prefix-overlap credit. Higher values prefer workers with cached prompt prefixes. |
 | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY` | `0.0` | Reduces prefix-overlap credit as active prefill load rises above the least-loaded eligible worker. |
 | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scales prompt-side prefill load after cache-hit credits are applied. |
