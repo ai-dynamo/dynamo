@@ -3,6 +3,7 @@
 
 """Common base classes and utilities for engine tests (vLLM, TRT-LLM, etc.)"""
 
+import collections
 import concurrent.futures
 import dataclasses
 import logging
@@ -427,24 +428,30 @@ def run_prefill_drain_deployment(
 
             # Functional floor: some burst requests served. Requests routed
             # after the prefill unregister legitimately fail, so this is a
-            # floor, not "all succeed".
-            ok = 0
+            # floor, not "all succeed". Tally outcomes by status code (or
+            # exception type) so a 0-OK failure shows how the burst died.
+            outcomes: collections.Counter = collections.Counter()
             try:
                 for fut in concurrent.futures.as_completed(futures, timeout=200):
                     try:
-                        if fut.result().status_code == 200:
-                            ok += 1
-                    except Exception:
-                        pass
+                        outcomes[fut.result().status_code] += 1
+                    except Exception as e:
+                        outcomes[type(e).__name__] += 1
             except concurrent.futures.TimeoutError:
                 logger.warning("burst tally timed out waiting for stragglers")
+            ok = outcomes[200]
             logger.info(
-                "burst: %d/%d returned 200 across prefill drain (drain loop engaged=%s)",
+                "burst: %d/%d returned 200 across prefill drain "
+                "(drain loop engaged=%s, outcomes=%s)",
                 ok,
                 burst_size,
                 drain_engaged,
+                dict(outcomes),
             )
-            assert ok >= 1, "no burst request completed across the prefill drain"
+            assert ok >= 1, (
+                "no burst request completed across the prefill drain "
+                f"(outcomes: {dict(outcomes)})"
+            )
             pool.shutdown(wait=False)
     finally:
         if prep.disagg_bootstrap_port is not None:
