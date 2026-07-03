@@ -20,6 +20,9 @@ ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
 ARG NIXL_REF
+{% if device == "xpu" %}
+ARG LMCACHE_REF
+{% endif %}
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
@@ -192,6 +195,15 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 # Reinstalling triton-xpu ensures the triton namespace is properly configured
 RUN uv pip uninstall triton && \
     uv pip install --force-reinstall --no-deps triton-xpu
+
+# XPU needs LMCache built from source with SYCL support. The upstream XPU base
+# image may carry a CUDA-oriented LMCache wheel, so replace it after vLLM-Omni
+# dependency layering has preserved the base framework stack.
+RUN --mount=type=bind,source=./container/deps/vllm/install_lmcache_xpu.sh,target=/tmp/install_lmcache_xpu.sh \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    bash /tmp/install_lmcache_xpu.sh
 {% endif %}
 
 {% if context.vllm.enable_modelexpress == "true" %}

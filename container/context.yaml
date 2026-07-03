@@ -70,6 +70,9 @@ vllm:
     base_image_tag: ad7125a431e176d4161099480a66f0169609a690-xpu
     runtime_image_tag: ad7125a431e176d4161099480a66f0169609a690-xpu
     baseline_sbom: vllm-ci-test-repo@efec382c
+    # Includes LMCache#3282, which is required for LMCacheMPConnector with
+    # vLLM 0.20+ GPU KV formats used by the XPU runtime.
+    lmcache_ref: "3dd3668181462e522d1229a491ad8446f89fecc5"
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
