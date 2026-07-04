@@ -16,6 +16,7 @@ import logging
 import os
 import socket
 import traceback
+import time as _time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -552,8 +553,571 @@ class MxRefitWorkerExtension:
             if old_do_torchao_reload is not None:
                 model._do_torchao_reload = old_do_torchao_reload
 
+
+    # ===== ModelExpress net-new refit features (MDL / EP-filter /
+    # Phase-0.5 pinned-CPU staging / MoE swizzle guard / byte-identity
+    # verify). Additive + env-gated; default behavior unchanged. =====
+    _MX_STACKED_GROUPS = (
+        ("qkv_proj", "q_proj", 0),
+        ("qkv_proj", "k_proj", 1),
+        ("qkv_proj", "v_proj", 2),
+        ("gate_up_proj", "gate_proj", 0),
+        ("gate_up_proj", "up_proj", 1),
+    )
+
+    def _mx_build_fused_dest_map(
+        self,
+        weights: list[tuple[str, torch.Tensor]],
+    ) -> None:
+        """Precompute, per HF tensor, its destination in the vLLM model.
+
+        MDL (Mapped Direct Load): rather than lean on vLLM's stock
+        ``load_weights`` (fragile per-arch traversal; the Qwen3-MoE
+        fused-layout bug we hit on 2026-07-03 lives there), we resolve
+        each received HF tensor to exactly ONE of three destinations,
+        computed ONCE. This is our own eager, destination-mapped
+        in-place write — inspired by RDT's "don't re-run the loader
+        each refit" goal, but NOT RDT: no lazy tensors, no deferred
+        narrow(), no dependency on the RDT API. We eagerly RDMA-pull
+        then copy into the params' final slots, because NeMo-RL already
+        knows its target layout (declared TargetTpLayout) so the dynamic
+        layout discovery RDT's laziness buys is unnecessary here.
+
+          * ``direct``  — ``hf_name`` matches a vLLM param 1:1 by shape.
+            Warm cycle does ``param.data.copy_(tensor)``.
+          * ``fused``   — ``hf_name`` is a member of a stacked param
+            (q/k/v -> qkv_proj, gate/up -> gate_up_proj). Warm cycle
+            does ``param.data.narrow(0, offset, size).copy_(tensor)``.
+            Offsets are derived from the ACTUAL member tensor shapes
+            (not model config), so this is version-robust: whatever
+            order/size vLLM allocated, we match it by summing member
+            rows in canonical (q,k,v / gate,up) order.
+          * ``expert``  — per-expert MoE tensor (gate/up/down_proj)
+            resolved via vLLM's ``get_expert_mapping()`` to a slot in
+            the stacked ``w13_weight`` / ``w2_weight`` param. Warm cycle
+            does ``param.data[expert_id].narrow(axis, offset, size).
+            copy_(tensor)``. Requires the standard 3D layout
+            (``--moe-backend triton``); the swizzled 4D ``auto`` layout
+            routes to fallback (and the swizzle guard errors first).
+          * ``fallback`` — anything else, or MoE experts under a
+            swizzled backend. Warm cycle routes these through vLLM's
+            stock loader. On dense + triton-MoE this set is EMPTY.
+
+        Built after cycle 1's stock load so ``named_parameters`` is
+        populated. Idempotent — only rebuilds if not present.
+        """
+        params = self._mx_param_cache
+        direct: dict[str, "torch.Tensor"] = {}
+        # fused: hf_name -> (fused_param, axis, offset, size)
+        fused: dict[str, tuple] = {}
+        fallback_names: set[str] = set()
+
+        # expert dest: hf_name -> (fused_param, expert_id, axis, offset, size)
+        # for MoE per-expert tensors written into the stacked w13/w2 params.
+        expert: dict[str, tuple] = {}
+
+        # Build the MoE expert-name → (fused_param, expert_id, shard_id)
+        # lookup from vLLM's own authoritative mapping table, so we don't
+        # hardcode name transforms. Empty on dense models / when the
+        # backend is swizzled (see _mx_check_moe_swizzle — that guard
+        # fires first). shard_id: w1=gate, w3=up, w2=down.
+        expert_lookup: dict[str, tuple] = {}  # weight_suffix -> (param_suffix, expert_id, shard_id)
+        try:
+            model = self.model_runner.model
+            if hasattr(model, "get_expert_mapping"):
+                for param_suffix, weight_suffix, expert_id, shard_id in model.get_expert_mapping():
+                    expert_lookup[weight_suffix] = (param_suffix, int(expert_id), shard_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[mx-mdl] no expert mapping (dense or unavailable): %s", exc)
+
+        # First, bucket the stacked-group members by their fused param
+        # name so we can accumulate offsets in canonical order.
+        # group_key = fused_param_name; value = list of
+        # (order, hf_name, member_rows).
+        groups: dict[str, list[tuple[int, str, int]]] = {}
+        name_to_shape = {n: tuple(t.shape) for n, t in weights}
+
+        for hf_name in name_to_shape:
+            param = params.get(hf_name)
+            if param is not None and tuple(param.shape) == name_to_shape[hf_name]:
+                direct[hf_name] = param
+                continue
+            # MoE per-expert tensor? Resolve via vLLM's expert mapping.
+            if ".experts." in hf_name and expert_lookup:
+                dest = self._mx_resolve_expert_dest(
+                    hf_name, name_to_shape[hf_name], expert_lookup, params,
+                )
+                if dest is not None:
+                    expert[hf_name] = dest
+                    continue
+            # Try stacked-group membership.
+            matched = False
+            for fused_suffix, member_suffix, order in self._MX_STACKED_GROUPS:
+                if member_suffix + "." in hf_name or hf_name.endswith(member_suffix + ".weight"):
+                    fused_name = hf_name.replace(member_suffix, fused_suffix)
+                    fused_param = params.get(fused_name)
+                    if fused_param is None:
+                        continue
+                    member_rows = name_to_shape[hf_name][0]
+                    groups.setdefault(fused_name, []).append(
+                        (order, hf_name, member_rows)
+                    )
+                    matched = True
+                    break
+            if not matched:
+                fallback_names.add(hf_name)
+
+        # Resolve offsets within each fused group (canonical order).
+        for fused_name, members in groups.items():
+            fused_param = params[fused_name]
+            members.sort(key=lambda m: m[0])
+            offset = 0
+            for _order, hf_name, member_rows in members:
+                fused[hf_name] = (fused_param, 0, offset, member_rows)
+                offset += member_rows
+            # Sanity: total should equal the fused param's axis-0 size.
+            if offset != int(fused_param.shape[0]):
+                logger.warning(
+                    "[mx-mdl] fused group %s: member rows sum to %d but "
+                    "param axis-0 is %d; routing group to fallback",
+                    fused_name, offset, int(fused_param.shape[0]),
+                )
+                for _o, hf_name, _r in members:
+                    fused.pop(hf_name, None)
+                    fallback_names.add(hf_name)
+
+        self._mx_mdl_direct = direct
+        self._mx_mdl_fused = fused
+        self._mx_mdl_expert = expert
+        self._mx_mdl_fallback = fallback_names
+        logger.info(
+            "[mx-mdl] dest map built: %d direct, %d fused-slice, "
+            "%d expert-slice, %d fallback",
+            len(direct), len(fused), len(expert), len(fallback_names),
+        )
+
+    def _mx_resolve_expert_dest(
+        self,
+        hf_name: str,
+        hf_shape: tuple,
+        expert_lookup: dict,
+        params: dict,
+    ) -> tuple | None:
+        """Resolve a per-expert HF tensor to its slot in the stacked w13/w2 param.
+
+        Returns ``(fused_param, local_expert_idx, axis, offset, size)``
+        for the warm-cycle write ``fused_param.data[local_expert_idx].
+        narrow(axis, offset, size).copy_(tensor)``, or ``None`` to route
+        to fallback.
+
+        Layout (vLLM standard / --moe-backend triton):
+          * w1 (gate): w13_weight[E] rows [0, inter)      → axis 0, offset 0
+          * w3 (up):   w13_weight[E] rows [inter, 2*inter) → axis 0, offset inter
+          * w2 (down): w2_weight[E] full                  → axis 0, offset 0, full
+
+        EP>1 correctness: ``get_expert_mapping()`` yields a GLOBAL expert
+        id, but under expert-parallel the vLLM param only holds this
+        rank's LOCAL experts, so the param index must be the local slot.
+        We map global→local via the owning FusedMoE module's
+        ``_map_global_expert_id_to_local_expert_id`` (mirrors vLLM's own
+        weight_loader). At EP=1 that map is identity, so this is a no-op
+        for the validated single-rank path. A global id not local to
+        this rank maps to -1 → routed to fallback/skipped (the EP filter
+        should have pruned it from the pull upstream anyway).
+
+        Guards: only accepts if the resolved fused param exists, is 3D
+        (standard stacked, NOT the swizzled 4D layout — that routes to
+        fallback and the swizzle guard errors), the local index is in
+        range, and the destination slice shape matches the received
+        tensor exactly (protects the TP assumption; TP>1 per-expert
+        sharding would mismatch and route to fallback).
+        """
+        # Match the received name against vLLM's weight suffixes.
+        for weight_suffix, (param_suffix, expert_id, shard_id) in expert_lookup.items():
+            if weight_suffix not in hf_name:
+                continue
+            fused_name = hf_name.replace(weight_suffix, param_suffix)
+            fused_param = params.get(fused_name)
+            if fused_param is None or fused_param.ndim != 3:
+                return None  # swizzled/absent → fallback
+
+            # global → local expert index (identity at EP=1).
+            local_idx = self._mx_map_global_to_local_expert(fused_name, expert_id)
+            if local_idx is None or local_idx < 0 or local_idx >= int(fused_param.shape[0]):
+                return None  # not local to this rank → fallback/skip
+
+            per_expert = fused_param.shape[1]  # axis-0 size of param.data[E]
+            rows = hf_shape[0]
+            if shard_id == "w1":       # gate → first half
+                axis, offset, size = 0, 0, rows
+            elif shard_id == "w3":     # up → second half
+                axis, offset, size = 0, rows, rows
+            else:                       # w2 (down) → full slot
+                axis, offset, size = 0, 0, int(per_expert)
+            # Shape sanity: the narrowed slot must equal the received tensor.
+            if size != rows and shard_id in ("w1", "w3"):
+                return None
+            if shard_id == "w2" and int(per_expert) != rows:
+                return None
+            return (fused_param, local_idx, axis, offset, size)
+        return None
+
+    def _mx_map_global_to_local_expert(
+        self, fused_param_name: str, global_expert_id: int
+    ) -> int | None:
+        """Map a global expert id to this rank's local slot index.
+
+        Resolves the owning FusedMoE module from the fused param name
+        (e.g. ``model.layers.3.mlp.experts.w13_weight`` -> the
+        ``...mlp.experts`` module) and calls its
+        ``_map_global_expert_id_to_local_expert_id``. Returns the local
+        index, ``-1`` if the expert isn't on this rank, or the global id
+        unchanged if the module/method can't be resolved (EP=1 identity
+        fallback). Cached per fused-param module to avoid re-walking.
+        """
+        cache = getattr(self, "_mx_moe_module_cache", None)
+        if cache is None:
+            cache = {}
+            self._mx_moe_module_cache = cache
+        module = cache.get(fused_param_name, "MISS")
+        if module == "MISS":
+            mod_path = fused_param_name.rsplit(".", 1)[0]
+            obj = self.model_runner.model
+            for part in mod_path.split("."):
+                obj = getattr(obj, part, None)
+                if obj is None:
+                    break
+            module = obj
+            cache[fused_param_name] = module
+        if module is not None and hasattr(
+            module, "_map_global_expert_id_to_local_expert_id"
+        ):
+            try:
+                return int(
+                    module._map_global_expert_id_to_local_expert_id(global_expert_id)
+                )
+            except Exception:  # noqa: BLE001
+                return global_expert_id
+        # No EP map available (EP=1 / dense-style): identity.
+        return global_expert_id
+
+    def _mx_buffer_device(self) -> "torch.device":
+        """Phase 0.5: ``MX_MEGATRON_BUFFER_LOC=host`` puts the NIXL-registered
+        receive buffers in host (pinned) RAM to free ~model-shard-sized HBM
+        (8.77 GB on 4B, ~61 GB on 30B — the difference between fitting and OOM
+        on a 190 GB GB200). Default ``device`` keeps them on GPU (unchanged).
+        """
+        loc = os.environ.get("MX_MEGATRON_BUFFER_LOC", "device").lower()
+        if loc == "host":
+            return torch.device("cpu")
+        if loc not in ("device", "host"):
+            logger.warning(
+                "[mx] MX_MEGATRON_BUFFER_LOC=%r not recognized; using device", loc
+            )
+        return self.device
+
+    def _mx_mdl_note_cold(self, weights: list[tuple[str, torch.Tensor]]) -> None:
+        """MDL cold cycle: after the stock load, cache params + build the
+        destination map. No-op unless ``MX_LOAD_MODE=direct``. Gated to the
+        validated regime (TP=1, non-FP8); other regimes stay on the stock path.
+        """
+        if os.environ.get("MX_LOAD_MODE", "stock").lower() != "direct":
+            return
+        if getattr(self, "_mx_mdl_direct", None) is not None:
+            return  # already built
+        tp_size, _ = _target_tp(self)
+        if tp_size != 1 or self._mx_uses_fp8_quantization():
+            return
+        self._mx_check_moe_swizzle()
+        self._mx_param_cache = dict(self.model_runner.model.named_parameters())
+        self._mx_build_fused_dest_map(weights)
+
+    def _mx_try_mdl_warm(self, weights: list[tuple[str, torch.Tensor]]) -> bool:
+        """MDL warm cycle: write each tensor to its precomputed destination with
+        zero stock-loader calls for mapped tensors (``param.data.copy_`` for
+        1:1, ``param.narrow(...).copy_`` for stacked members, per-expert slot
+        for MoE). Returns True if it handled the load. No-op (returns False)
+        unless ``MX_LOAD_MODE=direct`` and the dest map has been built.
+        """
+        if os.environ.get("MX_LOAD_MODE", "stock").lower() != "direct":
+            return False
+        if getattr(self, "_mx_mdl_direct", None) is None:
+            return False
+        direct_hits = fused_hits = expert_hits = 0
+        fallback: list[tuple[str, torch.Tensor]] = []
+        _t0 = _time.perf_counter()
+        with torch.no_grad():
+            for hf_name, tensor in weights:
+                dest = self._mx_mdl_fused.get(hf_name)
+                if dest is not None:
+                    param, axis, offset, size = dest
+                    param.data.narrow(axis, offset, size).copy_(tensor, non_blocking=True)
+                    fused_hits += 1
+                    continue
+                edest = self._mx_mdl_expert.get(hf_name)
+                if edest is not None:
+                    param, eid, axis, offset, size = edest
+                    param.data[eid].narrow(axis, offset, size).copy_(tensor, non_blocking=True)
+                    expert_hits += 1
+                    continue
+                param = self._mx_mdl_direct.get(hf_name)
+                if param is not None and tuple(param.shape) == tuple(tensor.shape):
+                    param.data.copy_(tensor, non_blocking=True)
+                    direct_hits += 1
+                    continue
+                fallback.append((hf_name, tensor))
+        if fallback:
+            self.model_runner.model.load_weights(weights=fallback)
+        logger.info(
+            "[mx-mdl] warm-cycle: %d direct + %d fused-slice + %d expert-slice "
+            "in %.3fs, %d fallback via stock",
+            direct_hits, fused_hits, expert_hits,
+            _time.perf_counter() - _t0, len(fallback),
+        )
+        return True
+
+    def _mx_check_moe_swizzle(self) -> None:
+        """Fail loud if a MoE expert param is in a swizzled >3D layout.
+
+        vLLM's ``--moe-backend auto`` selects a batched/packed backend on
+        some GPUs (observed on GB200 for Qwen3-MoE) whose
+        ``process_weights_after_loading`` repacks ``w13_weight`` into a
+        4D kernel layout ``(num_experts, tile, 2*inter, hidden_tile)``.
+        The incremental refit ``load_weights`` path can't write raw
+        per-expert HF weights back into that swizzled param — it fails
+        deep in ``_load_w13`` with an opaque
+        ``shard_dim=0 is not a valid data dimension for a 3D tensor``.
+
+        We detect the swizzle up-front (any ``experts...w13_weight`` /
+        ``w2_weight`` param with ``ndim > 3``) and raise a directive to
+        launch with ``--moe-backend triton`` (standard un-swizzled
+        layout), which is our contained fix until vLLM ships a
+        refit-aware reload path. See
+        pensieve/RL/NemoRL/JulyAlignment/NemoRL_MegaMX_Design.md §3-§5.
+
+        No-op on dense models and on correctly-configured MoE.
+        """
+        for name, param in self.model_runner.model.named_parameters():
+            if ("experts" in name and name.endswith(("w13_weight", "w2_weight"))):
+                if param.ndim > 3:
+                    raise RuntimeError(
+                        f"[mx-megatron] MoE expert param {name!r} is in a "
+                        f"swizzled {param.ndim}D layout {tuple(param.shape)}; "
+                        f"vLLM's refit load_weights cannot write raw HF "
+                        f"weights into it. Relaunch the vLLM worker with "
+                        f"'--moe-backend triton' to keep the standard "
+                        f"(num_experts, 2*inter, hidden) layout. See "
+                        f"NemoRL_MegaMX_Design.md §5 (contained fix)."
+                    )
+                # First expert param checked is representative; done.
+                return
+
+    def _mx_apply_receiver_ep_filter(
+        self,
+        receive_specs: dict,
+    ) -> None:
+        """Rewrite ``role_descriptor['local_expert_ids']`` on expert-role
+        specs to reflect THIS receiver's EP layout.
+
+        Wired to vLLM's parallel_config (§4.5 of the MX-RL design doc):
+        when ``enable_expert_parallel=True``, only the experts routed to
+        this inference rank need to be pulled — the planner's
+        ``_plan_per_expert`` filters to that set. When EP is disabled
+        (default), every rank owns every expert and this method still
+        writes the full set (identity result; no filter applied at
+        planner time).
+
+        Uses ``modelexpress.rl_expert_layout.compute_local_expert_ids``
+        so the placement math (linear vs round_robin) stays in one
+        place and matches what a rank-to-rank publisher would advertise
+        under the same layout.
+        """
+        pc = self.model_runner.vllm_config.parallel_config
+        # vLLM's EP is enabled via ``enable_expert_parallel``. When on,
+        # the effective EP world size equals the TP*PP*DP group's total
+        # devices (via get_ep_group); when off, EP is a no-op mesh of 1.
+        ep_enabled = bool(getattr(pc, "enable_expert_parallel", False))
+        if ep_enabled:
+            try:
+                from vllm.distributed import parallel_state as _ps
+                _ep = _ps.get_ep_group()
+                ep_world_size = int(_ep.world_size)
+                ep_rank = int(_ep.rank_in_group)
+            except Exception:
+                # If EP is enabled in config but group isn't up yet,
+                # fall back to no filter.
+                ep_world_size, ep_rank = 1, 0
+        else:
+            ep_world_size, ep_rank = 1, 0
+
+        # num_experts from HF config. Present on all MoE architectures
+        # under different names; try the common ones. Skip filter if
+        # this isn't an MoE model at all.
+        hf_cfg = self.model_runner.model_config.hf_config
+        num_experts = (
+            getattr(hf_cfg, "num_local_experts", None)
+            or getattr(hf_cfg, "num_experts", None)
+            or getattr(hf_cfg, "n_routed_experts", None)
+        )
+        if not num_experts:
+            return  # not MoE — nothing to filter
+
+        placement = getattr(pc, "expert_placement_strategy", "linear")
+        # Only "linear" and "round_robin" are recognised by
+        # compute_local_expert_ids; anything else defaults to linear.
+        if placement not in ("linear", "round_robin"):
+            placement = "linear"
+
+        from modelexpress.rl_expert_layout import compute_local_expert_ids
+        local = compute_local_expert_ids(
+            ep_rank=ep_rank,
+            ep_world_size=ep_world_size,
+            num_experts=int(num_experts),
+            placement=placement,
+        )
+        local_str = ",".join(str(e) for e in local)
+
+        # Walk expert-role specs, overwrite the local_expert_ids hint.
+        # Non-expert specs are unchanged. This is a receiver-side
+        # override — the trainer's own hint (its EP-owned set) stays in
+        # the sidecar but the planner uses what we set here.
+        touched = 0
+        for spec in receive_specs.values():
+            if not spec.role.startswith("expert_"):
+                continue
+            rd = dict(spec.role_descriptor or {})
+            rd["local_expert_ids"] = local_str
+            spec.role_descriptor = rd
+            touched += 1
+
+        logger.info(
+            "[mx-megatron] EP filter: ep_enabled=%s ep_rank=%d ep_size=%d "
+            "num_experts=%d placement=%s local=%d experts (%s...) "
+            "applied to %d expert-role specs",
+            ep_enabled, ep_rank, ep_world_size, num_experts, placement,
+            len(local), local_str[:60], touched,
+        )
+
+    def _mx_verify_byte_identity(
+        self,
+        weights: list[tuple[str, torch.Tensor]],
+        *,
+        gt_path: str,
+    ) -> None:
+        """Compare received HF tensors bitwise against a Bridge ground truth.
+
+        Loads ``gt_path`` (produced by ``bridge.export_hf_weights`` on
+        the trainer) as ``{"hf_weights": {name: tensor}, ...}`` OR a bare
+        state-dict, and does a per-tensor ``torch.equal`` for every name
+        in ``weights``. Logs a summary line
+
+            [mx-verify] byte-identity: N/M tensors match (X mismatches)
+
+        which is grep-able across cycles + workers. On mismatch, logs
+        the first-N offending tensor names + shape/dtype/max-abs-diff.
+
+        Only invoked when the ``MX_VERIFY_BYTE_IDENTITY`` env var is set,
+        so there's no overhead in the production path. Runs inside the
+        vLLM worker process; ``gt_path`` must be visible via a mounted
+        volume (e.g. the shared PVC on ``/mnt/rl-workspace``).
+        """
+        t0 = _time.perf_counter()
+        # Use mmap so tensors are backed by the file on disk rather than
+        # copied into anonymous RAM up-front. Critical at MoE scale where
+        # the GT file is ~60 GB — copying it all into the pod's 128 GB
+        # memory limit on top of the pinned-CPU buffer cache (another
+        # ~60 GB) OOM-kills the container. With mmap=True torch keeps
+        # only page-cache pressure, not per-tensor RSS.
+        try:
+            gt_blob = torch.load(
+                gt_path, map_location="cpu", weights_only=False, mmap=True,
+            )
+            _mmap_ok = True
+        except (TypeError, RuntimeError) as exc:
+            # Older torch or non-mmap-compatible pickle format. Fall
+            # back to non-mmap load and warn.
+            logger.warning(
+                "[mx-verify] mmap=True load failed (%s); falling back "
+                "to eager load (may OOM on large GTs)",
+                exc,
+            )
+            gt_blob = torch.load(gt_path, map_location="cpu", weights_only=False)
+            _mmap_ok = False
+        # Accept both the pensieve wrapper ({"hf_weights": {...}, ...})
+        # and a bare state-dict.
+        if isinstance(gt_blob, dict) and "hf_weights" in gt_blob:
+            gt = gt_blob["hf_weights"]
+        else:
+            gt = gt_blob
+        assert isinstance(gt, dict), (
+            f"GT file {gt_path!r} did not resolve to a tensor dict "
+            f"(got {type(gt).__name__})"
+        )
+        logger.info(
+            "[mx-verify] loaded GT (mmap=%s, %d tensors) in %.2fs",
+            _mmap_ok, len(gt), _time.perf_counter() - t0,
+        )
+
+        match = 0
+        missing_in_gt = 0
+        shape_dtype_mismatch = 0
+        value_mismatch = 0
+        mismatch_examples: list[str] = []
+        # Stream compare: pop each GT tensor as we consume it so the
+        # (small) receive tensor plus the (streamed) GT page is the
+        # only extra live memory. On mmap-backed tensors ``del`` +
+        # ``gt.pop`` release the mmap ref immediately.
+        for name, recv in weights:
+            gt_t = gt.pop(name, None)
+            if gt_t is None:
+                missing_in_gt += 1
+                if len(mismatch_examples) < 5:
+                    mismatch_examples.append(f"missing-in-gt: {name}")
+                continue
+            recv_cpu = recv.detach().to("cpu") if recv.device.type != "cpu" else recv
+            if tuple(recv_cpu.shape) != tuple(gt_t.shape) or recv_cpu.dtype != gt_t.dtype:
+                shape_dtype_mismatch += 1
+                if len(mismatch_examples) < 5:
+                    mismatch_examples.append(
+                        f"shape/dtype: {name} recv={tuple(recv_cpu.shape)}/{recv_cpu.dtype} "
+                        f"gt={tuple(gt_t.shape)}/{gt_t.dtype}"
+                    )
+                del gt_t
+                continue
+            if torch.equal(recv_cpu, gt_t):
+                match += 1
+            else:
+                value_mismatch += 1
+                if len(mismatch_examples) < 5:
+                    diff = (recv_cpu.to(torch.float32) - gt_t.to(torch.float32)).abs()
+                    mismatch_examples.append(
+                        f"value: {name} shape={tuple(recv_cpu.shape)} "
+                        f"max_abs_diff={diff.max().item():.4e} "
+                        f"mean_abs_diff={diff.mean().item():.4e}"
+                    )
+            del gt_t
+        total = len(weights)
+        mismatches = missing_in_gt + shape_dtype_mismatch + value_mismatch
+        elapsed = _time.perf_counter() - t0
+        logger.info(
+            "[mx-verify] byte-identity: %d/%d tensors match "
+            "(%d mismatches: %d missing-in-gt, %d shape/dtype, %d value) "
+            "in %.2fs against gt=%s",
+            match, total, mismatches, missing_in_gt, shape_dtype_mismatch,
+            value_mismatch, elapsed, gt_path,
+        )
+        if mismatch_examples:
+            for line in mismatch_examples:
+                logger.info("[mx-verify]   %s", line)
+
     def _mx_load_weights(self, weights: list[tuple[str, torch.Tensor]]) -> None:
         weights, draft_weights = _split_policy_and_draft_weights(weights)
+        # MDL warm fast-path (opt-in MX_LOAD_MODE=direct; no-op otherwise).
+        # Writes policy weights straight to their precomputed slots, bypassing
+        # the stock loader. Draft weights still go through the normal path.
+        if self._mx_try_mdl_warm(weights):
+            self._mx_load_draft_weights(draft_weights)
+            return
         tp_size, tp_rank = _target_tp(self)
         uses_fp8_quantization = self._mx_uses_fp8_quantization()
         if tp_size > 1:
@@ -584,6 +1148,9 @@ class MxRefitWorkerExtension:
             self._mx_load_fp8_weights(weights)
         else:
             self.model_runner.model.load_weights(weights=weights)
+            # MDL cold cycle: build the destination map after the stock load
+            # so cycle 2+ can take the warm fast-path. No-op unless opt-in.
+            self._mx_mdl_note_cold(weights)
         self._mx_load_draft_weights(draft_weights)
 
     def _mx_load_draft_weights(
@@ -858,6 +1425,11 @@ class MxRefitWorkerExtension:
             self._mx_megatron_ctx = self._build_megatron_context(candidates)
 
         ctx = self._mx_megatron_ctx
+        # EP filter (opt-in via mx_config.moe_expert_filter): rewrite each
+        # expert-role spec's local_expert_ids so the planner pulls only the
+        # experts this receiver routes to. Identity no-op at EP=1.
+        if getattr(mx_config, "moe_expert_filter", False):
+            self._mx_apply_receiver_ep_filter(ctx.receive_specs)
         if not hasattr(self, "_mx_megatron_buffers"):
             buffers: dict[str, torch.Tensor] = {}
             vocab_buffers: dict[str, torch.Tensor] = {}
@@ -883,7 +1455,7 @@ class MxRefitWorkerExtension:
                 target[spec.megatron_name] = torch.empty(
                     shape,
                     dtype=_torch_dtype(spec.target_dtype),
-                    device=self.device,
+                    device=self._mx_buffer_device(),
                 )
             all_buffers = dict(buffers)
             all_buffers.update(vocab_buffers)
@@ -959,6 +1531,11 @@ class MxRefitWorkerExtension:
 
         self._mx_load_weights(weights)
         torch.cuda.current_stream().synchronize()
+        # Optional byte-identity verify vs a Bridge ground truth (opt-in via
+        # MX_VERIFY_BYTE_IDENTITY=<gt_path>; no overhead when unset).
+        _gt_path = os.environ.get("MX_VERIFY_BYTE_IDENTITY")
+        if _gt_path:
+            self._mx_verify_byte_identity(weights, gt_path=_gt_path)
         self._mx_maybe_process_fp8_kv_cache()
         if mx_config.tree_scale_out:
             self._mx_receiver.publish_self_as_source(
