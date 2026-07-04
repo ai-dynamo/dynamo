@@ -178,7 +178,24 @@ No pause/resume lines are expected from a one-task smoke; those only appear afte
 
 ### 4. Run the full Verified dataset
 
-On a fresh host, authenticate with Docker Hub using `docker login`; the 500 unique Verified task images exceed the anonymous pull limit. Then run the command below with `--install-only`, change both concurrency values from `256` to `32`, and omit `--no-delete --environment-kwarg keep_containers=true`. This pre-pulls the task images without issuing model requests; keep it outside the measured interval. The lower install concurrency avoids overwhelming Docker during simultaneous container teardown. The host-network overlay avoids creating one Docker bridge network per trial, which exhausts Docker's default address pools during the measured run.
+On a fresh host, authenticate with Docker Hub and prepare every task image outside the measured interval. Verified uses 500 unique images, which exceeds the anonymous pull limit. Keeping containers until the job finishes avoids hundreds of concurrent per-trial Compose teardowns; prune them once afterward.
+
+```bash
+docker login
+
+harbor run \
+  -d swebench-verified@1.0 \
+  -a nop \
+  --extra-docker-compose ~/src/dynamo/components/src/dynamo/thunderagent_router/harbor-host-network.yml \
+  -n 32 --n-concurrent-agents 32 \
+  --memory ignore \
+  --no-delete --environment-kwarg keep_containers=true \
+  --job-name verified-prepull --install-only -y
+
+docker container prune -f
+```
+
+The host-network overlay avoids creating one Docker bridge network per trial, which exhausts Docker's default address pools during the measured run.
 
 ```bash
 harbor run \
