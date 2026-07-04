@@ -269,6 +269,13 @@ def test_uses_nixl_connector_direct_and_nested():
         _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL_PUSH))
         is True
     )
+    assert (
+        _uses_nixl_connector(_make_engine_cfg("MultiConnector", _PD_KVBM_NIXL)) is True
+    )
+    assert (
+        _uses_nixl_connector(_make_engine_cfg("MultiConnector", _PD_KVBM_NIXL_PUSH))
+        is True
+    )
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheConnectorV1")) is False
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheMPConnector")) is False
     assert _uses_nixl_connector(_make_engine_cfg("FlexKVConnectorV1")) is False

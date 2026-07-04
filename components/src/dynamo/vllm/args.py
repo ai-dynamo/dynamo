@@ -370,17 +370,18 @@ def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses a NIXL connector.
 
     Covers NixlConnector (pull) and NixlPushConnector (push), both directly
-    (kv_connector="NixlConnector") and nested inside PdConnector
-    (kv_connector_extra_config.connectors contains "NixlConnector").
+    (kv_connector="NixlConnector") and nested inside a wrapper connector
+    (PdConnector or MultiConnector, via kv_connector_extra_config.connectors).
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
     if kv_cfg is None:
         return False
     if kv_cfg.kv_connector in _NIXL_CONNECTOR_NAMES:
         return True
-    # PdConnector wraps multiple connectors in kv_connector_extra_config.
-    # Each entry is a dict like {"kv_connector": "NixlConnector", ...}.
-    if kv_cfg.kv_connector == "PdConnector":
+    # Wrapper connectors (PdConnector and vLLM's MultiConnector, matching
+    # kv_connector_protocols.MULTI_CONNECTOR_WRAPPERS) nest sub-connectors in
+    # kv_connector_extra_config as dicts like {"kv_connector": "NixlConnector"}.
+    if kv_cfg.kv_connector in ("PdConnector", "MultiConnector"):
         extra = kv_cfg.kv_connector_extra_config or {}
         for entry in extra.get("connectors", []):
             if (
