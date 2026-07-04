@@ -50,13 +50,14 @@ use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
     apply_header_routing_overrides, session_affinity_from_headers,
 };
+use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
 };
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
-use crate::types::Annotated;
+use crate::types::{Annotated, openai::chat_completions::OpenAIChatCompletionsStreamingEngine};
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::SanitizedError;
@@ -163,8 +164,9 @@ async fn handler_anthropic_messages(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.stream;
     let resolved_model = resolve_request_model(&request.model, template.as_ref());
+    let metric_model = state.manager().metric_model_for(resolved_model).to_string();
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: metric_model.clone(),
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -193,8 +195,39 @@ async fn handler_anthropic_messages(
     )
     .await;
 
+    #[allow(clippy::result_large_err)]
     let response = tokio::spawn(
-        anthropic_messages(state, template, request, headers, stream_handle).in_current_span(),
+        async move {
+            anthropic_messages(
+                &state,
+                metric_model,
+                template,
+                request,
+                headers,
+                stream_handle,
+                |model| {
+                    state
+                        .manager()
+                        .get_chat_completions_engine_with_parsing(model)
+                        .map_err(|error| match error {
+                            crate::discovery::ModelManagerError::ModelUnavailable(_) => {
+                                anthropic_error(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "overloaded_error",
+                                    &super::openai::model_not_ready_message(model),
+                                )
+                            }
+                            _ => anthropic_error(
+                                StatusCode::NOT_FOUND,
+                                "not_found_error",
+                                &format!("Model '{model}' not found"),
+                            ),
+                        })
+                },
+            )
+            .await
+        }
+        .in_current_span(),
     )
     .await
     .map_err(|e| {
@@ -211,11 +244,17 @@ async fn handler_anthropic_messages(
 /// Core logic for the Anthropic Messages endpoint.
 #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
 async fn anthropic_messages(
-    state: Arc<service_v2::State>,
+    state: &Arc<service_v2::State>,
+    metric_model: String,
     template: Option<RequestTemplate>,
     mut request: Context<AnthropicCreateMessageRequest>,
     headers: HeaderMap,
     mut stream_handle: ConnectionHandle,
+    resolve: impl FnOnce(
+        &str,
+    )
+        -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), Response>
+    + Send,
 ) -> Result<Response, Response> {
     let streaming = request.stream;
     let request_id = request.id().to_string();
@@ -240,32 +279,12 @@ async fn anthropic_messages(
     }
 
     let model = request.model.clone();
-    let metric_model = state.manager().metric_model_for(&model).to_string();
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
-    // Look up engine and parsing options early so we know whether a reasoning
-    // parser is configured before converting the request.
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| match e {
-            // Registered but not ready to serve yet → retryable 503 (mapped to
-            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
-            // canonical, customer-facing message so both APIs report the same
-            // text. Anything else is a genuine missing model → 404.
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => anthropic_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded_error",
-                &super::openai::model_not_ready_message(&model),
-            ),
-            _ => anthropic_error(
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-                &format!("Model '{}' not found", model),
-            ),
-        })?;
+    // Resolve one engine/options snapshot before options shape the converted request.
+    let (engine, parsing_options) = resolve(&model)?;
 
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();

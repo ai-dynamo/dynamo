@@ -59,6 +59,7 @@ use crate::protocols::common::extensions::{
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
+    ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -72,7 +73,13 @@ use crate::protocols::openai::{
 };
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
-use crate::types::Annotated;
+use crate::types::{
+    Annotated,
+    openai::{
+        chat_completions::OpenAIChatCompletionsStreamingEngine,
+        completions::OpenAICompletionsStreamingEngine,
+    },
+};
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
@@ -640,11 +647,12 @@ async fn handler_completions(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
+    let metric_model = state
+        .manager()
+        .metric_model_for(&request.inner.model)
+        .to_string();
     let cancellation_labels = CancellationLabels {
-        model: state
-            .manager()
-            .metric_model_for(&request.inner.model)
-            .to_string(),
+        model: metric_model.clone(),
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -661,14 +669,25 @@ async fn handler_completions(
 
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
-    let response = tokio::spawn(completions(state, request, stream_handle).in_current_span())
-        .await
-        .map_err(|e| {
-            ErrorMessage::internal_server_error_with_details(
-                "Failed to await chat completions task",
-                format!("{e:?}"),
-            )
-        })?;
+    let response = tokio::spawn(
+        async move {
+            completions(&state, metric_model, request, stream_handle, |model| {
+                state
+                    .manager()
+                    .get_completions_engine_with_parsing(model)
+                    .map_err(|error| ErrorMessage::from_model_error(&error))
+            })
+            .await
+        }
+        .in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        ErrorMessage::internal_server_error_with_details(
+            "Failed to await chat completions task",
+            format!("{e:?}"),
+        )
+    })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -679,14 +698,20 @@ async fn handler_completions(
 
 #[tracing::instrument(skip_all)]
 async fn completions(
-    state: Arc<service_v2::State>,
+    state: &Arc<service_v2::State>,
+    metric_model: String,
     request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
+    resolve: impl FnOnce(
+        &str,
+    )
+        -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ErrorResponse>
+    + Send,
 ) -> Result<Response, ErrorResponse> {
     use crate::protocols::openai::completions::get_prompt_batch_size;
 
     // return a 503 if the service is not ready
-    check_ready(&state)?;
+    check_ready(state)?;
 
     // Validate stream_options is only used when streaming (NVBug 5662680)
     validate_completion_stream_options(&request)?;
@@ -699,19 +724,33 @@ async fn completions(
 
     // If single prompt or single-element batch, use original flow
     if batch_size == 1 {
-        return completions_single(state, request, stream_handle).await;
+        return completions_single(state, metric_model, request, stream_handle, resolve).await;
     }
 
     // Batch processing: handle multiple prompts
-    completions_batch(state, request, stream_handle, batch_size, n).await
+    completions_batch(
+        state,
+        metric_model,
+        request,
+        stream_handle,
+        batch_size,
+        n,
+        resolve,
+    )
+    .await
 }
 
 /// Handle single prompt completions (original logic)
 #[tracing::instrument(skip_all)]
 async fn completions_single(
-    state: Arc<service_v2::State>,
+    state: &Arc<service_v2::State>,
+    metric_model: String,
     request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
+    resolve: impl FnOnce(
+        &str,
+    )
+        -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ErrorResponse>,
 ) -> Result<Response, ErrorResponse> {
     let request_id = request.id().to_string();
 
@@ -721,7 +760,6 @@ async fn completions_single(
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     let model = request.inner.model.clone();
-    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
@@ -735,14 +773,9 @@ async fn completions_single(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // todo - error handling should be more robust
-    let (engine, parsing_options) = state
-        .manager()
-        .get_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    let (engine, parsing_options) = resolve(&model).inspect_err(|err_response| {
+        inflight_guard.mark_error(extract_error_type_from_response(err_response));
+    })?;
 
     let mut response_collector = state
         .metrics_clone()
@@ -860,11 +893,16 @@ async fn completions_single(
 /// Handle batch prompt completions (multiple prompts with n choices each)
 #[tracing::instrument(skip_all)]
 async fn completions_batch(
-    state: Arc<service_v2::State>,
+    state: &Arc<service_v2::State>,
+    metric_model: String,
     request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
     batch_size: usize,
     n: u8,
+    resolve: impl FnOnce(
+        &str,
+    )
+        -> Result<(OpenAICompletionsStreamingEngine, ParsingOptions), ErrorResponse>,
 ) -> Result<Response, ErrorResponse> {
     use crate::protocols::openai::completions::extract_single_prompt;
     use futures::stream::{self, StreamExt};
@@ -872,7 +910,6 @@ async fn completions_batch(
     let request_id = request.id().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
     let model = request.inner.model.clone();
-    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
@@ -885,14 +922,9 @@ async fn completions_batch(
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
-    let (engine, parsing_options) = state
-        .manager()
-        .get_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    let (engine, parsing_options) = resolve(&model).inspect_err(|err_response| {
+        inflight_guard.mark_error(extract_error_type_from_response(err_response));
+    })?;
 
     let mut response_collector = state
         .metrics_clone()
@@ -1245,8 +1277,9 @@ async fn handler_chat_completions(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
+    let metric_model = state.manager().metric_model_for(resolved_model).to_string();
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: metric_model.clone(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -1267,15 +1300,32 @@ async fn handler_chat_completions(
     )
     .await;
 
-    let response =
-        tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
+    let response = tokio::spawn(
+        async move {
+            chat_completions(
+                &state,
+                metric_model,
+                template,
+                request,
+                stream_handle,
+                |model| {
+                    state
+                        .manager()
+                        .get_chat_completions_engine_with_parsing(model)
+                        .map_err(|error| ErrorMessage::from_model_error(&error))
+                },
+            )
             .await
-            .map_err(|e| {
-                ErrorMessage::internal_server_error_with_details(
-                    "Failed to await chat completions task",
-                    format!("{e:?}"),
-                )
-            })?;
+        }
+        .in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        ErrorMessage::internal_server_error_with_details(
+            "Failed to await chat completions task",
+            format!("{e:?}"),
+        )
+    })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -1763,13 +1813,20 @@ fn accumulate_reasoning_dispatch(
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
 async fn chat_completions(
-    state: Arc<service_v2::State>,
+    state: &Arc<service_v2::State>,
+    metric_model: String,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateChatCompletionRequest>,
     mut stream_handle: ConnectionHandle,
+    resolve: impl FnOnce(
+        &str,
+    ) -> Result<
+        (OpenAIChatCompletionsStreamingEngine, ParsingOptions),
+        ErrorResponse,
+    > + Send,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    check_ready(&state)?;
+    check_ready(state)?;
 
     let request_id = request.id().to_string();
 
@@ -1794,8 +1851,6 @@ async fn chat_completions(
     // todo - when optional, if none, apply a default
     // todo - determine the proper error code for when a request model is not present
     let model = request.inner.model.clone();
-    let metric_model = state.manager().metric_model_for(&model).to_string();
-
     tracing::trace!("Received chat completions request: {:?}", request.content());
 
     // Create inflight_guard early to ensure all errors (including validation) are counted
@@ -1848,14 +1903,9 @@ async fn chat_completions(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    let (engine, parsing_options) = resolve(&model).inspect_err(|err_response| {
+        inflight_guard.mark_error(extract_error_type_from_response(err_response));
+    })?;
 
     // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
     // streaming gate (required/named + structural-tag stay on the v1 finalize path).
@@ -2173,8 +2223,9 @@ async fn handler_responses(
     let streaming = request.inner.stream.unwrap_or(false);
     let raw_model = request.inner.model.as_deref().unwrap_or("");
     let resolved_model = resolve_request_model(raw_model, template.as_ref());
+    let metric_model = state.manager().metric_model_for(resolved_model).to_string();
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: metric_model.clone(),
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -2195,15 +2246,32 @@ async fn handler_responses(
     )
     .await;
 
-    let response =
-        tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
+    let response = tokio::spawn(
+        async move {
+            responses(
+                &state,
+                metric_model,
+                template,
+                request,
+                stream_handle,
+                |model| {
+                    state
+                        .manager()
+                        .get_chat_completions_engine_with_parsing(model)
+                        .map_err(|error| ErrorMessage::from_model_error(&error))
+                },
+            )
             .await
-            .map_err(|e| {
-                ErrorMessage::internal_server_error_with_details(
-                    "Failed to await responses task",
-                    format!("{e:?}"),
-                )
-            })?;
+        }
+        .in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        ErrorMessage::internal_server_error_with_details(
+            "Failed to await responses task",
+            format!("{e:?}"),
+        )
+    })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -2214,13 +2282,20 @@ async fn handler_responses(
 
 #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
 async fn responses(
-    state: Arc<service_v2::State>,
+    state: &Arc<service_v2::State>,
+    metric_model: String,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,
     mut stream_handle: ConnectionHandle,
+    resolve: impl FnOnce(
+        &str,
+    ) -> Result<
+        (OpenAIChatCompletionsStreamingEngine, ParsingOptions),
+        ErrorResponse,
+    > + Send,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
-    check_ready(&state)?;
+    check_ready(state)?;
 
     // Apply template values if present. When no template and no client-supplied
     // max_output_tokens, leave it as None for response echoing and let the
@@ -2241,8 +2316,6 @@ async fn responses(
 
     let model = request.inner.model.clone().unwrap_or_default();
     let streaming = request.inner.stream.unwrap_or(false);
-    let metric_model = state.manager().metric_model_for(&model).to_string();
-
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
@@ -2333,14 +2406,9 @@ async fn responses(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
-    let (engine, parsing_options) = state
-        .manager()
-        .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_model_error(&e);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    let (engine, parsing_options) = resolve(&model).inspect_err(|err_response| {
+        inflight_guard.mark_error(extract_error_type_from_response(err_response));
+    })?;
 
     // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
     // streaming gate (required/named + structural-tag stay on the v1 finalize path).
