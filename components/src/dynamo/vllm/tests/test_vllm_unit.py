@@ -410,6 +410,51 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     assert captured["enable_rl"] is True
 
 
+def test_unified_generate_applies_nvext_cache_salt(monkeypatch):
+    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+    from dynamo.vllm import llm_engine
+
+    captured = {}
+
+    def fake_build_sampling_params(
+        request, default_sampling_params, model_max_len=None, *, enable_rl=False
+    ):
+        return SimpleNamespace(extra_args=None)
+
+    async def empty_generation():
+        if False:
+            yield None
+
+    def fake_generate(prompt, *args, **kwargs):
+        captured["prompt"] = prompt
+        return empty_generation()
+
+    engine = llm_engine.VllmLLMEngine(
+        SimpleNamespace(),
+        CommonDisaggregationMode.AGGREGATED,
+        served_model_name="test-model",
+        component="backend",
+    )
+    engine.engine_client = SimpleNamespace(generate=fake_generate)
+    engine._default_sampling_params = {}
+    engine._model_max_len = 4096
+
+    monkeypatch.setattr(llm_engine, "build_sampling_params", fake_build_sampling_params)
+
+    async def run_generate():
+        request = {
+            "token_ids": [1, 2, 3],
+            "extra_args": {"nvext": {"cache_salt": "tenant-a"}},
+        }
+        context = SimpleNamespace(id=lambda: "req", trace_headers=lambda: None)
+        async for _ in engine.generate(request, context):
+            pass
+
+    asyncio.run(run_generate())
+
+    assert captured["prompt"]["cache_salt"] == "tenant-a"
+
+
 @pytest.mark.asyncio
 async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
     """Return the Dynamo-normalized served model name from EngineConfig."""
