@@ -17,6 +17,7 @@ import os
 import socket
 import traceback
 import time as _time
+from contextlib import nullcontext as _nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -816,6 +817,34 @@ class MxRefitWorkerExtension:
             )
         return self.device
 
+    def _mx_maybe_make_arena(self):
+        """MX_MEGATRON_ARENA=1: build a VmmArena so the Megatron receive
+        buffers register as ONE NIXL region instead of N per-tensor
+        ``ibv_reg_mr`` calls — measured ~75x faster registration on
+        Qwen3-30B-A3B (11.94 s -> 0.16 s for 12,627 tensors). Registration
+        is a one-time (cached) cost, so this mainly speeds cold-start.
+
+        REQUIRES ``UCX_CUDA_COPY_REG_WHOLE_ALLOC=off`` on the deployment,
+        else UCX truncates the multi-handle VMM range via
+        cuMemGetAddressRange -> OOB -> NIXL_ERR_REMOTE_DISCONNECT.
+
+        Returns ``(arena, use_arena_ctx)`` or ``None`` (per-tensor path).
+        Only for on-GPU buffers (not the host Phase-0.5 path).
+        """
+        if os.environ.get("MX_MEGATRON_ARENA", "0") != "1":
+            return None
+        if self._mx_buffer_device().type != "cuda":
+            logger.warning("[mx-megatron] MX_MEGATRON_ARENA ignored for host buffers")
+            return None
+        from modelexpress.vmm import (
+            VmmArena, CudaVmmBackend, use_arena, install_pluggable_allocator,
+        )
+        install_pluggable_allocator()
+        dev = _device_index(self.device)
+        total = int(os.environ.get("MX_MEGATRON_ARENA_BYTES", str(80 * (1024 ** 3))))
+        arena = VmmArena(total_bytes=total, device=dev, backend=CudaVmmBackend(device=dev))
+        return arena, use_arena(arena, self.device)
+
     def _mx_mdl_note_cold(self, weights: list[tuple[str, torch.Tensor]]) -> None:
         """MDL cold cycle: after the stock load, cache params + build the
         destination map. No-op unless ``MX_LOAD_MODE=direct``. Gated to the
@@ -1441,26 +1470,39 @@ class MxRefitWorkerExtension:
                 ),
                 ctx.target_tp_layout.tp_size,
             )
-            for spec in ctx.receive_specs.values():
-                if spec.role.startswith("expert_"):
-                    continue
-                shape = list(spec.target_shape)
-                target = buffers
-                if spec.role == ROLE_MEGATRON_VOCAB_PARALLEL:
-                    shape[int(spec.shard_axis)] *= int(source_tp_size)
-                    target = vocab_buffers
-                # The Megatron registry shape reflects the published buffer
-                # shape. Vocab tensors are the exception: vLLM's loader wants
-                # the full vocab tensor and slices it internally for TP.
-                target[spec.megatron_name] = torch.empty(
-                    shape,
-                    dtype=_torch_dtype(spec.target_dtype),
-                    device=self._mx_buffer_device(),
-                )
+            # MX_MEGATRON_ARENA=1: allocate all receive buffers inside one VMM
+            # arena so they register as a single NIXL region (~75x faster reg
+            # on MoE). No-op (per-tensor) when unset. Alloc must happen inside
+            # the use_arena() context so the empties land in the arena range.
+            _arena_pair = self._mx_maybe_make_arena()
+            _alloc_ctx = _arena_pair[1] if _arena_pair else _nullcontext()
+            with _alloc_ctx:
+                for spec in ctx.receive_specs.values():
+                    if spec.role.startswith("expert_"):
+                        continue
+                    shape = list(spec.target_shape)
+                    target = buffers
+                    if spec.role == ROLE_MEGATRON_VOCAB_PARALLEL:
+                        shape[int(spec.shard_axis)] *= int(source_tp_size)
+                        target = vocab_buffers
+                    # The Megatron registry shape reflects the published buffer
+                    # shape. Vocab tensors are the exception: vLLM's loader wants
+                    # the full vocab tensor and slices it internally for TP.
+                    target[spec.megatron_name] = torch.empty(
+                        shape,
+                        dtype=_torch_dtype(spec.target_dtype),
+                        device=self._mx_buffer_device(),
+                    )
             all_buffers = dict(buffers)
             all_buffers.update(vocab_buffers)
             if all_buffers:
-                self._mx_receiver._receiver._nixl.register_tensors(all_buffers)
+                if _arena_pair:
+                    self._mx_receiver._receiver._nixl.register_arena(
+                        _arena_pair[0], all_buffers
+                    )
+                    self._mx_megatron_arena = _arena_pair[0]  # keep alive
+                else:
+                    self._mx_receiver._receiver._nixl.register_tensors(all_buffers)
             self._mx_megatron_buffers = buffers
             self._mx_megatron_vocab_buffers = vocab_buffers
             logger.info(
