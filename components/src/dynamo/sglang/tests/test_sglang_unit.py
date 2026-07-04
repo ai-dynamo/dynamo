@@ -150,21 +150,21 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
 
 
 @pytest.mark.parametrize(
-    ("request", "expected"),
+    ("request_data", "expected"),
     [
         ({"require_reasoning": True}, {"require_reasoning": True}),
         ({"require_reasoning": False}, {"require_reasoning": False}),
         ({}, {"require_reasoning": False}),
     ],
 )
-def test_require_reasoning_kwarg_preserves_request_intent(request, expected):
+def test_require_reasoning_kwarg_preserves_request_intent(request_data, expected):
     """The internal reasoning intent reaches SGLang, including explicit false."""
 
     class ReasoningEngine:
         async def async_generate(self, require_reasoning=False):
             return None
 
-    assert require_reasoning_kwargs(ReasoningEngine(), request) == expected
+    assert require_reasoning_kwargs(ReasoningEngine(), request_data) == expected
 
 
 def test_require_reasoning_kwarg_is_dropped_for_older_engines():
