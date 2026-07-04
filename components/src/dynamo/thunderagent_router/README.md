@@ -98,7 +98,7 @@ agent.
 
 ## Harbor/Pi A/B walkthrough
 
-This walkthrough runs the same SWE-bench Verified task through ThunderAgent and the stock Dynamo KV router. Harbor owns the task container, Pi runs inside it, and the model stack runs on the host. The example uses one 8-GPU node, two TP4 vLLM workers, and MiniMax-M2. There is no HiCache, Mooncake, shared cache, or frontend admission control in either arm.
+This walkthrough runs the same SWE-bench Verified task through ThunderAgent and the stock Dynamo KV router. Harbor owns the task container, Pi runs inside it, and the model stack runs on the host. The example uses one 8-GPU node and two TP4 vLLM workers loading `MiniMaxAI/MiniMax-M2.7` from Hugging Face and serving the API alias `MiniMaxAI/MiniMax-M2`. There is no HiCache, Mooncake, shared cache, or frontend admission control in either arm.
 
 The [agent-plugins `DynamoPi` adapter](https://github.com/ai-dynamo/agent-plugins/blob/main/pi-plugin/harbor_dynamo_pi.py) is required. It installs the Dynamo provider in each Harbor task container and maps Harbor's per-trial ID to one stable `x-dynamo-session-id` across all Pi turns. The ThunderAgent arm also sends one terminal session request so the router can release the completed program; the stock KV arm disables that request because it has no lifecycle consumer.
 
@@ -108,8 +108,12 @@ Use Python 3.12 and a machine with Docker, Node.js, and eight visible GPUs. Buil
 
 ```bash
 git clone https://github.com/ai-dynamo/dynamo ~/src/dynamo
-git clone https://github.com/harbor-framework/harbor ~/src/harbor
+git -C ~/src/dynamo fetch origin pull/11185/head
+git -C ~/src/dynamo checkout --detach FETCH_HEAD
+
+git clone --branch v0.16.0 --depth 1 https://github.com/harbor-framework/harbor ~/src/harbor
 git clone https://github.com/ai-dynamo/agent-plugins ~/src/agent-plugins
+git -C ~/src/agent-plugins checkout d0bae6a3c486c937f1b190ce21259a828cbaa8f9
 
 cd ~/src/dynamo
 uv venv --python 3.12 --seed .venv

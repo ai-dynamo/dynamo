@@ -18,8 +18,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-MODEL="MiniMaxAI/MiniMax-M2"
-WORKER_MODEL="$MODEL"
+MODEL_PATH="${MODEL_PATH:-MiniMaxAI/MiniMax-M2.7}"
+MODEL_NAME="${MODEL_NAME:-MiniMaxAI/MiniMax-M2}"
+WORKER_MODEL="$MODEL_NAME"
 BLOCK_SIZE=16
 HTTP_PORT=8100
 
@@ -37,7 +38,7 @@ mkdir -p "$DYN_FILE_KV"
 DYN_SYSTEM_PORT=8181 DYN_FORWARDPASS_METRIC_PORT=20081 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 python -m dynamo.vllm \
-    --model "$MODEL" --served-model-name "$WORKER_MODEL" \
+    --model "$MODEL_PATH" --served-model-name "$WORKER_MODEL" \
     --tensor-parallel-size 4 --block-size "$BLOCK_SIZE" \
     --kv-cache-dtype fp8 --enable-prefix-caching \
     --dyn-tool-call-parser minimax_m2 \
@@ -47,7 +48,7 @@ python -m dynamo.vllm \
 DYN_SYSTEM_PORT=8182 DYN_FORWARDPASS_METRIC_PORT=20082 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 CUDA_VISIBLE_DEVICES=4,5,6,7 \
 python -m dynamo.vllm \
-    --model "$MODEL" --served-model-name "$WORKER_MODEL" \
+    --model "$MODEL_PATH" --served-model-name "$WORKER_MODEL" \
     --tensor-parallel-size 4 --block-size "$BLOCK_SIZE" \
     --kv-cache-dtype fp8 --enable-prefix-caching \
     --dyn-tool-call-parser minimax_m2 \
@@ -57,7 +58,8 @@ python -m dynamo.vllm \
 if [[ "$POLICY" == "ta" ]]; then
     DYN_SYSTEM_PORT=8183 python -m dynamo.thunderagent_router \
         --endpoint dynamo.backend.generate \
-        --model-name "$MODEL" \
+        --model-name "$MODEL_NAME" \
+        --model-path "$MODEL_PATH" \
         --dyn-tool-call-parser minimax_m2 \
         --dyn-reasoning-parser minimax_append_think \
         --router-block-size "$BLOCK_SIZE" \
@@ -80,7 +82,7 @@ until curl -fsS "http://127.0.0.1:${HTTP_PORT}/v1/models/${WORKER_MODEL}/ready" 
     | jq -e '([.namespaces[].worker_types.aggregated.workers // 0] | add) == 2' >/dev/null; do
     sleep 5
 done
-until curl -fsS "http://127.0.0.1:${HTTP_PORT}/v1/models" 2>/dev/null | grep -Fq "$MODEL"; do
+until curl -fsS "http://127.0.0.1:${HTTP_PORT}/v1/models" 2>/dev/null | grep -Fq "$MODEL_NAME"; do
     sleep 5
 done
 echo "$POLICY stack ready at http://127.0.0.1:${HTTP_PORT}/v1"
