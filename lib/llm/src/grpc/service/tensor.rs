@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_http_server::disconnect::{ConnectionHandle, create_connection_monitor};
 use dynamo_runtime::{
     engine::AsyncEngineContext,
     pipeline::{AsyncEngineContextProvider, Context},
@@ -18,11 +19,8 @@ use super::kserve;
 use validator::Validate;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
-use crate::http::service::metrics::InflightGuard;
-use crate::http::service::{
-    disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
-};
+use crate::http::service::metrics::process_response_and_observe_metrics;
+use dynamo_http_server::metrics::{CancellationLabels, Endpoint, InflightGuard};
 
 use crate::protocols::tensor;
 use crate::protocols::tensor::{
@@ -113,10 +111,10 @@ pub async fn tensor_response_stream(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, crate::http::service::metrics::Endpoint::Tensor);
+                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Tensor);
             return Status::resource_exhausted(e.to_string());
         }
         Status::internal(format!("Failed to generate tensor response stream: {}", e))

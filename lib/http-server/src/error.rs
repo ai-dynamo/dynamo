@@ -2,9 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use axum::http::StatusCode;
+use dynamo_runtime::protocols::annotated::Annotated;
+use futures::{Stream, StreamExt};
+use serde::Serialize;
 use thiserror::Error;
 
-pub(crate) fn overload_status_code() -> StatusCode {
+/// Maximum number of leading annotation frames buffered while looking for a
+/// backend error. This bounds per-request memory if a backend emits only
+/// annotations.
+const MAX_LEADING_ANNOTATIONS: usize = 16;
+
+pub fn overload_status_code() -> StatusCode {
     StatusCode::from_u16(529).expect("529 is a valid HTTP status code")
 }
 
@@ -16,6 +24,120 @@ pub(crate) fn overload_status_code() -> StatusCode {
 pub struct HttpError {
     pub code: u16,
     pub message: String,
+}
+
+/// Checks whether an annotated event carries a backend error.
+///
+/// Returns the HTTP status and backend message. Callers remain responsible for
+/// applying their protocol-specific sanitization and response envelope.
+pub fn extract_backend_error_if_present<T: Serialize>(
+    event: &Annotated<T>,
+) -> Option<(StatusCode, String)> {
+    #[derive(serde::Deserialize)]
+    struct ErrorPayload {
+        message: Option<String>,
+        code: Option<u16>,
+    }
+
+    if event.event.as_deref() == Some("error") {
+        // Prefer the typed error chain. `DynamoError::message()` omits the
+        // error-type prefix, preserving JSON error payloads for parsing.
+        let error_str = if let Some(ref dynamo_err) = event.error {
+            let mut parts = Vec::new();
+            let mut current: Option<&dyn std::error::Error> = Some(dynamo_err);
+            while let Some(error) = current {
+                if let Some(error) = error.downcast_ref::<dynamo_runtime::error::DynamoError>() {
+                    parts.push(error.message().to_string());
+                } else {
+                    parts.push(error.to_string());
+                }
+                current = error.source();
+            }
+            parts.join(", ")
+        } else {
+            event
+                .comment
+                .as_ref()
+                .map(|comments| comments.join(", "))
+                .unwrap_or_else(|| "Unknown error".to_string())
+        };
+
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&error_str) {
+            let status = error_payload
+                .code
+                .and_then(|code| StatusCode::from_u16(code).ok())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            return Some((status, error_payload.message.unwrap_or(error_str)));
+        }
+
+        return Some((StatusCode::INTERNAL_SERVER_ERROR, error_str));
+    }
+
+    if let Some(data) = &event.data
+        && let Ok(json_value) = serde_json::to_value(data)
+        && let Ok(error_payload) = serde_json::from_value::<ErrorPayload>(json_value.clone())
+        && let Some(code) = error_payload.code
+        && code >= 400
+    {
+        let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let message = error_payload
+            .message
+            .unwrap_or_else(|| json_value.to_string());
+        return Some((status, message));
+    }
+
+    if let Some(comments) = &event.comment
+        && !comments.is_empty()
+    {
+        let comment = comments.join(", ");
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment)
+            && let Some(code) = error_payload.code
+            && code >= 400
+        {
+            let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            return Some((status, error_payload.message.unwrap_or(comment)));
+        }
+
+        if event.data.is_none() && event.event.is_none() {
+            return Some((StatusCode::INTERNAL_SERVER_ERROR, comment));
+        }
+    }
+
+    None
+}
+
+fn is_annotation_frame<T>(event: &Annotated<T>) -> bool {
+    event.data.is_none()
+        && event.error.is_none()
+        && matches!(event.event.as_deref(), Some(tag) if tag != "error")
+}
+
+/// Inspects the first non-annotation stream item for a backend error.
+///
+/// On success, the returned stream replays all buffered items in their original
+/// order. On failure, the raw backend detail is returned for logging and must be
+/// sanitized by the protocol boundary before it is sent to a client.
+pub async fn check_for_backend_error<T, S>(
+    mut stream: S,
+) -> Result<impl Stream<Item = Annotated<T>> + Send, (StatusCode, String)>
+where
+    T: Serialize + Send + 'static,
+    S: Stream<Item = Annotated<T>> + Send + Unpin + 'static,
+{
+    let mut buffered = Vec::new();
+    while let Some(event) = stream.next().await {
+        if is_annotation_frame(&event) && buffered.len() < MAX_LEADING_ANNOTATIONS {
+            buffered.push(event);
+            continue;
+        }
+        if let Some(error) = extract_backend_error_if_present(&event) {
+            return Err(error);
+        }
+
+        buffered.push(event);
+        break;
+    }
+    Ok(futures::stream::iter(buffered).chain(stream))
 }
 
 /// Canonical sanitized error responses returned at the HTTP boundary.
@@ -141,6 +263,28 @@ impl std::fmt::Display for SanitizedError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream;
+
+    fn annotation(index: usize) -> Annotated<serde_json::Value> {
+        Annotated::from_annotation("request_id", &format!("request-{index}"))
+            .expect("annotation should serialize")
+    }
+
+    fn error_event(message: &str, code: u16) -> Annotated<serde_json::Value> {
+        Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![
+                serde_json::json!({
+                    "message": message,
+                    "code": code,
+                })
+                .to_string(),
+            ]),
+            error: None,
+        }
+    }
 
     #[test]
     fn local_statuses_distinguish_overload_from_unavailable() {
@@ -153,9 +297,6 @@ mod tests {
 
     #[test]
     fn preserve_server_error_503_maps_to_overload_types() {
-        // Backend-asserted 503 must surface as the spec-correct overload
-        // type on both protocols, not as a generic api_error /
-        // internal_server_error.
         let err = SanitizedError::PreserveServerError(StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(err.anthropic_type(), "overloaded_error");
         assert_eq!(err.openai_type_slug(), "service_unavailable");
@@ -163,8 +304,6 @@ mod tests {
 
     #[test]
     fn preserve_server_error_529_maps_to_overload_types() {
-        // Anthropic uses 529 as an alternative overload signal; mirror
-        // the 503 mapping so clients can apply the same backoff.
         let err = SanitizedError::PreserveServerError(StatusCode::from_u16(529).unwrap());
         assert_eq!(err.anthropic_type(), "overloaded_error");
         assert_eq!(err.openai_type_slug(), "service_unavailable");
@@ -179,23 +318,67 @@ mod tests {
 
     #[test]
     fn for_backend_status_classifies_correctly() {
-        // 499 → Cancelled
         assert!(matches!(
             SanitizedError::for_backend_status(StatusCode::from_u16(499).unwrap()),
             Some(SanitizedError::Cancelled)
         ));
-        // 5xx → PreserveServerError preserving the code
         assert!(matches!(
             SanitizedError::for_backend_status(StatusCode::SERVICE_UNAVAILABLE),
             Some(SanitizedError::PreserveServerError(s)) if s == StatusCode::SERVICE_UNAVAILABLE
         ));
-        // Non-499 4xx → None (forward as-is)
         assert!(SanitizedError::for_backend_status(StatusCode::BAD_REQUEST).is_none());
         assert!(SanitizedError::for_backend_status(StatusCode::NOT_FOUND).is_none());
-        // 1xx/2xx/3xx asserted by backend → Internal
         assert!(matches!(
             SanitizedError::for_backend_status(StatusCode::from_u16(399).unwrap()),
             Some(SanitizedError::Internal)
         ));
+    }
+
+    #[tokio::test]
+    async fn backend_error_inspection_returns_raw_detail() {
+        let result =
+            check_for_backend_error(stream::iter(vec![error_event("worker detail", 503)])).await;
+
+        let (status, message) = match result {
+            Ok(_) => panic!("error event should be detected"),
+            Err(error) => error,
+        };
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(message, "worker detail");
+    }
+
+    #[tokio::test]
+    async fn backend_error_inspection_replays_annotations_in_order() {
+        let first = annotation(0);
+        let second = Annotated::from_data(serde_json::json!({"token": "ok"}));
+        let returned = check_for_backend_error(stream::iter(vec![first, second]))
+            .await
+            .expect("normal stream should pass");
+        let returned: Vec<_> = returned.collect().await;
+
+        assert_eq!(returned.len(), 2);
+        assert_eq!(returned[0].event.as_deref(), Some("request_id"));
+        assert_eq!(returned[1].data, Some(serde_json::json!({"token": "ok"})));
+    }
+
+    #[tokio::test]
+    async fn backend_error_inspection_bounds_annotation_buffer() {
+        let mut events: Vec<_> = (0..=MAX_LEADING_ANNOTATIONS).map(annotation).collect();
+        events.push(error_event("after cap", 500));
+
+        let returned = check_for_backend_error(stream::iter(events))
+            .await
+            .expect("scanner stops after the bounded annotation prefix");
+        let returned: Vec<_> = returned.collect().await;
+
+        assert_eq!(returned.len(), MAX_LEADING_ANNOTATIONS + 2);
+        for (index, event) in returned[..=MAX_LEADING_ANNOTATIONS].iter().enumerate() {
+            assert_eq!(event.event.as_deref(), Some("request_id"));
+            assert_eq!(
+                event.comment.as_deref(),
+                Some([format!("\"request-{index}\"")].as_slice())
+            );
+        }
+        assert_eq!(returned.last().unwrap().event.as_deref(), Some("error"));
     }
 }

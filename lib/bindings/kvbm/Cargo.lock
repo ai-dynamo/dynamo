@@ -1525,6 +1525,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-http-server"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "axum-server",
+ "dynamo-runtime",
+ "futures",
+ "http-body",
+ "prometheus",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-kv-hashing"
 version = "1.3.0"
 dependencies = [
@@ -1575,7 +1596,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
- "axum-server",
  "base64 0.22.1",
  "bincode 2.0.1",
  "bitflags 2.12.1",
@@ -1589,6 +1609,7 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
+ "dynamo-http-server",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -1630,7 +1651,6 @@ dependencies = [
  "rayon",
  "reqwest",
  "rmp-serde",
- "rustls",
  "serde",
  "serde_json",
  "sha2",

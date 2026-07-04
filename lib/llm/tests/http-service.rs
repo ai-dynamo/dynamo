@@ -3,6 +3,10 @@
 
 use anyhow::Error;
 use async_stream::stream;
+use dynamo_http_server::{
+    error::HttpError,
+    metrics::{Endpoint, ErrorType, Metrics, RequestType, Status},
+};
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
@@ -12,15 +16,7 @@ use dynamo_llm::protocols::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_llm::{
-    http::service::{
-        Metrics,
-        error::HttpError,
-        metrics::{Endpoint, ErrorType, RequestType, Status},
-        service_v2::HttpService,
-    },
-    model_card::ModelDeploymentCard,
-};
+use dynamo_llm::{http::service::service_v2::HttpService, model_card::ModelDeploymentCard};
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,

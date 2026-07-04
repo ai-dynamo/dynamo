@@ -58,6 +58,7 @@ required-features = ["request-trace-bench"]
 
 [dependencies]
 # repo
+dynamo-http-server = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
@@ -144,9 +145,7 @@ indicatif = { version = "0.18.0", optional = true }
 
 # http-service
 axum = { workspace = true }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { workspace = true }
-rustls = { version = "0.23" }
 utoipa = { version = "5.3", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 

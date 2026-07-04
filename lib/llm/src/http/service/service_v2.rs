@@ -5,20 +5,16 @@ use std::collections::HashMap;
 use std::env::var;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU8;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Response;
 use axum::response::IntoResponse;
 
-use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
-use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
+use super::metrics::register_lora_allocation_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
@@ -26,8 +22,13 @@ use crate::kv_router::metrics::{
 };
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
-use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_http_server::metrics::{Metrics, Registry, register_worker_timing_metrics};
+use dynamo_http_server::{
+    HttpServer as CoreHttpServer, HttpServerConfig as CoreHttpServerConfig, InflightPermit,
+    ServiceObserver, ServiceStage, TlsConfig as CoreTlsConfig, echo_request_id_header,
+    track_inflight_response,
+};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
@@ -39,56 +40,23 @@ use dynamo_runtime::metrics::{
     tokio_perf::{ensure_tokio_perf_metrics_registered_prometheus, tokio_metrics_and_canary_loop},
     transport_metrics::ensure_transport_metrics_registered_prometheus,
 };
-use std::net::SocketAddr;
-use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 
-/// Middleware that echoes `x-request-id` from request to response headers.
-async fn echo_request_id_header(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let x_request_id = request.headers().get("x-request-id").cloned();
-    let mut response = next.run(request).await;
-    if let Some(value) = x_request_id {
-        response.headers_mut().insert("x-request-id", value);
-    }
-    response
-}
-
 async fn track_inflight_inference(
     axum::extract::State(state): axum::extract::State<Arc<State>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use futures::StreamExt;
-
-    // Requests rejected during draining should not extend the drain window.
-    if !state.is_ready() {
+    let Some(permit) = state.service_observer.try_acquire_inflight() else {
         return super::openai::ErrorMessage::_service_unavailable().into_response();
-    }
-
-    let permit = state.acquire_inflight();
-    // Close the race where shutdown starts after the readiness check but
-    // before this request is counted as inflight.
-    if !state.is_ready() {
-        drop(permit);
-        return super::openai::ErrorMessage::_service_unavailable().into_response();
-    }
+    };
 
     let response = next.run(request).await;
-    let (parts, body) = response.into_parts();
-    // Keep the permit alive until the full response body, including streams,
-    // finishes or is dropped.
-    let stream = body.into_data_stream().map(move |result| {
-        let _permit = &permit;
-        result
-    });
-    Response::from_parts(parts, Body::from_stream(stream))
+    track_inflight_response(response, permit)
 }
 
 /// HTTP service shared state
@@ -112,169 +80,6 @@ struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
-}
-
-/// Lifecycle stage for the HTTP frontend.
-///
-/// The stage gates readiness and request admission separately from the runtime
-/// cancellation token so the frontend can stop accepting new requests before
-/// tearing down discovery and transport state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ServiceStage {
-    /// The frontend is ready to admit new inference requests.
-    Ready = 0,
-    /// The frontend is rejecting new requests while admitted responses drain.
-    Draining = 1,
-    /// The frontend is cancelling runtime state and shutting down.
-    Stopping = 2,
-}
-
-impl ServiceStage {
-    fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    fn from_u8(value: u8) -> Self {
-        match value {
-            0 => Self::Ready,
-            1 => Self::Draining,
-            _ => Self::Stopping,
-        }
-    }
-}
-
-impl std::fmt::Display for ServiceStage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Ready => f.write_str("ready"),
-            Self::Draining => f.write_str("draining"),
-            Self::Stopping => f.write_str("stopping"),
-        }
-    }
-}
-
-/// Shared HTTP frontend lifecycle and inflight request tracker.
-///
-/// `ServiceObserver` is shared by HTTP handlers, health endpoints, and the
-/// shutdown path. It lets shutdown first mark the frontend as draining, then
-/// wait for admitted inference response bodies to complete before cancelling
-/// runtime state.
-#[derive(Debug)]
-pub struct ServiceObserver {
-    stage: AtomicU8,
-    inflight_inference: AtomicU64,
-    inflight_zero: Notify,
-}
-
-impl Default for ServiceObserver {
-    fn default() -> Self {
-        Self {
-            stage: AtomicU8::new(ServiceStage::Ready.as_u8()),
-            inflight_inference: AtomicU64::new(0),
-            inflight_zero: Notify::new(),
-        }
-    }
-}
-
-impl ServiceObserver {
-    /// Return the current frontend lifecycle stage.
-    pub fn stage(&self) -> ServiceStage {
-        ServiceStage::from_u8(self.stage.load(Ordering::Acquire))
-    }
-
-    /// Return true when the frontend should admit new inference requests.
-    pub fn is_ready(&self) -> bool {
-        self.stage() == ServiceStage::Ready
-    }
-
-    /// Mark the frontend as draining.
-    ///
-    /// Draining makes readiness fail and causes request admission checks to
-    /// reject new inference requests while existing response bodies continue.
-    pub fn start_draining(&self) {
-        tracing::info!(
-            previous_stage = ?self.stage(),
-            inflight_requests = self.inflight_count(),
-            "frontend service entering draining stage"
-        );
-        self.stage
-            .store(ServiceStage::Draining.as_u8(), Ordering::Release);
-    }
-
-    /// Mark the frontend as stopping.
-    ///
-    /// Stopping is entered after inflight requests drain or the graceful
-    /// shutdown timeout expires.
-    pub fn start_stopping(&self) {
-        tracing::info!(
-            previous_stage = ?self.stage(),
-            inflight_requests = self.inflight_count(),
-            "frontend service entering stopping stage"
-        );
-        self.stage
-            .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
-    }
-
-    /// Track one admitted inference response body.
-    ///
-    /// The returned permit must live for the full HTTP response body lifetime,
-    /// including streaming responses. Dropping the permit decrements the
-    /// inflight count and wakes shutdown waiters when the count reaches zero.
-    pub fn acquire_inflight(self: &Arc<Self>) -> InflightPermit {
-        self.inflight_inference.fetch_add(1, Ordering::Relaxed);
-        InflightPermit {
-            observer: self.clone(),
-        }
-    }
-
-    /// Return the number of admitted inference requests still in flight.
-    pub fn inflight_count(&self) -> u64 {
-        self.inflight_inference.load(Ordering::Acquire)
-    }
-
-    /// Wait until all admitted inference requests drain or `timeout` expires.
-    ///
-    /// Returns `true` when inflight work drained before the timeout and `false`
-    /// when shutdown should proceed because the timeout expired.
-    pub async fn wait_inflight_zero_or_timeout(&self, timeout: Duration) -> bool {
-        tokio::time::timeout(timeout, async {
-            loop {
-                let notified = self.inflight_zero.notified();
-                tokio::pin!(notified);
-                // Register before reading the count so a final permit drop
-                // cannot notify between the count check and the await.
-                notified.as_mut().enable();
-                if self.inflight_count() == 0 {
-                    break;
-                }
-                notified.as_mut().await;
-            }
-        })
-        .await
-        .is_ok()
-    }
-}
-
-/// RAII guard for one admitted inference response.
-///
-/// This permit is held by a response-body wrapper so it is released only when
-/// the client response body finishes or is dropped.
-pub struct InflightPermit {
-    observer: Arc<ServiceObserver>,
-}
-
-impl Drop for InflightPermit {
-    fn drop(&mut self) {
-        if self
-            .observer
-            .inflight_inference
-            .fetch_sub(1, Ordering::AcqRel)
-            == 1
-            && self.observer.stage() != ServiceStage::Ready
-        {
-            self.observer.inflight_zero.notify_waiters();
-        }
-    }
 }
 
 #[derive(Default, Debug)]
@@ -662,142 +467,51 @@ impl HttpService {
         cancel_token: CancellationToken,
         listener: Option<tokio::net::TcpListener>,
     ) -> Result<()> {
-        let address = format!("{}:{}", self.host, self.port);
-        let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
-        tracing::info!(protocol, address, "Starting HTTP(S) service");
-
-        let router = self.router.clone();
-        let observer = cancel_token.child_token();
-
-        let state = self.state.clone();
-        let state_cancel = state.cancel_token().clone();
-
-        if self.enable_tls {
-            if listener.is_some() {
-                return Err(anyhow::anyhow!(
-                    "Pre-bound listener is not supported in TLS mode; \
-                     axum_server::bind_rustls owns its own bind. \
-                     Use run()/spawn() (which bind internally) when enable_tls is set."
-                ));
-            }
-            let addr: SocketAddr = address
-                .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
-            let cert_path = self
-                .tls_cert_path
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("TLS certificate path not provided"))?;
-            let key_path = self
-                .tls_key_path
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("TLS private key path not provided"))?;
-
-            // aws_lc_rs is the default but other crates pull in `ring` also,
-            // so rustls doesn't know which one to use. Tell it.
-            if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
-                tracing::debug!("TLS crypto provider already installed: {e:?}");
-            }
-
-            let config = RustlsConfig::from_pem_file(cert_path, key_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create TLS config: {}", e))?;
-
-            let handle = axum_server::Handle::new();
-            let server = axum_server::bind_rustls(addr, config)
-                .handle(handle.clone())
-                .serve(router.into_make_service());
-
-            self.spawn_rl_listener_if_configured(&cancel_token).await?;
-
-            // Spawn canary after all fallible startup so it won't leak on early errors
-            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-
-            tokio::select! {
-                result = server => {
-                    let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
-                    state.start_stopping();
-                    cancel_token.cancel();
-                    result?;
-                }
-                _ = observer.cancelled() => {
-                    state.start_draining();
-                    tracing::info!("HTTPS server shutdown requested");
-                    let shutdown_timeout =
-                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    handle.graceful_shutdown(Some(shutdown_timeout));
-                    if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
-                        tracing::warn!(
-                            inflight_requests = state.inflight_count(),
-                            "Timed out waiting for inflight inference requests to drain"
-                        );
-                    }
-                    state.start_stopping();
-                    state_cancel.cancel();
-                }
-            }
-        } else {
-            let listener = match listener {
-                Some(l) => l,
-                None => {
-                    let addr: SocketAddr = address
-                        .parse()
-                        .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
-                    tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-                        tracing::error!(
-                            protocol = %protocol,
-                            address = %address,
-                            error = %e,
-                            "Failed to bind server to address"
-                        );
-                        match e.kind() {
-                            std::io::ErrorKind::AddrInUse => anyhow::anyhow!(
-                                "Failed to start {} server: port {} already in use. Use --http-port to specify a different port.",
-                                protocol,
-                                self.port
-                            ),
-                            _ => anyhow::anyhow!(
-                                "Failed to start {} server on {}: {}",
-                                protocol,
-                                address,
-                                e
-                            ),
-                        }
-                    })?
-                }
-            };
-
-            self.spawn_rl_listener_if_configured(&cancel_token).await?;
-
-            // Spawn canary after all fallible startup so it won't leak on early errors
-            tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
-
-            let state = self.state.clone();
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    observer.cancelled_owned().await;
-                    state.start_draining();
-                    tracing::info!("HTTP server shutdown requested");
-                    let shutdown_timeout =
-                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
-                    if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
-                        tracing::warn!(
-                            inflight_requests = state.inflight_count(),
-                            "Timed out waiting for inflight inference requests to drain"
-                        );
-                    }
-                    state.start_stopping();
-                    state_cancel.cancel();
-                })
-                .await
-                .inspect_err(|_| {
-                    self.state.start_stopping();
-                    cancel_token.cancel()
-                })?;
-            self.state.start_stopping();
-            cancel_token.cancel();
+        if self.enable_tls && listener.is_some() {
+            return Err(anyhow::anyhow!(
+                "Pre-bound listener is not supported in TLS mode; \
+                 axum_server::bind_rustls owns its own bind. \
+                 Use run()/spawn() (which bind internally) when enable_tls is set."
+            ));
         }
+        let tls = if self.enable_tls {
+            Some(CoreTlsConfig {
+                cert_path: self
+                    .tls_cert_path
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("TLS certificate path not provided"))?,
+                key_path: self
+                    .tls_key_path
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("TLS private key path not provided"))?,
+            })
+        } else {
+            None
+        };
 
-        Ok(())
+        self.spawn_rl_listener_if_configured(&cancel_token).await?;
+        tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
+
+        let server = CoreHttpServer::new(
+            self.router.clone(),
+            CoreHttpServerConfig {
+                host: self.host.clone(),
+                port: self.port,
+                tls,
+                graceful_shutdown_timeout: Duration::from_secs(
+                    get_graceful_shutdown_timeout() as u64
+                ),
+            },
+            self.state.service_observer(),
+            self.state.cancel_token().clone(),
+        );
+        let service_cancel = cancel_token.clone();
+        let result = match listener {
+            Some(listener) => server.run_with_listener(cancel_token, listener).await,
+            None => server.run(cancel_token).await,
+        };
+        service_cancel.cancel();
+        result
     }
 
     async fn spawn_rl_listener_if_configured(
@@ -937,7 +651,7 @@ impl HttpServiceConfigBuilder {
             .set(&EndpointType::Generate, generate_endpoints_enabled);
 
         // enable prometheus metrics
-        let registry = metrics::Registry::new();
+        let registry = Registry::new();
         state.metrics_clone().register(&registry)?;
 
         // Register worker load metrics (active_decode_blocks, active_prefill_tokens per worker)
@@ -1347,33 +1061,6 @@ mod tests {
             },
         )
         .await;
-    }
-
-    #[tokio::test]
-    async fn test_service_observer_waits_for_inflight_requests() {
-        let observer = Arc::new(ServiceObserver::default());
-        let permit = observer.acquire_inflight();
-
-        observer.start_draining();
-        assert_eq!(observer.inflight_count(), 1);
-        assert!(
-            !observer
-                .wait_inflight_zero_or_timeout(Duration::from_millis(1))
-                .await
-        );
-
-        let waiter = {
-            let observer = observer.clone();
-            tokio::spawn(async move {
-                observer
-                    .wait_inflight_zero_or_timeout(Duration::from_secs(1))
-                    .await
-            })
-        };
-        tokio::task::yield_now().await;
-        drop(permit);
-        assert!(waiter.await.unwrap());
-        assert_eq!(observer.inflight_count(), 0);
     }
 
     /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and

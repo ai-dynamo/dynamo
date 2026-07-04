@@ -22,7 +22,9 @@ use axum::{
 };
 use serde::Serialize;
 
-use super::openai::{get_body_limit, smart_json_error_middleware};
+use dynamo_http_server::request::get_body_limit;
+
+use super::openai::smart_json_error_middleware;
 use super::{RouteDoc, service_v2};
 use crate::protocols::openai::generate::GenerateRequest;
 

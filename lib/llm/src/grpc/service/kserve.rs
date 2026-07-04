@@ -7,8 +7,8 @@ use std::sync::Arc;
 use crate::grpc::service::kserve::inference::DataType;
 use crate::grpc::service::kserve::inference::ModelInput;
 use crate::grpc::service::kserve::inference::ModelOutput;
-use crate::http::service::Metrics;
 use crate::http::service::service_v2 as http_service;
+use dynamo_http_server::metrics::Metrics;
 
 use crate::discovery::ModelManager;
 use crate::protocols::tensor::TensorModelConfig;

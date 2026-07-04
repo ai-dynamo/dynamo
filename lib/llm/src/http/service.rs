@@ -24,7 +24,6 @@ mod openai;
 
 pub mod busy_threshold;
 pub mod disconnect;
-pub mod error;
 pub mod generate;
 pub mod health;
 pub mod metrics;
@@ -33,7 +32,6 @@ pub mod realtime;
 pub mod service_v2;
 
 pub use axum;
-pub use metrics::Metrics;
 
 /// Documentation for a route
 #[derive(Debug, Clone)]

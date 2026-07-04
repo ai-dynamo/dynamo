@@ -23,22 +23,26 @@ use axum::{
 };
 use base64::Engine as _;
 use bytes::Bytes;
-use dynamo_runtime::config::environment_names::llm as env_llm;
-use dynamo_runtime::{
-    pipeline::{AsyncEngineContextProvider, Context},
-    protocols::annotated::AnnotationsProvider,
+use dynamo_http_server::disconnect::{ConnectionHandle, create_connection_monitor};
+use dynamo_http_server::error::{
+    HttpError, SanitizedError, extract_backend_error_if_present, overload_status_code,
 };
+use dynamo_http_server::metrics::{
+    CancellationLabels, Endpoint, ErrorType, request_was_cancelled, request_was_rejected,
+    request_was_unavailable,
+};
+use dynamo_http_server::request::{get_body_limit, is_json_content_type};
+use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
+use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    error::HttpError,
+    disconnect::monitor_for_disconnects,
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
-        CancellationLabels, Endpoint, ErrorType, EventConverter,
-        process_chat_response_and_observe_metrics,
+        EventConverter, process_chat_response_and_observe_metrics,
         process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
@@ -81,25 +85,12 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
 
-use super::error::{SanitizedError, overload_status_code};
-
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
 ) -> anyhow::Result<axum::Router> {
     let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
     let state = dynamo_rl::RlDiscoveryState::new(config);
     Ok(dynamo_rl::rl_router(state))
-}
-
-// Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
-/// Default body limit in bytes (45MB) to support 500k+ token payloads.
-/// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
-pub(super) fn get_body_limit() -> usize {
-    std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|mb| mb * 1024 * 1024)
-        .unwrap_or(45 * 1024 * 1024)
 }
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
@@ -355,7 +346,7 @@ impl ErrorMessage {
         )
     }
 
-    /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
+    /// The OAI endpoints call a [`dynamo_runtime::engine::AsyncEngine`] which is specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
@@ -374,7 +365,7 @@ impl ErrorMessage {
         }
 
         // Check for ResourceExhausted anywhere in the error chain → HTTP 529
-        if super::metrics::request_was_rejected(err.as_ref()) {
+        if request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Overloaded,
                 format!("{err:#}"),
@@ -382,7 +373,7 @@ impl ErrorMessage {
         }
 
         // No backend workers are currently routable → HTTP 503.
-        if super::metrics::request_was_unavailable(err.as_ref()) {
+        if request_was_unavailable(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Unavailable,
                 format!("{err:#}"),
@@ -403,7 +394,7 @@ impl ErrorMessage {
         }
 
         // Check for Cancelled anywhere in the error chain → HTTP 499 (Client Closed Request)
-        if super::metrics::request_was_cancelled(err.as_ref()) {
+        if request_was_cancelled(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Cancelled,
                 format!("{err:#}"),
@@ -758,10 +749,10 @@ async fn completions_single(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Completions);
+                .inc_rejection(&model, Endpoint::Completions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -929,10 +920,10 @@ async fn completions_batch(
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
-            if super::metrics::request_was_rejected(e.as_ref()) {
+            if request_was_rejected(e.as_ref()) {
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Completions);
+                    .inc_rejection(&model, Endpoint::Completions);
             }
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1129,10 +1120,10 @@ async fn embeddings(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Embeddings);
+                .inc_rejection(&model_name, Endpoint::Embeddings);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -1370,20 +1361,6 @@ fn unsupported_media_type_error() -> ErrorResponse {
     )
 }
 
-fn is_json_content_type(content_type: &str) -> bool {
-    let media_type = content_type.split(';').next().unwrap_or_default().trim();
-    let Some((media_type, subtype)) = media_type.split_once('/') else {
-        return false;
-    };
-
-    media_type.eq_ignore_ascii_case("application")
-        && (subtype.eq_ignore_ascii_case("json")
-            || subtype
-                .to_ascii_lowercase()
-                .rsplit_once('+')
-                .is_some_and(|(_, suffix)| suffix == "json"))
-}
-
 fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(body.len());
     let mut in_string = false;
@@ -1419,126 +1396,11 @@ fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
     changed.then_some(out)
 }
 
-/// Checks if an Annotated event represents a backend error and extracts error information.
-/// Returns Some((message, status_code)) if it's an error, None otherwise.
-fn extract_backend_error_if_present<T: serde::Serialize>(
-    event: &Annotated<T>,
-) -> Option<(String, StatusCode)> {
-    #[derive(serde::Deserialize)]
-    struct ErrorPayload {
-        message: Option<String>,
-        code: Option<u16>,
-    }
-
-    // Check if event type is "error" (from postprocessor when FinishReason::Error is encountered)
-    if let Some(event_type) = &event.event
-        && event_type == "error"
-    {
-        // Extract error string: prefer DynamoError field, fallback to legacy comment.
-        // Use message() instead of to_string() for DynamoError to avoid prefixing
-        // the ErrorType (e.g., "Unknown: {...}"), which would break JSON parsing.
-        let error_str = if let Some(ref dynamo_err) = event.error {
-            let mut parts = Vec::new();
-            let mut current: Option<&dyn std::error::Error> = Some(dynamo_err);
-            while let Some(e) = current {
-                if let Some(de) = e.downcast_ref::<dynamo_runtime::error::DynamoError>() {
-                    parts.push(de.message().to_string());
-                } else {
-                    parts.push(e.to_string());
-                }
-                current = e.source();
-            }
-            parts.join(", ")
-        } else {
-            event
-                .comment
-                .as_ref()
-                .map(|c| c.join(", "))
-                .unwrap_or_else(|| "Unknown error".to_string())
-        };
-
-        // Try to parse as error JSON to extract status code
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&error_str) {
-            let code = error_payload
-                .code
-                .and_then(|c| StatusCode::from_u16(c).ok())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let message = error_payload.message.unwrap_or(error_str);
-            return Some((message, code));
-        }
-
-        return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
-    }
-
-    // Check if the data payload itself contains an error structure with code >= 400
-    if let Some(data) = &event.data
-        && let Ok(json_value) = serde_json::to_value(data)
-        && let Ok(error_payload) = serde_json::from_value::<ErrorPayload>(json_value.clone())
-        && let Some(code_num) = error_payload.code
-        && code_num >= 400
-    {
-        let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let message = error_payload
-            .message
-            .unwrap_or_else(|| json_value.to_string());
-        return Some((message, code));
-    }
-
-    // Check if comment contains error information (without event: error)
-    if let Some(comments) = &event.comment
-        && !comments.is_empty()
-    {
-        let comment_str = comments.join(", ");
-
-        // Try to parse comment as error JSON with code >= 400
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&comment_str)
-            && let Some(code_num) = error_payload.code
-            && code_num >= 400
-        {
-            let code = StatusCode::from_u16(code_num).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let message = error_payload.message.unwrap_or(comment_str);
-            return Some((message, code));
-        }
-
-        // Comments present with no data AND no event type indicates error
-        // (events with event types like "request_id" or "event.dynamo.test.sentinel" are annotations)
-        if event.data.is_none() && event.event.is_none() {
-            return Some((comment_str, StatusCode::INTERNAL_SERVER_ERROR));
-        }
-    }
-
-    None
-}
-
-/// Returns true for events that only carry an annotation tag (e.g. the
-/// `request_id` frame prepended to every stream): no data, no error, and
-/// an `event` field that is *not* the `"error"` marker. Annotations may
-/// still carry a serialized value in `comment` (that is how
-/// `Annotated::from_annotation` builds them), so the comment field is
-/// not part of the check. These frames are stepped over by
-/// `check_for_backend_error` so an immediate backend error in the *next*
-/// slot is still caught instead of slipping through to the fold/parse
-/// path.
-fn is_annotation_frame<T>(e: &Annotated<T>) -> bool {
-    e.data.is_none()
-        && e.error.is_none()
-        && matches!(e.event.as_deref(), Some(tag) if tag != "error")
-}
-
-/// Cap on how many leading annotation frames `check_for_backend_error`
-/// will buffer before giving up the inspection. A pathological backend
-/// (or attacker who can influence the engine output) that emits only
-/// annotation frames must not be able to pin unbounded memory per
-/// request. The handful of real annotations a frontend prepends
-/// (currently just `request_id`) fits well under this cap.
-const MAX_LEADING_ANNOTATIONS: usize = 16;
-
 /// Inspect the first non-annotation event in the stream for a backend error.
-/// Returns Err(ErrorResponse) if error detected, Ok(stream) otherwise — the
-/// returned stream replays any buffered annotation frames in their original
-/// order before yielding the remaining items.
+/// The reusable scanner returns raw backend details for server-side logging;
+/// this wrapper applies the OpenAI response envelope and sanitization policy.
 pub(super) async fn check_for_backend_error(
-    mut stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
+    stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>
     + Send
     + Unpin
     + 'static,
@@ -1546,16 +1408,10 @@ pub(super) async fn check_for_backend_error(
     impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send,
     ErrorResponse,
 > {
-    use futures::stream::StreamExt;
-
-    let mut buffered: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = Vec::new();
-    while let Some(event) = stream.next().await {
-        if is_annotation_frame(&event) && buffered.len() < MAX_LEADING_ANNOTATIONS {
-            buffered.push(event);
-            continue;
-        }
-        if let Some((error_msg, status_code)) = extract_backend_error_if_present(&event) {
-            return Err(match SanitizedError::for_backend_status(status_code) {
+    dynamo_http_server::error::check_for_backend_error(stream)
+        .await
+        .map_err(|(status_code, error_msg)| {
+            match SanitizedError::for_backend_status(status_code) {
                 Some(variant) => ErrorMessage::sanitized_with_details(variant, error_msg),
                 // 4xx (non-499): protocol contract — forward backend message as-is.
                 None => (
@@ -1567,15 +1423,8 @@ pub(super) async fn check_for_backend_error(
                         details: None,
                     }),
                 ),
-            });
-        }
-
-        // First non-annotation, non-error event — push it back and stop;
-        // downstream consumers see the original ordering.
-        buffered.push(event);
-        break;
-    }
-    Ok(futures::stream::iter(buffered).chain(stream))
+            }
+        })
 }
 
 #[derive(Serialize)]
@@ -1855,10 +1704,10 @@ async fn chat_completions(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
+                .inc_rejection(&model, Endpoint::ChatCompletions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -2334,10 +2183,10 @@ async fn responses(
 
     // issue the generate call on the engine
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Responses);
+                .inc_rejection(&model, Endpoint::Responses);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -2903,10 +2752,10 @@ async fn images(
     // NOT for client-facing SSE streaming. The stream is immediately folded into
     // a single response below.
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Images);
+                .inc_rejection(&model, Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -3020,10 +2869,10 @@ async fn videos(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&model, Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -3130,10 +2979,10 @@ async fn video_stream(
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&model, Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
         inflight.mark_error(extract_error_type_from_response(&err_response));

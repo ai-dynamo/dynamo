@@ -452,7 +452,7 @@ mod tests {
             prompt_tokens_details: None,
             completion_tokens_details: None,
         });
-        data.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+        data.llm_metrics = Some(dynamo_http_server::metrics::LLMMetricAnnotation {
             input_tokens: 10,
             output_tokens: 5,
             chunk_tokens: 0,

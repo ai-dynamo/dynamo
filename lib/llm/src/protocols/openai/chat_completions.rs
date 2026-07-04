@@ -236,7 +236,7 @@ pub struct NvCreateChatCompletionStreamResponse {
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
     #[serde(skip)]
-    pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
+    pub llm_metrics: Option<dynamo_http_server::metrics::LLMMetricAnnotation>,
 }
 
 /// Build one synthetic stream choice from an existing response template.

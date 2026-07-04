@@ -1922,7 +1922,7 @@ mod tests {
     // a tool-call stream (they'd all be None without the buffer/re-attach).
     #[tokio::test]
     async fn jail_preserves_llm_metrics_across_buffered_tool_call() {
-        use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
+        use dynamo_http_server::metrics::LLMMetricAnnotation;
         use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_protocols::types::{
             ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,

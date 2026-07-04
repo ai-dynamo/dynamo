@@ -80,10 +80,10 @@ use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
-pub use crate::protocols::common::metrics::{
+pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
+pub use dynamo_http_server::metrics::{
     ANNOTATION_AUDIT_USAGE, ANNOTATION_LLM_METRICS, LLMMetricAnnotation,
 };
-pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 

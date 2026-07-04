@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_http_server::metrics::Metrics;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,7 +10,6 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
-    http::service::metrics::Metrics,
     local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
     types::openai::{

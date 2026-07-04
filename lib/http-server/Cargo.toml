@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-http-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Plane-independent production HTTP server for Dynamo services"
+
+[dependencies]
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+axum = { workspace = true }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+dynamo-runtime = { workspace = true }
+futures = { workspace = true }
+http-body = "1"
+prometheus = { workspace = true }
+rustls = { version = "0.23" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }

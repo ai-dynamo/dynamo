@@ -59,7 +59,7 @@ fn router_metric(suffix: &str) -> String {
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts};
 
-use crate::http::service::metrics::generate_log_buckets;
+use dynamo_http_server::metrics::generate_log_buckets;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 

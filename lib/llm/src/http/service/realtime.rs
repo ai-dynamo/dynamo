@@ -59,9 +59,10 @@ const REQUEST_CHANNEL_CAPACITY: usize = 64;
 /// half-broken peer from parking the connection indefinitely.
 const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-use super::{RouteDoc, error::SanitizedError, service_v2};
+use super::{RouteDoc, service_v2};
 use crate::discovery::ModelManagerError;
 use crate::types::RealtimeBidirectionalEngine;
+use dynamo_http_server::error::SanitizedError;
 use dynamo_protocols::types::realtime::{
     EventType, RealtimeAPIError, RealtimeClientEvent, RealtimeClientEventSessionUpdate,
     RealtimeServerEvent, RealtimeServerEventError, RealtimeServerEventSessionCreated, Session,
@@ -102,7 +103,7 @@ async fn handle_socket(
     state: Arc<service_v2::State>,
     // Held for the full WebSocket task lifetime so realtime sessions are
     // visible to graceful shutdown after the 101 upgrade response completes.
-    _permit: service_v2::InflightPermit,
+    _permit: dynamo_http_server::InflightPermit,
 ) {
     // Inbound writes a non-NORMAL close message to `close_reason` on protocol errors
     // before cancelling the engine; the ScopedWsWriter takes it on Drop.
