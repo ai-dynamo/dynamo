@@ -193,9 +193,12 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 		s.pluginState.Write(req.RequestId, plugins.StateKey(decodeStateKey), routingState)
 	}
 
-	// Inject pre-computed tokens into the request body so the frontend
-	// sidecar can skip redundant tokenization.
-	setTokenizedPrompt(req, result.TokenData, logger)
+	// Inject tokens only when the parser produced a structured payload. For an
+	// opaque payload, result.TokenData came from the worker-selection placeholder;
+	// the frontend must tokenize the original request itself.
+	if req.Body != nil && req.Body.Payload != nil && req.Body.Payload.IsParsed() {
+		setTokenizedPrompt(req, result.TokenData, logger)
+	}
 
 	return uniformScores(endpoints, 1.0)
 }

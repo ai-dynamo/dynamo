@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 image:
-  repository: ghcr.io/vllm-project/semantic-router/extproc
-  # Main after v0.3.0 adds symmetric OpenAI SSE -> Anthropic SSE translation.
-  tag: latest@sha256:135533c2acf5ec810066ca7d2a277da219c4ece9165411740d668d4603e4f2c2
+  repository: ishandhanani/vllm-semantic-router
+  # Main plus api_format: passthrough for selection-only routing.
+  tag: dyn-3380-selection-only@sha256:2c79dcf541b7f677418fbc31a1bd770315e15a46a8ee683822e6881f65a01dac
   pullPolicy: IfNotPresent
 
 persistence:
@@ -51,8 +51,10 @@ config:
     models:
       - name: nvidia/GLM-5.2-NVFP4
         reasoning_family: glm
+        api_format: passthrough
       - name: Qwen/Qwen3.5-122B-A10B-FP8
         reasoning_family: qwen3
+        api_format: passthrough
   routing:
     decisions:
       - name: complex-agentic

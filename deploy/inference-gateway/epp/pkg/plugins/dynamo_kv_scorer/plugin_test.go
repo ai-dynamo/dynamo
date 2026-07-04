@@ -64,6 +64,27 @@ func TestBuildOpenAIRequest_ForwardsAgentHintsPriority(t *testing.T) {
 	}
 }
 
+func TestBuildOpenAIRequest_OpaquePayloadUsesSelectionPlaceholder(t *testing.T) {
+	req := &schedtypes.InferenceRequest{
+		TargetModel: "test-model",
+		Body: &fwkrh.InferenceRequestBody{
+			Payload: fwkrh.RawPayload(`{"model":"test-model","messages":[{"role":"user","content":"hello"}]}`),
+		},
+	}
+
+	body, err := BuildOpenAIRequest(req)
+	if err != nil {
+		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
+	}
+	if body["model"] != "test-model" {
+		t.Fatalf("model = %v, want test-model", body["model"])
+	}
+	messages, ok := body["messages"].([]map[string]any)
+	if !ok || len(messages) != 1 || messages[0]["content"] != "x" {
+		t.Fatalf("messages = %#v, want one selection placeholder", body["messages"])
+	}
+}
+
 func TestBuildOpenAIRequest_CompletionsTokenPromptUsesPromptIDs(t *testing.T) {
 	req := &schedtypes.InferenceRequest{
 		TargetModel: "test-model",

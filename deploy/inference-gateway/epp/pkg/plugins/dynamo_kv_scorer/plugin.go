@@ -304,6 +304,16 @@ func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error
 		requestBody["messages"] = messages
 	} else if req.Body.Completions != nil && !req.Body.Completions.Prompt.IsEmpty() {
 		addCompletionPrompt(requestBody, req.Body.Completions.Prompt)
+	} else if payload, ok := req.Body.Payload.(fwkrh.RawPayload); ok && len(payload) > 0 {
+		// Opaque protocols still need Dynamo worker IDs for direct-mode
+		// frontends. Use a minimal prompt only for worker selection; the raw
+		// request remains untouched and the frontend performs real tokenization.
+		requestBody["messages"] = []map[string]any{
+			{
+				"role":    "user",
+				"content": "x",
+			},
+		}
 	} else {
 		return nil, fmt.Errorf("no messages or prompt provided")
 	}

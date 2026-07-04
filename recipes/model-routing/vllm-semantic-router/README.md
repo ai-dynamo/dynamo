@@ -11,7 +11,7 @@ This experimental recipe serves `nvidia/GLM-5.2-NVFP4` and `Qwen/Qwen3.5-122B-A1
 client -> Envoy ext_proc -> vLLM Semantic Router -> HTTPRoute -> InferencePool -> Dynamo EPP -> backend graph
 ```
 
-The recipe uses a standalone Envoy bridge because agentgateway v1.0 does not rematch an `HTTPRoute` after a request-body external processor selects a model. The bridge owns model selection only; agentgateway and Dynamo EPP retain Kubernetes endpoint selection.
+The recipe uses a standalone Envoy bridge because agentgateway v1.0 does not rematch an `HTTPRoute` after a request-body external processor selects a model. The bridge owns model selection only; agentgateway and Dynamo EPP retain Kubernetes endpoint selection, and Dynamo Frontend owns client protocol handling.
 
 `x-selected-model` is internal routing metadata, not authentication. Envoy removes any client-supplied value before semantic routing. Keep the agentgateway service cluster-internal and restrict direct pod access with your cluster's network policy in a multi-tenant namespace.
 
@@ -28,11 +28,13 @@ This split is intentional: the model router selects model capability, while each
 
 A replacement global model router does not implement EPP. EPP is the inner contract between each `InferencePool` and its Dynamo worker graph. The outer router only needs to:
 
-- inspect or transform the request before Gateway API matching;
+- inspect the request before Gateway API matching;
 - select one configured model and set the trusted `x-selected-model` header; and
-- preserve the request and response protocol expected by the client and backend.
+- replace the unresolved `auto` model with the selected model without changing the client wire protocol.
 
 The HTTPRoutes map that header to model-specific `InferencePool` resources. A future Switchyard integration can therefore replace the semantic-router `ext_proc` service while preserving the Envoy trust boundary, routes, pools, EPP configuration, and worker graphs. If it uses a protocol other than Envoy `ext_proc`, only the bridge must change.
+
+The semantic-router image used here adds `api_format: passthrough`. In that mode it preserves the original OpenAI or Anthropic body and response format and changes only `model`. The EPP uses GAIE's `passthrough-parser`; its Dynamo scorers use a minimal placeholder solely to resolve the required Dynamo worker IDs and do not inject placeholder tokens. The selected Dynamo Frontend parses and tokenizes the original request. This intentionally gives up prompt-aware EPP placement for opaque payloads.
 
 ## Prerequisites
 
@@ -58,7 +60,7 @@ kubectl wait -n "$NAMESPACE" job/model-routing-cache \
 
 ## Deploy
 
-Install the v0.3.0 Helm chart. `semantic-router-values.yaml` pins a post-v0.3.0 image digest that adds symmetric OpenAI SSE to Anthropic SSE translation:
+Install the v0.3.0 Helm chart. `semantic-router-values.yaml` pins the selection-only semantic-router image:
 
 ```bash
 git clone --depth 1 --branch v0.3.0 \
@@ -115,7 +117,7 @@ kubectl logs -n "$NAMESPACE" \
 
 ## Claude Code
 
-The semantic router translates Anthropic Messages requests and streaming responses around Dynamo's OpenAI-compatible EPP path. Point Claude Code at the forwarded endpoint:
+Dynamo Frontend terminates the Anthropic Messages API; the semantic router and EPP preserve that protocol. Point Claude Code at the forwarded endpoint:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8000
