@@ -65,6 +65,7 @@ from dynamo.sglang._disagg import (
     get_sglang_worker_group_id,
     warmup_prefill_engine,
 )
+from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.capacity import (
     kv_metrics_block_values,
@@ -388,6 +389,7 @@ class SglangLLMEngine(LLMEngine):
             **input_param,
             sampling_params=sampling_params,
             stream=True,
+            **require_reasoning_kwargs(self.engine, request),
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
             **telemetry.engine_trace_kwargs(

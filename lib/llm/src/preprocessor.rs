@@ -404,6 +404,29 @@ impl OpenAIPreprocessor {
         }
     }
 
+    fn guided_tool_choice_requires_reasoning<R: OAIChatLikeRequest>(
+        request: &R,
+        reasoning_parser: Option<&str>,
+    ) -> bool {
+        if reasoning_parser.is_none() {
+            return false;
+        }
+
+        let is_guided_tool_choice = request.tool_choice().is_some_and(|tool_choice| {
+            match tool_choice.as_str() {
+                Some("required") => true,
+                Some(_) => false,
+                // The only supported non-string tool choice is a named function.
+                None => true,
+            }
+        });
+        if !is_guided_tool_choice {
+            return false;
+        }
+
+        !Self::is_reasoning_disabled_by_request(reasoning_parser, request.chat_template_args())
+    }
+
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = prompt_formatter_from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
@@ -893,6 +916,13 @@ impl OpenAIPreprocessor {
         {
             builder.extra_args(Some(extra_args));
         }
+
+        // SGLang needs this request-scoped signal in addition to its native
+        // reasoning parser so guided JSON starts after the reasoning boundary.
+        builder.require_reasoning(Self::guided_tool_choice_requires_reasoning(
+            request,
+            self.runtime_config.reasoning_parser.as_deref(),
+        ));
 
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
@@ -3644,6 +3674,65 @@ mod tests {
         .unwrap();
 
         assert!(OpenAIPreprocessor::backend_extra_args(&request, true).is_none());
+    }
+
+    /// Verifies the SGLang reasoning gate is limited to forced guided tool
+    /// choices and honors the public per-request thinking override.
+    #[test]
+    fn test_guided_tool_choice_requires_reasoning() {
+        let request = |tool_choice: serde_json::Value, enable_thinking: Option<bool>| {
+            let mut value = serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "use the tool"}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }],
+                "tool_choice": tool_choice
+            });
+            if let Some(enabled) = enable_thinking {
+                value["chat_template_kwargs"] = serde_json::json!({
+                    "enable_thinking": enabled
+                });
+            }
+            serde_json::from_value::<NvCreateChatCompletionRequest>(value).unwrap()
+        };
+
+        let required = request(serde_json::json!("required"), Some(true));
+        assert!(OpenAIPreprocessor::guided_tool_choice_requires_reasoning(
+            &required,
+            Some("nemotron_v3")
+        ));
+
+        let named = request(
+            serde_json::json!({
+                "type": "function",
+                "function": {"name": "lookup"}
+            }),
+            None,
+        );
+        assert!(OpenAIPreprocessor::guided_tool_choice_requires_reasoning(
+            &named,
+            Some("nemotron_v3")
+        ));
+
+        let disabled = request(serde_json::json!("required"), Some(false));
+        assert!(!OpenAIPreprocessor::guided_tool_choice_requires_reasoning(
+            &disabled,
+            Some("nemotron_v3")
+        ));
+        assert!(!OpenAIPreprocessor::guided_tool_choice_requires_reasoning(
+            &required, None
+        ));
+
+        let automatic = request(serde_json::json!("auto"), Some(true));
+        assert!(!OpenAIPreprocessor::guided_tool_choice_requires_reasoning(
+            &automatic,
+            Some("nemotron_v3")
+        ));
     }
 
     #[test]

@@ -108,6 +108,14 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+def require_reasoning_kwargs(engine: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Build the optional SGLang per-request reasoning-gate argument."""
+    return filter_supported_async_generate_kwargs(
+        engine,
+        {"require_reasoning": bool(request.get("require_reasoning", False))},
+    )
+
+
 def enable_disjoint_streaming_output(server_args: Any) -> None:
     """Enable SGLang's disjoint streaming output.
 
@@ -122,4 +130,5 @@ __all__ = [
     "enable_disjoint_streaming_output",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
+    "require_reasoning_kwargs",
 ]

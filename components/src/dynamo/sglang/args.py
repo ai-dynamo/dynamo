@@ -392,17 +392,13 @@ async def parse_args(args: list[str]) -> Config:
         endpoint
     )
 
-    # Validate parser flags: error if both --{name} and --dyn-{name} are set.
-    # --dyn-{name} choices are validated by argparse; --{name} by SGLang.
+    # Native and Dynamo tool parsers both construct tool calls, so they remain
+    # mutually exclusive. Reasoning parsers intentionally may be paired: the
+    # native parser gates guided decoding while Dynamo constructs the response.
     _validate_parser_flags(
         parsed_args.tool_call_parser,
         dynamo_config.dyn_tool_call_parser,
         "tool-call-parser",
-    )
-    _validate_parser_flags(
-        parsed_args.reasoning_parser,
-        dynamo_config.dyn_reasoning_parser,
-        "reasoning-parser",
     )
 
     if dynamo_config.custom_jinja_template and dynamo_config.use_sglang_tokenizer:

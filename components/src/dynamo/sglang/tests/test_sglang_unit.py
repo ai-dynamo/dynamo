@@ -17,6 +17,7 @@ from dynamo.common.constants import EmbeddingTransferMode
 from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
+    require_reasoning_kwargs,
 )
 from dynamo.sglang.args import (
     _normalize_multimodal_disaggregation_args,
@@ -146,6 +147,34 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     kwargs = {"return_routed_experts": True}
 
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
+
+
+@pytest.mark.parametrize(
+    ("request", "expected"),
+    [
+        ({"require_reasoning": True}, {"require_reasoning": True}),
+        ({"require_reasoning": False}, {"require_reasoning": False}),
+        ({}, {"require_reasoning": False}),
+    ],
+)
+def test_require_reasoning_kwarg_preserves_request_intent(request, expected):
+    """The internal reasoning intent reaches SGLang, including explicit false."""
+
+    class ReasoningEngine:
+        async def async_generate(self, require_reasoning=False):
+            return None
+
+    assert require_reasoning_kwargs(ReasoningEngine(), request) == expected
+
+
+def test_require_reasoning_kwarg_is_dropped_for_older_engines():
+    """Older supported SGLang engines remain usable without the new kwarg."""
+
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            return None
+
+    assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": True}) == {}
 
 
 def test_routed_experts_kwarg_omitted_when_flag_off():
@@ -324,6 +353,24 @@ async def test_tool_call_parser_both_flags_error(mock_sglang_cli):
 
     with pytest.raises(SystemExit):
         await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_reasoning_parser_both_flags_are_allowed(mock_sglang_cli):
+    """Native gating and Dynamo response parsing may use separate reasoners."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--dyn-reasoning-parser",
+        "qwen3",
+        "--reasoning-parser",
+        "qwen3",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.dynamo_args.dyn_reasoning_parser == "qwen3"
+    assert config.server_args.reasoning_parser == "qwen3"
 
 
 @pytest.mark.asyncio
