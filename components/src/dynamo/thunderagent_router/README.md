@@ -136,6 +136,7 @@ Choose one arm. The launcher starts both TP4 workers and the matching router, th
 ```bash
 cd ~/src/dynamo
 source .venv/bin/activate
+export HF_HOME=/home/nvidia/hf_cache
 
 # ThunderAgent
 export ARM=ta SESSION_FINAL=1
