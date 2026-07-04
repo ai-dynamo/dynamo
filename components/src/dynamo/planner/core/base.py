@@ -941,55 +941,48 @@ class NativePlannerBase:
         self.prometheus_metrics.num_decode_replicas.set(num_d)
         self.prometheus_metrics.gpu_hours.set(self._cumulative_gpu_hours)
 
+    @staticmethod
+    def _set_if_observed(gauge, value: Optional[float]) -> None:
+        """None = no new observation this tick -> leave the gauge unchanged.
+
+        A concrete value (including 0.0) = asserted observation -> publish it.
+        Mirrors the set/unset semantics documented on ``PredictionData``.
+        """
+        if value is not None:
+            gauge.set(value)
+
     def _report_diagnostics(self, tick: ScheduledTick, diag: TickDiagnostics) -> None:
         if self.prometheus_port == 0:
             return
         pm = self.prometheus_metrics
         interval = self.config.throughput_adjustment_interval_seconds
 
-        pm.estimated_ttft_ms.set(diag.estimated_ttft_ms or 0)
-        pm.estimated_itl_ms.set(diag.estimated_itl_ms or 0)
-
-        # The predicted-load and engine-capacity gauges are produced by the
-        # throughput stage (advance_throughput_from_prediction) and nulled by
-        # _reset_diag() at the start of every tick. Publishing them every tick
-        # wrote `or 0` on the ~35/36 load-only ticks, wiping the real value
-        # within seconds.
-        #
-        # Gate on `run_throughput_scaling OR a prediction is actually present`
-        # rather than on the throughput flag alone: `run_throughput_scaling`
-        # only marks that the builtin throughput loop is due, while predictions
-        # are produced by an independently-scheduled PREDICT plugin. A prediction
-        # can therefore land on a tick the throughput loop did not mark, and we
-        # still want to publish that real value -- but never write 0 over a
-        # stale-but-real value on an empty load-only tick.
-        has_throughput_metrics = tick.run_throughput_scaling or any(
-            v is not None
-            for v in (
-                diag.predicted_num_req,
-                diag.predicted_isl,
-                diag.predicted_osl,
-                diag.engine_rps_prefill,
-                diag.engine_rps_decode,
-            )
-        )
+        self._set_if_observed(pm.estimated_ttft_ms, diag.estimated_ttft_ms)
+        self._set_if_observed(pm.estimated_itl_ms, diag.estimated_itl_ms)
 
         if tick.run_load_scaling:
             pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
-        if has_throughput_metrics:
-            pm.predicted_requests_per_second.set(
-                diag.predicted_num_req / interval
-                if diag.predicted_num_req is not None and interval > 0
-                else 0
-            )
-            pm.predicted_input_sequence_tokens.set(diag.predicted_isl or 0)
-            pm.predicted_output_sequence_tokens.set(diag.predicted_osl or 0)
-            pm.engine_prefill_capacity_requests_per_second.set(
-                diag.engine_rps_prefill or 0
-            )
-            pm.engine_decode_capacity_requests_per_second.set(
-                diag.engine_rps_decode or 0
-            )
+
+        # Predicted-load / engine-capacity gauges: ``PredictionData`` supports
+        # partial predictions, so each gauge is gated on its own diagnostic --
+        # a tick that asserts only some fields must not zero the others. Fields
+        # are nulled by _reset_diag() at every tick start, so `is not None`
+        # means "produced this tick" (builtin throughput loop or an
+        # independently-scheduled PREDICT plugin).
+        self._set_if_observed(
+            pm.predicted_requests_per_second,
+            diag.predicted_num_req / interval
+            if diag.predicted_num_req is not None and interval > 0
+            else None,
+        )
+        self._set_if_observed(pm.predicted_input_sequence_tokens, diag.predicted_isl)
+        self._set_if_observed(pm.predicted_output_sequence_tokens, diag.predicted_osl)
+        self._set_if_observed(
+            pm.engine_prefill_capacity_requests_per_second, diag.engine_rps_prefill
+        )
+        self._set_if_observed(
+            pm.engine_decode_capacity_requests_per_second, diag.engine_rps_decode
+        )
         # The throughput-decision enum stays gated on the builtin throughput
         # cadence: it reflects a builtin-loop decision, not a plugin prediction.
         if tick.run_throughput_scaling:

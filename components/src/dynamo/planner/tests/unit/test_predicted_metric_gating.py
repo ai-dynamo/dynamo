@@ -21,10 +21,12 @@ start of every tick. Published unconditionally, they were written ``0`` on the
 ~35 of every 36 load-only ticks (default load=5s / throughput=180s), so Grafana
 reads ~0 essentially always while the planner logs real predictions every 180s.
 
-These tests pin that those five gauges are written only when a prediction is
-actually present -- on a builtin throughput tick, or on any tick whose
-diagnostics still carry a prediction -- and never on an empty load-only tick,
-while the load-stage ``estimated_*`` gauges remain written every tick. The
+These tests pin the per-gauge publication convention (review follow-up on
+#10804): each numeric gauge is written only when its own diagnostic field is
+present. ``None`` = no new observation this tick -> leave the gauge unchanged;
+a concrete value (including ``0.0``) = asserted observation -> publish it.
+``PredictionData`` explicitly supports partial predictions, so a tick that
+asserts only some fields must not zero the sibling gauges. The
 throughput-decision *Enum* stays gated on ``tick.run_throughput_scaling``.
 """
 
@@ -166,8 +168,8 @@ class TestReportDiagnosticsThroughputGauges:
         pm.engine_decode_capacity_requests_per_second.set.assert_called_once_with(4.0)
 
     def test_estimated_gauges_still_written_on_load_only_tick(self):
-        """Common path unchanged: load-stage estimated_* gauges are still set
-        every tick (they are produced by the load stage, not guarded)."""
+        """Common path unchanged: load-stage estimated_* gauges are published
+        on the ticks that produce them (the load stage)."""
         planner = _make_planner()
         pm = planner.prometheus_metrics
 
@@ -211,3 +213,94 @@ class TestReportDiagnosticsThroughputGauges:
         for name in _PREDICTED_GAUGES:
             getattr(pm, name).set.assert_not_called()
         pm.estimated_ttft_ms.set.assert_not_called()
+
+
+class TestPerGaugePublicationConvention:
+    """Review follow-up on #10804: ``PredictionData`` supports partial
+    predictions, so gauge writes must be gated per field. ``None`` = no new
+    observation -> leave that gauge unchanged; a concrete value (including
+    ``0.0``) = a real observed value -> publish it."""
+
+    def test_partial_prediction_updates_only_asserted_gauge(self):
+        """REGRESSION (review probe): a prediction asserting only
+        ``predicted_num_req`` must update the RPS gauge and leave the other
+        four untouched. Pre-fix, the group gate opened on any present field and
+        wrote 0 to the four missing ones, erasing latched real values."""
+        planner = _make_planner()
+        pm = planner.prometheus_metrics
+
+        planner._report_diagnostics(
+            _tick(run_load=True, run_throughput=False),
+            TickDiagnostics(predicted_num_req=1800.0),
+        )
+
+        pm.predicted_requests_per_second.set.assert_called_once_with(1800.0 / 180)
+        pm.predicted_input_sequence_tokens.set.assert_not_called()
+        pm.predicted_output_sequence_tokens.set.assert_not_called()
+        pm.engine_prefill_capacity_requests_per_second.set.assert_not_called()
+        pm.engine_decode_capacity_requests_per_second.set.assert_not_called()
+
+    def test_asserted_zero_is_published(self):
+        """0.0 is a real observation, not a missing one: an asserted zero must
+        be published (an ``or 0`` fallback cannot distinguish the two)."""
+        planner = _make_planner()
+        pm = planner.prometheus_metrics
+
+        planner._report_diagnostics(
+            _tick(run_load=True, run_throughput=False),
+            TickDiagnostics(predicted_num_req=0.0, predicted_isl=0.0),
+        )
+
+        pm.predicted_requests_per_second.set.assert_called_once_with(0.0)
+        pm.predicted_input_sequence_tokens.set.assert_called_once_with(0.0)
+        pm.predicted_output_sequence_tokens.set.assert_not_called()
+
+    def test_throughput_tick_with_missing_field_skips_that_gauge(self):
+        """Even on a builtin throughput tick, a field the stage did not produce
+        (e.g. no prefill capacity in aggregated mode) must not be zeroed --
+        the throughput flag alone no longer forces all five writes."""
+        planner = _make_planner()
+        pm = planner.prometheus_metrics
+
+        planner._report_diagnostics(
+            _tick(run_load=False, run_throughput=True),
+            TickDiagnostics(
+                predicted_num_req=1330.0,
+                predicted_isl=8008.0,
+                predicted_osl=946.0,
+                engine_rps_decode=4.0,
+                throughput_decision_reason="scale_up",
+            ),
+        )
+
+        pm.engine_prefill_capacity_requests_per_second.set.assert_not_called()
+        pm.engine_decode_capacity_requests_per_second.set.assert_called_once_with(4.0)
+        pm.throughput_scaling_decision.state.assert_called_once_with("scale_up")
+
+    def test_estimated_gauges_not_zeroed_when_absent(self):
+        """The load-stage estimated_* gauges follow the same convention: a tick
+        without fresh estimates must not overwrite the last real value with 0."""
+        planner = _make_planner()
+        pm = planner.prometheus_metrics
+
+        planner._report_diagnostics(
+            _tick(run_load=False, run_throughput=True), _diag_with_prediction()
+        )
+
+        pm.estimated_ttft_ms.set.assert_not_called()
+        pm.estimated_itl_ms.set.assert_not_called()
+
+    def test_nonpositive_interval_leaves_rps_unchanged(self):
+        """If the RPS gauge cannot be derived (interval <= 0), treat it as no
+        observation rather than publishing 0."""
+        planner = _make_planner()
+        planner.config.throughput_adjustment_interval_seconds = 0
+        pm = planner.prometheus_metrics
+
+        planner._report_diagnostics(
+            _tick(run_load=False, run_throughput=True),
+            TickDiagnostics(predicted_num_req=1800.0, predicted_isl=8008.0),
+        )
+
+        pm.predicted_requests_per_second.set.assert_not_called()
+        pm.predicted_input_sequence_tokens.set.assert_called_once_with(8008.0)
