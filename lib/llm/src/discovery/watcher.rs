@@ -955,6 +955,9 @@ impl ModelWatcher {
             // and go.
             self.manager
                 .add_worker_set(card.name(), &ws_key, worker_set);
+            // Mirror the prefill WorkerSet under any aliases so a disaggregated
+            // alias reports readiness like its primary (decode attaches its own).
+            self.attach_aliases(card, &ws_key);
 
             if let Some(tx) = &self.model_update_tx {
                 tx.send(ModelUpdate::Added(card.clone())).await.ok();
@@ -1374,46 +1377,72 @@ impl ModelWatcher {
             );
         }
 
-        // Register alias→primary mappings BEFORE the engine becomes visible.
-        // Order matters: any request landing between engine-visible and
-        // alias-mapped would see correct routing but mis-labelled metrics
-        // (and an OpenAI response.model echoing the alias instead of the
-        // primary). Recording the mapping first closes that gap.
-        let mut registered_aliases = Vec::new();
-        for alias in &card.aliases {
-            if alias != card.name() {
-                if self.manager.register_alias(alias, card.name()) {
-                    registered_aliases.push(alias.clone());
-                }
-            }
-        }
-
-        // Add the completed WorkerSet to the Model
+        // Add the completed WorkerSet to the Model, then mirror it under any
+        // configured aliases so alias names resolve, list, and report readiness
+        // exactly like the primary.
         self.manager
             .add_worker_set(card.name(), &ws_key, worker_set);
-
-        // Register under aliases — share the same Arc<WorkerSet>
-        if !registered_aliases.is_empty() {
-            if let Some(model) = self.manager.get_model(card.name()) {
-                if let Some(ws_arc) = model.get_worker_set(&ws_key) {
-                    for alias in &registered_aliases {
-                        tracing::info!(
-                            model_name = card.name(),
-                            alias,
-                            "Registering model alias"
-                        );
-                        self.manager
-                            .add_worker_set_arc(alias, &ws_key, ws_arc.clone());
-                    }
-                }
-            }
-        }
+        self.attach_aliases(card, &ws_key);
 
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
         }
 
         Ok(())
+    }
+
+    /// Register `card`'s aliases against its primary name and mirror the just-
+    /// added WorkerSet under each, so an alias resolves to the primary and lists
+    /// / reports readiness identically. Shared by the aggregated/decode and the
+    /// disaggregated prefill registration paths so a disaggregated alias gets
+    /// both the decode and prefill WorkerSets (the prefill worker registers on
+    /// its own early-return path and would otherwise skip alias attachment).
+    ///
+    /// `register_alias` reserves the name atomically (rejecting a collision with
+    /// a live primary or a different primary's alias); only a successful
+    /// reservation is followed by the WorkerSet attach. Because the reservation
+    /// already owns the name, the attach cannot lose a collision — the guarded
+    /// rollback is a defensive backstop for a would-be invariant violation, not
+    /// an expected path.
+    fn attach_aliases(&self, card: &ModelDeploymentCard, ws_key: &str) {
+        if card.aliases.is_empty() {
+            return;
+        }
+        let Some(model) = self.manager.get_model(card.name()) else {
+            tracing::warn!(
+                model_name = card.name(),
+                "Model missing right after registration; aliases not attached"
+            );
+            return;
+        };
+        let Some(ws_arc) = model.get_worker_set(ws_key) else {
+            tracing::warn!(
+                model_name = card.name(),
+                ws_key,
+                "WorkerSet missing right after registration; aliases not attached"
+            );
+            return;
+        };
+        for alias in &card.aliases {
+            if alias == card.name() {
+                continue;
+            }
+            if !self.manager.register_alias(alias, card.name()) {
+                continue;
+            }
+            tracing::info!(model_name = card.name(), alias, "Registering model alias");
+            if !self
+                .manager
+                .add_worker_set_arc(alias, ws_key, ws_arc.clone())
+            {
+                tracing::error!(
+                    model_name = card.name(),
+                    alias,
+                    "Alias reserved but WorkerSet attach was refused; rolling back the mapping"
+                );
+                self.manager.unregister_alias_if_empty(alias, card.name());
+            }
+        }
     }
 
     /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance

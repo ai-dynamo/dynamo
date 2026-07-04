@@ -191,7 +191,10 @@ class DynamoSGLangConfig(ConfigBase):
     # comma-separated string of multiple names; the first becomes the
     # primary and the rest land here. Plumbed to register_model() so the
     # Rust ModelManager registers the same WorkerSet under each alias.
-    served_model_aliases: List[str] = []
+    # Default is None (not []): ConfigBase.from_cli_args copies class
+    # defaults onto each instance by reference, so a mutable [] would be
+    # shared across configs.
+    served_model_aliases: Optional[List[str]] = None
 
     def validate(self) -> None:
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):

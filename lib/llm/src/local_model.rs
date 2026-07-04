@@ -345,6 +345,9 @@ impl LocalModelBuilder {
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
             card.router_config = self.router_config.clone();
+            if !self.model_aliases.is_empty() {
+                card.set_aliases(self.model_aliases.clone());
+            }
 
             return Ok(LocalModel {
                 card,

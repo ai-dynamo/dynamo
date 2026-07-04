@@ -282,7 +282,9 @@ async def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_
 
 
 @pytest.mark.asyncio
-async def test_multiple_served_model_names_register_primary_and_aliases(mock_sglang_cli):
+async def test_multiple_served_model_names_register_primary_and_aliases(
+    mock_sglang_cli,
+):
     """SGLang packed served names split into primary + Dynamo aliases."""
     mock_sglang_cli(
         "--model",

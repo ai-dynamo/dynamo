@@ -181,8 +181,12 @@ impl ModelManager {
         }
     }
 
-    /// Add a WorkerSet to a Model. Creates the Model if it doesn't exist.
+    /// Add a WorkerSet to a Model under its primary name. Creates the Model if
+    /// it doesn't exist. A real model always wins a name collision with an
+    /// operator-configured alias, so any stale alias claim on `model_name` is
+    /// reclaimed first (see [`Self::reclaim_primary_name`]).
     pub fn add_worker_set(&self, model_name: &str, namespace: &str, worker_set: WorkerSet) {
+        self.reclaim_primary_name(model_name);
         let model = self.get_or_create_model(model_name);
         model.add_worker_set(namespace.to_string(), Arc::new(worker_set));
     }
@@ -200,20 +204,23 @@ impl ModelManager {
         worker_set: Arc<WorkerSet>,
     ) -> bool {
         // Collision check: if `model_name` already exists as a primary (i.e.
-        // not currently mapped to anything in alias_to_primary, AND already
-        // has worker sets), refuse to clobber it.
-        if let Some(existing) = self.models.get(model_name) {
-            if !existing.is_empty()
-                && !self.alias_to_primary.contains_key(model_name)
-            {
-                tracing::warn!(
-                    alias = model_name,
-                    namespace,
-                    "Alias collides with a registered primary model — skipping. \
-                     Choose a different alias or rename the conflicting model."
-                );
-                return false;
-            }
+        // already has worker sets AND is not currently an alias), refuse to
+        // clobber it. The two facts are read one map at a time — the `models`
+        // guard is dropped before touching `alias_to_primary` — so this never
+        // holds one shard lock while acquiring the other (register_alias probes
+        // them in the opposite order; holding across would risk a deadlock).
+        let is_live_primary = self
+            .models
+            .get(model_name)
+            .is_some_and(|existing| !existing.is_empty());
+        if is_live_primary && !self.alias_to_primary.contains_key(model_name) {
+            tracing::warn!(
+                alias = model_name,
+                namespace,
+                "Alias collides with a registered primary model — skipping. \
+                 Choose a different alias or rename the conflicting model."
+            );
+            return false;
         }
 
         let model = self.get_or_create_model(model_name);
@@ -223,40 +230,77 @@ impl ModelManager {
 
     /// Record that `alias` is an alternate name for `primary`. Used to normalize metrics labels.
     ///
-    /// Logs a warning and refuses to overwrite if `alias` is already mapped to a
-    /// *different* primary. First-write-wins semantics so operators can detect
-    /// alias conflicts in logs rather than discovering them by silent metric
-    /// re-attribution.
+    /// The claim is taken atomically through the map entry so two concurrent
+    /// registrations of the same alias cannot both succeed. First-write-wins:
+    /// re-registering the same alias→primary is idempotent, but a conflicting
+    /// primary (or a name already owned by a registered primary model) is
+    /// refused and logged so operators find the collision in the logs rather
+    /// than through silent metric re-attribution.
+    ///
+    /// The "is this name a live primary" probe is done *before* taking the
+    /// `alias_to_primary` entry so we never hold one map's shard lock while
+    /// acquiring the other's — [`Self::add_worker_set_arc`] takes them in the
+    /// opposite order, and holding across would risk a lock-order inversion.
     pub fn register_alias(&self, alias: &str, primary: &str) -> bool {
-        if let Some(existing) = self.alias_to_primary.get(alias) {
-            if existing.value() != primary {
-                tracing::warn!(
-                    alias,
-                    new_primary = primary,
-                    existing_primary = existing.value().as_str(),
-                    "Alias is already claimed by a different primary — refusing to overwrite. \
-                     Existing claim wins."
-                );
-                return false;
-            }
-            // Same alias→same primary — idempotent, no-op.
-            return true;
+        if self
+            .models
+            .get(alias)
+            .is_some_and(|model| !model.is_empty())
+            && !self.alias_to_primary.contains_key(alias)
+        {
+            tracing::warn!(
+                alias,
+                primary,
+                "Alias collides with a registered primary model — refusing to register. \
+                 Choose a different alias or rename the conflicting model."
+            );
+            return false;
         }
 
-        if let Some(existing) = self.models.get(alias) {
-            if !existing.is_empty() {
-                tracing::warn!(
-                    alias,
-                    primary,
-                    "Alias collides with a registered primary model — refusing to register. \
-                     Choose a different alias or rename the conflicting model."
-                );
-                return false;
+        match self.alias_to_primary.entry(alias.to_string()) {
+            Entry::Occupied(existing) => {
+                if existing.get() != primary {
+                    tracing::warn!(
+                        alias,
+                        new_primary = primary,
+                        existing_primary = existing.get().as_str(),
+                        "Alias is already claimed by a different primary — refusing to overwrite. \
+                         Existing claim wins."
+                    );
+                    return false;
+                }
+                // Same alias→same primary — idempotent, no-op.
+                true
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(primary.to_string());
+                true
             }
         }
-        self.alias_to_primary
-            .insert(alias.to_string(), primary.to_string());
-        true
+    }
+
+    /// Ensure `name` is available as a primary model name. A real model always
+    /// wins a collision with an operator-configured alias: if `name` is currently
+    /// registered as an alias of a *different* model, drop that mapping and the
+    /// shared WorkerSets attached under it so HTTP stops canonicalizing the name
+    /// to the old primary. No-op in the common case where `name` is not an alias.
+    ///
+    /// Reconciliation across the two maps is best-effort: a name being both a
+    /// live primary of one model and an alias of another is an operator
+    /// misconfiguration (a correctly configured fleet never reuses a name), and
+    /// concurrent registration of such a collision may briefly leave a stale
+    /// mapping until the next registration event. It always self-corrects and
+    /// is logged; it cannot happen for distinct, correctly-named models.
+    fn reclaim_primary_name(&self, name: &str) {
+        if let Some((_, previous_primary)) = self.alias_to_primary.remove(name) {
+            tracing::warn!(
+                name,
+                previous_primary = previous_primary.as_str(),
+                "Name registered as a primary model was already an alias — reclaiming it for the \
+                 primary; the alias mapping is dropped."
+            );
+            self.models.remove(name);
+        }
     }
 
     /// Remove a previously registered alias mapping once the alias has no WorkerSets.
@@ -1720,6 +1764,26 @@ mod tests {
         assert!(!mm.register_alias("llama-alias", "llama"));
 
         assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama-alias");
+    }
+
+    #[test]
+    fn test_primary_registration_reclaims_alias_name() {
+        let mm = ModelManager::new();
+
+        // Model "a" claims "shared" as an alias and attaches its worker set.
+        assert!(mm.register_alias("shared", "a"));
+        assert!(mm.add_worker_set_arc("shared", "ns1", Arc::new(make_worker_set("ns1", "abc"))));
+        assert_eq!(mm.resolve_canonical_name("shared"), "a");
+
+        // A later model registers "shared" as its own primary — it must win the
+        // name back so requests for "shared" stop canonicalizing to "a".
+        mm.add_worker_set("shared", "ns2", make_worker_set("ns2", "def"));
+        assert_eq!(mm.resolve_canonical_name("shared"), "shared");
+
+        // The reclaimed model holds only its own worker set, not "a"'s.
+        let model = mm.get_model("shared").expect("primary model present");
+        assert!(model.get_worker_set("ns2").is_some());
+        assert!(model.get_worker_set("ns1").is_none());
     }
 
     #[test]

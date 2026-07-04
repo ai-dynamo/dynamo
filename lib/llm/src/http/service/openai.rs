@@ -648,7 +648,10 @@ async fn handler_completions(
     // Canonicalize alias → primary for the metric label.
     let canonical_model = state.manager().resolve_canonical_name(&request.inner.model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(&canonical_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -1273,7 +1276,10 @@ async fn handler_chat_completions(
     // Canonicalize alias → primary for the metric label.
     let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(&canonical_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -2188,7 +2194,10 @@ async fn handler_responses(
     // Canonicalize alias → primary for the metric label.
     let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(&canonical_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -2833,10 +2842,14 @@ fn get_model_retrieve(
         .unwrap()
         .as_secs();
 
+    // Alias entries have no card of their own (cards are keyed by the primary's
+    // display_name); fall back to the primary so an alias reports the same
+    // context_window that `GET /v1/models` lists for it.
+    let canonical_model = state.manager().resolve_canonical_name(model_id);
     let cards = state.manager().get_model_cards();
     let context_length = cards
         .iter()
-        .find(|c| c.display_name == model_id)
+        .find(|c| c.display_name == model_id || c.display_name == canonical_model)
         .map(|c| c.effective_context_length() as u64);
     let context_window: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
         .ok()
