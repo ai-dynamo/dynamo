@@ -150,15 +150,20 @@ Stop the launcher with `Ctrl-C` before starting the other arm. Always use fresh 
 
 ### 3. Run one Verified task
 
-In a second terminal, set `ARM` to match the launched stack. The terminal-session flag is derived from it. Use a host address reachable from Docker rather than `127.0.0.1`.
+In a second terminal, set `ARM` and `DYN_AGENT_SESSION_FINAL` to match the launched stack. Use a host address reachable from Docker rather than `127.0.0.1`.
 
 ```bash
 cd ~/src/harbor
 source .venv/bin/activate
 
-# Match the launched arm. Use ARM=kv for stock KV.
+# ThunderAgent
 export ARM=ta
-export DYN_AGENT_SESSION_FINAL=$([[ "$ARM" == ta ]] && echo 1 || echo 0)
+export DYN_AGENT_SESSION_FINAL=1
+
+# Stock KV instead
+# export ARM=kv
+# export DYN_AGENT_SESSION_FINAL=0
+
 export PI_PLUGIN_DIR=~/src/agent-plugins/pi-plugin
 export PYTHONPATH=$PI_PLUGIN_DIR
 export DYNAMO_BASE_URL=http://$(ip route get 1.1.1.1 | awk '{print $7; exit}'):8100/v1
@@ -211,9 +216,9 @@ harbor run \
   --job-name "$ARM-verified-full" -y
 ```
 
-This runs every task in `swebench-verified@1.0` with verification enabled. Remove the stopped task containers, start the other arm from fresh processes, set its matching `ARM`, and rerun the same command.
+This runs every task in `swebench-verified@1.0` with verification enabled. Remove the stopped task containers, start the other arm from fresh processes, set its matching `ARM` and `DYN_AGENT_SESSION_FINAL`, and rerun the same command.
 
-Stable session headers are sent in both arms. The derived `DYN_AGENT_SESSION_FINAL=0` only prevents the stock KV arm from receiving ThunderAgent's terminal lifecycle request.
+Stable session headers are sent in both arms. `DYN_AGENT_SESSION_FINAL=0` only prevents the stock KV arm from receiving ThunderAgent's terminal lifecycle request.
 
 ## Citation
 
