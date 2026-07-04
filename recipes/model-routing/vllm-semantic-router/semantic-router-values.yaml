@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+image:
+  repository: ghcr.io/vllm-project/semantic-router/extproc
+  # Main after v0.3.0 adds symmetric OpenAI SSE -> Anthropic SSE translation.
+  tag: latest@sha256:135533c2acf5ec810066ca7d2a277da219c4ece9165411740d668d4603e4f2c2
+  pullPolicy: IfNotPresent
+
+persistence:
+  enabled: true
+  existingClaim: shared-model-cache
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 3Gi
+  limits:
+    cpu: "2"
+    memory: 7Gi
+
+env:
+  - name: LD_LIBRARY_PATH
+    value: /app/lib
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: hf-token-secret
+        key: HF_TOKEN
+
+config:
+  version: v0.3
+  listeners:
+    - name: grpc-50051
+      address: 0.0.0.0
+      port: 50051
+      timeout: 300s
+    - name: http-8080
+      address: 0.0.0.0
+      port: 8080
+      timeout: 300s
+  providers:
+    defaults:
+      default_model: Qwen/Qwen3.5-122B-A10B-FP8
+      reasoning_families:
+        glm:
+          type: reasoning_effort
+          parameter: reasoning_effort
+        qwen3:
+          type: chat_template_kwargs
+          parameter: enable_thinking
+    models:
+      - name: nvidia/GLM-5.2-NVFP4
+        reasoning_family: glm
+      - name: Qwen/Qwen3.5-122B-A10B-FP8
+        reasoning_family: qwen3
+  routing:
+    decisions:
+      - name: complex-agentic
+        description: Route quantitative and technical work to GLM-5.2 NVFP4
+        priority: 100
+        rules:
+          operator: OR
+          conditions:
+            - type: domain
+              name: math
+            - type: domain
+              name: physics
+            - type: domain
+              name: chemistry
+            - type: domain
+              name: computer science
+            - type: domain
+              name: engineering
+        modelRefs:
+          - model: nvidia/GLM-5.2-NVFP4
+            use_reasoning: true
+      - name: lightweight
+        description: Route other work to Qwen3.5-122B
+        priority: 10
+        rules:
+          operator: OR
+          conditions:
+            - type: domain
+              name: other
+            - type: domain
+              name: business
+            - type: domain
+              name: law
+            - type: domain
+              name: psychology
+            - type: domain
+              name: biology
+            - type: domain
+              name: history
+            - type: domain
+              name: health
+            - type: domain
+              name: economics
+            - type: domain
+              name: philosophy
+        modelRefs:
+          - model: Qwen/Qwen3.5-122B-A10B-FP8
+            use_reasoning: false
+    signals:
+      domains:
+        - name: business
+          description: Business, corporate strategy, management, finance, and marketing
+        - name: law
+          description: Legal principles, case law, and legal procedures
+        - name: psychology
+          description: Cognitive processes, behavior, and mental health
+        - name: biology
+          description: Biology, genetics, ecology, evolution, and anatomy
+        - name: chemistry
+          description: Chemical reactions, molecular structures, and laboratory techniques
+        - name: history
+          description: Historical events, periods, cultures, and civilizations
+        - name: health
+          description: Anatomy, diseases, treatments, preventive care, and nutrition
+        - name: economics
+          description: Economics, financial markets, monetary policy, and trade
+        - name: math
+          description: Mathematics, algebra, calculus, geometry, and statistics
+        - name: physics
+          description: Mechanics, thermodynamics, electromagnetism, and quantum physics
+        - name: computer science
+          description: Algorithms, programming, software engineering, and systems
+        - name: philosophy
+          description: Ethics, logic, metaphysics, and epistemology
+        - name: engineering
+          description: Engineering design, systems, and technical problem solving
+        - name: other
+          description: General knowledge and miscellaneous topics
+    modelCards:
+      - name: nvidia/GLM-5.2-NVFP4
+      - name: Qwen/Qwen3.5-122B-A10B-FP8
+  global:
+    router:
+      strategy: priority
+      auto_model_name: auto
+      include_config_models_in_list: true
+    services:
+      response_api:
+        enabled: false
+      router_replay:
+        store_backend: memory
+        ttl_seconds: 86400
+        async_writes: false
+    stores:
+      semantic_cache:
+        enabled: false
+    integrations:
+      tools:
+        enabled: false

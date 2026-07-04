@@ -1,0 +1,733 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: model-routing-small
+  labels:
+    app.kubernetes.io/name: vllm-semantic-router
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  backendFramework: vllm
+  components:
+    - name: Epp
+      type: epp
+      replicas: 1
+      minAvailable: 1
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: ngc-secret
+          containers:
+            - name: main
+              image: nvcr.io/nvstaging/ai-dynamo/dynamo-frontend:1.3.0-rc1
+              env:
+                - name: DYN_KV_CACHE_BLOCK_SIZE
+                  value: "16"
+                - name: DYN_MODEL_NAME
+                  value: Qwen/Qwen3.5-122B-A10B-FP8
+                - name: DYN_DECODE_FALLBACK
+                  value: "true"
+      eppConfig:
+        config:
+          plugins:
+            - type: disagg-profile-handler
+            - name: decode-filter
+              type: label-filter
+              parameters:
+                label: nvidia.com/dynamo-component-type
+                validValues: [decode]
+                allowsNoLabel: false
+            - name: picker
+              type: max-score-picker
+            - name: dyn-decode
+              type: dyn-decode-scorer
+          schedulingProfiles:
+            - name: decode
+              plugins:
+                - pluginRef: decode-filter
+                  weight: 1
+                - pluginRef: dyn-decode
+                  weight: 1
+                - pluginRef: picker
+                  weight: 1
+    - name: VllmDecodeWorker
+      type: decode
+      replicas: 1
+      minAvailable: 1
+      sharedMemorySize: 64Gi
+      frontendSidecar: sidecar-frontend
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: ngc-secret
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-B200
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+          containers:
+            - name: main
+              image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc1
+              workingDir: /workspace/examples/backends/vllm
+              command: [python3, -m, dynamo.vllm]
+              args:
+                - --model
+                - Qwen/Qwen3.5-122B-A10B-FP8
+                - --served-model-name
+                - Qwen/Qwen3.5-122B-A10B-FP8
+                - --tensor-parallel-size
+                - "8"
+                - --gpu-memory-utilization
+                - "0.9"
+                - --max-model-len
+                - "262144"
+                - --max-num-seqs
+                - "32"
+                - --language-model-only
+                - --enable-prefix-caching
+                - --kv-events-config
+                - '{"enable_kv_cache_events":true}'
+                - --block-size
+                - "16"
+                - --dyn-tool-call-parser
+                - qwen3_coder
+                - --dyn-reasoning-parser
+                - qwen3
+              env:
+                - name: HF_HOME
+                  value: /opt/models
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: DYN_STORE_KV
+                  value: mem
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  memory: 512Gi
+                limits:
+                  nvidia.com/gpu: "8"
+              # FlashInfer 0.6.12 creates MoE cubin symlinks in its package directory.
+              securityContext:
+                runAsUser: 0
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 10
+                failureThreshold: 80
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+            - name: sidecar-frontend
+              image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc1
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - direct
+                - --enable-anthropic-api
+                - --strip-anthropic-preamble
+                - --enable-streaming-tool-dispatch
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: model-routing-large
+  labels:
+    app.kubernetes.io/name: vllm-semantic-router
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  backendFramework: sglang
+  components:
+    - name: Epp
+      type: epp
+      replicas: 1
+      minAvailable: 1
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: ngc-secret
+          containers:
+            - name: main
+              image: nvcr.io/nvstaging/ai-dynamo/dynamo-frontend:1.3.0-rc1
+              env:
+                - name: DYN_KV_CACHE_BLOCK_SIZE
+                  value: "1"
+                - name: DYN_MODEL_NAME
+                  value: nvidia/GLM-5.2-NVFP4
+                - name: DYN_ENFORCE_DISAGG
+                  value: "true"
+      eppConfig:
+        config:
+          plugins:
+            - type: disagg-profile-handler
+            - name: prefill-filter
+              type: label-filter
+              parameters:
+                label: nvidia.com/dynamo-component-type
+                validValues: [prefill]
+                allowsNoLabel: false
+            - name: decode-filter
+              type: label-filter
+              parameters:
+                label: nvidia.com/dynamo-component-type
+                validValues: [decode]
+                allowsNoLabel: false
+            - name: picker
+              type: max-score-picker
+            - name: dyn-prefill
+              type: dyn-prefill-scorer
+            - name: dyn-decode
+              type: dyn-decode-scorer
+          schedulingProfiles:
+            - name: prefill
+              plugins:
+                - pluginRef: prefill-filter
+                  weight: 1
+                - pluginRef: dyn-prefill
+                  weight: 1
+                - pluginRef: picker
+                  weight: 1
+            - name: decode
+              plugins:
+                - pluginRef: decode-filter
+                  weight: 1
+                - pluginRef: dyn-decode
+                  weight: 1
+                - pluginRef: picker
+                  weight: 1
+    - name: SglangDecodeWorker
+      type: decode
+      replicas: 1
+      minAvailable: 1
+      sharedMemorySize: 300Gi
+      frontendSidecar: sidecar-frontend
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: ngc-secret
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-B200
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+          containers:
+            - name: main
+              image: ishandhanani/sglang:dynamo-e2e-aaa31eb0@sha256:13fe875302a92b68632d2641ef6e2c114b95cd2bbf6d126a4d1eae2b28ab4c18
+              workingDir: /workspace/examples/backends/sglang
+              command: [python3, -m, dynamo.sglang]
+              args:
+                - --model-path
+                - nvidia/GLM-5.2-NVFP4
+                - --served-model-name
+                - nvidia/GLM-5.2-NVFP4
+                - --trust-remote-code
+                - --watchdog-timeout
+                - "100000"
+                - --quantization
+                - modelopt_fp4
+                - --chunked-prefill-size
+                - "8192"
+                - --mem-fraction-static
+                - "0.85"
+                - --tp-size
+                - "8"
+                - --disable-radix-cache
+                - --enable-metrics
+                - --disaggregation-mode
+                - decode
+                - --disaggregation-transfer-backend
+                - nixl
+                - --disaggregation-ib-device
+                - mlx5_0,mlx5_1,mlx5_2,mlx5_3
+                - --disaggregation-bootstrap-port
+                - "8998"
+                - --host
+                - 0.0.0.0
+                - --dyn-tool-call-parser
+                - glm47
+                - --dyn-reasoning-parser
+                - glm45
+              env:
+                - name: HF_HOME
+                  value: /opt/models
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: DYN_STORE_KV
+                  value: mem
+                - name: FLASHINFER_WORKSPACE_BASE
+                  value: /tmp/flashinfer-workspace
+                - name: SGLANG_CACHE_DIR
+                  value: /tmp/sglang
+                - name: SGLANG_DG_CACHE_DIR
+                  value: /tmp/deep-gemm
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: TORCH_NCCL_ENABLE_MONITORING
+                  value: "0"
+                - name: UCX_TLS
+                  value: cuda_ipc,cuda_copy,rc
+                - name: UCX_MODULE_DIR
+                  value: /usr/local/lib/python3.12/dist-packages/nixl_cu13.libs/ucx
+                - name: UCX_NET_DEVICES
+                  value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1
+                - name: NCCL_IB_DISABLE
+                  value: "0"
+                - name: NIXL_LOG_LEVEL
+                  value: INFO
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  rdma/shared_ib: "8"
+                  memory: 512Gi
+                  ephemeral-storage: 80Gi
+                limits:
+                  nvidia.com/gpu: "8"
+                  rdma/shared_ib: "8"
+                  ephemeral-storage: 160Gi
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_RESOURCE]
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 180
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+            - name: sidecar-frontend
+              image: ishandhanani/sglang:dynamo-e2e-aaa31eb0@sha256:13fe875302a92b68632d2641ef6e2c114b95cd2bbf6d126a4d1eae2b28ab4c18
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - direct
+                - --enable-anthropic-api
+                - --strip-anthropic-preamble
+                - --enable-streaming-tool-dispatch
+    - name: SglangPrefillWorker
+      type: prefill
+      replicas: 1
+      minAvailable: 1
+      sharedMemorySize: 300Gi
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: ngc-secret
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-B200
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+          containers:
+            - name: main
+              image: ishandhanani/sglang:dynamo-e2e-aaa31eb0@sha256:13fe875302a92b68632d2641ef6e2c114b95cd2bbf6d126a4d1eae2b28ab4c18
+              workingDir: /workspace/examples/backends/sglang
+              command: [python3, -m, dynamo.sglang]
+              args:
+                - --model-path
+                - nvidia/GLM-5.2-NVFP4
+                - --served-model-name
+                - nvidia/GLM-5.2-NVFP4
+                - --trust-remote-code
+                - --watchdog-timeout
+                - "100000"
+                - --quantization
+                - modelopt_fp4
+                - --chunked-prefill-size
+                - "8192"
+                - --mem-fraction-static
+                - "0.85"
+                - --tp-size
+                - "8"
+                - --disable-radix-cache
+                - --enable-metrics
+                - --disaggregation-mode
+                - prefill
+                - --disaggregation-transfer-backend
+                - nixl
+                - --disaggregation-ib-device
+                - mlx5_0,mlx5_1,mlx5_2,mlx5_3
+                - --disaggregation-bootstrap-port
+                - "8998"
+                - --host
+                - 0.0.0.0
+                - --dyn-tool-call-parser
+                - glm47
+                - --dyn-reasoning-parser
+                - glm45
+              env:
+                - name: HF_HOME
+                  value: /opt/models
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: DYN_STORE_KV
+                  value: mem
+                - name: FLASHINFER_WORKSPACE_BASE
+                  value: /tmp/flashinfer-workspace
+                - name: SGLANG_CACHE_DIR
+                  value: /tmp/sglang
+                - name: SGLANG_DG_CACHE_DIR
+                  value: /tmp/deep-gemm
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: TORCH_NCCL_ENABLE_MONITORING
+                  value: "0"
+                - name: UCX_TLS
+                  value: cuda_ipc,cuda_copy,rc
+                - name: UCX_MODULE_DIR
+                  value: /usr/local/lib/python3.12/dist-packages/nixl_cu13.libs/ucx
+                - name: UCX_NET_DEVICES
+                  value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1
+                - name: NCCL_IB_DISABLE
+                  value: "0"
+                - name: NIXL_LOG_LEVEL
+                  value: INFO
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  rdma/shared_ib: "8"
+                  memory: 512Gi
+                  ephemeral-storage: 80Gi
+                limits:
+                  nvidia.com/gpu: "8"
+                  rdma/shared_ib: "8"
+                  ephemeral-storage: 160Gi
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_RESOURCE]
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 180
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+---
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: model-routing-gateway
+  labels:
+    app.kubernetes.io/name: vllm-semantic-router
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  service:
+    spec:
+      type: ClusterIP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: model-routing-gateway
+  labels:
+    app.kubernetes.io/name: vllm-semantic-router
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  gatewayClassName: agentgateway
+  infrastructure:
+    parametersRef:
+      group: agentgateway.dev
+      kind: AgentgatewayParameters
+      name: model-routing-gateway
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: model-routing-small
+  labels:
+    app.kubernetes.io/name: vllm-semantic-router
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  parentRefs:
+    - name: model-routing-gateway
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+          headers:
+            - name: x-selected-model
+              type: Exact
+              value: Qwen/Qwen3.5-122B-A10B-FP8
+      backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: model-routing-small-pool
+          port: 8000
+      timeouts:
+        request: 600s
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: model-routing-large
+  labels:
+    app.kubernetes.io/name: vllm-semantic-router
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  parentRefs:
+    - name: model-routing-gateway
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+          headers:
+            - name: x-selected-model
+              type: Exact
+              value: nvidia/GLM-5.2-NVFP4
+      backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: model-routing-large-pool
+          port: 8000
+      timeouts:
+        request: 600s
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-routing-envoy
+  labels:
+    app.kubernetes.io/name: vllm-semantic-router
+    app.kubernetes.io/managed-by: dynamo-recipe
+data:
+  envoy.yaml: |
+    admin:
+      access_log_path: /dev/stdout
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
+    static_resources:
+      listeners:
+        - name: ingress
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 8080
+          per_connection_buffer_limit_bytes: 52428800
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: model_routing
+                    stream_idle_timeout: 600s
+                    route_config:
+                      name: upstream
+                      virtual_hosts:
+                        - name: gateway
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                prefix: /
+                              route:
+                                cluster: agentgateway
+                                timeout: 600s
+                    http_filters:
+                      - name: envoy.filters.http.lua
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                          inline_code: |
+                            function envoy_on_request(handle)
+                              handle:headers():remove("x-selected-model")
+                              handle:headers():remove("x-dynamo-client-protocol")
+                              handle:headers():remove("x-original-path")
+                              handle:headers():remove("x-forwarded-path")
+                            end
+                      - name: envoy.filters.http.ext_proc
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                          grpc_service:
+                            envoy_grpc:
+                              cluster_name: semantic-router
+                            timeout: 60s
+                          failure_mode_allow: false
+                          allow_mode_override: true
+                          message_timeout: 60s
+                          processing_mode:
+                            request_header_mode: SEND
+                            response_header_mode: SEND
+                            request_body_mode: BUFFERED
+                            response_body_mode: STREAMED
+                            request_trailer_mode: SKIP
+                            response_trailer_mode: SKIP
+                      # semantic-router normalizes Anthropic Messages bodies to OpenAI chat;
+                      # make the path agree before EPP parses and schedules the request.
+                      - name: envoy.filters.http.lua
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+                          inline_code: |
+                            function envoy_on_request(handle)
+                              local path = handle:headers():get(":path") or ""
+                              if string.sub(path, 1, 12) == "/v1/messages" then
+                                handle:headers():replace(":path", "/v1/chat/completions")
+                              end
+                            end
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+      clusters:
+        - name: agentgateway
+          connect_timeout: 5s
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          load_assignment:
+            cluster_name: agentgateway
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: model-routing-gateway
+                          port_value: 80
+        - name: semantic-router
+          connect_timeout: 5s
+          type: STRICT_DNS
+          dns_lookup_family: V4_ONLY
+          http2_protocol_options: {}
+          load_assignment:
+            cluster_name: semantic-router
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: semantic-router
+                          port_value: 50051
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-routing-envoy
+  labels:
+    app.kubernetes.io/name: vllm-semantic-router
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-routing-envoy
+  template:
+    metadata:
+      labels:
+        app: model-routing-envoy
+        app.kubernetes.io/name: vllm-semantic-router
+        app.kubernetes.io/managed-by: dynamo-recipe
+    spec:
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.36.4@sha256:ae31562b8cede20913a2d3d6a4f44c8479a50551e033cb8ef7bb8e38cec4b573
+          args: [-c, /etc/envoy/envoy.yaml, --log-level, info]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 9901
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: model-routing-envoy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-routing-envoy
+  labels:
+    app.kubernetes.io/name: vllm-semantic-router
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  type: ClusterIP
+  selector:
+    app: model-routing-envoy
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

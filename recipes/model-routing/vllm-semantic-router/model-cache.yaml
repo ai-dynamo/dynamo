@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-routing-cache
+  labels:
+    app.kubernetes.io/name: vllm-semantic-router
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm-semantic-router
+        app.kubernetes.io/managed-by: dynamo-recipe
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: downloader
+          image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              uvx --from 'huggingface_hub[hf_xet]' hf download nvidia/GLM-5.2-NVFP4
+              uvx --from 'huggingface_hub[hf_xet]' hf download Qwen/Qwen3.5-122B-A10B-FP8
+          env:
+            - name: HF_HOME
+              value: /opt/models
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: model-cache
+              mountPath: /opt/models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
