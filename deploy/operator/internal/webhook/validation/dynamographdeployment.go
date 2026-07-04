@@ -1074,24 +1074,11 @@ func betaComponentsByName(
 		return nil, fmt.Errorf("DynamoGraphDeployment is nil")
 	}
 	components := make(map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, len(dgd.Spec.Components))
-	lowerNames := make(map[string]string, len(dgd.Spec.Components))
-	var errs []error
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
-		name := component.ComponentName
-		if name == "" {
-			errs = append(errs, fmt.Errorf("spec.components[%d].name is required", i))
-			continue
-		}
-		lowerName := strings.ToLower(name)
-		if existingName, exists := lowerNames[lowerName]; exists {
-			errs = append(errs, fmt.Errorf("spec.components[%d].name %q duplicates component %q case-insensitively", i, name, existingName))
-			continue
-		}
-		lowerNames[lowerName] = name
-		components[name] = component
+		components[component.ComponentName] = component
 	}
-	return components, errors.Join(errs...)
+	return components, nil
 }
 
 func sortedBetaComponentNames(components map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) []string {
