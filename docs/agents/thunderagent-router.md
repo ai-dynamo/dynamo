@@ -128,7 +128,7 @@ For per-request tracing (token counts, cache hits, worker placement), the router
 
 ## Reproducing with upstream Harbor and Pi
 
-The maintained end-to-end path uses upstream Harbor to create SWE-bench containers and Pi with the Dynamo provider inside each container. The complete source build, ThunderAgent arm, stock KV arm, stable-session setup, and scaling procedure live next to the experimental component in [`components/src/dynamo/thunderagent_router/README.md`](/components/src/dynamo/thunderagent_router/README.md#harborpi-ab-walkthrough).
+The maintained end-to-end path uses upstream Harbor to create SWE-bench containers and Pi with the Dynamo provider inside each container. The complete source build, ThunderAgent arm, stock KV arm, stable-session setup, and scaling procedure live in the [`thunderagent_router` README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/thunderagent_router/README.md#harborpi-ab-walkthrough).
 
 ## References
 
