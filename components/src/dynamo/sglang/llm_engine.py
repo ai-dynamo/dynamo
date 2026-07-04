@@ -59,13 +59,13 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
+from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
     compute_bootstrap_address,
     get_sglang_worker_group_id,
     warmup_prefill_engine,
 )
-from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.capacity import (
     kv_metrics_block_values,

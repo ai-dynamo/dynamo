@@ -9,8 +9,8 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.sglang.args import Config
 from dynamo.sglang._compat import require_reasoning_kwargs
+from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
