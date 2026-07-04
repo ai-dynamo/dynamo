@@ -36,6 +36,17 @@ The HTTPRoutes map that header to model-specific `InferencePool` resources. A fu
 
 The semantic-router image used here adds `api_format: passthrough`. In that mode it preserves the original OpenAI or Anthropic body and response format and changes only `model`. The EPP uses GAIE's `passthrough-parser`; its Dynamo scorers use a minimal placeholder solely to resolve the required Dynamo worker IDs and do not inject placeholder tokens. The selected Dynamo Frontend parses and tokenizes the original request. This intentionally gives up prompt-aware EPP placement for opaque payloads.
 
+## Relationship to Dynamo Routing and Planning
+
+Model routing is independent from Dynamo's pool routing and capacity planning:
+
+- vLLM Semantic Router selects the concrete model before model-specific tokenization.
+- The `HTTPRoute` selects that model's `InferencePool`, and Dynamo EPP selects worker endpoints inside the pool.
+- GlobalRouter is optional when one concrete model spans multiple Dynamo pools. This recipe has one pool per model and does not deploy GlobalRouter.
+- GlobalPlanner reconciles pool capacity asynchronously. It does not select a model or participate in the request path.
+
+Keep these stages separate: model selection chooses capability, pool routing chooses placement for one model, and planning changes future capacity.
+
 ## Prerequisites
 
 - A Kubernetes cluster with three free 8x B200 nodes.

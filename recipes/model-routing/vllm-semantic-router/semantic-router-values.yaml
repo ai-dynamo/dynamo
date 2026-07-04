@@ -3,7 +3,7 @@
 image:
   repository: ishandhanani/vllm-semantic-router
   # Main plus api_format: passthrough for selection-only routing.
-  tag: dyn-3380-selection-only@sha256:2c79dcf541b7f677418fbc31a1bd770315e15a46a8ee683822e6881f65a01dac
+  tag: dyn-3380-selection-only@sha256:6061e137b42734c0117404c120359305e1bcbe08a16d87c9c079f7996ec1671a
   pullPolicy: IfNotPresent
 
 persistence:
