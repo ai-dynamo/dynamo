@@ -59,6 +59,22 @@ def test_list_checkpoint_devices_rejects_mismatched_checkpoints(
         loader._list_checkpoint_devices(str(tmp_path))
 
 
+def test_parser_accepts_gds_options_and_defaults_to_modelexpress():
+    defaults = loader._build_parser().parse_args([])
+    args = loader._build_parser().parse_args(
+        [
+            "--mx-gds-chunk-size-bytes",
+            "1048576",
+            "--mx-gds-max-inflight-batches",
+            "6",
+        ]
+    )
+
+    assert defaults.transfer_backend == "modelexpress"
+    assert args.mx_gds_chunk_size_bytes == 1048576
+    assert args.mx_gds_max_inflight_batches == 6
+
+
 def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
     calls = []
 
@@ -90,15 +106,19 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
         "/checkpoints/run/versions/1",
         3,
         16,
-        "nixl",
+        "modelexpress",
         [],
         2,
+        8 * 1024**2,
+        3,
     )
 
     assert calls[0] == ("set_device", 3)
     assert calls[1][0] == "init"
     assert calls[1][1]["socket_path"] == "/tmp/gms-3"
     assert calls[1][1]["device"] == 3
+    assert calls[1][1]["mx_gds_chunk_size_bytes"] == 8 * 1024**2
+    assert calls[1][1]["mx_gds_max_inflight_batches"] == 3
     assert calls[2] == (
         "load_to_gms",
         {

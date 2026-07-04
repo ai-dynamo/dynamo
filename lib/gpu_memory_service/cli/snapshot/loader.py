@@ -5,8 +5,8 @@
 
 Loads saved GMS state from a checkpoint directory into the running GMS
 servers. Devices are loaded in parallel to saturate PVC bandwidth. Runs as
-a regular sidecar; the GMS RO lock — not init-phase ordering — gates the
-restored engine on weight load.
+a regular sidecar; the GMS RO lock, not init-phase ordering, gates the restored
+engine on weight load.
 """
 
 from __future__ import annotations
@@ -38,6 +38,8 @@ def _load_device(
     transfer_backend: str,
     sharded_ssd_roots: list[str],
     sharded_ssd_queues_per_root: int,
+    mx_gds_chunk_size_bytes: int | None,
+    mx_gds_max_inflight_batches: int | None,
 ) -> None:
     input_dir = os.path.join(checkpoint_dir, f"device-{device}")
     logger.info(
@@ -48,10 +50,10 @@ def _load_device(
         max_workers,
     )
     t0 = time.monotonic()
-    # NIXL/POSIX staging setup may happen in background worker threads, but
-    # GMSStorageClient still publishes the restored layout from this thread.
-    # Ensure the loader's main per-device thread has a current CUDA context for
-    # the final synchronize/unmap/commit path.
+    # NIXL/POSIX or ModelExpress transfer setup may happen in background worker
+    # threads, but GMSStorageClient still publishes the restored layout from this
+    # thread. Ensure the loader's main per-device thread has a current CUDA
+    # context for the final synchronize/unmap/commit path.
     cuda_utils.cuda_runtime_set_device(device)
     client = GMSStorageClient(
         socket_path=get_socket_path(device),
@@ -59,6 +61,8 @@ def _load_device(
         transfer_backend=transfer_backend,
         sharded_ssd_roots=sharded_ssd_roots,
         sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
+        mx_gds_chunk_size_bytes=mx_gds_chunk_size_bytes,
+        mx_gds_max_inflight_batches=mx_gds_max_inflight_batches,
     )
     client.load_to_gms(
         input_dir,
@@ -91,8 +95,26 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--transfer-backend",
         choices=[backend.value for backend in TransferBackendKind],
-        default=TransferBackendKind.NIXL.value,
+        default=TransferBackendKind.MODELEXPRESS.value,
         help="Restore transfer backend.",
+    )
+    parser.add_argument(
+        "--mx-gds-chunk-size-bytes",
+        type=int,
+        default=None,
+        help=(
+            "Optional maximum GDS request chunk size. If unset, allocation "
+            "ranges are not split by ModelExpress."
+        ),
+    )
+    parser.add_argument(
+        "--mx-gds-max-inflight-batches",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of ModelExpress GDS shard-file transfers in flight. "
+            "If unset, --max-workers is used."
+        ),
     )
     parser.add_argument(
         "--sharded-ssd-roots",
@@ -179,6 +201,8 @@ def main(argv: list[str] | None = None) -> None:
                 transfer_backend,
                 sharded_ssd_roots,
                 sharded_ssd_queues_per_root,
+                args.mx_gds_chunk_size_bytes,
+                args.mx_gds_max_inflight_batches,
             ): dev
             for dev in devices
         }

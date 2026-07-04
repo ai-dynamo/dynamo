@@ -17,6 +17,7 @@ from gpu_memory_service.snapshot.model import AllocationEntry
 class TransferBackendKind(str, Enum):
     NIXL = "nixl"
     NIXL_GDS = "nixl-gds"
+    MODELEXPRESS = "modelexpress"
     SHARDED_SSD = "sharded-ssd"
 
     def __str__(self) -> str:
@@ -108,6 +109,13 @@ def create_transfer_backend(
 
         return NixlGDSTransferBackend(config=config)
 
+    if name == TransferBackendKind.MODELEXPRESS.value:
+        from gpu_memory_service.snapshot.backends.modelexpress import (
+            ModelExpressTransferBackend,
+        )
+
+        return ModelExpressTransferBackend(config=config)
+
     if name == TransferBackendKind.SHARDED_SSD.value:
         from gpu_memory_service.snapshot.backends.sharded_ssd import (
             ShardedSSDTransferBackend,
@@ -127,11 +135,23 @@ def validate_transfer_targets(
     *,
     device: Optional[int] = None,
 ) -> None:
+    source_allocation_ids: set[str] = set()
     for source in sources:
+        if source.allocation_id in source_allocation_ids:
+            raise RuntimeError(
+                "duplicate GMS transfer source allocation " f"{source.allocation_id}"
+            )
+        source_allocation_ids.add(source.allocation_id)
+
         target = targets.get(source.allocation_id)
         if target is None:
             raise RuntimeError(
                 f"Missing GMS transfer target for allocation {source.allocation_id}"
+            )
+        if target.allocation_id != source.allocation_id:
+            raise RuntimeError(
+                "GMS target allocation mismatch for allocation "
+                f"{source.allocation_id}: target={target.allocation_id}"
             )
         if target.byte_count != source.byte_count:
             raise RuntimeError(
@@ -143,6 +163,13 @@ def validate_transfer_targets(
                 f"GMS target device mismatch for allocation {source.allocation_id}: "
                 f"backend={device} target={target.device}"
             )
+
+    unknown_allocations = sorted(set(targets) - source_allocation_ids)
+    if unknown_allocations:
+        raise RuntimeError(
+            "GMS transfer targets contain unknown allocations: "
+            f"{unknown_allocations}"
+        )
 
 
 def group_sources_by_path(

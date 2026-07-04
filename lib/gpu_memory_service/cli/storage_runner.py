@@ -253,9 +253,10 @@ def _build_parser() -> argparse.ArgumentParser:
     load_p.add_argument(
         "--transfer-backend",
         choices=[backend.value for backend in TransferBackendKind],
-        default=TransferBackendKind.NIXL.value,
+        default=TransferBackendKind.MODELEXPRESS.value,
         help=(
             "Byte transfer backend for restore. "
+            "'modelexpress' uses the ModelExpress restore strategy chain; "
             "'nixl' uses NIXL POSIX with host staging; "
             "'nixl-gds' uses NIXL GDS_MT for direct file-to-GPU transfers; "
             "'sharded-ssd' shards reads across local SSD roots using the "

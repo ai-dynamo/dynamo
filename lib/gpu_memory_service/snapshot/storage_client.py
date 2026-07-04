@@ -46,16 +46,36 @@ class GMSStorageClient:
         *,
         timeout_ms: Optional[int] = None,
         shard_size_bytes: int = 4 * 1024**3,
-        transfer_backend: str = TransferBackendKind.NIXL.value,
+        transfer_backend: str = TransferBackendKind.MODELEXPRESS.value,
         sharded_ssd_roots: Optional[Sequence[str]] = None,
         sharded_ssd_queues_per_root: int = 2,
         posix_backend_params: Optional[Mapping[str, str]] = None,
+        mx_gds_chunk_size_bytes: Optional[int] = None,
+        mx_gds_max_inflight_batches: Optional[int] = None,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
         self._timeout_ms = timeout_ms
         self._shard_size = shard_size_bytes
         self._transfer_backend = transfer_backend
+        self._mx_gds_chunk_size_bytes = (
+            None if mx_gds_chunk_size_bytes is None else int(mx_gds_chunk_size_bytes)
+        )
+        if (
+            self._mx_gds_chunk_size_bytes is not None
+            and self._mx_gds_chunk_size_bytes <= 0
+        ):
+            raise ValueError("mx_gds_chunk_size_bytes must be positive when set")
+        self._mx_gds_max_inflight_batches = (
+            None
+            if mx_gds_max_inflight_batches is None
+            else int(mx_gds_max_inflight_batches)
+        )
+        if (
+            self._mx_gds_max_inflight_batches is not None
+            and self._mx_gds_max_inflight_batches <= 0
+        ):
+            raise ValueError("mx_gds_max_inflight_batches must be positive when set")
         self._sharded_ssd_roots = (
             None
             if sharded_ssd_roots is None
@@ -249,6 +269,8 @@ class GMSStorageClient:
                     "sharded_ssd_roots": self._sharded_ssd_roots,
                     "sharded_ssd_queues_per_root": self._sharded_ssd_queues_per_root,
                     "posix_backend_params": self._posix_backend_params,
+                    "mx_gds_chunk_size_bytes": self._mx_gds_chunk_size_bytes,
+                    "mx_gds_max_inflight_batches": self._mx_gds_max_inflight_batches,
                 },
             ),
         )
