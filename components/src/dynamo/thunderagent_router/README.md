@@ -125,22 +125,35 @@ uv sync
 
 These commands were validated with Harbor `0.16.0` and Pi `0.72.1`. Record the Dynamo, Harbor, and agent-plugins revisions with benchmark artifacts.
 
-### 2. Run the ThunderAgent smoke
+### 2. Launch ThunderAgent or stock KV
 
-The checked-in launcher starts both TP4 workers, ThunderAgent, and the frontend. It prints `ta stack ready` only after both workers register.
+Choose one arm. The launcher starts both TP4 workers and the matching router, then prints readiness after both workers and the public model register.
 
 ```bash
 cd ~/src/dynamo
 source .venv/bin/activate
-./components/src/dynamo/thunderagent_router/run_minimax_8xh100.sh ta
+
+# ThunderAgent
+export ARM=ta SESSION_FINAL=1
+
+# Stock KV instead
+# export ARM=kv SESSION_FINAL=0
+
+./components/src/dynamo/thunderagent_router/run_minimax_8xh100.sh "$ARM"
 ```
 
-In a second terminal, run one Verified task. Use a host address reachable from Docker rather than `127.0.0.1`.
+Stop the launcher with `Ctrl-C` before starting the other arm. Always use fresh server processes for each arm.
+
+### 3. Run one Verified task
+
+In a second terminal, set `ARM` and `SESSION_FINAL` to match the launched stack. Use a host address reachable from Docker rather than `127.0.0.1`.
 
 ```bash
 cd ~/src/harbor
 source .venv/bin/activate
 
+# Match the launched arm. Use ARM=kv SESSION_FINAL=0 for stock KV.
+export ARM=ta SESSION_FINAL=1
 export PI_PLUGIN_DIR=~/src/agent-plugins/pi-plugin
 export PYTHONPATH=$PI_PLUGIN_DIR
 export DYNAMO_BASE_URL=http://$(ip route get 1.1.1.1 | awk '{print $7; exit}'):8100/v1
@@ -150,49 +163,34 @@ harbor run \
   -d swebench-verified@1.0 -i astropy__astropy-12907 \
   -a harbor_dynamo_pi:DynamoPi -m dynamo/MiniMaxAI/MiniMax-M2 \
   --ak version=0.72.1 --ae "DYNAMO_BASE_URL=$DYNAMO_BASE_URL" \
+  --ae "DYN_AGENT_SESSION_FINAL=$SESSION_FINAL" \
   --mounts "[{\"type\":\"bind\",\"source\":\"$PI_PLUGIN_DIR\",\"target\":\"/opt/pi-dynamo-provider\",\"read_only\":true}]" \
   -n 1 --agent-setup-timeout-multiplier 10 \
-  --job-name ta-verified-one -y
+  --job-name "$ARM-verified-one" -y
 ```
 
 No pause/resume lines are expected from a one-task smoke; those only appear after the working set reaches the configured thresholds.
 
-### 3. Run the stock KV smoke
+### 4. Run the full Verified dataset
 
-Stop the ThunderAgent launcher with `Ctrl-C`, then start a fresh stock-KV stack:
-
-```bash
-cd ~/src/dynamo
-source .venv/bin/activate
-./components/src/dynamo/thunderagent_router/run_minimax_8xh100.sh kv
-```
-
-Rerun the Harbor command with these two changes:
+On a fresh host, first run the command below with `--install-only` and without `--no-delete --environment-kwarg keep_containers=true`. This pre-pulls the task images without issuing model requests; keep it outside the measured interval.
 
 ```bash
---ae DYN_AGENT_SESSION_FINAL=0 --job-name kv-verified-one
+harbor run \
+  -d swebench-verified@1.0 \
+  -a harbor_dynamo_pi:DynamoPi -m dynamo/MiniMaxAI/MiniMax-M2 \
+  --ak version=0.72.1 --ae "DYNAMO_BASE_URL=$DYNAMO_BASE_URL" \
+  --ae "DYN_AGENT_SESSION_FINAL=$SESSION_FINAL" \
+  --mounts "[{\"type\":\"bind\",\"source\":\"$PI_PLUGIN_DIR\",\"target\":\"/opt/pi-dynamo-provider\",\"read_only\":true}]" \
+  -n 256 --n-concurrent-agents 256 \
+  --agent-setup-timeout-multiplier 10 --memory ignore \
+  --no-delete --environment-kwarg keep_containers=true \
+  --job-name "$ARM-verified-full" -y
 ```
 
-Stable session headers remain enabled in the stock arm; they are identity metadata and do not enable ThunderAgent or sticky routing. Only the terminal lifecycle request is disabled.
+This runs every task in `swebench-verified@1.0` with verification enabled. Remove the stopped task containers, start the other arm from fresh processes, set its matching `ARM` and `SESSION_FINAL`, and rerun the same command.
 
-### 4. Scale the comparison
-
-After both smokes pass, use the same frozen task list and concurrency for both arms. For an exploratory run, replace `-i astropy__astropy-12907 -n 1` with `--n-tasks 32 -n 32 --n-concurrent-agents 32`. For a reported result, use repeated `-i <task-id>` arguments from a checked-in manifest because registry order is not a stable cohort.
-
-For high concurrency, also add `--no-delete --environment-kwarg keep_containers=true`; inspect and remove the stopped task containers between arms. Add `--disable-verification` only when measuring serving throughput rather than solve rate. Run each arm from fresh server processes.
-
-Start Tachometer before Harbor when server-side metrics are needed:
-
-```bash
-tachometer-scraper \
-  --endpoint frontend=http://127.0.0.1:8100/metrics \
-  --endpoint worker0=http://127.0.0.1:8181/metrics \
-  --endpoint worker1=http://127.0.0.1:8182/metrics \
-  --freq 1.0 \
-  --storage "$RUN_DIR/tachometer"
-```
-
-Add `--endpoint thunderagent=http://127.0.0.1:8183/metrics` for the ThunderAgent arm. Set `RUN_DIR` to the desired artifact directory before launching Tachometer.
+Stable session headers are sent in both arms. `SESSION_FINAL=0` only prevents the stock KV arm from receiving ThunderAgent's terminal lifecycle request.
 
 ## Citation
 
