@@ -57,6 +57,8 @@ docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runt
 
 ### 选项 B：从 PyPI 安装
 
+仅支持 vLLM 和 SGLang。TensorRT-LLM 请使用选项 A。
+
 ```bash
 # Install uv (recommended Python package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -78,18 +80,6 @@ uv pip install --prerelease=allow "ai-dynamo[sglang]"
 
 对于 CUDA 13（B300/GB300），推荐使用容器。详情请参阅
 [SGLang 安装文档](https://docs.sglang.io/get_started/install.html)。
-
-**TensorRT-LLM**
-
-```bash
-sudo apt install python3-dev
-pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
-```
-
-由于传递性 Git URL 依赖项 `uv` 无法解析，TensorRT-LLM 需要使用 `pip`。
-为获得更广泛的兼容性，我们建议使用 TensorRT-LLM 容器。
-详情请参阅 [TRT-LLM 后端指南](../backends/trtllm/README.md)。
 
 **vLLM**
 
@@ -209,7 +199,8 @@ curl localhost:8000/v1/chat/completions \
 
 **TensorRT-LLM 与 Python 3.11**
 
-TensorRT-LLM 不支持 Python 3.11。如果你在安装 TensorRT-LLM 时看到失败，请使用 `python3 --version` 检查 Python 版本。请改用 Python 3.10 或 3.12。
+TensorRT-LLM 仅支持容器路径。请使用 `tensorrtllm-runtime`
+容器（选项 A）。
 
 **容器运行但未检测到 GPU**
 
@@ -221,6 +212,24 @@ docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-ru
 
 # Wrong -- no GPU access
 docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+```
+
+**vLLM worker 启动失败：FlashInfer sampler 的 JIT 与 CUDA 13 wheels**
+
+在 CUDA 13 安装环境下运行 vLLM worker 时，worker 可能在启动阶段因 FlashInfer JIT 错误而中止：
+
+```text
+RuntimeError: Engine core initialization failed.
+...
+cuda/std/__cccl/cuda_toolkit.h:41: error: "CUDA compiler and CUDA toolkit headers are incompatible"
+```
+
+为 CUDA 13 安装解析出的 CUDA wheels 可能存在版本偏差：`torch` 将运行时头文件锁定到 13.0，而 vLLM 的 `tilelang` 依赖会拉取 `nvidia-cuda-nvcc` 13.2。FlashInfer 使用 `nvcc` 针对这些头文件编译其 sampler 内核，版本不匹配会导致构建失败。此问题在上游 [flashinfer#3493](https://github.com/flashinfer-ai/flashinfer/issues/3493) 中追踪。
+
+设置 `VLLM_USE_FLASHINFER_SAMPLER=0`，让 vLLM 回退到原生 sampler：
+
+```bash
+export VLLM_USE_FLASHINFER_SAMPLER=0
 ```
 
 ## 后续步骤

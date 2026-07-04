@@ -222,6 +222,15 @@ logging.basicConfig(
 
 def pytest_configure(config: pytest.Config) -> None:
     """Configure session: validate --models-dir and detect GPUs for --max-vram-gib."""
+    # Dual-register custom markers (also declared in pyproject
+    # [tool.pytest.ini_options].markers) so --strict-markers recognizes them
+    # regardless of config-load order. See .ai/pytest-guidelines.md.
+    config.addinivalue_line(
+        "markers",
+        "elastic_ep: marks vLLM elastic expert-parallelism (ePLB) scaling tests "
+        "(scale_elastic_ep over the Ray DP backend)",
+    )
+
     models_dir = config.getoption("--models-dir", default=None)
     if models_dir and not Path(models_dir).is_dir():
         pytest.exit(
