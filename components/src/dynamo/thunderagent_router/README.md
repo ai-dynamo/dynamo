@@ -98,7 +98,7 @@ agent.
 
 ## Harbor/Pi A/B walkthrough
 
-This walkthrough runs the same SWE-bench Verified task through ThunderAgent and the stock Dynamo KV router. Harbor owns the task container, Pi runs inside it, and the model stack runs on the host. The example uses one 8-GPU node and two TP4 vLLM workers loading `MiniMaxAI/MiniMax-M2.7` from Hugging Face and serving the API alias `MiniMaxAI/MiniMax-M2`. There is no HiCache, Mooncake, shared cache, or frontend admission control in either arm.
+This walkthrough runs the same SWE-bench Verified task through ThunderAgent and the stock Dynamo KV router. Harbor owns the task container, Pi runs inside it, and the model stack runs on the host. ThunderAgent is backend-agnostic and works with Dynamo's vLLM and SGLang backends; this example uses one 8-GPU node and two TP4 vLLM workers loading `MiniMaxAI/MiniMax-M2.7` from Hugging Face and serving the API alias `MiniMaxAI/MiniMax-M2`. There is no HiCache, Mooncake, shared cache, or frontend admission control in either arm.
 
 The [agent-plugins `DynamoPi` adapter](https://github.com/ai-dynamo/agent-plugins/blob/main/pi-plugin/harbor_dynamo_pi.py) is required. It installs the Dynamo provider in each Harbor task container and maps Harbor's per-trial ID to one stable `x-dynamo-session-id` across all Pi turns. The ThunderAgent arm also sends one terminal session request so the router can release the completed program; the stock KV arm disables that request because it has no lifecycle consumer.
 
@@ -120,7 +120,6 @@ uv venv --python 3.12 --seed .venv
 source .venv/bin/activate
 uv pip install pip 'maturin[patchelf]'
 (cd lib/bindings/python && maturin develop --uv)
-uv pip install -e lib/gpu_memory_service
 uv pip install -e '.[vllm]'
 
 cd ~/src/harbor
@@ -139,10 +138,10 @@ source .venv/bin/activate
 export HF_HOME=/home/nvidia/hf_cache
 
 # ThunderAgent
-export ARM=ta SESSION_FINAL=1
+export ARM=ta
 
 # Stock KV instead
-# export ARM=kv SESSION_FINAL=0
+# export ARM=kv
 
 ./components/src/dynamo/thunderagent_router/run_minimax_8xh100.sh "$ARM"
 ```
@@ -151,24 +150,25 @@ Stop the launcher with `Ctrl-C` before starting the other arm. Always use fresh 
 
 ### 3. Run one Verified task
 
-In a second terminal, set `ARM` and `SESSION_FINAL` to match the launched stack. Use a host address reachable from Docker rather than `127.0.0.1`.
+In a second terminal, set `ARM` to match the launched stack. The terminal-session flag is derived from it. Use a host address reachable from Docker rather than `127.0.0.1`.
 
 ```bash
 cd ~/src/harbor
 source .venv/bin/activate
 
-# Match the launched arm. Use ARM=kv SESSION_FINAL=0 for stock KV.
-export ARM=ta SESSION_FINAL=1
+# Match the launched arm. Use ARM=kv for stock KV.
+export ARM=ta
+export DYN_AGENT_SESSION_FINAL=$([[ "$ARM" == ta ]] && echo 1 || echo 0)
 export PI_PLUGIN_DIR=~/src/agent-plugins/pi-plugin
 export PYTHONPATH=$PI_PLUGIN_DIR
 export DYNAMO_BASE_URL=http://$(ip route get 1.1.1.1 | awk '{print $7; exit}'):8100/v1
-docker run --rm curlimages/curl:8.11.1 -fsS "$DYNAMO_BASE_URL/models"
+curl -fsS "$DYNAMO_BASE_URL/models"
 
 harbor run \
   -d swebench-verified@1.0 -i astropy__astropy-12907 \
   -a harbor_dynamo_pi:DynamoPi -m dynamo/MiniMaxAI/MiniMax-M2 \
   --ak version=0.72.1 --ae "DYNAMO_BASE_URL=$DYNAMO_BASE_URL" \
-  --ae "DYN_AGENT_SESSION_FINAL=$SESSION_FINAL" \
+  --ae "DYN_AGENT_SESSION_FINAL=$DYN_AGENT_SESSION_FINAL" \
   --mounts "[{\"type\":\"bind\",\"source\":\"$PI_PLUGIN_DIR\",\"target\":\"/opt/pi-dynamo-provider\",\"read_only\":true}]" \
   -n 1 --agent-setup-timeout-multiplier 10 \
   --job-name "$ARM-verified-one" -y
@@ -202,7 +202,7 @@ harbor run \
   -d swebench-verified@1.0 \
   -a harbor_dynamo_pi:DynamoPi -m dynamo/MiniMaxAI/MiniMax-M2 \
   --ak version=0.72.1 --ae "DYNAMO_BASE_URL=$DYNAMO_BASE_URL" \
-  --ae "DYN_AGENT_SESSION_FINAL=$SESSION_FINAL" \
+  --ae "DYN_AGENT_SESSION_FINAL=$DYN_AGENT_SESSION_FINAL" \
   --mounts "[{\"type\":\"bind\",\"source\":\"$PI_PLUGIN_DIR\",\"target\":\"/opt/pi-dynamo-provider\",\"read_only\":true}]" \
   --extra-docker-compose ~/src/dynamo/components/src/dynamo/thunderagent_router/harbor-host-network.yml \
   -n 256 --n-concurrent-agents 256 \
@@ -211,9 +211,9 @@ harbor run \
   --job-name "$ARM-verified-full" -y
 ```
 
-This runs every task in `swebench-verified@1.0` with verification enabled. Remove the stopped task containers, start the other arm from fresh processes, set its matching `ARM` and `SESSION_FINAL`, and rerun the same command.
+This runs every task in `swebench-verified@1.0` with verification enabled. Remove the stopped task containers, start the other arm from fresh processes, set its matching `ARM`, and rerun the same command.
 
-Stable session headers are sent in both arms. `SESSION_FINAL=0` only prevents the stock KV arm from receiving ThunderAgent's terminal lifecycle request.
+Stable session headers are sent in both arms. The derived `DYN_AGENT_SESSION_FINAL=0` only prevents the stock KV arm from receiving ThunderAgent's terminal lifecycle request.
 
 ## Citation
 
