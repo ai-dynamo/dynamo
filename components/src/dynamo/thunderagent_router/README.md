@@ -104,7 +104,7 @@ The [agent-plugins `DynamoPi` adapter](https://github.com/ai-dynamo/agent-plugin
 
 ### 1. Install the three source trees
 
-Use Python 3.12 and a machine with Docker, Node.js, and eight visible GPUs. Build Dynamo from the branch under test rather than installing a released wheel.
+Use Python 3.12 and a machine with Docker and eight visible GPUs. Build Dynamo from the branch under test rather than installing a released wheel. Pi and its Node.js runtime are installed inside each Harbor task container.
 
 ```bash
 git clone https://github.com/ai-dynamo/dynamo ~/src/dynamo
@@ -178,7 +178,7 @@ No pause/resume lines are expected from a one-task smoke; those only appear afte
 
 ### 4. Run the full Verified dataset
 
-On a fresh host, first run the command below with `--install-only` and without `--no-delete --environment-kwarg keep_containers=true`. This pre-pulls the task images without issuing model requests; keep it outside the measured interval.
+On a fresh host, first run the command below with `--install-only`, change both concurrency values from `256` to `32`, and omit `--no-delete --environment-kwarg keep_containers=true`. This pre-pulls the task images without issuing model requests; keep it outside the measured interval. The lower install concurrency avoids overwhelming Docker during simultaneous container teardown. The host-network overlay avoids creating one Docker bridge network per trial, which exhausts Docker's default address pools during the measured run.
 
 ```bash
 harbor run \
@@ -187,6 +187,7 @@ harbor run \
   --ak version=0.72.1 --ae "DYNAMO_BASE_URL=$DYNAMO_BASE_URL" \
   --ae "DYN_AGENT_SESSION_FINAL=$SESSION_FINAL" \
   --mounts "[{\"type\":\"bind\",\"source\":\"$PI_PLUGIN_DIR\",\"target\":\"/opt/pi-dynamo-provider\",\"read_only\":true}]" \
+  --extra-docker-compose ~/src/dynamo/components/src/dynamo/thunderagent_router/harbor-host-network.yml \
   -n 256 --n-concurrent-agents 256 \
   --agent-setup-timeout-multiplier 10 --memory ignore \
   --no-delete --environment-kwarg keep_containers=true \

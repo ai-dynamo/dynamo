@@ -1,0 +1,3 @@
+services:
+  main:
+    network_mode: host
