@@ -25,3 +25,5 @@
 # Unreliable from GitHub runners; these pages remain browser-accessible.
 ^https://cert-manager\.io/docs/?$
 ^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/
+^https://helm\.sh/docs/intro/install/?$
+^https://book\.kubebuilder\.io/cronjob-tutorial/webhook-implementation\.html$
