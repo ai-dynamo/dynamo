@@ -30,6 +30,7 @@ from dynamo.frontend.sglang_prepost import (
     _normalize_prompt_token_ids,
     _normalize_sglang_parser_name,
     _parse_json_array_buffer,
+    build_response_format_guided_decoding,
     build_tool_call_guided_decoding,
     convert_tools,
     create_parsers,
@@ -41,6 +42,7 @@ from dynamo.frontend.sglang_processor import (
     SglangProcessor,
     _build_dynamo_preproc,
     _init_worker,
+    _load_chat_template,
     _map_finish_reason,
     _normalize_eos_token_ids,
     _runtime_config_parser_name,
@@ -716,6 +718,90 @@ def test_minimax_m3_reasoning_effort_none_keeps_explicit_thinking_mode(monkeypat
     assert result.reasoning_parser.force_reasoning is True
 
 
+class TestBuildResponseFormatGuidedDecoding:
+    def test_json_schema_builds_guided_decoding(self):
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "city_result",
+                "schema": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }
+
+        guided = build_response_format_guided_decoding(
+            {"model": "test", "response_format": response_format}
+        )
+
+        assert guided == {
+            "json": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            }
+        }
+
+    def test_top_level_schema_builds_guided_decoding(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "strict": {"type": "boolean", "default": True},
+            },
+            "required": ["city"],
+        }
+
+        guided = build_response_format_guided_decoding(
+            {
+                "model": "test",
+                "response_format": {"type": "json_schema", "schema": schema},
+            }
+        )
+
+        assert guided == {
+            "json": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            }
+        }
+        assert "strict" in schema["properties"]
+
+    def test_json_schema_requires_schema(self):
+        with pytest.raises(
+            PreprocessError,
+            match="schema is required for json_schema response format request",
+        ):
+            build_response_format_guided_decoding(
+                {"model": "test", "response_format": {"type": "json_schema"}}
+            )
+
+    def test_json_object_builds_guided_decoding(self):
+        assert build_response_format_guided_decoding(
+            {"model": "test", "response_format": {"type": "json_object"}}
+        ) == {"json": {"type": "object"}}
+
+    def test_structural_tag_builds_guided_decoding(self):
+        response_format = {
+            "type": "structural_tag",
+            "structures": [
+                {
+                    "begin": "<json>",
+                    "schema": {"type": "object"},
+                    "end": "</json>",
+                }
+            ],
+            "triggers": ["<json>"],
+        }
+
+        assert build_response_format_guided_decoding(
+            {"model": "test", "response_format": response_format}
+        ) == {"structural_tag": response_format}
+
+
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
     def test_none_when_no_tools(self):
         assert (
@@ -1314,6 +1400,39 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert len(with_tools.prompt_token_ids) > len(without_tools.prompt_token_ids)
         assert with_tools.tool_call_parser is not None
 
+    def test_response_format_takes_precedence_over_tool_guidance(
+        self, tokenizer, caplog
+    ):
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": {"type": "json_object"},
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert (
+            "Tool-call guided decoding will be ignored because of response_format already exists."
+            in caplog.text
+        )
+
     def test_assistant_tool_calls_with_string_arguments(self, tokenizer):
         """Multi-turn with prior assistant tool_calls renders without raising.
 
@@ -1519,6 +1638,48 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
                 reasoning_parser_name=None,
             )
 
+    def test_chat_template_override_helpers(self, tmp_path):
+        """Chat template overrides can be supplied as a Jinja file path."""
+        template_file = tmp_path / "template.jinja"
+        template_file.write_text("custom template\\n\n", encoding="utf-8")
+
+        template = _load_chat_template(str(template_file))
+
+        assert template == "custom template\n"
+
+    def test_chat_template_override_expands_path(self, tmp_path, monkeypatch):
+        """Chat template file paths expand environment variables and home dirs."""
+        template_file = tmp_path / "template.jinja"
+        template_file.write_text("custom template", encoding="utf-8")
+
+        monkeypatch.setenv("CHAT_TEMPLATE_DIR", str(tmp_path))
+        assert _load_chat_template("$CHAT_TEMPLATE_DIR/template.jinja") == (
+            "custom template"
+        )
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _load_chat_template("~/template.jinja") == "custom template"
+
+    def test_chat_template_override_rejects_missing_path(self, tmp_path):
+        """Missing path-like chat templates fail at startup."""
+        missing_template = tmp_path / "missing.jinja"
+
+        with pytest.raises(FileNotFoundError, match="Chat template file not found"):
+            _load_chat_template(str(missing_template))
+
+    def test_chat_template_override_rejects_builtin_template_name(self):
+        """SGLang built-in template names are not supported in this path."""
+        with pytest.raises(ValueError, match="built-in chat template names"):
+            _load_chat_template("llama-2")
+
+    def test_chat_template_override_rejects_non_jinja_file(self, tmp_path):
+        """SGLang JSON template files are not supported in this path."""
+        template_file = tmp_path / "template.json"
+        template_file.write_text("{}", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="supports only .jinja"):
+            _load_chat_template(str(template_file))
+
     def test_init_worker_propagates_exclude_flag_true(self):
         """_init_worker sets the worker-global exclude_tools flag to True."""
         _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=True)
@@ -1530,6 +1691,27 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert sglang_processor_module._w_exclude_tools_when_tool_choice_none is False
         # Reset to default
         sglang_processor_module._w_exclude_tools_when_tool_choice_none = True
+
+    def test_init_worker_applies_chat_template_override(self, monkeypatch):
+        """Preprocess workers use the same chat template override as the main process."""
+
+        class FakeTokenizer:
+            chat_template = "original"
+
+        monkeypatch.setattr(
+            sglang_processor_module,
+            "get_tokenizer",
+            lambda model_path, trust_remote_code=False: FakeTokenizer(),
+        )
+
+        _init_worker(
+            MODEL,
+            None,
+            None,
+            exclude_tools_when_tool_choice_none=True,
+            chat_template="custom template",
+        )
+        assert sglang_processor_module._w_tokenizer.chat_template == "custom template"
 
     def test_with_reasoning_parser(self, tokenizer):
         """Reasoning parser is attached to result."""

@@ -41,8 +41,15 @@ spec:
         resourceClaims:
           - name: gpu
             resourceClaimTemplateName: gpu-template
+        # NOTE: Uncomment if your environment requires specific group access
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44   # render group
+        #     - 991  # video group
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
           resources:
             claims:
               - name: gpu
@@ -59,6 +66,8 @@ spec:
             - Qwen/Qwen3-0.6B
             - --disaggregation-mode
             - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"xpu"}'
             - --block-size
             - "64"
     VllmPrefillWorker:
@@ -75,8 +84,15 @@ spec:
         resourceClaims:
           - name: gpu
             resourceClaimTemplateName: gpu-template
+        # NOTE: Uncomment if your environment requires specific group access
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44   # render group
+        #     - 991  # video group
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
           resources:
             claims:
               - name: gpu

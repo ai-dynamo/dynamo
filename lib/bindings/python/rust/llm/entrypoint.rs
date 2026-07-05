@@ -428,7 +428,6 @@ pub struct RouterConfig {
     active_prefill_tokens_threshold: Option<u64>,
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
-    enforce_disagg: bool,
     session_affinity_ttl_secs: Option<u64>,
 }
 
@@ -445,6 +444,14 @@ impl RouterConfig {
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
     ) -> PyResult<Self> {
+        if enforce_disagg {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "enforce_disagg is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+                );
+            });
+        }
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
@@ -456,7 +463,6 @@ impl RouterConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-            enforce_disagg,
             session_affinity_ttl_secs,
         })
     }
@@ -472,7 +478,7 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
-            enforce_disagg: rc.enforce_disagg,
+            enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
         }
     }

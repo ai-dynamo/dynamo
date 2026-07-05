@@ -140,7 +140,6 @@ pub struct PrefillRouter {
     endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
-    enforce_disagg: bool,
     session_affinity_ttl: Option<std::time::Duration>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name (used for logging / lifecycle messages).
@@ -182,13 +181,10 @@ impl
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // If prefill router is not activated (no prefill workers discovered) or has been
-        // deactivated (all prefill workers died), this is aggregated mode -- route directly
-        // to decode. With --enforce-disagg, fail instead of falling back.
+        // If the prefill router is not activated (no prefill workers discovered) or has been
+        // deactivated (all prefill workers died), route directly to the backend. Model admission
+        // remains gated by the registered worker topology before the request reaches this stage.
         if self.lifecycle_state() != PrefillLifecycleState::Active {
-            if self.enforce_disagg {
-                return Err(anyhow::anyhow!(PrefillError::NotActivated));
-            }
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -343,10 +339,6 @@ impl
 }
 
 impl PrefillRouter {
-    pub fn enforce_disagg(&self) -> bool {
-        self.enforce_disagg
-    }
-
     fn prepare_prefill_dispatch(
         &self,
         request: &mut PreprocessedRequest,
@@ -565,61 +557,44 @@ mod tests {
         }
     }
 
-    fn make_test_router(enforce_disagg: bool) -> Arc<PrefillRouter> {
+    fn make_test_router() -> Arc<PrefillRouter> {
         PrefillRouter::disabled(
             Arc::new(crate::discovery::ModelManager::new()),
             RouterMode::RoundRobin,
-            enforce_disagg,
             None,
         )
     }
 
     #[test]
-    fn pending_state_uses_aggregated_fallback_only_when_allowed() {
-        let strict = make_test_router(true);
-        let fallback = make_test_router(false);
-
-        for router in [&strict, &fallback] {
-            assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Pending);
-            assert!(!router.is_activated());
-            assert!(!router.is_deactivated());
-        }
-        assert!(!strict.can_serve_requests());
-        assert!(fallback.can_serve_requests());
+    fn pending_state_is_tracked() {
+        let router = make_test_router();
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Pending);
+        assert!(!router.is_activated());
+        assert!(!router.is_deactivated());
     }
 
     #[test]
-    fn active_state_serves_strict_and_fallback_routers() {
-        for enforce_disagg in [true, false] {
-            let router = make_test_router(enforce_disagg);
-            router.mark_active_for_test();
+    fn active_state_is_tracked() {
+        let router = make_test_router();
+        router.mark_active_for_test();
 
-            assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Active);
-            assert!(!router.is_deactivated());
-            assert!(router.can_serve_requests());
-        }
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Active);
+        assert!(!router.is_deactivated());
     }
 
     #[test]
-    fn unavailable_state_blocks_strict_and_allows_aggregated_fallback() {
-        let strict = make_test_router(true);
-        let fallback = make_test_router(false);
-        strict.mark_active_for_test();
-        fallback.mark_active_for_test();
-        strict.deactivate();
-        fallback.deactivate();
+    fn unavailable_state_is_tracked() {
+        let router = make_test_router();
+        router.mark_active_for_test();
+        router.deactivate();
 
-        for router in [&strict, &fallback] {
-            assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
-            assert!(router.is_deactivated());
-        }
-        assert!(!strict.can_serve_requests());
-        assert!(fallback.can_serve_requests());
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
+        assert!(router.is_deactivated());
     }
 
     #[test]
     fn deactivation_is_idempotent() {
-        let router = make_test_router(true);
+        let router = make_test_router();
         router.mark_active_for_test();
         router.deactivate();
         router.deactivate();
@@ -628,7 +603,7 @@ mod tests {
 
     #[test]
     fn pending_router_latches_worker_availability_transitions() {
-        let router = make_test_router(true);
+        let router = make_test_router();
         router.deactivate();
         assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
 
@@ -640,7 +615,7 @@ mod tests {
 
     #[test]
     fn activation_does_not_overwrite_latched_deactivation() {
-        let router = make_test_router(true);
+        let router = make_test_router();
         router.deactivate();
 
         assert_eq!(
