@@ -100,7 +100,7 @@ agent.
 
 This walkthrough runs the same SWE-bench Verified task through ThunderAgent and the stock Dynamo KV router. Harbor owns the task container, Pi runs inside it, and the model stack runs on the host. ThunderAgent is backend-agnostic and works with Dynamo's vLLM and SGLang backends; this example uses one 8-GPU node and two TP4 vLLM workers loading `MiniMaxAI/MiniMax-M2.7` from Hugging Face and serving the API alias `MiniMaxAI/MiniMax-M2`. There is no HiCache, Mooncake, shared cache, or frontend admission control in either arm.
 
-The [agent-plugins `DynamoPi` adapter](https://github.com/ai-dynamo/agent-plugins/blob/main/pi-plugin/harbor_dynamo_pi.py) is required. It installs the Dynamo provider in each Harbor task container and maps Harbor's per-trial ID to one stable `x-dynamo-session-id` across all Pi turns. The ThunderAgent arm also sends one terminal session request so the router can release the completed program; the stock KV arm disables that request because it has no lifecycle consumer.
+The [agent-plugins `DynamoPi` adapter](https://github.com/ai-dynamo/agent-plugins/blob/main/pi-plugin/harbor/dynamo_pi.py) is required. It installs the Dynamo provider in each Harbor task container and maps Harbor's per-trial ID to one stable `x-dynamo-session-id` across all Pi turns. The ThunderAgent arm also sends one terminal session request so the router can release the completed program; the stock KV arm disables that request because it has no lifecycle consumer.
 
 ### 1. Install the three source trees
 
@@ -111,7 +111,7 @@ git clone https://github.com/ai-dynamo/dynamo ~/src/dynamo
 
 git clone --branch v0.16.0 --depth 1 https://github.com/harbor-framework/harbor ~/src/harbor
 git clone https://github.com/ai-dynamo/agent-plugins ~/src/agent-plugins
-git -C ~/src/agent-plugins checkout cd0434136a92522532ee3ae5bf61078f47e6761a
+git -C ~/src/agent-plugins checkout 223a0b8823610d042e7479bfff9b93eeac4a23ec
 
 cd ~/src/dynamo
 uv venv --python 3.12 --seed .venv
@@ -163,13 +163,13 @@ export DYN_AGENT_SESSION_FINAL=1
 # export DYN_AGENT_SESSION_FINAL=0
 
 export PI_PLUGIN_DIR=~/src/agent-plugins/pi-plugin
-export PYTHONPATH=$PI_PLUGIN_DIR
+export PYTHONPATH=$PI_PLUGIN_DIR/harbor
 export DYNAMO_BASE_URL=http://$(ip route get 1.1.1.1 | awk '{print $7; exit}'):8100/v1
 curl -fsS "$DYNAMO_BASE_URL/models"
 
 harbor run \
   -d swebench-verified@1.0 -i astropy__astropy-12907 \
-  -a harbor_dynamo_pi:DynamoPi -m dynamo/MiniMaxAI/MiniMax-M2 \
+  -a dynamo_pi:DynamoPi -m dynamo/MiniMaxAI/MiniMax-M2 \
   --ak version=0.72.1 --ae "DYNAMO_BASE_URL=$DYNAMO_BASE_URL" \
   --ae "DYN_AGENT_SESSION_FINAL=$DYN_AGENT_SESSION_FINAL" \
   --mounts "[{\"type\":\"bind\",\"source\":\"$PI_PLUGIN_DIR\",\"target\":\"/opt/pi-dynamo-provider\",\"read_only\":true}]" \
@@ -189,7 +189,7 @@ docker login
 harbor run \
   -d swebench-verified@1.0 \
   -a nop \
-  --extra-docker-compose ~/src/agent-plugins/pi-plugin/harbor-host-network.yml \
+  --extra-docker-compose ~/src/agent-plugins/pi-plugin/harbor/host-network.yml \
   -n 32 --n-concurrent-agents 32 \
   --memory ignore \
   --no-delete --environment-kwarg keep_containers=true \
@@ -203,11 +203,11 @@ The host-network overlay avoids creating one Docker bridge network per trial, wh
 ```bash
 harbor run \
   -d swebench-verified@1.0 \
-  -a harbor_dynamo_pi:DynamoPi -m dynamo/MiniMaxAI/MiniMax-M2 \
+  -a dynamo_pi:DynamoPi -m dynamo/MiniMaxAI/MiniMax-M2 \
   --ak version=0.72.1 --ae "DYNAMO_BASE_URL=$DYNAMO_BASE_URL" \
   --ae "DYN_AGENT_SESSION_FINAL=$DYN_AGENT_SESSION_FINAL" \
   --mounts "[{\"type\":\"bind\",\"source\":\"$PI_PLUGIN_DIR\",\"target\":\"/opt/pi-dynamo-provider\",\"read_only\":true}]" \
-  --extra-docker-compose ~/src/agent-plugins/pi-plugin/harbor-host-network.yml \
+  --extra-docker-compose ~/src/agent-plugins/pi-plugin/harbor/host-network.yml \
   -n 256 --n-concurrent-agents 256 \
   --agent-setup-timeout-multiplier 10 --memory ignore \
   --no-delete --environment-kwarg keep_containers=true \
