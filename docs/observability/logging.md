@@ -384,10 +384,10 @@ Payload-related request trace variables:
 | `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. Oversized payload rows emit a marker with `payload_complete=false` and `payload_drop_reason`. | `4194304` (4 MiB) |
 
 > [!WARNING]
-> Deprecated. Legacy `DYN_AUDIT_*` variables remain accepted as request trace
-> aliases. Prefer the `DYN_REQUEST_TRACE_*` variables for new deployments. See
-> [Compatibility and Deprecated Aliases](request-tracing.md#compatibility-and-deprecated-aliases)
-> for precedence and fallback behavior.
+> Deprecated. `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`,
+> `DYN_AUDIT_NATS_SUBJECT`, and `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` remain
+> accepted as aliases. Prefer the `DYN_REQUEST_TRACE_*` variables for new
+> deployments.
 
 The `otel` destination ships over OTLP using the standard
 `OTEL_EXPORTER_OTLP_*` variables, resolved the same way as the runtime log and

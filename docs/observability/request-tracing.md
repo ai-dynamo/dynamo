@@ -53,68 +53,16 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | ZMQ bind address | Optional ZMQ PULL bind address for harness tool events. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame ZMQ topic filter when endpoint is configured. |
 
-## Compatibility and Deprecated Aliases
-
 > [!WARNING]
-> Deprecated. The aliases in this section remain accepted for compatibility.
-> Prefer canonical `DYN_REQUEST_TRACE_*` variables for new deployments.
-
-Deprecated request trace and audit variables remain accepted as fallbacks. New
-request trace variables take precedence over request trace aliases, and request
-trace aliases take precedence over audit aliases.
-
-Destination selection resolves in this order:
-
-1. `DYN_REQUEST_TRACE_DESTINATIONS`
-2. `DYN_REQUEST_TRACE_SINKS`
-3. `DYN_AUDIT_SINKS`
-4. `file` when request trace is enabled and no destination variable is set
-
-`DYN_AUDIT_SINKS` also enables request trace compatibility when
-`DYN_REQUEST_TRACE` is unset. Other deprecated aliases configure an enabled
-request trace, but do not enable request trace by themselves.
-
-### Changed Request Trace Variables
-
-| Previous variable | Canonical variable | Still respected? | Notes |
-| --- | --- | --- | --- |
-| `DYN_REQUEST_TRACE_SINKS` | `DYN_REQUEST_TRACE_DESTINATIONS` | Yes, when `DYN_REQUEST_TRACE_DESTINATIONS` is unset. | Prefer `file`, `stderr`, `nats`, or `otel`. Legacy `jsonl` maps to `file` with `DYN_REQUEST_TRACE_FILE_COMPRESSION=none`; `jsonl_gz` maps to `file` with `DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip`. |
-| `DYN_REQUEST_TRACE_OUTPUT_PATH` | `DYN_REQUEST_TRACE_FILE_PATH` | Yes, when `DYN_REQUEST_TRACE_FILE_PATH` is unset. | Used only when the `file` destination is configured. |
-| `DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES` | `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES` | Yes, when `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES` is unset. | Applies to `file` destination buffering. |
-| `DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS` | `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` | Yes, when `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` is unset. | Applies to `file` destination flushing. |
-| `DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES` | `DYN_REQUEST_TRACE_FILE_ROLL_BYTES` | Yes, when `DYN_REQUEST_TRACE_FILE_ROLL_BYTES` is unset. | Applies when `DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip`. |
-| `DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES` | `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | Yes, when `DYN_REQUEST_TRACE_FILE_ROLL_LINES` is unset. | Applies when `DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip`. |
-
-### Added Request Trace Variables
-
-| Variable | Values | Purpose | Fallback behavior |
-| --- | --- | --- | --- |
-| `DYN_REQUEST_TRACE_DESTINATIONS` | `file`, `stderr`, `nats`, `otel` | Selects record destinations. | Falls back to `DYN_REQUEST_TRACE_SINKS`, then `DYN_AUDIT_SINKS`, then `file` when request trace is enabled. |
-| `DYN_REQUEST_TRACE_FILE_PATH` | File path or segment prefix | Configures the `file` destination path. | Falls back to `DYN_REQUEST_TRACE_OUTPUT_PATH`, then `DYN_AUDIT_OUTPUT_PATH`, then `/tmp/dynamo-request-trace` when the `file` destination is enabled. |
-| `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl` | Selects the file record format. | Defaults to `jsonl`; unknown values warn and use `jsonl`. |
-| `DYN_REQUEST_TRACE_FILE_COMPRESSION` | `gzip`, `gz`, `jsonl_gz`, `none`, `off`, `false` | Selects file compression. | Falls back to compression inferred from legacy `jsonl` or `jsonl_gz` destination values, then `gzip`. |
-| `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES` | Integer bytes | Sets file destination buffer size. | Falls back to `DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES`, then `DYN_AUDIT_JSONL_BUFFER_BYTES`, then `1048576`. |
-| `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` | Integer milliseconds | Sets file destination flush interval. | Falls back to `DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS`, then `DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS`, then `1000`. |
-| `DYN_REQUEST_TRACE_FILE_ROLL_BYTES` | Positive integer bytes | Sets gzip roll threshold in uncompressed bytes. | Falls back to `DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES`, then `DYN_AUDIT_JSONL_GZ_ROLL_BYTES`, then `268435456`. |
-| `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | Positive integer records | Sets optional gzip roll threshold in records. | Falls back to `DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES`, then `DYN_AUDIT_JSONL_GZ_ROLL_LINES`; unset means no line-count roll threshold. |
-| `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE` | `true`, `false` | Emits `request_payload` rows with request and response bodies for eligible chat requests. | Falls back to `DYN_AUDIT_FORCE_LOGGING`, then `false`. When `false`, no payload rows are emitted, even if `store=true`. |
-| `DYN_REQUEST_TRACE_NATS_SUBJECT` | NATS subject | Sets the `nats` destination subject. | Falls back to `DYN_AUDIT_NATS_SUBJECT`, then `dynamo.request_trace.v1`. |
-| `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Positive integer bytes | Sets the max serialized OTEL payload attribute size. | Falls back to `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES`, then `4194304`. |
-
-### Deprecated Audit Aliases
-
-| Deprecated variable | Canonical variable | Still respected? | Notes |
-| --- | --- | --- | --- |
-| `DYN_AUDIT_SINKS` | `DYN_REQUEST_TRACE_DESTINATIONS` | Yes, when neither `DYN_REQUEST_TRACE_DESTINATIONS` nor `DYN_REQUEST_TRACE_SINKS` is set. | Also enables request trace compatibility when `DYN_REQUEST_TRACE` is unset. Legacy `jsonl` and `jsonl_gz` map to the `file` destination and set compression as described above. |
-| `DYN_AUDIT_FORCE_LOGGING` | `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE` | Yes, when `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE` is unset. | Preserves the legacy opt-in payload logging behavior under the new request trace record schema. |
-| `DYN_AUDIT_CAPACITY` | `DYN_REQUEST_TRACE_CAPACITY` | Yes, when `DYN_REQUEST_TRACE_CAPACITY` is unset. | Configures request trace bus capacity. |
-| `DYN_AUDIT_NATS_SUBJECT` | `DYN_REQUEST_TRACE_NATS_SUBJECT` | Yes, when `DYN_REQUEST_TRACE_NATS_SUBJECT` is unset. | Configures the `nats` destination subject. |
-| `DYN_AUDIT_OUTPUT_PATH` | `DYN_REQUEST_TRACE_FILE_PATH` | Yes, when `DYN_REQUEST_TRACE_FILE_PATH` and `DYN_REQUEST_TRACE_OUTPUT_PATH` are unset. | Used only for the `file` destination. |
-| `DYN_AUDIT_JSONL_BUFFER_BYTES` | `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES` | Yes, when request trace buffer env vars are unset. | Configures file destination buffering. |
-| `DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS` | `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` | Yes, when request trace flush env vars are unset. | Configures file destination flushing. |
-| `DYN_AUDIT_JSONL_GZ_ROLL_BYTES` | `DYN_REQUEST_TRACE_FILE_ROLL_BYTES` | Yes, when request trace roll-byte env vars are unset. | Applies when file compression is `gzip`. |
-| `DYN_AUDIT_JSONL_GZ_ROLL_LINES` | `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | Yes, when request trace roll-line env vars are unset. | Applies when file compression is `gzip`. |
-| `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` | `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Yes, when `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` is unset. | Configures the `otel` destination payload size guard. |
+> Deprecated. `DYN_REQUEST_TRACE_SINKS`, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
+> `DYN_REQUEST_TRACE_JSONL_*` aliases remain accepted for compatibility. Legacy
+> `DYN_REQUEST_TRACE_SINKS=jsonl` maps to `DYN_REQUEST_TRACE_DESTINATIONS=file`
+> with `DYN_REQUEST_TRACE_FILE_COMPRESSION=none`; `jsonl_gz` maps to `file` with
+> `DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip`. The legacy audit variables
+> `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`, `DYN_AUDIT_OUTPUT_PATH`,
+> `DYN_AUDIT_NATS_SUBJECT`, `DYN_AUDIT_JSONL_*`, and
+> `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are also accepted as aliases for the
+> corresponding request trace settings.
 
 Set the ZMQ endpoint on the process that should own tool-event ingress, usually
 the frontend process. If the same bind address is exported to multiple Dynamo
