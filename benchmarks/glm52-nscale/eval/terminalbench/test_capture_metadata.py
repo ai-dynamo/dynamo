@@ -199,29 +199,47 @@ class CaptureMetadataTests(unittest.TestCase):
             capture_metadata.validate_resume_metadata(metadata, {}, {}, {}, {})
 
     def test_endpoint_requires_exact_serving_context(self) -> None:
-        payload = json.dumps(
+        for field in ("context_window", "max_model_len"):
+            with self.subTest(field=field):
+                payload = json.dumps(
+                    {"data": [{"id": "zai-org/GLM-5.2", field: 409600}]}
+                ).encode()
+                with mock.patch.object(
+                    capture_metadata.urllib.request,
+                    "urlopen",
+                    return_value=FakeResponse(payload),
+                ):
+                    identity = capture_metadata.endpoint_models(
+                        "http://example.test/v1", "zai-org/GLM-5.2", 409600
+                    )
+                self.assertEqual(identity["advertised_model"]["context_window"], 409600)
+                self.assertNotIn("max_model_len", identity["advertised_model"])
+
+        invalid_models = (
+            {"id": "zai-org/GLM-5.2"},
+            {"id": "zai-org/GLM-5.2", "max_model_len": 262144},
             {
-                "data": [
-                    {
-                        "id": "zai-org/GLM-5.2",
-                        "context_window": 409600,
-                    }
-                ]
-            }
-        ).encode()
-        with mock.patch.object(
-            capture_metadata.urllib.request,
-            "urlopen",
-            return_value=FakeResponse(payload),
-        ):
-            identity = capture_metadata.endpoint_models(
-                "http://example.test/v1", "zai-org/GLM-5.2", 409600
-            )
-            self.assertEqual(identity["advertised_model"]["context_window"], 409600)
-            with self.assertRaisesRegex(RuntimeError, "context_window"):
-                capture_metadata.endpoint_models(
-                    "http://example.test/v1", "zai-org/GLM-5.2", 262144
-                )
+                "id": "zai-org/GLM-5.2",
+                "context_window": 409600,
+                "max_model_len": 262144,
+            },
+        )
+        for advertised in invalid_models:
+            with self.subTest(advertised=advertised):
+                payload = json.dumps({"data": [advertised]}).encode()
+                with (
+                    mock.patch.object(
+                        capture_metadata.urllib.request,
+                        "urlopen",
+                        return_value=FakeResponse(payload),
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError, "context_window or max_model_len"
+                    ),
+                ):
+                    capture_metadata.endpoint_models(
+                        "http://example.test/v1", "zai-org/GLM-5.2", 409600
+                    )
 
 
 if __name__ == "__main__":

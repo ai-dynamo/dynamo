@@ -24,6 +24,7 @@ from typing import Any, Iterable, Sequence
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from bfcl_endpoint import EndpointModelError, canonical_endpoint_model  # noqa: E402
 from runtime_binding import BindingError, make_wrapper  # noqa: E402
 from source_provenance import (  # noqa: E402
     SourceProvenanceError,
@@ -916,13 +917,18 @@ def validate_command(args: argparse.Namespace) -> int:
                 metadata_errors.append(
                     "Endpoint evidence must advertise zai-org/GLM-5.2 exactly once"
                 )
-            elif {
-                field: matching_models[0].get(field)
-                for field in ("id", "object", "owned_by", "context_window")
-            } != metadata.get("endpoint_model"):
-                metadata_errors.append(
-                    "Endpoint model evidence does not match immutable metadata"
-                )
+            else:
+                try:
+                    endpoint_model = canonical_endpoint_model(
+                        matching_models[0], 409600
+                    )
+                except EndpointModelError as error:
+                    metadata_errors.append(f"Invalid endpoint model evidence: {error}")
+                else:
+                    if endpoint_model != metadata.get("endpoint_model"):
+                        metadata_errors.append(
+                            "Endpoint model evidence does not match immutable metadata"
+                        )
     try:
         if args.population_config:
             population = build_configured_population(args.population_config.resolve())

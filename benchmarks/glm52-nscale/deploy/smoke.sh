@@ -56,7 +56,14 @@ fi
 curl_args=(-fsS --connect-timeout 10 --max-time 120)
 curl "${curl_args[@]}" "http://127.0.0.1:${local_port}/v1/models" | jq -e \
   --arg model "${SERVED_MODEL_NAME}" --argjson context "${MAX_MODEL_LEN}" '
-    any(.data[]; .id == $model and .context_window == $context)
+    [.data[] | select(.id == $model)] as $matches
+    | ($matches | length) == 1
+      and ($matches[0] as $match
+        | [$match.context_window?, $match.max_model_len?]
+        | map(select(. != null)) as $contexts
+        | ($contexts | length) > 0
+          and all($contexts[];
+            type == "number" and . == floor and . == $context))
   ' >/dev/null
 
 curl "${curl_args[@]}" "http://127.0.0.1:${local_port}/v1/chat/completions" \

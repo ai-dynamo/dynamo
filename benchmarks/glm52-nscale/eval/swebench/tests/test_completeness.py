@@ -566,9 +566,115 @@ class CompletenessGateTest(unittest.TestCase):
         good = {"data": [{"id": "test-model", "context_window": 409600}]}
         evidence = build_evidence(good, "test-model", 409600)
         self.assertEqual(evidence["selected_model_response"]["context_window"], 409600)
+        self.assertEqual(evidence["full_response"], good)
+
+        native_vllm = {
+            "data": [
+                {
+                    "id": "test-model",
+                    "max_model_len": 409600,
+                    "owned_by": "vllm",
+                }
+            ]
+        }
+        evidence = build_evidence(native_vllm, "test-model", 409600)
+        self.assertEqual(
+            evidence["selected_model_response"],
+            {
+                "id": "test-model",
+                "context_window": 409600,
+                "owned_by": "vllm",
+            },
+        )
+        self.assertEqual(evidence["full_response"], native_vllm)
+
+        both = {
+            "data": [
+                {
+                    "id": "test-model",
+                    "context_window": 409600,
+                    "max_model_len": 409600,
+                }
+            ]
+        }
+        evidence = build_evidence(both, "test-model", 409600)
+        self.assertEqual(
+            evidence["selected_model_response"],
+            {"id": "test-model", "context_window": 409600},
+        )
+
+        nullable_alias = {
+            "data": [
+                {
+                    "id": "test-model",
+                    "context_window": None,
+                    "max_model_len": 409600,
+                }
+            ]
+        }
+        evidence = build_evidence(nullable_alias, "test-model", 409600)
+        self.assertEqual(
+            evidence["selected_model_response"],
+            {"id": "test-model", "context_window": 409600},
+        )
+
         with self.assertRaisesRegex(ValueError, "expected 409600"):
             build_evidence(
                 {"data": [{"id": "test-model", "context_window": 262144}]},
+                "test-model",
+                409600,
+            )
+        with self.assertRaisesRegex(ValueError, "expected 409600"):
+            build_evidence(
+                {"data": [{"id": "test-model", "max_model_len": 262144}]},
+                "test-model",
+                409600,
+            )
+
+    def test_endpoint_preflight_rejects_missing_or_conflicting_context_aliases(
+        self,
+    ) -> None:
+        for entry in (
+            {"id": "test-model"},
+            {"id": "test-model", "context_window": None},
+            {
+                "id": "test-model",
+                "context_window": None,
+                "max_model_len": None,
+            },
+        ):
+            with (
+                self.subTest(entry=entry),
+                self.assertRaisesRegex(ValueError, "no non-null context field"),
+            ):
+                build_evidence({"data": [entry]}, "test-model", 409600)
+
+        with self.assertRaisesRegex(ValueError, "conflicting context aliases"):
+            build_evidence(
+                {
+                    "data": [
+                        {
+                            "id": "test-model",
+                            "context_window": 409600,
+                            "max_model_len": 262144,
+                        }
+                    ]
+                },
+                "test-model",
+                409600,
+            )
+
+        with self.assertRaisesRegex(ValueError, "expected 409600"):
+            build_evidence(
+                {
+                    "data": [
+                        {
+                            "id": "test-model",
+                            "context_window": 262144,
+                            "max_model_len": 262144,
+                        }
+                    ]
+                },
                 "test-model",
                 409600,
             )

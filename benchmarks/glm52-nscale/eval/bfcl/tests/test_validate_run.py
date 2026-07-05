@@ -27,6 +27,7 @@ capture_metadata = importlib.util.module_from_spec(CAPTURE_SPEC)
 sys.modules[CAPTURE_SPEC.name] = capture_metadata
 CAPTURE_SPEC.loader.exec_module(capture_metadata)
 
+from bfcl_endpoint import EndpointModelError, canonical_endpoint_model  # noqa: E402
 from source_provenance import SourceProvenanceError, build_source_provenance  # noqa: E402
 
 
@@ -138,6 +139,45 @@ class ValidateRunTest(unittest.TestCase):
             "93\t0\tberkeley-function-call-leaderboard/bfcl_eval/model_handler/api_inference/glm52_openai.py",
             result.stdout,
         )
+
+    def test_endpoint_context_aliases_canonicalize(self) -> None:
+        base = {
+            "id": "zai-org/GLM-5.2",
+            "object": "model",
+            "owned_by": "nvidia",
+        }
+        expected = {**base, "context_window": 409600}
+        accepted = (
+            {"context_window": 409600},
+            {"max_model_len": 409600},
+            {"context_window": 409600, "max_model_len": 409600},
+            {"context_window": None, "max_model_len": 409600},
+            {"context_window": 409600, "max_model_len": None},
+        )
+        for aliases in accepted:
+            with self.subTest(aliases=aliases):
+                self.assertEqual(
+                    canonical_endpoint_model({**base, **aliases}, 409600), expected
+                )
+
+    def test_endpoint_context_aliases_reject_missing_conflicting_and_wrong(
+        self,
+    ) -> None:
+        rejected = (
+            ({}, "non-null"),
+            ({"context_window": None, "max_model_len": None}, "non-null"),
+            ({"context_window": 262144}, "!= campaign"),
+            ({"max_model_len": 262144}, "!= campaign"),
+            (
+                {"context_window": 409600, "max_model_len": 262144},
+                "conflict",
+            ),
+            ({"max_model_len": 409600.0}, "must be integers"),
+        )
+        for aliases, message in rejected:
+            with self.subTest(aliases=aliases):
+                with self.assertRaisesRegex(EndpointModelError, message):
+                    canonical_endpoint_model(aliases, 409600)
 
     def test_configured_population_is_exact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -37,6 +37,7 @@ EVAL_DIR = ROOT / "eval"
 if str(EVAL_DIR) not in os.sys.path:
     os.sys.path.insert(0, str(EVAL_DIR))
 
+from bfcl_endpoint import EndpointModelError, canonical_endpoint_model  # noqa: E402
 from runtime_binding import (  # noqa: E402
     BindingError,
     canonical_sha256 as runtime_canonical_sha256,
@@ -1071,10 +1072,14 @@ def import_bfcl(
     ]
     if len(matching_endpoint_models) != 1:
         raise EvidenceError("BFCL endpoint evidence must contain the served model once")
-    endpoint_model_identity = {
-        field: matching_endpoint_models[0].get(field)
-        for field in ("id", "object", "owned_by", "context_window")
-    }
+    try:
+        endpoint_model_identity = canonical_endpoint_model(
+            matching_endpoint_models[0], RUNTIME_MAX_MODEL_LEN
+        )
+    except EndpointModelError as error:
+        raise EvidenceError(
+            f"BFCL endpoint model context is invalid: {error}"
+        ) from error
     require_equal(
         endpoint_model_identity,
         metadata.get("endpoint_model"),

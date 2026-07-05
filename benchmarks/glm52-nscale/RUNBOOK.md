@@ -88,7 +88,7 @@ benchmarks/glm52-nscale/deploy/teardown.sh
 ## Guarded BFCL command
 
 ```bash
-run_dir=/artifacts/glm52-nscale/bfcl/${variant}/${phase}/full
+run_dir=/artifacts/glm52-nscale/bfcl/${variant}/${phase}/${variant}-${phase}-full
 benchmarks/glm52-nscale/eval/run-guarded.sh "${variant}" \
   --phase "${phase}" \
   --attestation "${run_dir}/runtime-continuity.json" -- \
@@ -98,7 +98,8 @@ benchmarks/glm52-nscale/eval/run-guarded.sh "${variant}" \
 ```
 
 For validation, replace the final command with
-`run-smoke.sh ${variant} /artifacts/glm52-nscale/bfcl/${variant}/validation/smoke`.
+`run-smoke.sh ${variant}
+/artifacts/glm52-nscale/bfcl/${variant}/validation/${variant}-validation-smoke`.
 Full BFCL is fixed at 5,106 scored IDs, 5,217 generated IDs, 16 request threads,
 temperature 0, 64,000 output tokens, and zero inference errors.
 

@@ -115,8 +115,11 @@ counts and evaluator worker, timeout, backend, and Docker platform settings.
 The top-level `campaign_source` equals the identity inside the runtime envelope's
 evaluator content and proves the current `/workspace/campaign.env` plus `eval/` content
 hashes and permission modes against the deployment recipe source commit.
-The exact `/v1/models` response is retained and the selected served model must advertise
-`context_window: 409600`; 262144 is rejected. Any drift fails closed and requires a new run name. The endpoint
+The exact `/v1/models` response is retained. The selected served model may advertise
+either `context_window` or native-vLLM `max_model_len`, but every present non-null
+alias must agree exactly on `409600`; the immutable selected-model identity is
+canonicalized to `context_window: 409600`. Missing, conflicting, and 262144-token
+values are rejected. Any drift fails closed and requires a new run name. The endpoint
 is probed before the metadata is created, so a typo does not reserve a run name.
 Predictions found without pre-existing metadata are never adopted as a resumable run.
 

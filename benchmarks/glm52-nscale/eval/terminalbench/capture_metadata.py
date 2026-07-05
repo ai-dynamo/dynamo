@@ -94,6 +94,34 @@ def validate_api_base(api_base: str) -> str:
     return api_base.rstrip("/")
 
 
+def canonical_advertised_model(
+    advertised: dict[str, Any], serving_context: int
+) -> dict[str, Any]:
+    aliases = {
+        field: advertised[field]
+        for field in ("context_window", "max_model_len")
+        if advertised.get(field) is not None
+    }
+    if not aliases or any(
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value != serving_context
+        for value in aliases.values()
+    ):
+        raise RuntimeError(
+            "GET /models must advertise the serving context through "
+            f"context_window or max_model_len; found {aliases!r}, "
+            f"expected {serving_context}"
+        )
+    canonical = {
+        key: value
+        for key, value in advertised.items()
+        if key not in {"context_window", "max_model_len"}
+    }
+    canonical["context_window"] = serving_context
+    return canonical
+
+
 def endpoint_models(
     api_base: str, served_model: str, serving_context: int
 ) -> dict[str, Any]:
@@ -128,12 +156,7 @@ def endpoint_models(
         raise RuntimeError(
             f"GET {url} must advertise {served_model!r} exactly once; found {model_ids}"
         )
-    advertised = matching[0]
-    if advertised.get("context_window") != serving_context:
-        raise RuntimeError(
-            f"GET {url} advertised context_window={advertised.get('context_window')!r}; "
-            f"expected {serving_context}"
-        )
+    advertised = canonical_advertised_model(matching[0], serving_context)
 
     return {
         "checked_at": utc_now(),

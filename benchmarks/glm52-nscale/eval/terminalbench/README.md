@@ -46,6 +46,8 @@ put the immutable checkout and virtual environment on a persistent volume.
 The endpoint must expose OpenAI Chat Completions and `GET /v1/models`. Pass a base
 URL that includes `/v1`. `--model` is the LiteLLM model string; for a custom
 OpenAI-compatible endpoint it should use the `openai/` provider prefix.
+The endpoint preflight accepts `context_window` or `max_model_len` only when every
+advertised non-null alias equals 409,600, then persists canonical `context_window`.
 
 ```bash
 export OPENAI_API_KEY=EMPTY  # replace only when the endpoint enforces auth

@@ -14,7 +14,7 @@ evaluation runner, so first copy the allowlisted compact evidence into the ignor
 `report/runs/` staging tree, then invoke the fail-closed importer:
 
 ```bash
-remote=/artifacts/glm52-nscale/bfcl/dynamo-vllm/ab/full
+remote=/artifacts/glm52-nscale/bfcl/dynamo-vllm/ab/dynamo-vllm-ab-full
 local=benchmarks/glm52-nscale/report/runs/bfcl-v4/ab/dynamo-vllm
 benchmarks/glm52-nscale/eval/fetch-result.sh bfcl "${remote}" "${local}"
 python3 benchmarks/glm52-nscale/report/import_result.py \

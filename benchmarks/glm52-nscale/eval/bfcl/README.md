@@ -69,10 +69,13 @@ export GLM52_OPENAI_BASE_URL=http://glm52-dynamo-vllm-frontend:8000/v1
 export GLM52_OPENAI_API_KEY=EMPTY
 ```
 
-The preflight requires `/v1/models` to advertise exactly `zai-org/GLM-5.2`. An
-authenticated endpoint can also use `GLM52_OPENAI_DEFAULT_HEADERS` as a JSON object.
-Secrets are not written to metadata; endpoint URLs have userinfo and query strings
-removed.
+The preflight requires `/v1/models` to advertise exactly `zai-org/GLM-5.2` with a
+409,600-token context. It accepts the `context_window` and `max_model_len` response
+aliases, but every non-null alias present must agree. The immutable BFCL endpoint
+identity always records the canonical `context_window` field while
+`endpoint-models.json` preserves the raw response. An authenticated endpoint can
+also use `GLM52_OPENAI_DEFAULT_HEADERS` as a JSON object. Secrets are not written
+to metadata; endpoint URLs have userinfo and query strings removed.
 
 `GLM52_OPENAI_EXTRA_BODY` is diagnostics-only. Full campaign validation requires
 it to be unset, so a run with any extra body cannot be imported as a baseline

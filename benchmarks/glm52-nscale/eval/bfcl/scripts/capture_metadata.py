@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from bfcl_endpoint import EndpointModelError, canonical_endpoint_model  # noqa: E402
 from runtime_binding import make_wrapper  # noqa: E402
 from source_provenance import verify_source_provenance  # noqa: E402
 
@@ -222,12 +223,12 @@ def main() -> None:
         for entry in endpoint_models.get("data", [])
         if isinstance(entry, dict) and entry.get("id") == "zai-org/GLM-5.2"
     ]
-    if len(matching_models) != 1 or matching_models[0].get("context_window") != 409600:
+    if len(matching_models) != 1:
         raise SystemExit("Endpoint model evidence is missing the 409600-token GLM-5.2")
-    endpoint_model = {
-        field: matching_models[0].get(field)
-        for field in ("id", "object", "owned_by", "context_window")
-    }
+    try:
+        endpoint_model = canonical_endpoint_model(matching_models[0], 409600)
+    except EndpointModelError as error:
+        raise SystemExit(f"Invalid endpoint model evidence: {error}") from error
     endpoint = sanitized_url(os.environ["GLM52_OPENAI_BASE_URL"])
     evaluator_binding = {
         "harness": "bfcl-v4",

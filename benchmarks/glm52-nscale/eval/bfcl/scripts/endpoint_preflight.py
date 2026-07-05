@@ -7,8 +7,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from bfcl_endpoint import EndpointModelError, canonical_endpoint_model  # noqa: E402
 
 
 def main() -> None:
@@ -32,11 +36,10 @@ def main() -> None:
             f"Endpoint must advertise {args.model!r} exactly once; "
             f"available models: {[entry.get('id') for entry in entries]}"
         )
-    if matching[0].get("context_window") != args.expected_context_window:
-        raise SystemExit(
-            f"Endpoint context_window {matching[0].get('context_window')!r} != "
-            f"campaign {args.expected_context_window}"
-        )
+    try:
+        canonical_endpoint_model(matching[0], args.expected_context_window)
+    except EndpointModelError as error:
+        raise SystemExit(str(error)) from error
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")

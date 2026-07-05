@@ -82,7 +82,9 @@ The artifact PVC is mounted only in the runner. Fetch an importer-ready director
 the suite allowlist instead of copying a raw run tree:
 
 ```bash
-./fetch-result.sh bfcl /artifacts/glm52-nscale/bfcl/dynamo-vllm/ab/full ./fetched/bfcl
+./fetch-result.sh bfcl \
+  /artifacts/glm52-nscale/bfcl/dynamo-vllm/ab/dynamo-vllm-ab-full \
+  ./fetched/bfcl
 ./fetch-result.sh swebench /artifacts/glm52-nscale/swebench/results/dynamo-vllm-ab/verified ./fetched/swe
 ./fetch-result.sh terminalbench /artifacts/glm52-nscale/terminalbench/summaries/dynamo-vllm/ab ./fetched/terminal
 ```

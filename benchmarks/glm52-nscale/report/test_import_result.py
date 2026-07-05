@@ -192,7 +192,13 @@ def write_runtime_continuity(run: Path, wrapper: dict) -> None:
     )
 
 
-def bfcl_evidence(root: Path, *, complete: bool = True, phase: str = "ab") -> Path:
+def bfcl_evidence(
+    root: Path,
+    *,
+    complete: bool = True,
+    phase: str = "ab",
+    endpoint_context_fields: dict | None = None,
+) -> Path:
     run = root / f"bfcl-full-{phase}-run"
     commit = importer.load_assignments(importer.EVAL_PINS)["BFCL_COMMIT"]
     source_identity = {
@@ -201,16 +207,19 @@ def bfcl_evidence(root: Path, *, complete: bool = True, phase: str = "ab") -> Pa
         "tracked_diff_sha256": importer.BFCL_TRACKED_DIFF_SHA256,
         "new_handler_sha256": importer.BFCL_NEW_HANDLER_SHA256,
     }
+    endpoint_model_response = {
+        "id": "zai-org/GLM-5.2",
+        "object": "model",
+        "owned_by": "nvidia",
+    }
+    endpoint_model_response.update(
+        {"context_window": 409600}
+        if endpoint_context_fields is None
+        else endpoint_context_fields
+    )
     endpoint_models = {
         "object": "list",
-        "data": [
-            {
-                "id": "zai-org/GLM-5.2",
-                "object": "model",
-                "owned_by": "nvidia",
-                "context_window": 409600,
-            }
-        ],
+        "data": [endpoint_model_response],
     }
     write_json(run / "endpoint-models.json", endpoint_models)
     constraints_lines = sorted(
@@ -234,8 +243,10 @@ def bfcl_evidence(root: Path, *, complete: bool = True, phase: str = "ab") -> Pa
     }
     write_json(run / "environment-lock.json", environment_lock)
     endpoint_model = {
-        field: endpoint_models["data"][0].get(field)
-        for field in ("id", "object", "owned_by", "context_window")
+        "id": "zai-org/GLM-5.2",
+        "object": "model",
+        "owned_by": "nvidia",
+        "context_window": 409600,
     }
     binding = runtime_binding(
         phase=phase,
@@ -960,6 +971,36 @@ class ResultImportTests(unittest.TestCase):
         write_json(artifact, compact)
         with self.assertRaisesRegex(EvidenceError, "Overall Acc"):
             update_summary(summary_path, "dynamo-vllm", "bfcl-v4", "ab", artifact)
+
+    def test_bfcl_import_accepts_vllm_max_model_len_alias(self) -> None:
+        artifact = bfcl_evidence(
+            self.root, endpoint_context_fields={"max_model_len": 409600}
+        )
+        row = build_result(summary_template(), "dynamo-vllm", "bfcl-v4", "ab", artifact)
+        self.assertAlmostEqual(row["metrics"]["overall_accuracy"], 0.7305)
+
+    def test_bfcl_import_rejects_invalid_context_aliases(self) -> None:
+        cases = (
+            ({}, "non-null"),
+            ({"context_window": None, "max_model_len": None}, "non-null"),
+            ({"max_model_len": 262144}, "!= campaign"),
+            (
+                {"context_window": 409600, "max_model_len": 262144},
+                "conflict",
+            ),
+            ({"max_model_len": 409600.0}, "must be integers"),
+        )
+        for fields, message in cases:
+            with self.subTest(fields=fields):
+                artifact = bfcl_evidence(self.root, endpoint_context_fields=fields)
+                with self.assertRaisesRegex(EvidenceError, message):
+                    build_result(
+                        summary_template(),
+                        "dynamo-vllm",
+                        "bfcl-v4",
+                        "ab",
+                        artifact,
+                    )
 
     def test_failed_evidence_does_not_modify_summary(self) -> None:
         artifact = bfcl_evidence(self.root, complete=False)
