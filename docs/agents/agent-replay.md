@@ -17,7 +17,7 @@ A Dynamo request trace preserves the parts of an agent run that affect serving:
 - which requests belonged to the same agent session
 - parent-child relationships between agent sessions
 
-Prompts, responses, and tool arguments are not stored. Enable [audit payloads](agent-tracing.md#audit-payloads) alongside tracing if you need them. Optional tool spans record where time was spent, but replay uses the captured request schedule rather than calling those tools again.
+Prompts, responses, and tool arguments are not stored. Enable [request payloads](agent-tracing.md#request-payloads) alongside tracing if you need them. Optional tool spans record where time was spent, but replay uses the captured request schedule rather than calling those tools again.
 
 ## Why Replay an Agent Trace
 
