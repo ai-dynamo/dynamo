@@ -124,6 +124,9 @@ if ! jq -e \
       | add // 0);
   def argv_text:
     ([.spec.containers[]? | ((.command // []) + (.args // []))[]] | join("\n"));
+  def valid_container_id:
+    type == "string"
+    and test("^(containerd|docker|cri-o)://(sha256:)?[0-9a-f]{64}$");
 
   (.items | length) == $expected_pods
   and (.items | all(.[];
@@ -137,8 +140,7 @@ if ! jq -e \
       | all(.[];
         .ready == true
         and .restartCount == 0
-        and (.containerID | type == "string")
-        and (.containerID | test("sha256:[0-9a-f]{64}$"))
+        and (.containerID | valid_container_id)
         and (.imageID | type == "string")
         and (.imageID | test("@sha256:[0-9a-f]{64}$"))))
     and (($pod | gpu_count) == 0 or $pod.spec.nodeName == $gpu_node)))
