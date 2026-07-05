@@ -53,7 +53,7 @@ export DYNAMO_BASE_URL=http://localhost:8000/v1
 export DYNAMO_API_KEY=dynamo-local
 export DYN_AGENT_SESSION_ID=pi-demo-$(uuidgen)
 
-pi --model dynamo/zai-org/GLM-4.7-Flash -p 'Reply exactly ok.'
+pi --model dynamo/zai-org/GLM-4.7-Flash
 ```
 
 ## Claude Code

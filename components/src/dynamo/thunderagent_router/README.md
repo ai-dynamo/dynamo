@@ -113,7 +113,7 @@ git -C ~/src/dynamo checkout --detach FETCH_HEAD
 
 git clone --branch v0.16.0 --depth 1 https://github.com/harbor-framework/harbor ~/src/harbor
 git clone https://github.com/ai-dynamo/agent-plugins ~/src/agent-plugins
-git -C ~/src/agent-plugins checkout d0bae6a3c486c937f1b190ce21259a828cbaa8f9
+git -C ~/src/agent-plugins checkout cd0434136a92522532ee3ae5bf61078f47e6761a
 
 cd ~/src/dynamo
 uv venv --python 3.12 --seed .venv
@@ -191,7 +191,7 @@ docker login
 harbor run \
   -d swebench-verified@1.0 \
   -a nop \
-  --extra-docker-compose ~/src/dynamo/components/src/dynamo/thunderagent_router/harbor-host-network.yml \
+  --extra-docker-compose ~/src/agent-plugins/pi-plugin/harbor-host-network.yml \
   -n 32 --n-concurrent-agents 32 \
   --memory ignore \
   --no-delete --environment-kwarg keep_containers=true \
@@ -209,7 +209,7 @@ harbor run \
   --ak version=0.72.1 --ae "DYNAMO_BASE_URL=$DYNAMO_BASE_URL" \
   --ae "DYN_AGENT_SESSION_FINAL=$DYN_AGENT_SESSION_FINAL" \
   --mounts "[{\"type\":\"bind\",\"source\":\"$PI_PLUGIN_DIR\",\"target\":\"/opt/pi-dynamo-provider\",\"read_only\":true}]" \
-  --extra-docker-compose ~/src/dynamo/components/src/dynamo/thunderagent_router/harbor-host-network.yml \
+  --extra-docker-compose ~/src/agent-plugins/pi-plugin/harbor-host-network.yml \
   -n 256 --n-concurrent-agents 256 \
   --agent-setup-timeout-multiplier 10 --memory ignore \
   --no-delete --environment-kwarg keep_containers=true \
