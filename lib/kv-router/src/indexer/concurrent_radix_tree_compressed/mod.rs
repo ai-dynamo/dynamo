@@ -43,6 +43,10 @@ pub struct ConcurrentRadixTreeCompressed {
     root: SharedNode,
 
     anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
+    /// Entry points for every root/anchor forest that may contain a worker.
+    /// Root nodes stay ancestors across splits, so cleanup can start here
+    /// without sweeping unrelated forests.
+    worker_forest_roots: DashMap<WorkerWithDpRank, FxHashSet<WorkerForestRoot>, FxBuildHasher>,
     cleanup: CleanupState,
     #[cfg(feature = "bench")]
     bench_metrics: CrtcBenchMetrics,
@@ -96,6 +100,7 @@ impl ConcurrentRadixTreeCompressed {
         Self {
             root: Arc::new(Node::new()),
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
+            worker_forest_roots: DashMap::with_hasher(FxBuildHasher),
             cleanup: CleanupState::new(),
             #[cfg(feature = "bench")]
             bench_metrics: CrtcBenchMetrics::new(),
@@ -168,8 +173,16 @@ impl ConcurrentRadixTreeCompressed {
     ) -> Option<SharedNode> {
         let node = self.anchor_nodes.get(&hash)?.clone();
         node.promote_worker_to_full_edge(worker);
+        self.register_worker_forest_root(worker, WorkerForestRoot::Anchor(hash));
         lookup.entry(worker).or_default().insert(hash, node.clone());
         Some(node)
+    }
+
+    fn register_worker_forest_root(&self, worker: WorkerWithDpRank, root: WorkerForestRoot) {
+        self.worker_forest_roots
+            .entry(worker)
+            .or_default()
+            .insert(root);
     }
 
     fn is_anchor_node(&self, hash: ExternalSequenceBlockHash, node: &SharedNode) -> bool {

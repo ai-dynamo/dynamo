@@ -118,6 +118,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         };
 
         anchor_node.promote_worker_to_full_edge(worker);
+        self.register_worker_forest_root(worker, WorkerForestRoot::Anchor(anchor.anchor_id));
         Ok(())
     }
 

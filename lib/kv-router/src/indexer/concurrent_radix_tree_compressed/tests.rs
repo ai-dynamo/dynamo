@@ -522,6 +522,55 @@ mod race_tests {
     mod clear {
         use super::super::*;
 
+        #[test]
+        fn clear_sweeps_registered_anchor_forest() {
+            let index = ConcurrentRadixTreeCompressed::new();
+            let worker = worker(1);
+            let continuation = make_store_event_with_parent(1, &[10], &[20, 30]);
+            let anchor_id = stored_data(continuation.clone())
+                .parent_hash
+                .expect("continuation should have an anchor parent");
+            let anchor = AnchorRef {
+                anchor_id,
+                anchor_local_hash: LocalBlockHash(10),
+                anchor_depth: 1,
+            };
+            let mut lookup = direct_lookup();
+
+            index
+                .apply_anchor(
+                    worker,
+                    AnchorTask {
+                        anchor_id,
+                        anchor_local_hash: anchor.anchor_local_hash,
+                        anchor_depth: anchor.anchor_depth,
+                    },
+                )
+                .unwrap();
+            apply_direct(&index, &mut lookup, continuation);
+            assert_eq!(
+                index
+                    .find_matches_from_anchor(anchor, &[LocalBlockHash(20), LocalBlockHash(30)],)
+                    .unwrap()
+                    .scores
+                    .get(&worker),
+                Some(&3),
+            );
+
+            apply_direct(
+                &index,
+                &mut lookup,
+                make_clear_event_with_dp_rank(worker.worker_id, worker.dp_rank),
+            );
+            assert!(
+                index
+                    .find_matches_from_anchor(anchor, &[LocalBlockHash(20), LocalBlockHash(30)],)
+                    .unwrap()
+                    .scores
+                    .is_empty()
+            );
+        }
+
         #[tokio::test]
         async fn clear_sweeps_split_suffixes_across_event_threads_and_dp_ranks() {
             let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 32);

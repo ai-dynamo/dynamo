@@ -224,14 +224,23 @@ impl ConcurrentRadixTreeCompressed {
             return;
         }
 
-        let mut queue = VecDeque::new();
-        self.root.push_children_into(&mut queue);
-        let anchor_roots: Vec<_> = self
-            .anchor_nodes
+        let workers: Vec<_> = self
+            .worker_forest_roots
             .iter()
-            .map(|entry| entry.value().clone())
+            .filter_map(|entry| target.matches(*entry.key()).then_some(*entry.key()))
             .collect();
-        queue.extend(anchor_roots);
+        let mut queue = VecDeque::new();
+        for worker in workers {
+            let Some((_, roots)) = self.worker_forest_roots.remove(&worker) else {
+                continue;
+            };
+            queue.extend(roots.into_iter().filter_map(|root| match root {
+                WorkerForestRoot::Root(key) => self.root.child_snapshot(key),
+                WorkerForestRoot::Anchor(id) => {
+                    self.anchor_nodes.get(&id).map(|node| node.value().clone())
+                }
+            }));
+        }
 
         let mut seen = FxHashSet::<usize>::default();
         while let Some(node) = queue.pop_front() {

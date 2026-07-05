@@ -33,6 +33,17 @@ impl ConcurrentRadixTreeCompressed {
     ) -> Result<(), KvCacheEventError> {
         lookup.entry(worker).or_default();
 
+        let root_key = op
+            .parent_hash
+            .is_none()
+            .then(|| op.blocks.first().map(|block| block.tokens_hash))
+            .flatten();
+        if let Some(root_key) = root_key {
+            // Register before mutation so even a partially applied store that
+            // later returns an error cannot leave unindexed coverage behind.
+            self.register_worker_forest_root(worker, WorkerForestRoot::Root(root_key));
+        }
+
         let parent_resolution = self.resolve_store_parent(lookup, worker, &op, id)?;
         let outcome = self.insert_for_resolved_parent(lookup, worker, parent_resolution, &op)?;
         self.record_store_outcome(&outcome, counters);

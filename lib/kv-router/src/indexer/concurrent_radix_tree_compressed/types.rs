@@ -33,6 +33,12 @@ impl WorkerRemovalTarget {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum WorkerForestRoot {
+    Root(LocalBlockHash),
+    Anchor(ExternalSequenceBlockHash),
+}
+
 pub(super) struct MatchWalkResult {
     // NOTE(perf): Replacing this set with a Vec did not improve throughput. Keep
     // uniqueness by construction unless a new profile justifies changing it.
