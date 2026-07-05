@@ -51,7 +51,6 @@ Point it at the Dynamo OpenAI-compatible endpoint and run Pi with the `dynamo` p
 ```bash
 export DYNAMO_BASE_URL=http://localhost:8000/v1
 export DYNAMO_API_KEY=dynamo-local
-export DYN_AGENT_SESSION_ID=pi-demo-$(uuidgen)
 
 pi --model dynamo/zai-org/GLM-4.7-Flash
 ```
