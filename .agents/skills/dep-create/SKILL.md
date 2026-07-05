@@ -1,6 +1,14 @@
 ---
 name: dep-create
 description: Create or update Dynamo Enhancement Proposals as GitHub issues, including lightweight DEPs, implementation plans, and retroactive DEPs for ai-dynamo/dynamo.
+license: Apache-2.0
+metadata:
+  author: NVIDIA
+  tags:
+    - dynamo
+    - dep
+    - enhancement-proposal
+    - github
 ---
 
 # Skill: Create a DEP as a GitHub Issue
