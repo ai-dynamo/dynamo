@@ -65,6 +65,31 @@ spec:
               set -euo pipefail
               test -r "${MODEL_PATH}/config.json"
               test "$(head -n1 "${MODEL_PATH}/.cache/huggingface/download/config.json.metadata")" = "${MODEL_REVISION}"
+              model_view=/tmp/glm52-model
+              rm -rf "${model_view}"
+              mkdir -p "${model_view}"
+              find "${MODEL_PATH}" -mindepth 1 -maxdepth 1 ! -name config.json \
+                -exec ln -s {} "${model_view}/" \;
+              python3 - "${MODEL_PATH}/config.json" "${model_view}/config.json" <<'PY'
+              import json
+              import sys
+              from pathlib import Path
+
+              source = Path(sys.argv[1])
+              target = Path(sys.argv[2])
+              document = json.loads(source.read_text())
+              layer_types = document.pop("layer_types", None)
+              if (
+                  not isinstance(layer_types, list)
+                  or not layer_types
+                  or set(layer_types) != {"deepseek_sparse_attention"}
+              ):
+                  raise RuntimeError(
+                      "pinned GLM-5.2 config has unexpected layer_types"
+                  )
+              target.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+              target.chmod(0o444)
+              PY
               visible_count="$(nvidia-smi -L | grep -c '^GPU ')"
               test "${visible_count}" -eq ${TP_SIZE}
               actual_gpu_uuids="$(nvidia-smi --query-gpu=uuid --format=csv,noheader | sort | paste -sd, -)"
@@ -73,7 +98,7 @@ spec:
               test "${dirty_count}" -eq 0
               ulimit -l unlimited
               exec python3 -m sglang.launch_server \
-                --model-path="${MODEL_PATH}" \
+                --model-path="${model_view}" \
                 --served-model-name="${SERVED_MODEL_NAME}" \
                 --host=0.0.0.0 \
                 --port=8000 \
