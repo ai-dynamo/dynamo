@@ -19,6 +19,7 @@ const DEFAULT_FILE_FLUSH_INTERVAL_MS: u64 = 1000;
 const DEFAULT_FILE_ROLL_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_FILE_PATH: &str = "/tmp/dynamo-request-trace";
 const DEFAULT_NATS_SUBJECT: &str = "dynamo.request_trace.v1";
+const DEFAULT_LEGACY_AUDIT_NATS_SUBJECT: &str = "dynamo.audit.v1";
 const DEFAULT_OTEL_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
 const CAPTURE_UNINITIALIZED: u8 = 0;
@@ -107,7 +108,7 @@ fn load_from_env() -> RequestTracePolicy {
     let legacy_audit_sinks = env_trimmed(env_audit::DYN_AUDIT_SINKS);
     let enabled =
         env_is_truthy(env_request_trace::DYN_REQUEST_TRACE) || legacy_audit_sinks.is_some();
-    let (destinations, legacy_file_compression) =
+    let (destinations, legacy_file_compression, legacy_audit_destinations) =
         load_destinations(enabled, legacy_audit_sinks.as_deref());
     let has_file_destination = destinations.contains(&RequestTraceDestination::File);
     let file_path = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_FILE_PATH)
@@ -160,7 +161,13 @@ fn load_from_env() -> RequestTracePolicy {
     .unwrap_or(false);
     let nats_subject = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT)
         .or_else(|| env_trimmed(env_audit::DYN_AUDIT_NATS_SUBJECT))
-        .unwrap_or_else(|| DEFAULT_NATS_SUBJECT.to_string());
+        .unwrap_or_else(|| {
+            if legacy_audit_destinations && destinations.contains(&RequestTraceDestination::Nats) {
+                DEFAULT_LEGACY_AUDIT_NATS_SUBJECT.to_string()
+            } else {
+                DEFAULT_NATS_SUBJECT.to_string()
+            }
+        });
     let otel_max_payload_bytes = env_usize(&[
         env_request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
         env_audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
@@ -205,17 +212,21 @@ fn load_destinations(
 ) -> (
     Vec<RequestTraceDestination>,
     Option<RequestTraceFileCompression>,
+    bool,
 ) {
     if let Some(value) = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS) {
-        parse_destination_names(&value)
+        let (destinations, compression) = parse_destination_names(&value);
+        (destinations, compression, false)
     } else if let Some(value) = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_SINKS) {
-        parse_destination_names(&value)
+        let (destinations, compression) = parse_destination_names(&value);
+        (destinations, compression, false)
     } else if let Some(value) = legacy_audit_sinks {
-        parse_destination_names(value)
+        let (destinations, compression) = parse_destination_names(value);
+        (destinations, compression, true)
     } else if enabled {
-        (vec![RequestTraceDestination::File], None)
+        (vec![RequestTraceDestination::File], None, false)
     } else {
-        (Vec::new(), None)
+        (Vec::new(), None, false)
     }
 }
 
@@ -568,6 +579,34 @@ mod tests {
                 );
                 assert_eq!(policy.nats_subject, "legacy.audit.subject");
                 assert_eq!(policy.otel_max_payload_bytes, 5678);
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn legacy_audit_nats_sink_uses_legacy_default_subject() {
+        with_request_trace_env(&[(env_audit::DYN_AUDIT_SINKS, "nats")], || {
+            let policy = load_from_env();
+            assert!(policy.enabled);
+            assert_eq!(policy.destinations, vec![RequestTraceDestination::Nats]);
+            assert_eq!(policy.nats_subject, DEFAULT_LEGACY_AUDIT_NATS_SUBJECT);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn request_trace_nats_destination_uses_request_trace_default_subject() {
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS, "nats"),
+                (env_audit::DYN_AUDIT_SINKS, "nats"),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(policy.destinations, vec![RequestTraceDestination::Nats]);
+                assert_eq!(policy.nats_subject, DEFAULT_NATS_SUBJECT);
             },
         );
     }
