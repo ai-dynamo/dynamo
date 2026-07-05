@@ -7,16 +7,16 @@
 #   ./run_minimax_8xh100.sh kv
 set -euo pipefail
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh"
+
 POLICY="${1:-}"
 if [[ "$POLICY" != "ta" && "$POLICY" != "kv" ]]; then
     echo "usage: $0 ta|kv" >&2
     exit 2
 fi
 
-cleanup() {
-    jobs -pr | xargs -r kill
-}
-trap cleanup EXIT
+trap dynamo_exit_trap EXIT
 
 MODEL_PATH="${MODEL_PATH:-MiniMaxAI/MiniMax-M2.7}"
 MODEL_NAME_ROUTER="${MODEL_NAME_ROUTER:-MiniMaxAI/MiniMax-M2}"
@@ -87,4 +87,4 @@ until curl -fsS "http://127.0.0.1:${HTTP_PORT}/v1/models" 2>/dev/null | grep -Fq
 done
 echo "$POLICY stack ready at http://127.0.0.1:${HTTP_PORT}/v1"
 
-wait
+wait_any_exit
