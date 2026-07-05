@@ -22,6 +22,7 @@ Runtime data-contract notes (not code-level shims):
 
 import inspect
 import logging
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any
 
@@ -108,7 +109,7 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
-def require_reasoning_kwargs(engine: Any, request: dict[str, Any]) -> dict[str, Any]:
+def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     """Build the optional SGLang per-request reasoning-gate argument."""
     return filter_supported_async_generate_kwargs(
         engine,
