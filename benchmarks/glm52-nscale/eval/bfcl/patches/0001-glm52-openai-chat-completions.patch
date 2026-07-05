@@ -1,0 +1,153 @@
+diff --git a/berkeley-function-call-leaderboard/SUPPORTED_MODELS.md b/berkeley-function-call-leaderboard/SUPPORTED_MODELS.md
+index 961a4bb..fc70469 100644
+--- a/berkeley-function-call-leaderboard/SUPPORTED_MODELS.md
++++ b/berkeley-function-call-leaderboard/SUPPORTED_MODELS.md
+@@ -57,6 +57,7 @@ For model names containing `{...}`, multiple versions are available. For example
+ | GLM-4.5                                | Function Calling | Zhipu AI       | glm-4.5-FC                                                  |
+ | GLM-4.5-Air                            | Function Calling | Zhipu AI       | glm-4.5-air-FC                                              |
+ | GLM-4.6                                | Function Calling | Zhipu AI       | glm-4.6-FC                                                  |
++| GLM-5.2                                | Function Calling | Self-hosted API | zai-org/GLM-5.2-FC                                         |
+ | GoGoAgent                              | Prompt           | BitAgent       | BitAgent/GoGoAgent                                          |
+ | Gorilla-OpenFunctions-v2               | Function Calling | Gorilla LLM    | gorilla-openfunctions-v2                                    |
+ | GPT-4.1-2025-04-14                     | Function Calling | OpenAI         | gpt-4.1-2025-04-14-FC                                       |
+diff --git a/berkeley-function-call-leaderboard/bfcl_eval/constants/model_config.py b/berkeley-function-call-leaderboard/bfcl_eval/constants/model_config.py
+index e42fe1c..dbde258 100644
+--- a/berkeley-function-call-leaderboard/bfcl_eval/constants/model_config.py
++++ b/berkeley-function-call-leaderboard/bfcl_eval/constants/model_config.py
+@@ -9,6 +9,9 @@ from bfcl_eval.model_handler.api_inference.fireworks import FireworksHandler
+ from bfcl_eval.model_handler.api_inference.functionary import FunctionaryHandler
+ from bfcl_eval.model_handler.api_inference.gemini import GeminiHandler
+ from bfcl_eval.model_handler.api_inference.glm import GLMAPIHandler
++from bfcl_eval.model_handler.api_inference.glm52_openai import (
++    GLM52OpenAIChatCompletionsHandler,
++)
+ from bfcl_eval.model_handler.api_inference.gogoagent import GoGoAgentHandler
+ from bfcl_eval.model_handler.api_inference.gorilla import GorillaHandler
+ from bfcl_eval.model_handler.api_inference.grok import GrokHandler
+@@ -118,5 +121,17 @@ class ModelConfig:
+ # Inference through API calls
+ api_inference_model_map = {
++    "zai-org/GLM-5.2-FC": ModelConfig(
++        model_name="zai-org/GLM-5.2",
++        display_name="GLM-5.2 Native FC OpenAI Chat Completions",
++        url="https://huggingface.co/zai-org/GLM-5.2",
++        org="Z.ai",
++        license="MIT",
++        model_handler=GLM52OpenAIChatCompletionsHandler,
++        input_price=None,
++        output_price=None,
++        is_fc_model=True,
++        underscore_to_dot=True,
++    ),
+     "gorilla-openfunctions-v2": ModelConfig(
+         model_name="gorilla-openfunctions-v2",
+         display_name="Gorilla-OpenFunctions-v2 (FC)",
+diff --git a/berkeley-function-call-leaderboard/bfcl_eval/constants/supported_models.py b/berkeley-function-call-leaderboard/bfcl_eval/constants/supported_models.py
+index 047c273..937004a 100644
+--- a/berkeley-function-call-leaderboard/bfcl_eval/constants/supported_models.py
++++ b/berkeley-function-call-leaderboard/bfcl_eval/constants/supported_models.py
+@@ -15,4 +15,5 @@
+ SUPPORTED_MODELS = [
++    "zai-org/GLM-5.2-FC",
+     "gorilla-openfunctions-v2",
+     "DeepSeek-V3.2-Exp",
+     "DeepSeek-V3.2-Exp-FC",
+diff --git a/berkeley-function-call-leaderboard/bfcl_eval/model_handler/api_inference/glm52_openai.py b/berkeley-function-call-leaderboard/bfcl_eval/model_handler/api_inference/glm52_openai.py
+new file mode 100644
+index 0000000..43dfa03
+--- /dev/null
++++ b/berkeley-function-call-leaderboard/bfcl_eval/model_handler/api_inference/glm52_openai.py
+@@ -0,0 +1,93 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++
++"""GLM-5.2 native OpenAI Chat Completions adapter for BFCL."""
++
++import json
++import os
++from typing import Any
++
++from bfcl_eval.model_handler.api_inference.openai_completion import (
++    OpenAICompletionsHandler,
++)
++from overrides import override
++
++
++class GLM52OpenAIChatCompletionsHandler(OpenAICompletionsHandler):
++    """Native tool-calling adapter for OpenAI-compatible GLM-5.2 endpoints.
++
++    This intentionally inherits the API-inference handler, not ``OSSHandler``:
++    requests go to ``/v1/chat/completions`` with ``messages`` and ``tools`` and
++    BFCL consumes structured ``message.tool_calls`` from the response.
++    """
++
++    def _build_client_kwargs(self) -> dict[str, Any]:
++        base_url = os.getenv("GLM52_OPENAI_BASE_URL")
++        if not base_url:
++            raise ValueError(
++                "GLM52_OPENAI_BASE_URL is required (for example, "
++                "http://127.0.0.1:8000/v1)"
++            )
++
++        kwargs: dict[str, Any] = {
++            "base_url": base_url.rstrip("/"),
++            "api_key": os.getenv("GLM52_OPENAI_API_KEY", "EMPTY"),
++        }
++
++        if headers_env := os.getenv("GLM52_OPENAI_DEFAULT_HEADERS"):
++            kwargs["default_headers"] = json.loads(headers_env)
++
++        return kwargs
++
++    @override
++    def _query_FC(self, inference_data: dict):
++        messages: list[dict] = inference_data["message"]
++        tools: list[dict] = inference_data["tools"]
++        inference_data["inference_input_log"] = {
++            "message": repr(messages),
++            "tools": tools,
++        }
++
++        kwargs: dict[str, Any] = {
++            "messages": messages,
++            "model": self.model_name,
++            "temperature": self.temperature,
++            "max_tokens": int(os.getenv("GLM52_OPENAI_MAX_TOKENS", "64000")),
++        }
++        if tools:
++            kwargs["tools"] = tools
++            kwargs["tool_choice"] = "auto"
++
++        if extra_body_env := os.getenv("GLM52_OPENAI_EXTRA_BODY"):
++            extra_body = json.loads(extra_body_env)
++            if not isinstance(extra_body, dict):
++                raise ValueError("GLM52_OPENAI_EXTRA_BODY must decode to a JSON object")
++            kwargs["extra_body"] = extra_body
++
++        return self.generate_with_backoff(**kwargs)
++
++    @override
++    def _parse_query_response_FC(self, api_response: Any) -> dict:
++        message = api_response.choices[0].message
++        tool_calls = getattr(message, "tool_calls", None) or []
++
++        if tool_calls:
++            model_responses = [
++                {tool_call.function.name: tool_call.function.arguments}
++                for tool_call in tool_calls
++            ]
++            tool_call_ids = [tool_call.id for tool_call in tool_calls]
++        else:
++            model_responses = message.content
++            tool_call_ids = []
++
++        usage = getattr(api_response, "usage", None)
++        response_data = {
++            "model_responses": model_responses,
++            "model_responses_message_for_chat_history": message,
++            "tool_call_ids": tool_call_ids,
++            "input_token": getattr(usage, "prompt_tokens", 0) if usage else 0,
++            "output_token": getattr(usage, "completion_tokens", 0) if usage else 0,
++        }
++        self._add_reasoning_content_if_available_FC(api_response, response_data)
++        return response_data

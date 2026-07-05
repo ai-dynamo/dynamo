@@ -1,0 +1,63 @@
+{
+  "campaign_phase": "ab",
+  "capture": {
+    "captured_at": "2026-07-05T00:00:00Z",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "control_plane": {
+    "dynamo_operator_image_digests": [
+      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "grove_operator_image_digests": [
+      "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ]
+  },
+  "controller": {
+    "generation": 1,
+    "kind": "DynamoGraphDeployment",
+    "name": "glm52-dynamo-vllm",
+    "uid_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "endpoint": "http://glm52-dynamo-vllm-frontend:8000/v1",
+  "hardware": {
+    "container_runtime_version": "containerd://2.1.4",
+    "driver_version": "595.58.03",
+    "gpu_count": 4,
+    "gpu_memory_total_mib": [183359],
+    "gpu_model": "NVIDIA B200",
+    "gpu_uuid_set_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "kernel_version": "6.8.0",
+    "kubelet_version": "v1.33.1"
+  },
+  "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260701-5245c0f@sha256:c3336583c830ea5c3cf4bd5cc92cb57200b8f558398a18c3ac0f473f9b74dd1d",
+  "max_model_len": 409600,
+  "model_id": "nvidia/GLM-5.2-NVFP4",
+  "model_revision": "aec724e8c7b8ee9db3b48c01c320f63f9cdaf8aa",
+  "pods": {
+    "frontend": {
+      "argv_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "image_id": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly@sha256:c3336583c830ea5c3cf4bd5cc92cb57200b8f558398a18c3ac0f473f9b74dd1d",
+      "model_manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "name_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "node_name_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "uid_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    "worker": {
+      "argv_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "image_id": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly@sha256:67c4e55999cfd1f79cb5b5d59fcc20def55e6f465f819f4dbdb69c08613a6b4c",
+      "model_manifest_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "name_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "node_name_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+      "uid_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "recipe": {
+    "rendered_manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "source_commit": "cccccccccccccccccccccccccccccccccccccccc",
+    "template_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "schema_version": 1,
+  "served_model_name": "zai-org/GLM-5.2",
+  "service_name": "glm52-dynamo-vllm-frontend",
+  "variant": "dynamo-vllm"
+}

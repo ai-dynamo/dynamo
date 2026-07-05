@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Public Pro images keep the repository in /app and declare /bin/bash as their
+# entrypoint. This file is included in the immutable run-config digest.
+environment:
+  cwd: /app
+  run_args: ["--rm", "--entrypoint="]

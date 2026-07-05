@@ -1,0 +1,62 @@
+{
+  "campaign_phase": "ab",
+  "command_exit_code": 0,
+  "deployment_sha256": "8a8278c1f49eea2c5574d285d192747966a78ad3d88d8091396df865066185d5",
+  "post": {
+    "controller": {
+      "generation": 1,
+      "kind": "DynamoGraphDeployment",
+      "name": "glm52-dynamo-vllm",
+      "uid_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "pods": {
+      "frontend": {
+        "container_id_sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+        "image_id": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly@sha256:c3336583c830ea5c3cf4bd5cc92cb57200b8f558398a18c3ac0f473f9b74dd1d",
+        "name_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "node_name_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "restart_count": 0,
+        "uid_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "worker": {
+        "container_id_sha256": "3434343434343434343434343434343434343434343434343434343434343434",
+        "image_id": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly@sha256:67c4e55999cfd1f79cb5b5d59fcc20def55e6f465f819f4dbdb69c08613a6b4c",
+        "name_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "node_name_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "restart_count": 0,
+        "uid_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  "post_captured_at": "2026-07-05T02:00:00Z",
+  "pre": {
+    "controller": {
+      "generation": 1,
+      "kind": "DynamoGraphDeployment",
+      "name": "glm52-dynamo-vllm",
+      "uid_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "pods": {
+      "frontend": {
+        "container_id_sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+        "image_id": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly@sha256:c3336583c830ea5c3cf4bd5cc92cb57200b8f558398a18c3ac0f473f9b74dd1d",
+        "name_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "node_name_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "restart_count": 0,
+        "uid_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "worker": {
+        "container_id_sha256": "3434343434343434343434343434343434343434343434343434343434343434",
+        "image_id": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly@sha256:67c4e55999cfd1f79cb5b5d59fcc20def55e6f465f819f4dbdb69c08613a6b4c",
+        "name_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "node_name_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "restart_count": 0,
+        "uid_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  },
+  "pre_captured_at": "2026-07-05T01:00:00Z",
+  "schema_version": 1,
+  "stable": true,
+  "variant": "dynamo-vllm"
+}

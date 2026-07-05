@@ -1,0 +1,6 @@
+{
+  "simple_python": ["simple_python_0", "simple_python_1"],
+  "parallel": ["parallel_0"],
+  "irrelevance": ["irrelevance_0"],
+  "multi_turn_base": ["multi_turn_base_0"]
+}

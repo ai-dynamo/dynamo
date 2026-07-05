@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: glm52-vllm-serve
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: glm52-vllm-serve
+spec:
+  selector:
+    app.kubernetes.io/name: glm52-vllm-serve
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: glm52-vllm-serve
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: glm52-vllm-serve
+    app.kubernetes.io/part-of: glm52-nscale-benchmark
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  progressDeadlineSeconds: 3600
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: glm52-vllm-serve
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: glm52-vllm-serve
+        glm52.nvidia.com/variant: vllm-serve
+    spec:
+      schedulerName: default-scheduler
+      runtimeClassName: nvidia
+      nodeSelector:
+        kubernetes.io/hostname: ${NODE_NAME}
+        nvidia.com/gpu.product: NVIDIA-B200
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+        - key: dra
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      imagePullSecrets:
+        - name: nvcr-secret
+      containers:
+        - name: main
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              test -r "${MODEL_PATH}/config.json"
+              test "$(head -n1 "${MODEL_PATH}/.cache/huggingface/download/config.json.metadata")" = "${MODEL_REVISION}"
+              visible_count="$(nvidia-smi -L | grep -c '^GPU ')"
+              test "${visible_count}" -eq ${TP_SIZE}
+              actual_gpu_uuids="$(nvidia-smi --query-gpu=uuid --format=csv,noheader | sort | paste -sd, -)"
+              test "${actual_gpu_uuids}" = "${EXPECTED_GPU_UUIDS}"
+              dirty_count="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '$1 > 1024 {c++} END {print c+0}')"
+              test "${dirty_count}" -eq 0
+              ulimit -l unlimited
+              exec vllm serve "${MODEL_PATH}" \
+                --served-model-name="${SERVED_MODEL_NAME}" \
+                --host=0.0.0.0 \
+                --port=8000 \
+                --tensor-parallel-size=${TP_SIZE} \
+                --enable-expert-parallel \
+                --trust-remote-code \
+                --kv-cache-dtype=fp8_e4m3 \
+                --reasoning-parser=glm45 \
+                --tool-call-parser=glm47 \
+                --enable-auto-tool-choice \
+                --max-model-len=${MAX_MODEL_LEN} \
+                --max-num-seqs=${MAX_RUNNING_REQUESTS} \
+                --max-num-batched-tokens=32768 \
+                --gpu-memory-utilization=0.90 \
+                --enable-prefix-caching \
+                --no-enable-log-requests
+          env:
+            - name: HF_HOME
+              value: /opt/models/hub
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: HOME
+              value: /tmp
+            - name: VLLM_CACHE_ROOT
+              value: /tmp/vllm
+            - name: TRITON_CACHE_DIR
+              value: /tmp/triton
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: spawn
+            - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+              value: "0"
+            - name: NCCL_IB_DISABLE
+              value: "1"
+            - name: NCCL_CUMEM_ENABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "1"
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "32"
+              memory: 750Gi
+              ephemeral-storage: 40Gi
+              nvidia.com/gpu: "${TP_SIZE}"
+            limits:
+              cpu: "64"
+              memory: 900Gi
+              nvidia.com/gpu: "${TP_SIZE}"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add: ["IPC_LOCK", "SYS_RESOURCE"]
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: model-cache
+              mountPath: /opt/models
+              readOnly: true
+            - name: runtime-tmp
+              mountPath: /tmp
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: runtime-tmp
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Gi

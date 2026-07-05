@@ -1,0 +1,207 @@
+{
+  "schema_version": 3,
+  "campaign": {
+    "title": "GLM-5.2 on NScale: Dynamo versus native engine serving",
+    "status": "in_progress",
+    "started_at": "2026-07-05T03:00:00Z",
+    "completed_at": null,
+    "model": "nvidia/GLM-5.2-NVFP4",
+    "model_revision": "aec724e8c7b8ee9db3b48c01c320f63f9cdaf8aa",
+    "served_model_name": "zai-org/GLM-5.2",
+    "serving_context_tokens": 409600,
+    "terminalbench_context_tokens": 262144,
+    "branch": "rmccormick/glm52",
+    "branch_base": "aeda23b483831df2f75b697b8ccf65f4ffd9f3d6",
+    "source_commit": null,
+    "namespace": "deployment-local (redacted)",
+    "hardware": "4x NVIDIA B200 per serving stack",
+    "execution_policy": "Sequential same-node runs with GPU cleanliness checks"
+  },
+  "variants": [
+    {
+      "id": "dynamo-vllm",
+      "label": "Dynamo + vLLM",
+      "framework": "vLLM",
+      "dynamo": true,
+      "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260701-5245c0f@sha256:c3336583c830ea5c3cf4bd5cc92cb57200b8f558398a18c3ac0f473f9b74dd1d",
+      "status": "starting"
+    },
+    {
+      "id": "vllm-serve",
+      "label": "vLLM serve",
+      "framework": "vLLM",
+      "dynamo": false,
+      "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260701-5245c0f@sha256:c3336583c830ea5c3cf4bd5cc92cb57200b8f558398a18c3ac0f473f9b74dd1d",
+      "status": "pending"
+    },
+    {
+      "id": "dynamo-sglang",
+      "label": "Dynamo + SGLang",
+      "framework": "SGLang",
+      "dynamo": true,
+      "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f@sha256:a60e09976d7bc26812fca94c24df0f76cb579f218bc2e2e689c717a784a1d5e5",
+      "status": "pending"
+    },
+    {
+      "id": "sglang-serve",
+      "label": "SGLang serve",
+      "framework": "SGLang",
+      "dynamo": false,
+      "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f@sha256:a60e09976d7bc26812fca94c24df0f76cb579f218bc2e2e689c717a784a1d5e5",
+      "status": "pending"
+    }
+  ],
+  "pairs": [
+    {
+      "id": "vllm",
+      "label": "vLLM",
+      "dynamo_variant": "dynamo-vllm",
+      "native_variant": "vllm-serve"
+    },
+    {
+      "id": "sglang",
+      "label": "SGLang",
+      "dynamo_variant": "dynamo-sglang",
+      "native_variant": "sglang-serve"
+    }
+  ],
+  "phases": [
+    {
+      "id": "ab",
+      "label": "A/B",
+      "variant_order": [
+        "dynamo-vllm",
+        "vllm-serve",
+        "dynamo-sglang",
+        "sglang-serve"
+      ],
+      "fresh_deployment_required": true
+    },
+    {
+      "id": "ba",
+      "label": "B/A",
+      "variant_order": [
+        "vllm-serve",
+        "dynamo-vllm",
+        "sglang-serve",
+        "dynamo-sglang"
+      ],
+      "fresh_deployment_required": true
+    }
+  ],
+  "suites": [
+    {
+      "id": "bfcl-v4",
+      "label": "BFCL v4 all_scoring",
+      "kind": "bfcl",
+      "unit_label": "cases",
+      "units": 5106,
+      "generation_units": 5217,
+      "attempts": 1,
+      "primary_metric": "overall_accuracy",
+      "comparison_metrics": ["overall_accuracy"],
+      "required_metrics": ["overall_accuracy", "correct_cases", "failed_cases", "inference_errors"],
+      "metrics": [
+        {"id": "overall_accuracy", "label": "Official overall accuracy", "format": "percent", "direction": "higher"},
+        {"id": "correct_cases", "label": "Correct cases", "format": "integer"},
+        {"id": "failed_cases", "label": "Failed cases", "format": "integer"},
+        {"id": "inference_errors", "label": "Inference errors", "format": "integer"}
+      ]
+    },
+    {
+      "id": "swebench-verified",
+      "label": "SWE-bench Verified",
+      "kind": "swebench",
+      "unit_label": "instances",
+      "units": 500,
+      "attempts": 1,
+      "primary_metric": "benchmark_score",
+      "comparison_metrics": ["benchmark_score"],
+      "required_metrics": ["benchmark_score", "score_on_submitted", "passed_instances", "failed_instances", "missing_instances"],
+      "metrics": [
+        {"id": "benchmark_score", "label": "Resolved / full dataset", "format": "percent", "direction": "higher"},
+        {"id": "score_on_submitted", "label": "Resolved / submitted", "format": "percent", "direction": "higher"},
+        {"id": "passed_instances", "label": "Resolved instances", "format": "integer"},
+        {"id": "failed_instances", "label": "Failed instances", "format": "integer"},
+        {"id": "missing_instances", "label": "Missing predictions", "format": "integer"}
+      ]
+    },
+    {
+      "id": "swebench-pro",
+      "label": "SWE-bench Pro public",
+      "kind": "swebench",
+      "unit_label": "instances",
+      "units": 731,
+      "attempts": 1,
+      "primary_metric": "benchmark_score",
+      "comparison_metrics": ["benchmark_score"],
+      "required_metrics": ["benchmark_score", "score_on_submitted", "passed_instances", "failed_instances", "missing_instances"],
+      "metrics": [
+        {"id": "benchmark_score", "label": "Resolved / full dataset", "format": "percent", "direction": "higher"},
+        {"id": "score_on_submitted", "label": "Resolved / submitted", "format": "percent", "direction": "higher"},
+        {"id": "passed_instances", "label": "Resolved instances", "format": "integer"},
+        {"id": "failed_instances", "label": "Failed instances", "format": "integer"},
+        {"id": "missing_instances", "label": "Missing predictions", "format": "integer"}
+      ]
+    },
+    {
+      "id": "swebench-multilingual",
+      "label": "SWE-bench Multilingual",
+      "kind": "swebench",
+      "unit_label": "instances",
+      "units": 300,
+      "attempts": 1,
+      "primary_metric": "benchmark_score",
+      "comparison_metrics": ["benchmark_score"],
+      "required_metrics": ["benchmark_score", "score_on_submitted", "passed_instances", "failed_instances", "missing_instances"],
+      "metrics": [
+        {"id": "benchmark_score", "label": "Resolved / full dataset", "format": "percent", "direction": "higher"},
+        {"id": "score_on_submitted", "label": "Resolved / submitted", "format": "percent", "direction": "higher"},
+        {"id": "passed_instances", "label": "Resolved instances", "format": "integer"},
+        {"id": "failed_instances", "label": "Failed instances", "format": "integer"},
+        {"id": "missing_instances", "label": "Missing predictions", "format": "integer"}
+      ]
+    },
+    {
+      "id": "terminal-bench-2.1",
+      "label": "Terminal-Bench 2.1",
+      "kind": "terminalbench",
+      "unit_label": "tasks",
+      "units": 89,
+      "attempts": 5,
+      "primary_metric": "pass_at_1",
+      "comparison_metrics": ["pass_at_1", "pass_at_2", "pass_at_3", "pass_at_4", "pass_at_5"],
+      "required_metrics": ["pass_at_1", "pass_at_2", "pass_at_3", "pass_at_4", "pass_at_5", "passed_attempts", "failed_attempts", "errored_attempts", "no_reward_attempts"],
+      "metrics": [
+        {"id": "pass_at_1", "label": "pass@1", "format": "percent", "direction": "higher"},
+        {"id": "pass_at_2", "label": "pass@2", "format": "percent", "direction": "higher"},
+        {"id": "pass_at_3", "label": "pass@3", "format": "percent", "direction": "higher"},
+        {"id": "pass_at_4", "label": "pass@4", "format": "percent", "direction": "higher"},
+        {"id": "pass_at_5", "label": "pass@5", "format": "percent", "direction": "higher"},
+        {"id": "mean_reward_all_trials", "label": "Mean reward (all trials)", "format": "number", "direction": "higher"},
+        {"id": "passed_attempts", "label": "Passed attempts", "format": "integer"},
+        {"id": "failed_attempts", "label": "Failed attempts", "format": "integer"},
+        {"id": "errored_attempts", "label": "Errored attempts", "format": "integer"},
+        {"id": "no_reward_attempts", "label": "No-reward attempts", "format": "integer"}
+      ]
+    }
+  ],
+  "results": [],
+  "paired_disagreements": [],
+  "issues": [
+    {
+      "id": "setup-vllm-omni-plugin-import",
+      "variant": "dynamo-vllm",
+      "severity": "low",
+      "status": "observed",
+      "error": "The pinned runtime logs a vllm_omni plugin ImportError for supports_xccl while loading plugins.",
+      "impact": "The text model continues initializing; benchmark impact is not yet established.",
+      "fix": null,
+      "verification": null
+    }
+  ],
+  "notes": [
+    "No benchmark scores are published until the corresponding full run and official evaluator complete.",
+    "The BFCL web-search category requires an external SERPAPI_API_KEY; none is available, so the full official BFCL run remains blocked."
+  ]
+}

@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: glm52-benchmark-artifacts
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: vast
+  resources:
+    requests:
+      storage: 1Ti
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: glm52-eval-runner
+  labels:
+    app.kubernetes.io/name: glm52-eval-runner
+    app.kubernetes.io/part-of: glm52-nscale-benchmark
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 10
+  nodeSelector:
+    node.kubernetes.io/instance-type: g.32.standard.100s
+    kubernetes.io/arch: amd64
+  initContainers:
+    - name: docker-cli
+      image: docker:27.5.1-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          cp /usr/local/bin/docker /docker-cli/docker
+          cp /usr/local/libexec/docker/cli-plugins/docker-compose /docker-cli/docker-compose
+      volumeMounts:
+        - name: docker-cli
+          mountPath: /docker-cli
+  containers:
+    - name: runner
+      image: python:3.12-bookworm@sha256:c36262cd12ed3eb4c32146f5268ea5037e04c688ccf32cdb04b6084671845541
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/bash", "-lc"]
+      args:
+        - |
+          set -euo pipefail
+          rm -f /run/glm52-runner-ready
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git jq patch rsync tini tmux
+          rm -rf /var/lib/apt/lists/*
+          mkdir -p /usr/local/libexec/docker/cli-plugins
+          ln -sf /opt/docker-cli/docker /usr/local/bin/docker
+          ln -sf /opt/docker-cli/docker-compose \
+            /usr/local/libexec/docker/cli-plugins/docker-compose
+          python3 -m pip install --no-cache-dir uv==0.8.17
+          mkdir -p \
+            /artifacts/cache/huggingface \
+            /artifacts/cache/pip \
+            /artifacts/cache/uv \
+            /artifacts/glm52-nscale \
+            /artifacts/harnesses/bfcl \
+            /artifacts/harnesses/swebench \
+            /artifacts/harnesses/terminalbench \
+            /workspace
+          docker --version
+          docker compose version
+          touch /run/glm52-runner-ready
+          exec tini -- sleep infinity
+      env:
+        - name: DOCKER_HOST
+          value: tcp://127.0.0.1:2375
+        - name: HF_HOME
+          value: /artifacts/cache/huggingface
+        - name: UV_CACHE_DIR
+          value: /artifacts/cache/uv
+        - name: PIP_CACHE_DIR
+          value: /artifacts/cache/pip
+        - name: GLM52_ARTIFACT_ROOT
+          value: /artifacts/glm52-nscale
+        - name: BFCL_CHECKOUT_DIR
+          value: /artifacts/harnesses/bfcl/gorilla
+        - name: BFCL_VENV_DIR
+          value: /artifacts/harnesses/bfcl/venv
+        - name: BFCL_ARTIFACT_ROOT
+          value: /artifacts/glm52-nscale/bfcl
+        - name: HARBOR_SOURCE_DIR
+          value: /artifacts/harnesses/terminalbench/harbor-1afcacf22df82e6b3f36152fcd11bfef4ec96c4f
+        - name: TERMINALBENCH_JOBS_DIR
+          value: /artifacts/glm52-nscale/terminalbench/jobs
+        - name: SWEBENCH_WORK_ROOT
+          value: /artifacts/harnesses/swebench
+        - name: SWEBENCH_RESULTS_ROOT
+          value: /artifacts/glm52-nscale/swebench/results
+        - name: PYTHONUNBUFFERED
+          value: "1"
+      envFrom:
+        - secretRef:
+            name: hf-token-secret
+        - secretRef:
+            name: glm52-benchmark-secrets
+            optional: true
+      resources:
+        requests:
+          cpu: "8"
+          memory: 16Gi
+          ephemeral-storage: 40Gi
+        limits:
+          cpu: "16"
+          memory: 64Gi
+      startupProbe:
+        exec:
+          command:
+            - /bin/bash
+            - -lc
+            - test -f /run/glm52-runner-ready
+        periodSeconds: 5
+        timeoutSeconds: 2
+        failureThreshold: 360
+      readinessProbe:
+        exec:
+          command:
+            - /bin/bash
+            - -lc
+            - >-
+              test -f /run/glm52-runner-ready &&
+              docker info >/dev/null &&
+              docker compose version >/dev/null
+        periodSeconds: 5
+        timeoutSeconds: 5
+        failureThreshold: 6
+      volumeMounts:
+        - name: artifacts
+          mountPath: /artifacts
+        - name: workspace
+          mountPath: /workspace
+        - name: docker-cli
+          mountPath: /opt/docker-cli
+    - name: dind
+      image: docker:27.5.1-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
+      imagePullPolicy: IfNotPresent
+      command: ["dockerd"]
+      args:
+        - --host=tcp://127.0.0.1:2375
+        - --host=unix:///var/run/docker.sock
+        - --storage-driver=overlay2
+        - --tls=false
+      env:
+        - name: DOCKER_TLS_CERTDIR
+          value: ""
+      securityContext:
+        privileged: true
+      resources:
+        requests:
+          cpu: "2"
+          memory: 4Gi
+          ephemeral-storage: 200Gi
+        limits:
+          cpu: "4"
+          memory: 16Gi
+      readinessProbe:
+        exec:
+          command: ["docker", "info"]
+        initialDelaySeconds: 5
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 120
+      volumeMounts:
+        - name: docker-data
+          mountPath: /var/lib/docker
+        - name: artifacts
+          mountPath: /artifacts
+        - name: workspace
+          mountPath: /workspace
+  volumes:
+    - name: artifacts
+      persistentVolumeClaim:
+        claimName: glm52-benchmark-artifacts
+    - name: workspace
+      emptyDir:
+        sizeLimit: 40Gi
+    - name: docker-data
+      emptyDir:
+        sizeLimit: 400Gi
+    - name: docker-cli
+      emptyDir: {}
