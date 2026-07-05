@@ -1,11 +1,8 @@
 """vLLM request adaptation for Dynamo's engine-native generate API."""
 
-import base64
-import io
-import logging
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-import numpy as np
 from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
 from vllm.inputs import TokensPrompt, mm_input
 from vllm.multimodal.inputs import (
@@ -22,22 +19,44 @@ from vllm.sampling_params import (
 
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 
-logger = logging.getLogger(__name__)
+from .response_adapters import EngineGenerateResponseAdapter, serialize_vllm_routed_experts
 
 
-def serialize_routed_experts(routed_experts: Any) -> Optional[str]:
-    """Encode routed experts using vLLM's public base64-of-NumPy format."""
-    if routed_experts is None:
-        return None
-    try:
-        buffer = io.BytesIO()
-        np.save(buffer, routed_experts)
-        return base64.b64encode(buffer.getvalue()).decode("ascii")
-    except Exception:
-        logger.warning(
-            "Unable to encode routed_experts for generate API", exc_info=True
+@dataclass(frozen=True)
+class EngineGenerateRequest:
+    """Typed worker adapter for one engine-native generate request."""
+
+    request: Dict[str, Any]
+    generate_request: Dict[str, Any]
+
+    @classmethod
+    def from_request(cls, request: Dict[str, Any]) -> Optional["EngineGenerateRequest"]:
+        generate_request = payload(request)
+        return cls(request, generate_request) if generate_request is not None else None
+
+    def build_prompt(self) -> Any:
+        return _build_prompt(self.request, self.generate_request)
+
+    def build_sampling_params(
+        self,
+        default_sampling_params: Dict[str, Any],
+        model_max_len: int | None,
+    ) -> SamplingParams:
+        return _build_sampling_params(
+            self.request,
+            self.generate_request,
+            default_sampling_params,
+            model_max_len,
         )
-        return None
+
+    def priority(self, routing: Dict[str, Any]) -> int:
+        return int(routing.get("priority", 0))
+
+    def response_adapter(self) -> EngineGenerateResponseAdapter:
+        return EngineGenerateResponseAdapter()
+
+
+serialize_routed_experts = serialize_vllm_routed_experts
 
 
 def payload(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -72,7 +91,10 @@ def build_prompt(request: Dict[str, Any]) -> Any:
     generate_request = payload(request)
     if generate_request is None:
         raise ValueError("generate_request is missing from token-native request")
+    return _build_prompt(request, generate_request)
 
+
+def _build_prompt(request: Dict[str, Any], generate_request: Dict[str, Any]) -> Any:
     token_ids = list(
         request.get("token_ids") or generate_request.get("token_ids") or []
     )
@@ -122,6 +144,20 @@ def build_sampling_params(
     generate_request = payload(request)
     if generate_request is None:
         raise ValueError("generate_request is missing from token-native request")
+    return _build_sampling_params(
+        request,
+        generate_request,
+        default_sampling_params,
+        model_max_len,
+    )
+
+
+def _build_sampling_params(
+    request: Dict[str, Any],
+    generate_request: Dict[str, Any],
+    default_sampling_params: Dict[str, Any],
+    model_max_len: int | None,
+) -> SamplingParams:
     raw_params = generate_request.get("sampling_params") or {}
     if not isinstance(raw_params, dict):
         raise ValueError("generate_request.sampling_params must be an object")

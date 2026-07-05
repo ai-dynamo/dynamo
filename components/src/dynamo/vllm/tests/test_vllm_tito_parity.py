@@ -28,9 +28,9 @@ class TestSerializePromptLogprobs:
 
     @staticmethod
     def _import():
-        from dynamo.vllm.handlers import _serialize_prompt_logprobs
+        from dynamo.vllm.response_adapters import serialize_prompt_logprobs
 
-        return _serialize_prompt_logprobs
+        return serialize_prompt_logprobs
 
     def test_none_entries_preserved(self):
         fn = self._import()
@@ -230,24 +230,25 @@ class TestNonFiniteLogprobs:
     def test_finite_logprob_clamps_non_finite(self):
         import math
 
-        from dynamo.vllm.handlers import _MIN_FINITE_LOGPROB, _finite_logprob
+        from dynamo.vllm.response_adapters import MIN_FINITE_LOGPROB, finite_logprob
 
-        assert _finite_logprob(-0.5) == pytest.approx(-0.5)
-        assert _finite_logprob(0.0) == 0.0  # legitimate finite value preserved
-        assert _finite_logprob(float("-inf")) == _MIN_FINITE_LOGPROB
-        assert _finite_logprob(float("inf")) == _MIN_FINITE_LOGPROB
-        assert _finite_logprob(float("nan")) == _MIN_FINITE_LOGPROB
-        assert math.isfinite(_finite_logprob(float("-inf")))
+        assert finite_logprob(-0.5) == pytest.approx(-0.5)
+        assert finite_logprob(0.0) == 0.0  # legitimate finite value preserved
+        assert finite_logprob(float("-inf")) == MIN_FINITE_LOGPROB
+        assert finite_logprob(float("inf")) == MIN_FINITE_LOGPROB
+        assert finite_logprob(float("nan")) == MIN_FINITE_LOGPROB
+        assert math.isfinite(finite_logprob(float("-inf")))
 
     def test_flatten_logprobs_clamps_inf_and_drops_bool(self):
-        from dynamo.vllm.handlers import _MIN_FINITE_LOGPROB, _flatten_logprobs
+        from dynamo.vllm.handlers import _flatten_logprobs
+        from dynamo.vllm.response_adapters import MIN_FINITE_LOGPROB
 
         assert _flatten_logprobs(
             [float("-inf"), -0.5, [{"logprob": float("nan")}]]
         ) == [
-            _MIN_FINITE_LOGPROB,
+            MIN_FINITE_LOGPROB,
             pytest.approx(-0.5),
-            _MIN_FINITE_LOGPROB,
+            MIN_FINITE_LOGPROB,
         ]
         # bool is an int subclass; drop it rather than coerce to 1.0/0.0.
         assert _flatten_logprobs([True, -0.5, False]) == [pytest.approx(-0.5)]
@@ -255,21 +256,21 @@ class TestNonFiniteLogprobs:
     def test_serialize_prompt_logprobs_clamps_inf(self):
         from types import SimpleNamespace
 
-        from dynamo.vllm.handlers import _MIN_FINITE_LOGPROB, _serialize_prompt_logprobs
+        from dynamo.vllm.response_adapters import MIN_FINITE_LOGPROB, serialize_prompt_logprobs
 
-        out = _serialize_prompt_logprobs([{7: SimpleNamespace(logprob=float("-inf"))}])
-        assert out[0]["7"]["logprob"] == _MIN_FINITE_LOGPROB
+        out = serialize_prompt_logprobs([{7: SimpleNamespace(logprob=float("-inf"))}])
+        assert out[0]["7"]["logprob"] == MIN_FINITE_LOGPROB
 
     def test_sentinel_is_json_safe(self):
         import json
         import math
 
-        from dynamo.vllm.handlers import _MIN_FINITE_LOGPROB
+        from dynamo.vllm.response_adapters import MIN_FINITE_LOGPROB
 
-        assert math.isfinite(_MIN_FINITE_LOGPROB)
+        assert math.isfinite(MIN_FINITE_LOGPROB)
         # Must serialize without becoming null (the whole point of the clamp).
-        assert json.loads(json.dumps({"logprob": _MIN_FINITE_LOGPROB})) == {
-            "logprob": _MIN_FINITE_LOGPROB
+        assert json.loads(json.dumps({"logprob": MIN_FINITE_LOGPROB})) == {
+            "logprob": MIN_FINITE_LOGPROB
         }
 
 
@@ -323,10 +324,8 @@ class TestEngineDataAccumulation:
         assert token_ids[1] == [20]
 
     def test_engine_data_preserves_prompt_logprobs(self):
-        from dynamo.vllm.handlers import (
-            _accumulate_engine_data,
-            _attach_prompt_logprobs_engine_data,
-        )
+        from dynamo.vllm.handlers import _accumulate_engine_data
+        from dynamo.vllm.response_adapters import attach_prompt_logprobs_engine_data
 
         final = {
             "index": 0,
@@ -335,7 +334,7 @@ class TestEngineDataAccumulation:
         }
         payload = [None, {"42": {"logprob": -0.5, "rank": 1}}]
 
-        _attach_prompt_logprobs_engine_data(final, payload)
+        attach_prompt_logprobs_engine_data(final, payload)
         _accumulate_engine_data(final, [1, 2], {}, {})
 
         assert final["engine_data"]["prompt_logprobs"] == payload
