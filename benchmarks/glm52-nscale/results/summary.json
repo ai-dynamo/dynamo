@@ -12,7 +12,7 @@
     "terminalbench_context_tokens": 262144,
     "branch": "rmccormick/glm52",
     "branch_base": "aeda23b483831df2f75b697b8ccf65f4ffd9f3d6",
-    "source_commit": "5b00da6cab6f0f0f1c37f935bf6751f80b1d2c8c",
+    "source_commit": "71df933dd01394bf54e1d5cc25a0f666bd91dd9e",
     "namespace": "deployment-local (redacted)",
     "hardware": "4x NVIDIA B200 per serving stack",
     "execution_policy": "Sequential same-node runs with GPU cleanliness checks"
