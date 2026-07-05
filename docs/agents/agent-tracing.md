@@ -136,7 +136,7 @@ stream, enable request trace and set
 
 ```bash
 export DYN_REQUEST_TRACE=1
-export DYN_REQUEST_TRACE_DESTINATIONS=file
+export DYN_REQUEST_TRACE_SINKS=file
 export DYN_REQUEST_TRACE_FILE_PATH=/tmp/dynamo-trace
 export DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip
 export DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true

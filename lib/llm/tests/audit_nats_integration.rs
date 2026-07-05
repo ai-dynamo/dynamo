@@ -146,7 +146,7 @@ mod tests {
         async_with_vars(
             [
                 ("DYN_REQUEST_TRACE", Some("1")),
-                ("DYN_REQUEST_TRACE_DESTINATIONS", Some("nats")),
+                ("DYN_REQUEST_TRACE_SINKS", Some("nats")),
                 ("DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE", Some("true")),
                 ("DYN_REQUEST_TRACE_NATS_SUBJECT", Some(TEST_SUBJECT)),
             ],
@@ -213,7 +213,7 @@ mod tests {
         async_with_vars(
             [
                 ("DYN_REQUEST_TRACE", Some("1")),
-                ("DYN_REQUEST_TRACE_DESTINATIONS", Some("nats")),
+                ("DYN_REQUEST_TRACE_SINKS", Some("nats")),
                 ("DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE", Some("true")),
                 ("DYN_REQUEST_TRACE_NATS_SUBJECT", Some(TEST_SUBJECT)),
             ],

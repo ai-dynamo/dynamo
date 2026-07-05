@@ -530,7 +530,7 @@ def test_frontend_api_surface_compliance(
         # nvext is enabled by default; no env needed. (Set
         # DYN_DISABLE_FRONTEND_NVEXT=1 to turn it off.)
         "DYN_REQUEST_TRACE": "1",
-        "DYN_REQUEST_TRACE_DESTINATIONS": "file",
+        "DYN_REQUEST_TRACE_SINKS": "file",
         "DYN_REQUEST_TRACE_FILE_PATH": str(request_trace_path),
         "DYN_REQUEST_TRACE_FILE_COMPRESSION": "none",
         "DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS": "10",

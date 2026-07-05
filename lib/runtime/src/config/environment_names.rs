@@ -424,8 +424,8 @@ pub mod llm {
 
     /// Deprecated audit payload logging aliases. Prefer `llm::request_trace`.
     pub mod audit {
-        /// Deprecated alias for `DYN_REQUEST_TRACE_DESTINATIONS`. Legacy values
-        /// `jsonl` and `jsonl_gz` map to the request trace `file` destination.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_SINKS`. Legacy values
+        /// `jsonl` and `jsonl_gz` map to the request trace `file` sink.
         pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
 
         /// Deprecated alias for `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE`.
@@ -461,10 +461,7 @@ pub mod llm {
         /// Master switch. Truthy enables request trace emission.
         pub const DYN_REQUEST_TRACE: &str = "DYN_REQUEST_TRACE";
 
-        /// Request trace destination selection. Comma-separated values: `file`, `stderr`, `nats`, `otel`.
-        pub const DYN_REQUEST_TRACE_DESTINATIONS: &str = "DYN_REQUEST_TRACE_DESTINATIONS";
-
-        /// Deprecated alias for request trace destination and file codec selection.
+        /// Request trace sink selection. Comma-separated values: `file`, `stderr`, `nats`, `otel`.
         ///
         /// Legacy values map as follows: `jsonl` => `file` with no compression,
         /// `jsonl_gz` => `file` with gzip compression, `stderr` => `stderr`,
@@ -811,7 +808,6 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE,
-            llm::request_trace::DYN_REQUEST_TRACE_DESTINATIONS,
             llm::request_trace::DYN_REQUEST_TRACE_SINKS,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_PATH,
             llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,

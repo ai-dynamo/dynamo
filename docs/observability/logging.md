@@ -343,7 +343,7 @@ command to set the SGLang engine's log level directly (e.g.
 
 Dynamo emits per-request `/v1/chat/completions` payloads through request trace.
 The `request_payload` row carries the client request and, when one completes,
-the response. The same `DYN_REQUEST_TRACE_DESTINATIONS` setting controls local
+the response. The same `DYN_REQUEST_TRACE_SINKS` setting selects local
 files, stderr, NATS, and OTLP log export.
 
 Request payload logging is opt-in and independent of `OTEL_EXPORT_ENABLED`
@@ -353,9 +353,9 @@ emit request or response payload rows, even when the OpenAI request sets
 payload rows for every eligible chat request.
 
 > [!IMPORTANT]
-> The OTLP payload path is enabled by `DYN_REQUEST_TRACE_DESTINATIONS=otel`, or
-> by combining destinations such as `DYN_REQUEST_TRACE_DESTINATIONS=file,otel`.
-> Setting `DYN_REQUEST_TRACE_DESTINATIONS=stderr` together with
+> The OTLP payload path is enabled by `DYN_REQUEST_TRACE_SINKS=otel`, or
+> by combining sinks such as `DYN_REQUEST_TRACE_SINKS=file,otel`.
+> Setting `DYN_REQUEST_TRACE_SINKS=stderr` together with
 > `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` writes request trace JSON to the process
 > logger only; it does not export payload records over OTLP.
 
@@ -366,7 +366,7 @@ payload rows for every eligible chat request.
 - On client cancellation, gateway timeout, or aggregation failure, the record is
   still emitted with `payload.response` omitted, so those cases remain
   inspectable. A hard process crash before emission can lose a record.
-- Each `otel` destination record maps to one OTLP `LogRecord`: scope
+- Each `otel` sink record maps to one OTLP `LogRecord`: scope
   `dynamo.request_trace`, body `request_payload`, with attributes `schema`,
   `event_type`, `rid`, `endpoint`, `model`, `streaming`, `payload_complete`,
   and `payload` (the request trace row serialized as a JSON string).
@@ -378,9 +378,9 @@ Payload-related request trace variables:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DYN_REQUEST_TRACE` | Master switch for request trace and request payload logging. | unset (disabled) |
-| `DYN_REQUEST_TRACE_DESTINATIONS` | Comma-separated destinations: `file`, `stderr`, `nats`, `otel`. | `file` when enabled |
+| `DYN_REQUEST_TRACE_SINKS` | Comma-separated sinks: `file`, `stderr`, `nats`, `otel`. | `file` when enabled |
 | `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE` | Include request and response payload bodies by emitting `request_payload` rows for all eligible chat requests. When `false`, no payload rows are emitted, even if `store=true`. | `false` |
-| `DYN_REQUEST_TRACE_NATS_SUBJECT` | Subject used by the `nats` destination. | `dynamo.request_trace.v1` |
+| `DYN_REQUEST_TRACE_NATS_SUBJECT` | Subject used by the `nats` sink. | `dynamo.request_trace.v1` |
 | `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. Oversized payload rows emit a marker with `payload_complete=false` and `payload_drop_reason`. | `4194304` (4 MiB) |
 
 > [!WARNING]
@@ -389,7 +389,7 @@ Payload-related request trace variables:
 > accepted as aliases. Prefer the `DYN_REQUEST_TRACE_*` variables for new
 > deployments.
 
-The `otel` destination ships over OTLP using the standard
+The `otel` sink ships over OTLP using the standard
 `OTEL_EXPORTER_OTLP_*` variables, resolved the same way as the runtime log and
 trace exporter:
 
@@ -405,7 +405,7 @@ trace exporter:
 > [!NOTE]
 > Keep the endpoint consistent with the protocol: a `grpc` endpoint is used
 > verbatim, while `http/protobuf` expects an HTTP URL and gets `/v1/logs`
-> appended. Because the request trace OTLP destination and the runtime exporter
+> appended. Because the request trace OTLP sink and the runtime exporter
 > share these variables and the same `grpc` default, request payload records and
 > application telemetry resolve to the same destination unless you override the
 > logs signal explicitly.
@@ -417,7 +417,7 @@ request:
 
 ```bash
 export DYN_REQUEST_TRACE=1
-export DYN_REQUEST_TRACE_DESTINATIONS=otel
+export DYN_REQUEST_TRACE_SINKS=otel
 export DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true
 export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4317
 export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
@@ -426,10 +426,10 @@ export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
 To also write request trace JSON to stderr:
 
 ```bash
-export DYN_REQUEST_TRACE_DESTINATIONS=stderr,otel
+export DYN_REQUEST_TRACE_SINKS=stderr,otel
 ```
 
-For local files, set `DYN_REQUEST_TRACE_DESTINATIONS=file` and configure
+For local files, set `DYN_REQUEST_TRACE_SINKS=file` and configure
 `DYN_REQUEST_TRACE_FILE_PATH`, `DYN_REQUEST_TRACE_FILE_FORMAT`, and
 `DYN_REQUEST_TRACE_FILE_COMPRESSION`. See
 [Request Replay Tracing](request-tracing.md) for the full request trace

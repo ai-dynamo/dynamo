@@ -19,8 +19,8 @@ use crate::telemetry::jsonl::{JsonlSinkOptions, JsonlWriter};
 use crate::telemetry::jsonl_gz::{JsonlGzipSinkOptions, JsonlGzipWriter};
 
 use super::{
-    RequestTraceDestination, RequestTraceFileCompression, RequestTraceFileFormat,
-    RequestTracePolicy, RequestTraceRecord, config, otel_sink::OtelRequestTraceSink,
+    RequestTraceFileCompression, RequestTraceFileFormat, RequestTracePolicy, RequestTraceRecord,
+    RequestTraceSinkKind, config, otel_sink::OtelRequestTraceSink,
 };
 
 static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
@@ -66,7 +66,7 @@ impl NatsRequestTraceSink {
             .with_context(|| {
                 format!(
                     "Attempting to connect NATS request trace sink from env var {}",
-                    env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS
+                    env_request_trace::DYN_REQUEST_TRACE_SINKS
                 )
             })?;
         Ok(Self {
@@ -111,7 +111,7 @@ impl JsonlRequestTraceSink {
             anyhow!(
                 "{} must be set when {} includes file",
                 env_request_trace::DYN_REQUEST_TRACE_FILE_PATH,
-                env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS
+                env_request_trace::DYN_REQUEST_TRACE_SINKS
             )
         })?;
         Self::new(
@@ -155,7 +155,7 @@ impl JsonlGzipRequestTraceSink {
             anyhow!(
                 "{} must be set when {} includes file",
                 env_request_trace::DYN_REQUEST_TRACE_FILE_PATH,
-                env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS
+                env_request_trace::DYN_REQUEST_TRACE_SINKS
             )
         })?;
         Self::new(
@@ -185,19 +185,19 @@ impl RequestTraceSink for JsonlGzipRequestTraceSink {
     }
 }
 
-async fn parse_destinations_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTraceSink>>> {
+async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTraceSink>>> {
     let policy = config::policy();
     let mut sinks: Vec<Arc<dyn RequestTraceSink>> = Vec::new();
-    for destination in &policy.destinations {
-        match destination {
-            RequestTraceDestination::Stderr => sinks.push(Arc::new(StderrRequestTraceSink)),
-            RequestTraceDestination::Nats => {
+    for sink_kind in &policy.sinks {
+        match sink_kind {
+            RequestTraceSinkKind::Stderr => sinks.push(Arc::new(StderrRequestTraceSink)),
+            RequestTraceSinkKind::Nats => {
                 sinks.push(Arc::new(NatsRequestTraceSink::from_policy(policy).await?))
             }
-            RequestTraceDestination::Otel => {
+            RequestTraceSinkKind::Otel => {
                 sinks.push(Arc::new(OtelRequestTraceSink::from_policy(policy).await?))
             }
-            RequestTraceDestination::File => match policy.file_format {
+            RequestTraceSinkKind::File => match policy.file_format {
                 RequestTraceFileFormat::Jsonl => match policy.file_compression {
                     RequestTraceFileCompression::None => {
                         sinks.push(Arc::new(JsonlRequestTraceSink::from_policy(policy).await?))
@@ -228,7 +228,7 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
 }
 
 async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
-    let sinks = parse_destinations_from_env().await?;
+    let sinks = parse_sinks_from_env().await?;
     let sink_count = sinks.len();
     for sink in sinks {
         let name = sink.name();
@@ -273,14 +273,9 @@ async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
     }
 
     if sink_count == 0 {
-        tracing::warn!(
-            "request trace is enabled but no valid request trace destinations were configured"
-        );
+        tracing::warn!("request trace is enabled but no valid request trace sinks were configured");
     }
-    tracing::info!(
-        destinations = sink_count,
-        "Request trace destinations ready"
-    );
+    tracing::info!(sinks = sink_count, "Request trace sinks ready");
     Ok(())
 }
 

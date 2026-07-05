@@ -19,7 +19,7 @@ request or response payload rows, even when `store=true`. Set
 `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true` to emit payload rows for every
 eligible chat request.
 
-Enable the default rotating gzip file destination:
+Enable the default rotating gzip file sink:
 
 ```bash
 export DYN_REQUEST_TRACE=1
@@ -38,13 +38,13 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 | Variable | Default when enabled | Values | Description |
 | --- | --- | --- | --- |
 | `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. |
-| `DYN_REQUEST_TRACE_DESTINATIONS` | `file` | `file`, `stderr`, `nats`, `otel` | Comma-separated record destinations. |
+| `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel` | Comma-separated record sinks. |
 | `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | File path or segment prefix | Literal path when compression is `none`; gzip segment prefix when compression is `gzip`. |
 | `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl` | `jsonl` | File record format. |
 | `DYN_REQUEST_TRACE_FILE_COMPRESSION` | `gzip` | `gzip`, `none` | File compression. `gzip` writes `<prefix>.<index>.jsonl.gz`; `none` writes a literal JSONL path. |
 | `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Positive integer | Best-effort in-process broadcast capacity. |
 | `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE` | `false` | `true`, `false` | Include request and response payload bodies by emitting `request_payload` rows for all eligible chat requests. When `false`, no payload rows are emitted, even if `store=true`. |
-| `DYN_REQUEST_TRACE_NATS_SUBJECT` | `dynamo.request_trace.v1` | NATS subject | Subject used when `DYN_REQUEST_TRACE_DESTINATIONS` includes `nats`. |
+| `DYN_REQUEST_TRACE_NATS_SUBJECT` | `dynamo.request_trace.v1` | NATS subject | Subject used when `DYN_REQUEST_TRACE_SINKS` includes `nats`. |
 | `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | `4194304` | Positive integer bytes | Max serialized OTEL payload attribute size. Oversized `request_payload` rows emit a marker with `payload_complete=false` and `payload_drop_reason`. |
 | `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES` | `1048576` | Integer bytes | File batching threshold. |
 | `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` | `1000` | Integer milliseconds | Periodic flush interval. |
@@ -54,11 +54,12 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame ZMQ topic filter when endpoint is configured. |
 
 > [!WARNING]
-> Deprecated. `DYN_REQUEST_TRACE_SINKS`, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
-> `DYN_REQUEST_TRACE_JSONL_*` aliases remain accepted for compatibility. Legacy
-> `DYN_REQUEST_TRACE_SINKS=jsonl` maps to `DYN_REQUEST_TRACE_DESTINATIONS=file`
-> with `DYN_REQUEST_TRACE_FILE_COMPRESSION=none`; `jsonl_gz` maps to `file` with
-> `DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip`. The legacy audit variables
+> Deprecated. The legacy `jsonl` and `jsonl_gz` values for
+> `DYN_REQUEST_TRACE_SINKS`, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
+> `DYN_REQUEST_TRACE_JSONL_*` aliases remain accepted for compatibility.
+> `DYN_REQUEST_TRACE_SINKS=jsonl` maps to the `file` sink with
+> `DYN_REQUEST_TRACE_FILE_COMPRESSION=none`; `jsonl_gz` maps to the `file` sink
+> with `DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip`. The legacy audit variables
 > `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`, `DYN_AUDIT_OUTPUT_PATH`,
 > `DYN_AUDIT_NATS_SUBJECT`, `DYN_AUDIT_JSONL_*`, and
 > `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are also accepted as aliases for the
@@ -70,14 +71,14 @@ processes, the first process binds it and later processes warn and continue.
 The harness should publish `agent-tool-events` as the first ZMQ frame unless
 `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` is set on Dynamo.
 
-The bus and destinations use best-effort delivery behavior.
-A slow destination can report lag and drop records. Validate captured row counts before
+The bus and sinks use best-effort delivery behavior.
+A slow sink can report lag and drop records. Validate captured row counts before
 using a trace as a complete workload.
 
-The `otel` destination uses the standard `OTEL_EXPORTER_OTLP_*` variables. Set
+The `otel` sink uses the standard `OTEL_EXPORTER_OTLP_*` variables. Set
 `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` and `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` to
 route request trace records through an OpenTelemetry Collector. The `otel`
-destination writes each request trace row as one OTLP log record with the full
+sink writes each request trace row as one OTLP log record with the full
 row serialized in the `payload` attribute.
 
 ## Record Shape
@@ -194,10 +195,10 @@ Payload row:
 
 For canceled streams, gateway timeouts, and aggregation failures, the row still
 contains `payload.request`; `payload.response` is omitted. If the `otel`
-destination drops an oversized payload body, the row contains
+sink drops an oversized payload body, the row contains
 `payload_complete=false` and `payload_drop_reason`.
 
-Optional harness tool events use the `RequestTraceToolEventIngress` payload below. Dynamo normalizes these events into request trace rows before writing them to destinations.
+Optional harness tool events use the `RequestTraceToolEventIngress` payload below. Dynamo normalizes these events into request trace rows before writing them to sinks.
 
 ```json
 {

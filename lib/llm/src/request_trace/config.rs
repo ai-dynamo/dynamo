@@ -27,14 +27,14 @@ const CAPTURE_ACTIVE: u8 = 1;
 const CAPTURE_INACTIVE: u8 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RequestTraceDestination {
+pub enum RequestTraceSinkKind {
     File,
     Stderr,
     Nats,
     Otel,
 }
 
-impl RequestTraceDestination {
+impl RequestTraceSinkKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -77,7 +77,7 @@ impl RequestTraceFileCompression {
 pub struct RequestTracePolicy {
     pub enabled: bool,
     pub include_request_response: bool,
-    pub destinations: Vec<RequestTraceDestination>,
+    pub sinks: Vec<RequestTraceSinkKind>,
     pub file_path: Option<String>,
     pub file_format: RequestTraceFileFormat,
     pub file_compression: RequestTraceFileCompression,
@@ -93,11 +93,8 @@ pub struct RequestTracePolicy {
 }
 
 impl RequestTracePolicy {
-    pub fn destination_names(&self) -> Vec<&'static str> {
-        self.destinations
-            .iter()
-            .map(|destination| destination.as_str())
-            .collect()
+    pub fn sink_names(&self) -> Vec<&'static str> {
+        self.sinks.iter().map(|sink| sink.as_str()).collect()
     }
 }
 
@@ -108,13 +105,13 @@ fn load_from_env() -> RequestTracePolicy {
     let legacy_audit_sinks = env_trimmed(env_audit::DYN_AUDIT_SINKS);
     let enabled =
         env_is_truthy(env_request_trace::DYN_REQUEST_TRACE) || legacy_audit_sinks.is_some();
-    let (destinations, legacy_file_compression, legacy_audit_destinations) =
-        load_destinations(enabled, legacy_audit_sinks.as_deref());
-    let has_file_destination = destinations.contains(&RequestTraceDestination::File);
+    let (sinks, legacy_file_compression, legacy_audit_sinks_selected) =
+        load_sinks(enabled, legacy_audit_sinks.as_deref());
+    let has_file_sink = sinks.contains(&RequestTraceSinkKind::File);
     let file_path = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_FILE_PATH)
         .or_else(|| env_trimmed(env_request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH))
         .or_else(|| env_trimmed(env_audit::DYN_AUDIT_OUTPUT_PATH))
-        .or_else(|| (enabled && has_file_destination).then(|| DEFAULT_FILE_PATH.to_string()));
+        .or_else(|| (enabled && has_file_sink).then(|| DEFAULT_FILE_PATH.to_string()));
     let file_format = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_FILE_FORMAT)
         .as_deref()
         .map(parse_file_format)
@@ -162,7 +159,7 @@ fn load_from_env() -> RequestTracePolicy {
     let nats_subject = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT)
         .or_else(|| env_trimmed(env_audit::DYN_AUDIT_NATS_SUBJECT))
         .unwrap_or_else(|| {
-            if legacy_audit_destinations && destinations.contains(&RequestTraceDestination::Nats) {
+            if legacy_audit_sinks_selected && sinks.contains(&RequestTraceSinkKind::Nats) {
                 DEFAULT_LEGACY_AUDIT_NATS_SUBJECT.to_string()
             } else {
                 DEFAULT_NATS_SUBJECT.to_string()
@@ -190,7 +187,7 @@ fn load_from_env() -> RequestTracePolicy {
     RequestTracePolicy {
         enabled,
         include_request_response,
-        destinations,
+        sinks,
         file_path,
         file_format,
         file_compression,
@@ -206,55 +203,52 @@ fn load_from_env() -> RequestTracePolicy {
     }
 }
 
-fn load_destinations(
+fn load_sinks(
     enabled: bool,
     legacy_audit_sinks: Option<&str>,
 ) -> (
-    Vec<RequestTraceDestination>,
+    Vec<RequestTraceSinkKind>,
     Option<RequestTraceFileCompression>,
     bool,
 ) {
-    if let Some(value) = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS) {
-        let (destinations, compression) = parse_destination_names(&value);
-        (destinations, compression, false)
-    } else if let Some(value) = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_SINKS) {
-        let (destinations, compression) = parse_destination_names(&value);
-        (destinations, compression, false)
+    if let Some(value) = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_SINKS) {
+        let (sinks, compression) = parse_sink_kind_names(&value);
+        (sinks, compression, false)
     } else if let Some(value) = legacy_audit_sinks {
-        let (destinations, compression) = parse_destination_names(value);
-        (destinations, compression, true)
+        let (sinks, compression) = parse_sink_kind_names(value);
+        (sinks, compression, true)
     } else if enabled {
-        (vec![RequestTraceDestination::File], None, false)
+        (vec![RequestTraceSinkKind::File], None, false)
     } else {
         (Vec::new(), None, false)
     }
 }
 
-fn parse_destination_names(
+fn parse_sink_kind_names(
     value: &str,
 ) -> (
-    Vec<RequestTraceDestination>,
+    Vec<RequestTraceSinkKind>,
     Option<RequestTraceFileCompression>,
 ) {
-    let mut destinations = Vec::new();
+    let mut sinks = Vec::new();
     let mut legacy_jsonl = false;
     let mut legacy_jsonl_gz = false;
 
     for name in parse_sink_names(value) {
         match name.as_str() {
-            "file" => push_destination(&mut destinations, RequestTraceDestination::File),
-            "stderr" => push_destination(&mut destinations, RequestTraceDestination::Stderr),
-            "nats" => push_destination(&mut destinations, RequestTraceDestination::Nats),
-            "otel" => push_destination(&mut destinations, RequestTraceDestination::Otel),
+            "file" => push_sink(&mut sinks, RequestTraceSinkKind::File),
+            "stderr" => push_sink(&mut sinks, RequestTraceSinkKind::Stderr),
+            "nats" => push_sink(&mut sinks, RequestTraceSinkKind::Nats),
+            "otel" => push_sink(&mut sinks, RequestTraceSinkKind::Otel),
             "jsonl" => {
                 legacy_jsonl = true;
-                push_destination(&mut destinations, RequestTraceDestination::File);
+                push_sink(&mut sinks, RequestTraceSinkKind::File);
             }
             "jsonl_gz" => {
                 legacy_jsonl_gz = true;
-                push_destination(&mut destinations, RequestTraceDestination::File);
+                push_sink(&mut sinks, RequestTraceSinkKind::File);
             }
-            other => tracing::warn!(%other, "request trace: unknown destination ignored"),
+            other => tracing::warn!(%other, "request trace: unknown sink ignored"),
         }
     }
 
@@ -266,15 +260,12 @@ fn parse_destination_names(
         None
     };
 
-    (destinations, compression)
+    (sinks, compression)
 }
 
-fn push_destination(
-    destinations: &mut Vec<RequestTraceDestination>,
-    destination: RequestTraceDestination,
-) {
-    if !destinations.contains(&destination) {
-        destinations.push(destination);
+fn push_sink(sinks: &mut Vec<RequestTraceSinkKind>, sink: RequestTraceSinkKind) {
+    if !sinks.contains(&sink) {
+        sinks.push(sink);
     }
 }
 
@@ -366,7 +357,6 @@ mod tests {
 
     const ALL_ENV_NAMES: &[&str] = &[
         env_request_trace::DYN_REQUEST_TRACE,
-        env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS,
         env_request_trace::DYN_REQUEST_TRACE_SINKS,
         env_request_trace::DYN_REQUEST_TRACE_FILE_PATH,
         env_request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
@@ -419,11 +409,11 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn master_switch_enables_default_file_destination_and_path() {
+    fn master_switch_enables_default_file_sink_and_path() {
         with_request_trace_env(&[(env_request_trace::DYN_REQUEST_TRACE, "1")], || {
             let policy = load_from_env();
             assert!(policy.enabled);
-            assert_eq!(policy.destinations, vec![RequestTraceDestination::File]);
+            assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
             assert_eq!(policy.file_path.as_deref(), Some(DEFAULT_FILE_PATH));
             assert_eq!(policy.file_format, RequestTraceFileFormat::Jsonl);
             assert_eq!(policy.file_compression, RequestTraceFileCompression::Gzip);
@@ -438,12 +428,12 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn master_switch_yields_to_new_destination_overrides() {
+    fn master_switch_yields_to_new_sink_overrides() {
         with_request_trace_env(
             &[
                 (env_request_trace::DYN_REQUEST_TRACE, "1"),
                 (
-                    env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS,
+                    env_request_trace::DYN_REQUEST_TRACE_SINKS,
                     "file,stderr,nats,otel",
                 ),
                 (
@@ -475,12 +465,12 @@ mod tests {
             || {
                 let policy = load_from_env();
                 assert_eq!(
-                    policy.destinations,
+                    policy.sinks,
                     vec![
-                        RequestTraceDestination::File,
-                        RequestTraceDestination::Stderr,
-                        RequestTraceDestination::Nats,
-                        RequestTraceDestination::Otel,
+                        RequestTraceSinkKind::File,
+                        RequestTraceSinkKind::Stderr,
+                        RequestTraceSinkKind::Nats,
+                        RequestTraceSinkKind::Otel,
                     ]
                 );
                 assert_eq!(
@@ -506,7 +496,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn legacy_jsonl_sink_maps_to_file_destination() {
+    fn legacy_jsonl_sink_maps_to_file_sink() {
         with_request_trace_env(
             &[
                 (env_request_trace::DYN_REQUEST_TRACE, "1"),
@@ -523,11 +513,8 @@ mod tests {
             || {
                 let policy = load_from_env();
                 assert_eq!(
-                    policy.destinations,
-                    vec![
-                        RequestTraceDestination::File,
-                        RequestTraceDestination::Stderr
-                    ]
+                    policy.sinks,
+                    vec![RequestTraceSinkKind::File, RequestTraceSinkKind::Stderr]
                 );
                 assert_eq!(
                     policy.file_path.as_deref(),
@@ -541,7 +528,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn legacy_jsonl_gz_sink_maps_to_gzip_file_destination() {
+    fn legacy_jsonl_gz_sink_maps_to_gzip_file_sink() {
         with_request_trace_env(
             &[
                 (env_request_trace::DYN_REQUEST_TRACE, "1"),
@@ -553,7 +540,7 @@ mod tests {
             ],
             || {
                 let policy = load_from_env();
-                assert_eq!(policy.destinations, vec![RequestTraceDestination::File]);
+                assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
                 assert_eq!(policy.file_path.as_deref(), Some(DEFAULT_FILE_PATH));
                 assert_eq!(policy.file_compression, RequestTraceFileCompression::Gzip);
                 assert_eq!(policy.file_roll_lines, Some(20));
@@ -563,7 +550,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn legacy_audit_sinks_enable_request_trace_destinations() {
+    fn legacy_audit_sinks_enable_request_trace_sinks() {
         with_request_trace_env(
             &[
                 (env_audit::DYN_AUDIT_SINKS, "nats,otel"),
@@ -574,8 +561,8 @@ mod tests {
                 let policy = load_from_env();
                 assert!(policy.enabled);
                 assert_eq!(
-                    policy.destinations,
-                    vec![RequestTraceDestination::Nats, RequestTraceDestination::Otel]
+                    policy.sinks,
+                    vec![RequestTraceSinkKind::Nats, RequestTraceSinkKind::Otel]
                 );
                 assert_eq!(policy.nats_subject, "legacy.audit.subject");
                 assert_eq!(policy.otel_max_payload_bytes, 5678);
@@ -589,23 +576,23 @@ mod tests {
         with_request_trace_env(&[(env_audit::DYN_AUDIT_SINKS, "nats")], || {
             let policy = load_from_env();
             assert!(policy.enabled);
-            assert_eq!(policy.destinations, vec![RequestTraceDestination::Nats]);
+            assert_eq!(policy.sinks, vec![RequestTraceSinkKind::Nats]);
             assert_eq!(policy.nats_subject, DEFAULT_LEGACY_AUDIT_NATS_SUBJECT);
         });
     }
 
     #[test]
     #[serial_test::serial]
-    fn request_trace_nats_destination_uses_request_trace_default_subject() {
+    fn request_trace_nats_sink_uses_request_trace_default_subject() {
         with_request_trace_env(
             &[
                 (env_request_trace::DYN_REQUEST_TRACE, "1"),
-                (env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS, "nats"),
+                (env_request_trace::DYN_REQUEST_TRACE_SINKS, "nats"),
                 (env_audit::DYN_AUDIT_SINKS, "nats"),
             ],
             || {
                 let policy = load_from_env();
-                assert_eq!(policy.destinations, vec![RequestTraceDestination::Nats]);
+                assert_eq!(policy.sinks, vec![RequestTraceSinkKind::Nats]);
                 assert_eq!(policy.nats_subject, DEFAULT_NATS_SUBJECT);
             },
         );
@@ -627,7 +614,7 @@ mod tests {
             || {
                 let policy = load_from_env();
                 assert!(policy.enabled);
-                assert_eq!(policy.destinations, vec![RequestTraceDestination::File]);
+                assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
                 assert_eq!(policy.file_path.as_deref(), Some("/tmp/legacy-audit"));
                 assert_eq!(policy.file_compression, RequestTraceFileCompression::Gzip);
                 assert!(policy.include_request_response);
@@ -641,16 +628,16 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn request_trace_destinations_win_over_legacy_audit_sinks() {
+    fn request_trace_sinks_win_over_legacy_audit_sinks() {
         with_request_trace_env(
             &[
                 (env_request_trace::DYN_REQUEST_TRACE, "1"),
-                (env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS, "stderr"),
+                (env_request_trace::DYN_REQUEST_TRACE_SINKS, "stderr"),
                 (env_audit::DYN_AUDIT_SINKS, "nats,otel,jsonl_gz"),
             ],
             || {
                 let policy = load_from_env();
-                assert_eq!(policy.destinations, vec![RequestTraceDestination::Stderr]);
+                assert_eq!(policy.sinks, vec![RequestTraceSinkKind::Stderr]);
                 assert!(policy.file_path.is_none());
             },
         );
@@ -687,7 +674,7 @@ mod tests {
         with_request_trace_env(&[], || {
             let policy = load_from_env();
             assert!(!policy.enabled);
-            assert!(policy.destinations.is_empty());
+            assert!(policy.sinks.is_empty());
             assert!(policy.file_path.is_none());
             assert!(policy.tool_events_zmq_endpoint.is_none());
             assert!(policy.tool_events_zmq_topic.is_none());
