@@ -19,8 +19,8 @@ cleanup() {
 trap cleanup EXIT
 
 MODEL_PATH="${MODEL_PATH:-MiniMaxAI/MiniMax-M2.7}"
-MODEL_NAME="${MODEL_NAME:-MiniMaxAI/MiniMax-M2}"
-WORKER_MODEL="$MODEL_NAME"
+MODEL_NAME_ROUTER="${MODEL_NAME_ROUTER:-MiniMaxAI/MiniMax-M2}"
+WORKER_MODEL="$MODEL_NAME_ROUTER"
 BLOCK_SIZE=16
 HTTP_PORT=8100
 
@@ -58,7 +58,7 @@ python -m dynamo.vllm \
 if [[ "$POLICY" == "ta" ]]; then
     DYN_SYSTEM_PORT=8183 python -m dynamo.thunderagent_router \
         --endpoint dynamo.backend.generate \
-        --model-name "$MODEL_NAME" \
+        --model-name "$MODEL_NAME_ROUTER" \
         --model-path "$MODEL_PATH" \
         --dyn-tool-call-parser minimax_m2 \
         --dyn-reasoning-parser minimax_append_think \
@@ -82,7 +82,7 @@ until curl -fsS "http://127.0.0.1:${HTTP_PORT}/v1/models/${WORKER_MODEL}/ready" 
     | jq -e '([.namespaces[].worker_types.aggregated.workers // 0] | add) == 2' >/dev/null; do
     sleep 5
 done
-until curl -fsS "http://127.0.0.1:${HTTP_PORT}/v1/models" 2>/dev/null | grep -Fq "$MODEL_NAME"; do
+until curl -fsS "http://127.0.0.1:${HTTP_PORT}/v1/models" 2>/dev/null | grep -Fq "$MODEL_NAME_ROUTER"; do
     sleep 5
 done
 echo "$POLICY stack ready at http://127.0.0.1:${HTTP_PORT}/v1"
