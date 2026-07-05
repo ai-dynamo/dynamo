@@ -307,6 +307,8 @@ navigation:
             slug: agents
             path: agents/README.md
             contents:
+              - page: Deploy a Mixture of Models
+                path: agents/deploy-mixture-of-models.md
               - page: Session IDs
                 path: agents/session-ids.md
               - page: Agent Tracing

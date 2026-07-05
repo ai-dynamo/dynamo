@@ -19,6 +19,7 @@ The common identity concept is `session_id`: one stable ID for one agent reasoni
 
 | Concept | Purpose |
 |---------|---------|
+| [Deploy a Mixture of Models](deploy-mixture-of-models.md) | Route agent requests between heterogeneous model deployments through one endpoint. |
 | [Agent Harnesses](agent-harnesses.md) | Quickstart for running popular agent harnesses through Dynamo. |
 | [Session IDs](session-ids.md) | Stable agent identity for tracing and opt-in consumers. |
 | [Agent Tracing](agent-tracing.md) | Request traces, inferred tool calls, optional harness tool spans, and Perfetto conversion. |
