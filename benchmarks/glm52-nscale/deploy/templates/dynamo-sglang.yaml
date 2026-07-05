@@ -42,15 +42,43 @@ spec:
               imagePullPolicy: IfNotPresent
               command: ["/bin/bash", "-lc"]
               args:
-                - >-
-                  exec python3 -m dynamo.frontend
-                  --router-mode round-robin
-                  --http-host 0.0.0.0
-                  --http-port 8000
-                  --dyn-chat-processor sglang
-                  --tool-call-parser glm47
-                  --reasoning-parser glm45
-                  --trust-remote-code
+                - |
+                  set -euo pipefail
+                  test -r "${MODEL_PATH}/config.json"
+                  test "$(head -n1 "${MODEL_PATH}/.cache/huggingface/download/config.json.metadata")" = "${MODEL_REVISION}"
+                  model_view=/tmp/glm52-model
+                  rm -rf "${model_view}"
+                  mkdir -p "${model_view}"
+                  find "${MODEL_PATH}" -mindepth 1 -maxdepth 1 ! -name config.json \
+                    -exec ln -s {} "${model_view}/" \;
+                  python3 - "${MODEL_PATH}/config.json" "${model_view}/config.json" <<'PY'
+                  import json
+                  import sys
+                  from pathlib import Path
+
+                  source = Path(sys.argv[1])
+                  target = Path(sys.argv[2])
+                  document = json.loads(source.read_text())
+                  layer_types = document.pop("layer_types", None)
+                  if (
+                      not isinstance(layer_types, list)
+                      or not layer_types
+                      or set(layer_types) != {"deepseek_sparse_attention"}
+                  ):
+                      raise RuntimeError(
+                          "pinned GLM-5.2 config has unexpected layer_types"
+                      )
+                  target.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+                  target.chmod(0o444)
+                  PY
+                  exec python3 -m dynamo.frontend \
+                    --router-mode round-robin \
+                    --http-host 0.0.0.0 \
+                    --http-port 8000 \
+                    --dyn-chat-processor sglang \
+                    --tool-call-parser glm47 \
+                    --reasoning-parser glm45 \
+                    --trust-remote-code
               ports:
                 - name: http
                   containerPort: 8000

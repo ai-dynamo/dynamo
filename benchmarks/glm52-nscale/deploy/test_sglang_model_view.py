@@ -24,22 +24,37 @@ PYTHON_MARKER = (
 )
 
 
-def embedded_transform(path: Path) -> str:
+def embedded_transforms(path: Path) -> list[str]:
     source = path.read_text()
-    program = re.split(
-        r"\n[ \t]+PY\n", source.split(PYTHON_MARKER, maxsplit=1)[1], maxsplit=1
-    )[0]
-    return textwrap.dedent(program)
+    return [
+        textwrap.dedent(re.split(r"\n[ \t]+PY\n", fragment, maxsplit=1)[0])
+        for fragment in source.split(PYTHON_MARKER)[1:]
+    ]
+
+
+def embedded_transform(path: Path) -> str:
+    return embedded_transforms(path)[0]
 
 
 class SglangModelViewTests(unittest.TestCase):
-    def test_manifests_use_one_identical_model_view_transform(self) -> None:
-        programs = [embedded_transform(path) for path in TEMPLATES]
-        self.assertEqual(programs[0], programs[1])
+    def test_manifests_use_identical_model_view_transforms(self) -> None:
+        dynamo_programs = embedded_transforms(TEMPLATES[0])
+        native_programs = embedded_transforms(TEMPLATES[1])
+        self.assertEqual(len(dynamo_programs), 2)
+        self.assertEqual(len(native_programs), 1)
+        self.assertEqual(dynamo_programs, native_programs * 2)
         for path in TEMPLATES:
             source = path.read_text()
             self.assertIn('--model-path="${model_view}"', source)
             self.assertNotIn('--model-path="${MODEL_PATH}"', source)
+        dynamo_source = TEMPLATES[0].read_text()
+        frontend, worker = dynamo_source.split("    - name: SglangWorker", maxsplit=1)
+        self.assertEqual(frontend.count(PYTHON_MARKER), 1)
+        self.assertEqual(worker.count(PYTHON_MARKER), 1)
+        self.assertLess(
+            frontend.index(PYTHON_MARKER),
+            frontend.index("exec python3 -m dynamo.frontend"),
+        )
 
     def test_transform_removes_only_the_validated_layer_types(self) -> None:
         document = {
