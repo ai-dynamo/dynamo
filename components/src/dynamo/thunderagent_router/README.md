@@ -104,12 +104,10 @@ The [agent-plugins `DynamoPi` adapter](https://github.com/ai-dynamo/agent-plugin
 
 ### 1. Install the three source trees
 
-Use Python 3.12 and a machine with Docker and eight visible GPUs. Build Dynamo from the branch under test rather than installing a released wheel. Pi and its Node.js runtime are installed inside each Harbor task container.
+Use Python 3.12 and a machine with Docker and eight visible GPUs. Build Dynamo from source rather than installing a released wheel. Pi and its Node.js runtime are installed inside each Harbor task container.
 
 ```bash
 git clone https://github.com/ai-dynamo/dynamo ~/src/dynamo
-git -C ~/src/dynamo fetch origin pull/11185/head
-git -C ~/src/dynamo checkout --detach FETCH_HEAD
 
 git clone --branch v0.16.0 --depth 1 https://github.com/harbor-framework/harbor ~/src/harbor
 git clone https://github.com/ai-dynamo/agent-plugins ~/src/agent-plugins
