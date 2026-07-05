@@ -64,10 +64,10 @@ dynamo-operator:
   # Environment variables to pass to operator Deployment.
   env: []
 
-  # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port"
+  # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:4222"
   natsAddr: ""
 
-  # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port"
+  # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:2379" or "https://hostname:2379"
   etcdAddr: ""
 
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
