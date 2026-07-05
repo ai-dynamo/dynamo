@@ -464,14 +464,6 @@ async def _get_runtime_config(
 
     try:
         scheduler_info = engine._scheduler_init_result.scheduler_infos[0]
-        hicache_capacity_runtime_data = _get_hicache_capacity_runtime_data(
-            scheduler_info
-        )
-        if hicache_capacity_runtime_data is not None:
-            runtime_config.set_engine_specific(
-                SGLANG_HICACHE_CAPACITY_RUNTIME_KEY,
-                json.dumps(hicache_capacity_runtime_data),
-            )
         capacity = runtime_capacity(server_args, scheduler_info)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")
 
@@ -500,11 +492,26 @@ async def _get_runtime_config(
                 f"{unpublished} will not be published; SGLang will use its internal defaults."
             )
 
-        return runtime_config
-
     except Exception as e:
         logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
         return runtime_config
+
+    try:
+        hicache_capacity_runtime_data = _get_hicache_capacity_runtime_data(
+            scheduler_info
+        )
+        if hicache_capacity_runtime_data is not None:
+            runtime_config.set_engine_specific(
+                SGLANG_HICACHE_CAPACITY_RUNTIME_KEY,
+                json.dumps(hicache_capacity_runtime_data),
+            )
+            logging.info("Published SGLang HiCache capacity runtime metadata.")
+    except Exception as e:
+        logging.warning(
+            "Failed to attach SGLang HiCache capacity runtime metadata: %s", e
+        )
+
+    return runtime_config
 
 
 async def register_model_with_readiness_gate(
