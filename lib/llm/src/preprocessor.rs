@@ -2472,8 +2472,8 @@ impl OpenAIPreprocessor {
         let pending_in = Arc::clone(&pending);
 
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
-        let jail_input = stream.map(move |a| {
-            if let Some(metrics) = a.data.as_ref().and_then(|nv| nv.llm_metrics.clone()) {
+        let jail_input = stream.map(move |mut a| {
+            if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
                 let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
                 p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
                 p.template = Some(metrics);
