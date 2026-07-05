@@ -7,31 +7,40 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from typing import Sequence
 
 from runtime_binding import BindingError, canonical_sha256, validate_continuity
 
 
 EVAL_DIR = Path(__file__).resolve().parent
 SCRIPT = EVAL_DIR / "run-guarded.sh"
+REMOTE_DRIVER = EVAL_DIR / "remote-command-driver.py"
 FIXTURE = EVAL_DIR / "fixtures" / "runtime-binding.json"
 
 FAKE_KUBECTL = r"""#!/usr/bin/env python3
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 
 remote_root = Path(os.environ["FAKE_REMOTE_ROOT"])
 state_path = Path(os.environ["FAKE_KUBE_STATE"])
+call_state_path = Path(os.environ["FAKE_KUBE_CALL_STATE"])
 args = sys.argv[1:]
 if len(args) >= 2 and args[0] == "--context":
     args = args[2:]
+if args and args[0].startswith("--request-timeout="):
+    args = args[1:]
 
 
 def remote(path):
@@ -45,6 +54,11 @@ def state():
 
 
 if args[:2] == ["get", "pod"]:
+    call_state = json.loads(call_state_path.read_text())
+    call_state["pod_get_calls"] += 1
+    call_state_path.write_text(json.dumps(call_state))
+    if call_state["fail_pod_get_on_call"] == call_state["pod_get_calls"]:
+        raise SystemExit(1)
     print("{}")
     raise SystemExit(0)
 if args[:2] == ["get", "pods"]:
@@ -60,6 +74,44 @@ if not args or args[0] != "exec" or "--" not in args:
     raise RuntimeError(f"unsupported fake kubectl invocation: {args!r}")
 
 command = args[args.index("--") + 1 :]
+if command[:2] == ["python3", "/workspace/eval/remote-command-driver.py"]:
+    driver_args = command[2:]
+    operation = driver_args[0]
+    state_index = driver_args.index("--state-dir") + 1
+    driver_args[state_index] = str(remote(driver_args[state_index]))
+    completed = subprocess.run(
+        [sys.executable, os.environ["FAKE_REMOTE_DRIVER"], *driver_args],
+        text=True,
+        capture_output=True,
+        env=os.environ,
+        check=False,
+    )
+    call_state = json.loads(call_state_path.read_text())
+    if operation == "acquire":
+        call_state["acquire_calls"] += 1
+        if call_state["drop_acquire_after_apply"] > 0:
+            call_state["drop_acquire_after_apply"] -= 1
+            call_state_path.write_text(json.dumps(call_state))
+            raise SystemExit(255)
+    if operation == "start":
+        call_state["start_calls"] += 1
+        if call_state["drop_start_after_launch"] > 0:
+            call_state["drop_start_after_launch"] -= 1
+            call_state_path.write_text(json.dumps(call_state))
+            raise SystemExit(255)
+    if operation == "status" and call_state["status_failures"] > 0:
+        call_state["status_failures"] -= 1
+        call_state_path.write_text(json.dumps(call_state))
+        raise SystemExit(255)
+    if operation == "status" and call_state["status_malformed"] > 0:
+        call_state["status_malformed"] -= 1
+        call_state_path.write_text(json.dumps(call_state))
+        print("{")
+        raise SystemExit(0)
+    call_state_path.write_text(json.dumps(call_state))
+    sys.stdout.write(completed.stdout)
+    sys.stderr.write(completed.stderr)
+    raise SystemExit(completed.returncode)
 if command[:2] == ["python3", "-c"] or command[:2] == ["docker", "ps"]:
     raise SystemExit(0)
 if command[:2] == ["tmux", "list-sessions"]:
@@ -107,32 +159,20 @@ if command[:2] == ["/bin/bash", "-eu"]:
     if "owner.json" in command[3]:
         target.mkdir(parents=True, exist_ok=True)
         (target / "owner.json").write_text(payload)
+    elif "pre.json" in command[3]:
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "pre.json").write_text(payload)
     else:
         json.loads(payload)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(target.name + ".tmp")
         temporary.write_text(payload)
         temporary.replace(target)
-    raise SystemExit(0)
-if command == ["succeed"]:
-    raise SystemExit(0)
-if command == ["fail-seven"]:
-    raise SystemExit(7)
-if command == ["touch-marker"]:
-    Path(os.environ["FAKE_COMMAND_MARKER"]).touch()
-    raise SystemExit(0)
-if command == ["mutate-runtime"]:
-    document = state()
-    status = document["pods"]["items"][1]["status"]["containerStatuses"][0]
-    status["restartCount"] = 1
-    status["containerID"] = "containerd://" + "9" * 64
-    state_path.write_text(json.dumps(document))
-    raise SystemExit(0)
-if command == ["replace-container"]:
-    document = state()
-    status = document["pods"]["items"][1]["status"]["containerStatuses"][0]
-    status["containerID"] = "containerd://" + "8" * 64
-    state_path.write_text(json.dumps(document))
+        call_state = json.loads(call_state_path.read_text())
+        if call_state["drop_attestation_after_write"] > 0:
+            call_state["drop_attestation_after_write"] -= 1
+            call_state_path.write_text(json.dumps(call_state))
+            raise SystemExit(255)
     raise SystemExit(0)
 raise RuntimeError(f"unsupported fake remote command: {command!r}")
 """
@@ -154,6 +194,22 @@ class GuardedRunIntegrationTests(unittest.TestCase):
         kubectl.write_text(FAKE_KUBECTL)
         kubectl.chmod(0o755)
         self.state_path = self.root / "state.json"
+        self.call_state_path = self.root / "call-state.json"
+        self.call_state_path.write_text(
+            json.dumps(
+                {
+                    "drop_acquire_after_apply": 0,
+                    "drop_attestation_after_write": 0,
+                    "drop_start_after_launch": 0,
+                    "status_failures": 0,
+                    "status_malformed": 0,
+                    "acquire_calls": 0,
+                    "fail_pod_get_on_call": 0,
+                    "pod_get_calls": 0,
+                    "start_calls": 0,
+                }
+            )
+        )
         self.marker = self.root / "command-ran"
         self.binding = self._make_binding()
         binding_path = (
@@ -168,10 +224,18 @@ class GuardedRunIntegrationTests(unittest.TestCase):
                 "PATH": f"{fake_bin}{os.pathsep}{self.env['PATH']}",
                 "FAKE_REMOTE_ROOT": str(self.remote),
                 "FAKE_KUBE_STATE": str(self.state_path),
+                "FAKE_KUBE_CALL_STATE": str(self.call_state_path),
                 "FAKE_COMMAND_MARKER": str(self.marker),
+                "FAKE_REMOTE_DRIVER": str(REMOTE_DRIVER),
                 "KUBE_CONTEXT": "synthetic-context",
                 "NAMESPACE": "synthetic-namespace",
                 "EVAL_RUNNER_POD": "synthetic-runner",
+                "GLM52_GUARD_POLL_SECONDS": "0.01",
+                "GLM52_GUARD_RETRY_SECONDS": "0.01",
+                "GLM52_GUARD_REQUEST_TIMEOUT": "5s",
+                "GLM52_REMOTE_COMMAND_ROOT": str(
+                    self.remote / "artifacts/glm52-nscale/.campaign-run.lock"
+                ),
                 "TMPDIR": str(self.root),
             }
         )
@@ -252,9 +316,14 @@ class GuardedRunIntegrationTests(unittest.TestCase):
             )
         return binding
 
+    def _set_call_state(self, **changes: int) -> None:
+        value = json.loads(self.call_state_path.read_text())
+        value.update(changes)
+        self.call_state_path.write_text(json.dumps(value))
+
     def _run(
         self,
-        command: str,
+        command: Sequence[str],
         *,
         phase: str = "ab",
         suffix: str = "case",
@@ -271,7 +340,7 @@ class GuardedRunIntegrationTests(unittest.TestCase):
                 "--attestation",
                 attestation,
                 "--",
-                command,
+                *command,
             ],
             text=True,
             capture_output=True,
@@ -281,7 +350,9 @@ class GuardedRunIntegrationTests(unittest.TestCase):
         return result, self.remote / attestation.removeprefix("/")
 
     def test_success_attests_canonical_private_stable_runtime(self) -> None:
-        result, path = self._run("succeed", suffix="success")
+        result, path = self._run(
+            [sys.executable, "-c", "raise SystemExit(0)"], suffix="success"
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         continuity = json.loads(path.read_text())
         validate_continuity(continuity, self.binding)
@@ -306,15 +377,225 @@ class GuardedRunIntegrationTests(unittest.TestCase):
         for raw_value in raw_values:
             self.assertNotIn(raw_value, serialized)
 
+    def test_lost_start_response_retries_without_duplicate_execution(self) -> None:
+        marker = self.root / "detached-launches"
+        self._set_call_state(drop_start_after_launch=1)
+        result, path = self._run(
+            [
+                sys.executable,
+                "-c",
+                "import sys, time; "
+                "open(sys.argv[1], 'a', encoding='utf-8').write('launch\\n'); "
+                "time.sleep(0.2)",
+                str(marker),
+            ],
+            suffix="lost-start-response",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validate_continuity(json.loads(path.read_text()), self.binding)
+        self.assertEqual(marker.read_text().splitlines(), ["launch"])
+        call_state = json.loads(self.call_state_path.read_text())
+        self.assertGreaterEqual(call_state["start_calls"], 2)
+
+    def test_lost_lock_acquisition_response_retries_same_owner(self) -> None:
+        self._set_call_state(drop_acquire_after_apply=1)
+        result, path = self._run(
+            [sys.executable, "-c", "raise SystemExit(0)"],
+            suffix="lost-lock-response",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validate_continuity(json.loads(path.read_text()), self.binding)
+        call_state = json.loads(self.call_state_path.read_text())
+        self.assertGreaterEqual(call_state["acquire_calls"], 2)
+
+    def test_transient_status_failures_preserve_remote_exit_code(self) -> None:
+        self._set_call_state(status_failures=1, status_malformed=1)
+        result, path = self._run(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(0.2); raise SystemExit(7)",
+            ],
+            suffix="status-retry",
+        )
+        self.assertEqual(result.returncode, 7, result.stderr)
+        continuity = json.loads(path.read_text())
+        self.assertEqual(continuity["command_exit_code"], 7)
+        validate_continuity(continuity, self.binding, require_success=False)
+
+    def test_remote_exit_255_is_not_a_transport_failure(self) -> None:
+        result, path = self._run(
+            [sys.executable, "-c", "raise SystemExit(255)"],
+            suffix="remote-exit-255",
+        )
+        self.assertEqual(result.returncode, 255, result.stderr)
+        continuity = json.loads(path.read_text())
+        self.assertEqual(continuity["command_exit_code"], 255)
+        validate_continuity(continuity, self.binding, require_success=False)
+
+    def test_attestation_response_loss_retains_terminal_state(self) -> None:
+        self._set_call_state(drop_attestation_after_write=1)
+        result, path = self._run(
+            [sys.executable, "-c", "raise SystemExit(0)"],
+            suffix="attestation-response-loss",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        lock = self.remote / "artifacts/glm52-nscale/.campaign-run.lock"
+        self.assertTrue(lock.is_dir())
+        self.assertTrue(path.is_file())
+        owner = json.loads((lock / "owner.json").read_text())
+        driver_status = json.loads((lock / "command/status.json").read_text())
+        self.assertEqual(driver_status["exit_code"], 0)
+
+        released = subprocess.run(
+            [
+                sys.executable,
+                str(REMOTE_DRIVER),
+                "release",
+                "--state-dir",
+                str(lock / "command"),
+                "--invocation-id",
+                owner["invocation_id"],
+            ],
+            text=True,
+            capture_output=True,
+            env=self.env,
+            check=True,
+        )
+        self.assertEqual(json.loads(released.stdout)["state"], "released")
+
+    def test_postflight_runner_failure_retains_terminal_state(self) -> None:
+        self._set_call_state(fail_pod_get_on_call=2)
+        result, path = self._run(
+            [sys.executable, "-c", "raise SystemExit(0)"],
+            suffix="postflight-runner-failure",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Evaluation runner", result.stderr)
+        self.assertFalse(path.exists())
+        lock = self.remote / "artifacts/glm52-nscale/.campaign-run.lock"
+        self.assertTrue(lock.is_dir())
+        owner = json.loads((lock / "owner.json").read_text())
+        released = subprocess.run(
+            [
+                sys.executable,
+                str(REMOTE_DRIVER),
+                "release",
+                "--state-dir",
+                str(lock / "command"),
+                "--invocation-id",
+                owner["invocation_id"],
+            ],
+            text=True,
+            capture_output=True,
+            env=self.env,
+            check=True,
+        )
+        self.assertEqual(json.loads(released.stdout)["state"], "released")
+
+    def test_terminated_local_guard_retains_lock_and_remote_command(self) -> None:
+        marker = self.root / "remote-command-started"
+        attestation = (
+            "/artifacts/glm52-nscale/integration/killed-guard/runtime-continuity.json"
+        )
+        command = [
+            sys.executable,
+            "-c",
+            "import sys, time; from pathlib import Path; "
+            "Path(sys.argv[1]).touch(); time.sleep(60)",
+            str(marker),
+        ]
+        guard = subprocess.Popen(
+            [
+                str(SCRIPT),
+                "dynamo-vllm",
+                "--phase",
+                "ab",
+                "--attestation",
+                attestation,
+                "--",
+                *command,
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.env,
+        )
+        lock = self.remote / "artifacts/glm52-nscale/.campaign-run.lock"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not marker.exists():
+            time.sleep(0.01)
+        self.assertTrue(marker.exists(), "detached command did not start")
+        guard.terminate()
+        guard.communicate(timeout=10)
+
+        self.assertTrue(lock.is_dir())
+        self.assertFalse((self.remote / attestation.removeprefix("/")).exists())
+        blocked, _ = self._run(
+            [sys.executable, "-c", "raise SystemExit(0)"],
+            suffix="blocked-by-killed-guard",
+        )
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("Evaluation runner is active", blocked.stderr)
+
+        owner = json.loads((lock / "owner.json").read_text())
+        probed = subprocess.run(
+            [
+                sys.executable,
+                str(REMOTE_DRIVER),
+                "status",
+                "--state-dir",
+                str(lock / "command"),
+                "--invocation-id",
+                owner["invocation_id"],
+            ],
+            text=True,
+            capture_output=True,
+            env=self.env,
+            check=True,
+        )
+        self.assertEqual(json.loads(probed.stdout)["state"], "running")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(REMOTE_DRIVER),
+                "terminate",
+                "--state-dir",
+                str(lock / "command"),
+                "--invocation-id",
+                owner["invocation_id"],
+                "--timeout",
+                "5",
+            ],
+            text=True,
+            capture_output=True,
+            env=self.env,
+            check=True,
+        )
+        self.assertEqual(json.loads(completed.stdout)["state"], "finished")
+        shutil.rmtree(lock)
+
     def test_explicit_phase_mismatch_fails_before_command(self) -> None:
-        result, path = self._run("touch-marker", phase="ba", suffix="wrong-phase")
+        result, path = self._run(
+            [
+                sys.executable,
+                "-c",
+                "import os; from pathlib import Path; "
+                "Path(os.environ['FAKE_COMMAND_MARKER']).touch()",
+            ],
+            phase="ba",
+            suffix="wrong-phase",
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("campaign_phase", result.stderr)
         self.assertFalse(self.marker.exists())
         self.assertFalse(path.exists())
 
     def test_failed_command_gets_structurally_valid_attestation(self) -> None:
-        result, path = self._run("fail-seven", suffix="command-failure")
+        result, path = self._run(
+            [sys.executable, "-c", "raise SystemExit(7)"],
+            suffix="command-failure",
+        )
         self.assertEqual(result.returncode, 7, result.stderr)
         continuity = json.loads(path.read_text())
         validate_continuity(continuity, self.binding, require_success=False)
@@ -324,12 +605,16 @@ class GuardedRunIntegrationTests(unittest.TestCase):
     def test_retry_archives_failed_attestation_but_never_overwrites_success(
         self,
     ) -> None:
-        failed, path = self._run("fail-seven", suffix="retry")
+        failed, path = self._run(
+            [sys.executable, "-c", "raise SystemExit(7)"], suffix="retry"
+        )
         self.assertEqual(failed.returncode, 7, failed.stderr)
         failed_payload = path.read_bytes()
         failed_digest = hashlib.sha256(failed_payload).hexdigest()
 
-        retried, same_path = self._run("succeed", suffix="retry")
+        retried, same_path = self._run(
+            [sys.executable, "-c", "raise SystemExit(0)"], suffix="retry"
+        )
         self.assertEqual(retried.returncode, 0, retried.stderr)
         self.assertEqual(same_path, path)
         validate_continuity(json.loads(path.read_text()), self.binding)
@@ -339,19 +624,52 @@ class GuardedRunIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(archived.read_bytes(), failed_payload)
 
-        refused, _ = self._run("touch-marker", suffix="retry")
+        refused, _ = self._run(
+            [
+                sys.executable,
+                "-c",
+                "import os; from pathlib import Path; "
+                "Path(os.environ['FAKE_COMMAND_MARKER']).touch()",
+            ],
+            suffix="retry",
+        )
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("successful runtime attestation", refused.stderr)
         self.assertFalse(self.marker.exists())
 
     def test_runtime_restart_fails_without_publishing_attestation(self) -> None:
-        result, path = self._run("mutate-runtime", suffix="restart")
+        result, path = self._run(
+            [
+                sys.executable,
+                "-c",
+                "import json, os; from pathlib import Path; "
+                "path=Path(os.environ['FAKE_KUBE_STATE']); "
+                "document=json.loads(path.read_text()); "
+                "status=document['pods']['items'][1]['status']['containerStatuses'][0]; "
+                "status['restartCount']=1; "
+                "status['containerID']='containerd://'+'9'*64; "
+                "path.write_text(json.dumps(document))",
+            ],
+            suffix="restart",
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("zero restarts after", result.stderr)
         self.assertFalse(path.exists())
 
     def test_container_replacement_fails_without_publishing_attestation(self) -> None:
-        result, path = self._run("replace-container", suffix="replacement")
+        result, path = self._run(
+            [
+                sys.executable,
+                "-c",
+                "import json, os; from pathlib import Path; "
+                "path=Path(os.environ['FAKE_KUBE_STATE']); "
+                "document=json.loads(path.read_text()); "
+                "status=document['pods']['items'][1]['status']['containerStatuses'][0]; "
+                "status['containerID']='containerd://'+'8'*64; "
+                "path.write_text(json.dumps(document))",
+            ],
+            suffix="replacement",
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("runtime identity changed", result.stderr)
         self.assertFalse(path.exists())

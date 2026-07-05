@@ -9,10 +9,17 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/campaign.env"
 glm52_require_cluster_env KUBE_CONTEXT NAMESPACE
-kubectl() { command kubectl --context "${KUBE_CONTEXT}" "$@"; }
+kubectl() {
+  command kubectl --context "${KUBE_CONTEXT}" \
+    --request-timeout="${GLM52_GUARD_REQUEST_TIMEOUT:-60s}" "$@"
+}
 
 POD="${EVAL_RUNNER_POD:-glm52-eval-runner}"
 if ! kubectl get pod "${POD}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+  if [[ "${GLM52_REQUIRE_RUNNER:-0}" == 1 ]]; then
+    echo "Evaluation runner ${POD} is unavailable." >&2
+    exit 1
+  fi
   exit 0
 fi
 
@@ -47,6 +54,11 @@ tmux_sessions="$(kubectl exec -n "${NAMESPACE}" "${POD}" -c runner -- \
 lock_owner="$(kubectl exec -n "${NAMESPACE}" "${POD}" -c runner -- \
   /bin/bash -c 'if test -d /artifacts/glm52-nscale/.campaign-run.lock; then cat /artifacts/glm52-nscale/.campaign-run.lock/owner.json 2>/dev/null || echo "{\"present\":true}"; fi' \
   2>/dev/null || true)"
+if [[ -n "${GLM52_ALLOW_LOCK_INVOCATION_ID:-}" && -n "${lock_owner}" ]] \
+  && jq -e --arg invocation_id "${GLM52_ALLOW_LOCK_INVOCATION_ID}" \
+    '.invocation_id == $invocation_id' <<<"${lock_owner}" >/dev/null 2>&1; then
+  lock_owner=""
+fi
 
 if [[ -n "${active_processes}" || -n "${running_containers}" \
   || -n "${tmux_sessions}" || -n "${lock_owner}" ]]; then
