@@ -114,9 +114,8 @@ var (
 	ffiOnce sync.Once
 	ffiErr  error
 
-	ffiNamespace     string
-	ffiComponent     string
-	ffiEnforceDisagg bool
+	ffiNamespace string
+	ffiComponent string
 
 	routerInitialized bool
 
@@ -132,11 +131,12 @@ const UnsetDpRank = ^uint32(0)
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE_PREFIX", getEnvOrDefault("DYN_NAMESPACE", "vllm-agg"))
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
-	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
+	if getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false) {
+		logger.Info("DYN_ENFORCE_DISAGG is deprecated and ignored; routing topology and readiness come from registered worker types")
+	}
 	logger.Info("Dynamo KV Scorer config loaded",
 		"namespace", ffiNamespace,
 		"component", ffiComponent,
-		"enforce_disagg", ffiEnforceDisagg,
 		"kvCacheBlockSize", getEnvOrDefault("DYN_KV_CACHE_BLOCK_SIZE", "(from discovery)"),
 		"modelName", getEnvOrDefault("DYN_MODEL_NAME", "(from discovery)"))
 }
@@ -176,7 +176,7 @@ func initFFI() error {
 		rc := C.create_routers(
 			ns,
 			cm,
-			C.bool(ffiEnforceDisagg),
+			C.bool(false),
 			&routerHandles,
 		)
 		if rc != C.QUERY_ROUTER_OK {

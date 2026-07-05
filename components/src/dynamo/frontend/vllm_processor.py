@@ -913,7 +913,7 @@ class EngineFactory:
         # vLLM's renderer skips its AutoProcessor fallback when tools are present,
         # so tool calls crash unless tokenizer.chat_template is set; load from disk.
         if tokenizer.chat_template is None:
-            tokenizer.chat_template = resolve_chat_template(local_dir)
+            tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
 
         # --chat-template overrides; load_chat_template accepts either a file path
         # or an inline Jinja template string.
