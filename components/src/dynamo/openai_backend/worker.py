@@ -43,6 +43,7 @@ class Config:
     upstream_health_path: str
     connect_timeout_seconds: float
     write_timeout_seconds: float
+    priority_multiplier: Optional[int] = None
 
 
 @dataclass
@@ -229,6 +230,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_WRITE_TIMEOUT_SECONDS,
         help="HTTP write timeout for upstream calls.",
     )
+    parser.add_argument(
+        "--priority-multiplier",
+        type=int,
+        default=None,
+        help=(
+            "Forward Dynamo routing.priority multiplied by this value to the "
+            "upstream OpenAI request's top-level priority field."
+        ),
+    )
     return parser
 
 
@@ -242,6 +252,7 @@ def cmd_line_args(argv: Sequence[str] | None = None) -> Config:
         upstream_health_path=args.upstream_health_path,
         connect_timeout_seconds=args.connect_timeout_seconds,
         write_timeout_seconds=args.write_timeout_seconds,
+        priority_multiplier=args.priority_multiplier,
     )
 
 
@@ -270,6 +281,21 @@ def _mark_forced_tools_strict(request: dict[str, Any]) -> None:
             continue
 
         function["strict"] = True
+
+
+def _forward_priority_hint(request: dict[str, Any], priority_multiplier: Optional[int]) -> None:
+    if priority_multiplier is None:
+        return
+
+    routing = request.get("routing")
+    if not isinstance(routing, dict):
+        return
+
+    priority = routing.get("priority")
+    if not isinstance(priority, int):
+        return
+
+    request["priority"] = priority * priority_multiplier
 
 
 def _normalize_reasoning_content(payload: dict[str, Any]) -> None:
@@ -353,6 +379,10 @@ class UpstreamClient:
             forwarded_request["stream_options"] = stream_options
             _normalize_chat_template_kwargs(forwarded_request)
             _mark_forced_tools_strict(forwarded_request)
+            _forward_priority_hint(
+                forwarded_request,
+                self._config.priority_multiplier,
+            )
 
             tool_call_coalescer = (
                 _ToolCallCoalescer()

@@ -51,12 +51,16 @@ def build_health_url(args: argparse.Namespace) -> str:
     return f"http://{args.engine_host}:{args.engine_port}{args.health_path}"
 
 
-def build_worker_command(args: argparse.Namespace) -> list[str]:
+def build_worker_command(
+    args: argparse.Namespace,
+    *,
+    priority_multiplier: int | None = None,
+) -> list[str]:
     served_model_name = args.served_model_name or args.model
     upstream_base_url = (
         f"http://{args.engine_host}:{args.engine_port}{args.api_prefix.rstrip('/')}"
     )
-    return [
+    command = [
         sys.executable,
         "-m",
         "dynamo.openai_backend._worker",
@@ -69,6 +73,9 @@ def build_worker_command(args: argparse.Namespace) -> list[str]:
         "--upstream-health-path",
         args.health_path,
     ]
+    if priority_multiplier is not None:
+        command.extend(["--priority-multiplier", str(priority_multiplier)])
+    return command
 
 
 async def wait_for_health(health_url: str, stop_event: asyncio.Event) -> None:

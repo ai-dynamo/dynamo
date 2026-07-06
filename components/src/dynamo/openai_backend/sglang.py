@@ -55,6 +55,10 @@ def _engine_command(args: argparse.Namespace) -> list[str]:
     return command
 
 
+def _worker_command(args: argparse.Namespace) -> list[str]:
+    return build_worker_command(args, priority_multiplier=1)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     configure_logging()
     args = _build_parser().parse_args(list(argv) if argv is not None else None)
@@ -62,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         uvloop.run(
             run_launcher(
                 engine_command=_engine_command(args),
-                worker_command=build_worker_command(args),
+                worker_command=_worker_command(args),
                 health_url=build_health_url(args),
             )
         )
