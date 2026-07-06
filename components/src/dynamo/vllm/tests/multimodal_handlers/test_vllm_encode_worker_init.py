@@ -3,7 +3,7 @@
 
 """Unit tests for ``EncodeWorkerHandler.__init__`` vision-model hidden-dim resolution.
 
-Regression guard for NvBug 5935944 / OPS-5180.
+Regression guard for NvBug 5935944.
 
 ``EncodeWorkerHandler.__init__`` reads the embedding hidden dimension off the
 loaded vision model. The two supported load paths return different object shapes
@@ -11,9 +11,9 @@ loaded vision model. The two supported load paths return different object shapes
 
 * Qwen-VL loads via vLLM ``LLM(mm_encoder_only=True)`` and returns a vLLM ViT
   module that exposes ``out_hidden_size`` directly on the module.
-* Non-Qwen families (LLaVA-1.5, LLaVA-NeXT, ...) load via
-  ``AutoModel.from_pretrained`` and return a HuggingFace model that has **no**
-  ``out_hidden_size`` attribute — the hidden dim lives on ``.config.hidden_size``.
+* Non-Qwen families (e.g. LLaVA-1.5) load via ``AutoModel.from_pretrained`` and
+  return a HuggingFace model that has **no** ``out_hidden_size`` attribute — the
+  hidden dim lives on ``.config.hidden_size``.
 
 The original bug unconditionally read ``self.vision_model.out_hidden_size``, so
 every non-Qwen vision model crashed the encode worker on startup with
@@ -123,18 +123,15 @@ class TestEncodeWorkerInitHiddenDim:
         "vision_model, model_name, expected_dim",
         [
             # Non-Qwen families load via AutoModel.from_pretrained and expose the
-            # hidden dim only on .config.hidden_size (the fallback path).
+            # hidden dim only on .config.hidden_size (the fallback path). LLaVA-1.5
+            # is the family the encoder currently supports (resolve_model_family +
+            # get_encoder_components); other AutoModel families that don't yet
+            # resolve are rejected later in __init__, so they aren't asserted here.
             pytest.param(
                 _llava_like_vision_model(4096),
                 "llava-hf/llava-1.5-7b-hf",
                 4096,
                 id="llava-1.5",
-            ),
-            pytest.param(
-                _llava_like_vision_model(4096),
-                "llava-hf/llava-v1.6-mistral-7b-hf",
-                4096,
-                id="llava-next",
             ),
             # Qwen-VL loads via vLLM and exposes out_hidden_size on the module;
             # it must be preferred over config.hidden_size when both are present.
@@ -149,7 +146,8 @@ class TestEncodeWorkerInitHiddenDim:
     def test_init_logs_hidden_dim_across_vision_model_families(
         self, caplog, vision_model, model_name, expected_dim
     ):
-        """Curated family sweep {LLaVA-1.5, LLaVA-NeXT, Qwen-VL}.
+        """Curated family sweep over the encoder's supported families {LLaVA-1.5,
+        Qwen-VL}.
 
         Guards both branches of the resolution: the ``out_hidden_size`` module
         attribute (Qwen) and the ``config.hidden_size`` fallback (LLaVA family).
