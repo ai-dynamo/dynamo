@@ -2049,6 +2049,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn error_type_from_chain_classifies_by_semantics() {
+        use dynamo_runtime::error::{DynamoError, ErrorType as DynErr};
+        let mk = |t: DynErr| -> anyhow::Error {
+            DynamoError::builder()
+                .error_type(t)
+                .message("x")
+                .build()
+                .into()
+        };
+        assert_eq!(
+            error_type_from_chain(mk(DynErr::ResourceExhausted).as_ref()),
+            Some(ErrorType::Overload)
+        );
+        assert_eq!(
+            error_type_from_chain(mk(DynErr::Unavailable).as_ref()),
+            Some(ErrorType::Unavailable)
+        );
+        assert_eq!(
+            error_type_from_chain(mk(DynErr::Cancelled).as_ref()),
+            Some(ErrorType::Cancelled)
+        );
+        // An error with no overload/unavailable/cancelled signal falls through.
+        assert_eq!(
+            error_type_from_chain(anyhow::anyhow!("unrelated").as_ref()),
+            None
+        );
+    }
+
+    #[test]
     fn test_round_to_sig_figs() {
         // Test rounding to 2 significant figures
         assert_eq!(round_to_sig_figs(0.0026, 2), 0.0026);
