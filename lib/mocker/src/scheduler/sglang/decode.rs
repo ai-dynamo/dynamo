@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::time::Duration;
-
+use crate::common::perf_model::{
+    ReplayDecodeInput, ReplayDecodeLatencyModel, replay_latency_duration, scale_replay_duration,
+};
 use crate::common::protocols::OutputSignal;
 use crate::common::speculative::SpeculativeDecodeSampler;
 use crate::common::utils::compute_prefill_handoff_delay_ms;
@@ -223,22 +224,27 @@ pub(super) fn simulate_decode_step_with_sampler(
         };
     }
 
-    let total_context: usize = running
+    let sequence_lengths = running
         .iter()
         .map(SglangRequest::current_sequence_len)
-        .sum();
-    let avg_context = total_context / running.len();
-    let active_kv_tokens = total_context.min(config.total_kv_tokens);
-    let decode_time = config.perf_model.predict_decode_time(
-        running.len(),
-        active_kv_tokens,
-        avg_context,
-        config.total_kv_tokens,
+        .collect::<Vec<_>>();
+    let active_kv_tokens = sequence_lengths
+        .iter()
+        .sum::<usize>()
+        .min(config.total_kv_tokens);
+    let unscaled_time = replay_latency_duration(
+        config.perf_model.decode_latency_ms(ReplayDecodeInput {
+            sequence_lengths: &sequence_lengths,
+            active_kv_tokens,
+            total_kv_tokens: config.total_kv_tokens,
+            output_length: max_burst,
+        }),
+        1.0,
+        "decode",
     );
-    let unscaled_time = Duration::from_secs_f64(decode_time / 1000.0);
     let effective_ratio = config.speedup_ratio * config.decode_speedup_ratio;
-    let total_time = if apply_speedup && effective_ratio > 0.0 && unscaled_time > Duration::ZERO {
-        Duration::from_secs_f64(unscaled_time.as_secs_f64() / effective_ratio)
+    let total_time = if apply_speedup {
+        scale_replay_duration(unscaled_time, effective_ratio, "decode")
     } else {
         unscaled_time
     };

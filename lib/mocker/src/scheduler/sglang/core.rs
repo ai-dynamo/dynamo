@@ -8,6 +8,9 @@ use dynamo_kv_router::protocols::WorkerId;
 use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
+use crate::common::perf_model::{
+    ReplayPrefillInput, ReplayPrefillLatencyModel, replay_latency_duration, scale_replay_duration,
+};
 use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, WorkerType};
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
 use crate::common::utils::prefill_handoff_transfer_timing;
@@ -572,7 +575,7 @@ impl SglangCore {
         apply_schedule_policy(&mut self.waiting, &self.kv_manager, &self.config);
 
         let admission = AdmissionInvariant::new(self.pending_destinations.has_pending());
-        let mut admit = match admission.stage_for(materialized_waiting) {
+        let admit = match admission.stage_for(materialized_waiting) {
             AdmissionStage::Materialized | AdmissionStage::PendingDestinationHead => {
                 Default::default()
             }
@@ -589,36 +592,51 @@ impl SglangCore {
             self.new_token_ratio = self.config.init_new_token_ratio;
         }
 
-        admissions.append(&mut admit.admissions);
+        let scheduled_prefills = admit.scheduled_prefills;
+        admissions.extend(scheduled_prefills.iter().map(|scheduled| {
+            crate::scheduler::AdmissionEvent {
+                uuid: scheduled.request.uuid,
+                reused_input_tokens: scheduled.prefix_tokens,
+            }
+        }));
         for admission in &admissions {
             if let Some(collector) = collector.as_deref_mut() {
                 collector.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
             }
         }
 
-        // Capture per-request prefill FPM data before dispersing can_run.
-        let prefill_fpm = admit.prefill_fpm;
+        let prefill_sequence_lengths = scheduled_prefills
+            .iter()
+            .map(|scheduled| scheduled.request.materialized_tokens)
+            .collect::<Vec<_>>();
+        let prefill_prefix_lengths = scheduled_prefills
+            .iter()
+            .map(|scheduled| scheduled.prefix_tokens)
+            .collect::<Vec<_>>();
+        let prefill_time = simulate_prefill_duration(
+            &prefill_sequence_lengths,
+            &prefill_prefix_lengths,
+            &self.config,
+            true,
+        );
 
-        let batch_size = admit.can_run.len();
-        let mean_isl = if batch_size > 0 {
-            admit.total_isl / batch_size
-        } else {
-            0
-        };
-        let mean_prefix = if batch_size > 0 {
-            admit.total_prefix / batch_size
-        } else {
-            0
-        };
-        let prefill_time =
-            simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true);
-
-        for mut req in admit.can_run {
-            if req.materialized_tokens < req.current_sequence_len() {
-                cache_materialized_prefix(&mut req, &mut self.kv_manager, &self.config);
-                self.waiting.push_front(req);
+        let prefill_fpm = scheduled_prefills
+            .iter()
+            .map(|scheduled| {
+                (
+                    scheduled.prompt_len as u64,
+                    scheduled.prefix_tokens as u64,
+                    scheduled.tokens_computed as u64,
+                )
+            })
+            .collect::<Vec<_>>();
+        for scheduled in scheduled_prefills {
+            let mut request = scheduled.request;
+            if request.materialized_tokens < request.current_sequence_len() {
+                cache_materialized_prefix(&mut request, &mut self.kv_manager, &self.config);
+                self.waiting.push_front(request);
             } else {
-                self.running.push(req);
+                self.running.push(request);
             }
         }
 
@@ -663,11 +681,11 @@ impl SglangCore {
         // Build FPM snapshot now that all state has settled.
         let sglang_cache_hit_tokens = prefill_fpm
             .iter()
-            .map(|item| item.prefix_tokens as u64)
+            .map(|(_, prefix_tokens, _)| *prefix_tokens)
             .sum::<u64>();
         let sglang_cache_total_tokens = prefill_fpm
             .iter()
-            .map(|item| (item.prefix_tokens + item.tokens_computed) as u64)
+            .map(|(_, prefix_tokens, tokens_computed)| prefix_tokens + tokens_computed)
             .sum::<u64>();
         let queued_prefills = self
             .waiting
@@ -704,13 +722,7 @@ impl SglangCore {
                     .map(|reservation| reservation.request.prompt_len() as u64),
             );
         let fpm = build_fpm_snapshot(
-            prefill_fpm.iter().map(|p| {
-                (
-                    p.prompt_len as u64,
-                    p.prefix_tokens as u64,
-                    p.tokens_computed as u64,
-                )
-            }),
+            prefill_fpm.iter().copied(),
             scheduled_decode_lens.into_iter(),
             queued_prefills,
             ordinary_queued_decodes.chain(preactivation_decodes),
@@ -782,26 +794,25 @@ impl SglangCore {
 }
 
 fn simulate_prefill_duration(
-    batch_size: usize,
-    mean_isl: usize,
-    mean_prefix: usize,
+    sequence_lengths: &[usize],
+    prefix_lengths: &[usize],
     config: &SglangConfig,
     apply_speedup: bool,
 ) -> Duration {
-    if batch_size == 0 || config.worker_type == WorkerType::Decode {
+    if sequence_lengths.is_empty() || config.worker_type == WorkerType::Decode {
         return Duration::ZERO;
     }
 
-    let prefill_time = config
-        .perf_model
-        .predict_prefill_time(batch_size, mean_isl, mean_prefix);
-    let total_time = Duration::from_secs_f64(prefill_time / 1000.0);
+    let input = ReplayPrefillInput::new(sequence_lengths, prefix_lengths)
+        .expect("scheduled prefill shape must be valid");
+    let total_time =
+        replay_latency_duration(config.perf_model.prefill_latency_ms(input), 0.0, "prefill");
 
-    if !apply_speedup || config.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
+    if !apply_speedup {
         return total_time;
     }
 
-    Duration::from_secs_f64(total_time.as_secs_f64() / config.speedup_ratio)
+    scale_replay_duration(total_time, config.speedup_ratio, "prefill")
 }
 
 fn debug_assert_sglang_scheduler_state(
