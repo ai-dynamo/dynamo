@@ -1,32 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
-use async_trait::async_trait;
 use dynamo_runtime::{
-    discovery::{
-        ClaimCloseOutcome, ClaimEvent, ClaimOutcome, ClaimPayload, ClaimPayloadFuture, Discovery,
-        DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
-    },
     engine::AsyncEngineContext,
     error::ErrorType,
     pipeline::{Context, ResponseStream, context::Controller},
     protocols::maybe_error::MaybeError,
 };
 use futures::{StreamExt, stream};
-use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
 
-use super::coordinator::AffinityAcquire;
-use super::{AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id, explicit_target};
+use super::{
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id, explicit_target,
+};
 use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -48,138 +35,6 @@ fn target(worker_id: u64, dp_rank: Option<u32>) -> AffinityTarget {
 
 fn coordinator() -> AffinityCoordinator {
     AffinityCoordinator::new(Duration::from_secs(10)).unwrap()
-}
-
-struct ClaimTestDiscovery {
-    claims: Mutex<HashMap<String, ClaimPayload>>,
-    create_calls: AtomicUsize,
-    close_calls: AtomicUsize,
-    events: Mutex<Option<broadcast::Sender<ClaimEvent>>>,
-}
-
-impl ClaimTestDiscovery {
-    fn new(event_capacity: usize) -> Arc<Self> {
-        let (events, _) = broadcast::channel(event_capacity);
-        Arc::new(Self {
-            claims: Mutex::new(HashMap::new()),
-            create_calls: AtomicUsize::new(0),
-            close_calls: AtomicUsize::new(0),
-            events: Mutex::new(Some(events)),
-        })
-    }
-
-    fn emit(&self, event: ClaimEvent) {
-        if let Some(events) = self.events.lock().unwrap().as_ref() {
-            let _ = events.send(event);
-        }
-    }
-
-    fn disconnect(&self) {
-        self.events.lock().unwrap().take();
-    }
-}
-
-#[async_trait]
-impl Discovery for ClaimTestDiscovery {
-    fn instance_id(&self) -> u64 {
-        1
-    }
-
-    async fn register_internal(&self, _spec: DiscoverySpec) -> anyhow::Result<DiscoveryInstance> {
-        anyhow::bail!("not used by claim tests")
-    }
-
-    async fn unregister(&self, _instance: DiscoveryInstance) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn list(&self, _query: DiscoveryQuery) -> anyhow::Result<Vec<DiscoveryInstance>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_and_watch(
-        &self,
-        _query: DiscoveryQuery,
-        _cancel_token: Option<CancellationToken>,
-    ) -> anyhow::Result<DiscoveryStream> {
-        Ok(Box::pin(stream::pending()))
-    }
-
-    async fn create_or_get_claim(
-        &self,
-        key: &str,
-        proposed_payload: &mut ClaimPayloadFuture<'_>,
-    ) -> anyhow::Result<ClaimOutcome> {
-        self.create_calls.fetch_add(1, Ordering::Relaxed);
-        if let Some(payload) = self.claims.lock().unwrap().get(key).cloned() {
-            return Ok(ClaimOutcome::Existing(payload));
-        }
-
-        let proposed = proposed_payload.as_mut().await?;
-        let mut claims = self.claims.lock().unwrap();
-        if let Some(payload) = claims.get(key).cloned() {
-            return Ok(ClaimOutcome::Existing(payload));
-        }
-        claims.insert(key.to_string(), proposed.clone());
-        Ok(ClaimOutcome::Created(proposed))
-    }
-
-    async fn close_claim(&self, key: &str) -> anyhow::Result<ClaimCloseOutcome> {
-        self.close_calls.fetch_add(1, Ordering::Relaxed);
-        if self.claims.lock().unwrap().remove(key).is_some() {
-            self.emit(ClaimEvent::Delete(key.to_string()));
-        }
-        Ok(ClaimCloseOutcome::Closed)
-    }
-
-    fn subscribe_claim_events(&self) -> Option<broadcast::Receiver<ClaimEvent>> {
-        self.events
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(broadcast::Sender::subscribe)
-    }
-}
-
-fn distributed_coordinator(discovery: Arc<dyn Discovery>) -> AffinityCoordinator {
-    AffinityCoordinator::new_distributed(
-        Duration::from_secs(10),
-        "ns/component/endpoint".to_string(),
-        discovery,
-    )
-    .unwrap()
-}
-
-fn target_payload(target: AffinityTarget) -> ClaimPayloadFuture<'static> {
-    Box::pin(async move { Ok(serde_json::to_value(target)?) })
-}
-
-async fn resolve_local(
-    coordinator: &AffinityCoordinator,
-    session_id: &SessionAffinityId,
-    selected: AffinityTarget,
-) -> super::ResolvedAffinity {
-    coordinator
-        .acquire(session_id)
-        .await
-        .unwrap()
-        .resolve(|| target_payload(selected))
-        .await
-        .unwrap()
-}
-
-async fn wait_for_cached_target(
-    coordinator: &AffinityCoordinator,
-    session_id: &SessionAffinityId,
-    expected: Option<AffinityTarget>,
-) {
-    for _ in 0..100 {
-        if coordinator.query_target(session_id).unwrap() == expected {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(coordinator.query_target(session_id).unwrap(), expected);
 }
 
 fn response_stream(items: usize) -> dynamo_runtime::pipeline::ManyOut<LlmResponse> {
@@ -206,11 +61,11 @@ fn cancelled_response_stream() -> dynamo_runtime::pipeline::ManyOut<LlmResponse>
 async fn assert_binding_expires_after_refreshed_ttl(coordinator: &AffinityCoordinator) {
     tokio::time::advance(Duration::from_secs(9)).await;
     assert_eq!(
-        coordinator.query_target(&session_id()).unwrap(),
+        coordinator.query_target(&session_id(), None).unwrap(),
         Some(target(7, Some(0)))
     );
     tokio::time::advance(Duration::from_secs(2)).await;
-    assert_eq!(coordinator.query_target(&session_id()).unwrap(), None);
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
 }
 
 fn request_with_routing(routing: RoutingHints) -> PreprocessedRequest {
@@ -281,208 +136,40 @@ fn session_affinity_context_type_errors_are_preserved() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_initialization_is_atomic() {
     let coordinator = coordinator();
-    let first = coordinator.acquire(&session_id()).await.unwrap();
-    assert!(matches!(&first, AffinityAcquire::Initialize(_)));
-
-    let waiter_coordinator = coordinator.clone();
-    let waiter = tokio::spawn(async move { waiter_coordinator.acquire(&session_id()).await });
-    coordinator.wait_for_initializing_waiter().await;
-    assert!(!waiter.is_finished());
-
-    let first = first
-        .resolve(|| target_payload(target(7, Some(0))))
-        .await
-        .unwrap();
-    let second = waiter
-        .await
-        .unwrap()
-        .unwrap()
-        .resolve(|| target_payload(target(8, Some(0))))
-        .await
-        .unwrap();
-    assert_eq!(second.target(), target(7, Some(0)));
-    drop(first);
-    drop(second);
-}
-
-#[tokio::test]
-async fn distributed_existing_winner_skips_proposal_and_cache_hits_skip_discovery() {
-    let discovery = ClaimTestDiscovery::new(16);
-    let first = distributed_coordinator(discovery.clone());
-    let second = distributed_coordinator(discovery.clone());
-    let session_id = session_id();
-
-    let created = first
-        .acquire(&session_id)
-        .await
-        .unwrap()
-        .resolve(|| target_payload(target(7, Some(0))))
-        .await
-        .unwrap();
-    assert_eq!(created.target(), target(7, Some(0)));
-    assert!(created.was_created());
-    drop(created);
-
-    let proposal_polled = Arc::new(AtomicBool::new(false));
-    let polled = proposal_polled.clone();
-    let winner = second
-        .acquire(&session_id)
-        .await
-        .unwrap()
-        .resolve(|| {
-            Box::pin(async move {
-                polled.store(true, Ordering::Relaxed);
-                Ok(serde_json::to_value(target(8, Some(0)))?)
-            })
-        })
-        .await
-        .unwrap();
-    assert_eq!(winner.target(), target(7, Some(0)));
-    assert!(!winner.was_created());
-    assert!(!proposal_polled.load(Ordering::Relaxed));
-    drop(winner);
-    assert_eq!(discovery.create_calls.load(Ordering::Relaxed), 2);
-
-    let cached_proposal_constructed = Arc::new(AtomicBool::new(false));
-    let constructed = cached_proposal_constructed.clone();
-    let cached = second
-        .acquire(&session_id)
-        .await
-        .unwrap()
-        .resolve(|| {
-            constructed.store(true, Ordering::Relaxed);
-            target_payload(target(9, Some(0)))
-        })
-        .await
-        .unwrap();
-    assert_eq!(cached.target(), target(7, Some(0)));
-    assert!(!cached_proposal_constructed.load(Ordering::Relaxed));
-    assert_eq!(discovery.create_calls.load(Ordering::Relaxed), 2);
-}
-
-#[tokio::test]
-async fn distributed_delete_evicts_one_entry_and_duplicate_is_harmless() {
-    let discovery = ClaimTestDiscovery::new(16);
-    let first = distributed_coordinator(discovery.clone());
-    let second = distributed_coordinator(discovery.clone());
-    let first_session = SessionAffinityId::new("first-session");
-    let second_session = SessionAffinityId::new("second-session");
-
-    for (coordinator, session, worker_id) in
-        [(&first, &first_session, 7), (&second, &second_session, 8)]
-    {
-        drop(
-            coordinator
-                .acquire(session)
-                .await
-                .unwrap()
-                .resolve(|| target_payload(target(worker_id, Some(0))))
-                .await
-                .unwrap(),
-        );
-    }
-
-    let first_key = first.claim_key_for_test(&first_session);
-    discovery.emit(ClaimEvent::Delete(first_key.clone()));
-    wait_for_cached_target(&first, &first_session, None).await;
-    assert_eq!(
-        second.query_target(&second_session).unwrap(),
-        Some(target(8, Some(0)))
-    );
-    discovery.emit(ClaimEvent::Delete(first_key));
-    wait_for_cached_target(&first, &first_session, None).await;
-}
-
-#[tokio::test]
-async fn distributed_subscriber_lag_clears_all_entries() {
-    let discovery = ClaimTestDiscovery::new(1);
-    let coordinator = distributed_coordinator(discovery.clone());
-    let session_id = session_id();
-    drop(
-        coordinator
-            .acquire(&session_id)
-            .await
-            .unwrap()
-            .resolve(|| target_payload(target(8, Some(0))))
-            .await
-            .unwrap(),
-    );
-
-    for index in 0..16 {
-        discovery.emit(ClaimEvent::Delete(format!("unrelated/{index}")));
-    }
-    wait_for_cached_target(&coordinator, &session_id, None).await;
-}
-
-#[tokio::test]
-async fn distributed_reset_and_disconnect_clear_entries() {
-    let discovery = ClaimTestDiscovery::new(16);
-    let coordinator = distributed_coordinator(discovery.clone());
-    let session_id = session_id();
-
-    drop(
-        coordinator
-            .acquire(&session_id)
-            .await
-            .unwrap()
-            .resolve(|| target_payload(target(8, Some(0))))
-            .await
-            .unwrap(),
-    );
-    discovery.emit(ClaimEvent::Reset);
-    wait_for_cached_target(&coordinator, &session_id, None).await;
-
-    let resolved = coordinator
-        .acquire(&session_id)
-        .await
-        .unwrap()
-        .resolve(|| target_payload(target(99, Some(0))))
-        .await
-        .unwrap();
-    assert_eq!(resolved.target(), target(8, Some(0)));
-    assert!(!resolved.was_created());
-    drop(resolved);
-    discovery.disconnect();
-    wait_for_cached_target(&coordinator, &session_id, None).await;
-}
-
-#[tokio::test]
-async fn terminal_close_evicts_synchronously() {
-    let discovery = ClaimTestDiscovery::new(16);
-    let coordinator = distributed_coordinator(discovery.clone());
-    let session_id = session_id();
-    let resolved = coordinator
-        .acquire(&session_id)
-        .await
-        .unwrap()
-        .resolve(|| target_payload(target(7, Some(0))))
-        .await
-        .unwrap();
-    let key = coordinator.claim_key_for_test(&session_id);
-    let mut stream = resolved.into_stream(response_stream(0), true);
-    assert!(stream.next().await.is_none());
-    assert_eq!(coordinator.query_target(&session_id).unwrap(), None);
-
-    for _ in 0..100 {
-        if discovery.close_calls.load(Ordering::Relaxed) == 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(discovery.close_calls.load(Ordering::Relaxed), 1);
-    assert!(!discovery.claims.lock().unwrap().contains_key(&key));
-}
-
-#[tokio::test(start_paused = true)]
-async fn session_affinity_initializer_cancellation_wakes_waiter() {
-    let coordinator = coordinator();
-    let first = coordinator.acquire(&session_id()).await.unwrap();
+    let first = coordinator.acquire(&session_id(), None).await.unwrap();
     let AffinityAcquire::Initialize(first) = first else {
         panic!("first request must initialize");
     };
 
     let waiter_coordinator = coordinator.clone();
-    let waiter = tokio::spawn(async move { waiter_coordinator.acquire(&session_id()).await });
+    let waiter = tokio::spawn(async move { waiter_coordinator.acquire(&session_id(), None).await });
+    coordinator.wait_for_initializing_waiter().await;
+    assert!(!waiter.is_finished());
+
+    let first_lease = first.commit(target(7, Some(0))).unwrap();
+    let second = waiter.await.unwrap().unwrap();
+    let AffinityAcquire::Bound {
+        target: second_target,
+        lease: second_lease,
+    } = second
+    else {
+        panic!("waiter must acquire the committed binding");
+    };
+    assert_eq!(second_target, target(7, Some(0)));
+    drop(first_lease);
+    drop(second_lease);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_initializer_cancellation_wakes_waiter() {
+    let coordinator = coordinator();
+    let first = coordinator.acquire(&session_id(), None).await.unwrap();
+    let AffinityAcquire::Initialize(first) = first else {
+        panic!("first request must initialize");
+    };
+
+    let waiter_coordinator = coordinator.clone();
+    let waiter = tokio::spawn(async move { waiter_coordinator.acquire(&session_id(), None).await });
     coordinator.wait_for_initializing_waiter().await;
     drop(first);
 
@@ -491,43 +178,15 @@ async fn session_affinity_initializer_cancellation_wakes_waiter() {
     drop(next);
     assert_eq!(coordinator.entry_count(), 0);
     assert!(matches!(
-        coordinator.acquire(&session_id()).await.unwrap(),
+        coordinator.acquire(&session_id(), None).await.unwrap(),
         AffinityAcquire::Initialize(_)
     ));
-}
-
-#[tokio::test]
-async fn distributed_reset_wakes_initializing_waiter_and_preserves_entry_count() {
-    let discovery = ClaimTestDiscovery::new(16);
-    let coordinator = distributed_coordinator(discovery.clone());
-    let first = coordinator.acquire(&session_id()).await.unwrap();
-    let AffinityAcquire::Initialize(first) = first else {
-        panic!("first request must initialize");
-    };
-
-    let waiter_coordinator = coordinator.clone();
-    let waiter = tokio::spawn(async move { waiter_coordinator.acquire(&session_id()).await });
-    coordinator.wait_for_initializing_waiter().await;
-    discovery.emit(ClaimEvent::Reset);
-
-    let next = tokio::time::timeout(Duration::from_secs(1), waiter)
-        .await
-        .expect("reset did not wake initializing waiter")
-        .unwrap()
-        .unwrap();
-    assert!(matches!(&next, AffinityAcquire::Initialize(_)));
-    assert_eq!(coordinator.entry_count(), 1);
-
-    drop(first);
-    assert_eq!(coordinator.entry_count(), 1);
-    drop(next);
-    assert_eq!(coordinator.entry_count(), 0);
 }
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_wait_stops_when_request_is_cancelled() {
     let coordinator = coordinator();
-    let first = coordinator.acquire(&session_id()).await.unwrap();
+    let first = coordinator.acquire(&session_id(), None).await.unwrap();
     let AffinityAcquire::Initialize(first) = first else {
         panic!("first request must initialize");
     };
@@ -537,7 +196,7 @@ async fn session_affinity_wait_stops_when_request_is_cancelled() {
     let waiter_coordinator = coordinator.clone();
     let waiter = tokio::spawn(async move {
         waiter_coordinator
-            .acquire_with_context(&session_id(), waiter_context.as_ref())
+            .acquire_with_context(&session_id(), None, waiter_context.as_ref())
             .await
     });
     coordinator.wait_for_initializing_waiter().await;
@@ -555,28 +214,70 @@ async fn session_affinity_wait_stops_when_request_is_cancelled() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn session_affinity_existing_binding_overrides_explicit_proposals() {
+async fn session_affinity_validates_worker_and_rank_contract() {
     let coordinator = coordinator();
-    drop(resolve_local(&coordinator, &session_id(), target(7, None)).await);
+    let AffinityAcquire::Initialize(initializer) = coordinator
+        .acquire(&session_id(), Some(target(7, None)))
+        .await
+        .unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(target(7, None)).unwrap());
 
-    for proposal in [target(8, None), target(7, Some(0)), target(7, None)] {
-        let resolved = coordinator
-            .acquire(&session_id())
+    assert!(
+        coordinator
+            .acquire(&session_id(), Some(target(8, None)))
             .await
-            .unwrap()
-            .resolve(|| target_payload(proposal))
+            .is_err()
+    );
+    assert!(
+        coordinator
+            .acquire(&session_id(), Some(target(7, Some(0))))
             .await
-            .unwrap();
-        assert_eq!(resolved.target(), target(7, None));
-    }
+            .is_err()
+    );
+    assert!(
+        coordinator
+            .acquire(&session_id(), Some(target(7, None)))
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_failed_bound_operation_invalidates_binding() {
+    let coordinator = coordinator();
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(target(7, Some(0))).unwrap());
+
+    let operation = coordinator.acquire(&session_id(), None).await.unwrap();
+    assert_eq!(operation.target(), Some(target(7, Some(0))));
+    operation.invalidate();
+
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+    assert_eq!(coordinator.entry_count(), 0);
+    assert!(matches!(
+        coordinator.acquire(&session_id(), None).await.unwrap(),
+        AffinityAcquire::Initialize(_)
+    ));
 }
 
 #[tokio::test(start_paused = true)]
 async fn session_affinity_stream_drop_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    let resolved = resolve_local(&coordinator, &session_id(), target(7, Some(0))).await;
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    let lease = initializer.commit(target(7, Some(0))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = resolved.into_stream(response_stream(1), false);
+    let mut stream = lease.into_stream(response_stream(1));
     assert!(stream.next().await.is_some());
     drop(stream);
 
@@ -586,9 +287,14 @@ async fn session_affinity_stream_drop_refreshes_idle_ttl() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_empty_stream_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    let resolved = resolve_local(&coordinator, &session_id(), target(7, Some(0))).await;
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    let lease = initializer.commit(target(7, Some(0))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = resolved.into_stream(response_stream(0), false);
+    let mut stream = lease.into_stream(response_stream(0));
     assert!(stream.next().await.is_none());
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
@@ -597,12 +303,23 @@ async fn session_affinity_empty_stream_refreshes_idle_ttl() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_cancelled_stream_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    drop(resolve_local(&coordinator, &session_id(), target(7, Some(0))).await);
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(target(7, Some(0))).unwrap());
 
     tokio::time::advance(Duration::from_secs(9)).await;
-    let resolved = resolve_local(&coordinator, &session_id(), target(8, Some(0))).await;
-    assert_eq!(resolved.target(), target(7, Some(0)));
-    let mut stream = resolved.into_stream(cancelled_response_stream(), false);
+    let AffinityAcquire::Bound {
+        target: bound_target,
+        lease,
+    } = coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("continuation must acquire the existing binding");
+    };
+    assert_eq!(bound_target, target(7, Some(0)));
+    let mut stream = lease.into_stream(cancelled_response_stream());
     assert!(stream.next().await.is_none());
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
@@ -611,8 +328,10 @@ async fn session_affinity_cancelled_stream_refreshes_idle_ttl() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl() {
     let coordinator = coordinator();
-    let resolved = resolve_local(&coordinator, &session_id(), target(7, Some(0))).await;
-    let mut stream = resolved.into_stream(cancelled_response_stream(), false);
+    let operation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let mut stream = operation
+        .into_stream(target(7, Some(0)), cancelled_response_stream())
+        .unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
     assert!(stream.next().await.is_none());
 
@@ -622,9 +341,14 @@ async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl(
 #[tokio::test(start_paused = true)]
 async fn session_affinity_error_stream_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    let resolved = resolve_local(&coordinator, &session_id(), target(7, Some(0))).await;
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    let lease = initializer.commit(target(7, Some(0))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = resolved.into_stream(error_response_stream(), false);
+    let mut stream = lease.into_stream(error_response_stream());
     assert!(stream.next().await.unwrap().is_err());
     assert!(stream.next().await.is_none());
 
@@ -634,9 +358,14 @@ async fn session_affinity_error_stream_refreshes_idle_ttl() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_stream_eof_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    let resolved = resolve_local(&coordinator, &session_id(), target(7, Some(0))).await;
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    let lease = initializer.commit(target(7, Some(0))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = resolved.into_stream(response_stream(1), false);
+    let mut stream = lease.into_stream(response_stream(1));
     while stream.next().await.is_some() {}
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
@@ -645,17 +374,26 @@ async fn session_affinity_stream_eof_refreshes_idle_ttl() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_bound_lease_drop_refreshes_idle_ttl() {
     let coordinator = coordinator();
-    drop(resolve_local(&coordinator, &session_id(), target(7, Some(0))).await);
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(target(7, Some(0))).unwrap());
 
     tokio::time::advance(Duration::from_secs(9)).await;
-    let resolved = resolve_local(&coordinator, &session_id(), target(8, Some(0))).await;
+    let AffinityAcquire::Bound { lease, .. } =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("continuation must acquire the binding");
+    };
     tokio::time::advance(Duration::from_secs(2)).await;
     tokio::task::yield_now().await;
     assert_eq!(
-        coordinator.query_target(&session_id()).unwrap(),
+        coordinator.query_target(&session_id(), None).unwrap(),
         Some(target(7, Some(0)))
     );
-    drop(resolved);
+    drop(lease);
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
 }
@@ -663,22 +401,27 @@ async fn session_affinity_bound_lease_drop_refreshes_idle_ttl() {
 #[tokio::test(start_paused = true)]
 async fn session_affinity_query_is_read_only() {
     let coordinator = coordinator();
-    assert_eq!(coordinator.query_target(&session_id()).unwrap(), None);
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
     assert_eq!(coordinator.entry_count(), 0);
 
-    let initializing = coordinator.acquire(&session_id()).await.unwrap();
-    assert_eq!(coordinator.query_target(&session_id()).unwrap(), None);
+    let initializing = coordinator.acquire(&session_id(), None).await.unwrap();
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
     assert_eq!(coordinator.entry_count(), 1);
     drop(initializing);
     assert_eq!(coordinator.entry_count(), 0);
 
-    drop(resolve_local(&coordinator, &session_id(), target(7, Some(0))).await);
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(target(7, Some(0))).unwrap());
     assert_eq!(
-        coordinator.query_target(&session_id()).unwrap(),
+        coordinator.query_target(&session_id(), None).unwrap(),
         Some(target(7, Some(0)))
     );
     coordinator.expire_for_test(&session_id());
-    assert_eq!(coordinator.query_target(&session_id()).unwrap(), None);
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
     assert_eq!(coordinator.entry_count(), 1);
 }
 
@@ -686,7 +429,12 @@ async fn session_affinity_query_is_read_only() {
 async fn session_affinity_reaper_removes_idle_entries_and_stops_on_drop() {
     let coordinator = coordinator();
     let cancellation = coordinator.cancellation_token();
-    drop(resolve_local(&coordinator, &session_id(), target(7, Some(0))).await);
+    let AffinityAcquire::Initialize(initializer) =
+        coordinator.acquire(&session_id(), None).await.unwrap()
+    else {
+        panic!("first request must initialize");
+    };
+    drop(initializer.commit(target(7, Some(0))).unwrap());
 
     coordinator.wait_for_reaper().await;
     tokio::time::advance(Duration::from_secs(10)).await;
@@ -719,7 +467,7 @@ fn session_affinity_rejects_invalid_ttl_before_starting_reaper() {
 async fn session_affinity_enforces_id_and_entry_limits() {
     let coordinator = AffinityCoordinator::with_test_limits(1, 8);
     let oversized = SessionAffinityId::new("123456789");
-    let Err(error) = coordinator.acquire(&oversized).await else {
+    let Err(error) = coordinator.acquire(&oversized, None).await else {
         panic!("oversized session ID must fail");
     };
     assert!(dynamo_runtime::error::match_error_chain(
@@ -730,9 +478,9 @@ async fn session_affinity_enforces_id_and_entry_limits() {
     assert_eq!(coordinator.entry_count(), 0);
 
     let first_id = SessionAffinityId::new("first");
-    let first = coordinator.acquire(&first_id).await.unwrap();
+    let first = coordinator.acquire(&first_id, None).await.unwrap();
     let second_id = SessionAffinityId::new("second");
-    let Err(error) = coordinator.acquire(&second_id).await else {
+    let Err(error) = coordinator.acquire(&second_id, None).await else {
         panic!("entry limit must reject a second session");
     };
     assert!(dynamo_runtime::error::match_error_chain(
@@ -744,7 +492,7 @@ async fn session_affinity_enforces_id_and_entry_limits() {
     drop(first);
     assert_eq!(coordinator.entry_count(), 0);
     assert!(matches!(
-        coordinator.acquire(&second_id).await.unwrap(),
+        coordinator.acquire(&second_id, None).await.unwrap(),
         AffinityAcquire::Initialize(_)
     ));
 }

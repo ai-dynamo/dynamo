@@ -625,17 +625,17 @@ mod tests {
     fn deleted_event_path_canonicalizes_existing_parent() {
         let t = tempfile::tempdir().unwrap();
         let canonical_root = t.path().join("canonical");
-        let bucket = canonical_root.join("v1/claims");
+        let bucket = canonical_root.join("v1/tests");
         fs::create_dir_all(&bucket).unwrap();
         let linked_root = t.path().join("linked");
         symlink(&canonical_root, &linked_root).unwrap();
 
         assert_eq!(
-            super::canonicalize_event_path(&linked_root.join("v1/claims/deleted")),
+            super::canonicalize_event_path(&linked_root.join("v1/tests/deleted")),
             canonical_root
                 .canonicalize()
                 .unwrap()
-                .join("v1/claims/deleted")
+                .join("v1/tests/deleted")
         );
     }
 
@@ -651,15 +651,15 @@ mod tests {
         let watcher_store = FileStore::new(watcher_cancel.clone(), &linked_root);
         let creator_store = FileStore::new(creator_cancel.clone(), &canonical_root);
         let watcher_bucket = watcher_store
-            .get_or_create_bucket("v1/claims", None)
+            .get_or_create_bucket("v1/tests", None)
             .await
             .unwrap();
         let creator_bucket = creator_store
-            .get_or_create_bucket("v1/claims", None)
+            .get_or_create_bucket("v1/tests", None)
             .await
             .unwrap();
         let mut events = watcher_bucket.watch().await.unwrap();
-        let key = Key::new("scope/session".to_string());
+        let key = Key::new("scope/item".to_string());
 
         creator_bucket
             .insert(&key, "value".into(), 0)
@@ -668,9 +668,9 @@ mod tests {
         loop {
             let event = tokio::time::timeout(Duration::from_secs(2), events.next())
                 .await
-                .expect("FileStore watcher did not observe claim creation")
-                .expect("FileStore watcher ended after claim creation");
-            if matches!(event, super::WatchEvent::Put(ref item) if item.key_str() == "v1/claims/scope/session")
+                .expect("FileStore watcher did not observe value creation")
+                .expect("FileStore watcher ended after value creation");
+            if matches!(event, super::WatchEvent::Put(ref item) if item.key_str() == "v1/tests/scope/item")
             {
                 break;
             }
@@ -679,10 +679,10 @@ mod tests {
         creator_bucket.delete(&key).await.unwrap();
         let event = tokio::time::timeout(Duration::from_secs(2), events.next())
             .await
-            .expect("FileStore watcher did not observe claim deletion")
-            .expect("FileStore watcher ended after claim deletion");
+            .expect("FileStore watcher did not observe value deletion")
+            .expect("FileStore watcher ended after value deletion");
         assert!(
-            matches!(event, super::WatchEvent::Delete(ref deleted) if deleted == &Key::new("v1/claims/scope/session".to_string()))
+            matches!(event, super::WatchEvent::Delete(ref deleted) if deleted == &Key::new("v1/tests/scope/item".to_string()))
         );
 
         watcher_cancel.cancel();
