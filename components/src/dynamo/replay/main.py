@@ -301,9 +301,10 @@ def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
     """Derive EngineCapabilities from MockEngineArgs."""
     from dynamo.planner.core.types import EngineCapabilities
 
-    max_kv_tokens = args.num_gpu_blocks * args.block_size
+    dp_size = max(args.dp_size, 1)
+    max_kv_tokens = args.num_gpu_blocks * args.block_size * dp_size
     return EngineCapabilities(
-        num_gpu=1,
+        num_gpu=(args.aic_tp_size or 1) * dp_size,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
         context_length=args.max_model_len,

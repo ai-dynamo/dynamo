@@ -261,6 +261,27 @@ def test_replay_engine_caps_exposes_aic_nextn():
     assert caps.speculative_nextn == 2
 
 
+def test_replay_engine_caps_aggregates_attention_dp_capacity_and_gpu_width():
+    caps = _engine_caps(
+        MockEngineArgs(
+            num_gpu_blocks=100,
+            block_size=16,
+            dp_size=4,
+            aic_tp_size=2,
+        )
+    )
+
+    assert caps.max_kv_tokens == 100 * 16 * 4
+    assert caps.num_gpu == 2 * 4
+
+
+def test_replay_engine_caps_keeps_single_rank_defaults():
+    caps = _engine_caps(MockEngineArgs(num_gpu_blocks=100, block_size=16))
+
+    assert caps.max_kv_tokens == 100 * 16
+    assert caps.num_gpu == 1
+
+
 def test_merge_traffic_weights_ratio_fields_by_native_counts():
     # kv_hit_rate and accept_length must merge by their true denominators
     # (hit_rate_count / accept_length_forward_count), not num_req, so a window
