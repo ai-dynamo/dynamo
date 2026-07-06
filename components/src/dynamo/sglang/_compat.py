@@ -92,7 +92,7 @@ def ensure_sglang_tensor_image_size() -> None:
         ).num_image_tokens
         return [int(count) for count in token_counts]
 
-    setattr(resolve_image_token_counts, "_dynamo_tensor_image_size_support", True)
+    resolve_image_token_counts._dynamo_tensor_image_size_support = True
     BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
 
 
