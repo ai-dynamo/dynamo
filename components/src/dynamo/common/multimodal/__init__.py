@@ -9,7 +9,6 @@ from typing import Any
 
 from dynamo.common.constants import EmbeddingTransferMode
 
-
 _LAZY_EXPORTS = {
     "AsyncEncoderCache": "dynamo.common.multimodal.async_encoder_cache",
     "AudioLoader": "dynamo.common.multimodal.audio_loader",
@@ -57,7 +56,9 @@ EMBEDDING_SENDER_FACTORIES: dict[EmbeddingTransferMode, Callable[[], Any]] = {
     EmbeddingTransferMode.NIXL_WRITE: _embedding_sender_factory(
         "NixlWriteEmbeddingSender"
     ),
-    EmbeddingTransferMode.NIXL_READ: _embedding_sender_factory("NixlReadEmbeddingSender"),
+    EmbeddingTransferMode.NIXL_READ: _embedding_sender_factory(
+        "NixlReadEmbeddingSender"
+    ),
 }
 
 EMBEDDING_RECEIVER_FACTORIES: dict[EmbeddingTransferMode, Callable[[], Any]] = {
