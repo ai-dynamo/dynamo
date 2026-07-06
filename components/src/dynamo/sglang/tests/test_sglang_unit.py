@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
@@ -19,6 +20,7 @@ import dynamo.sglang.llm_engine as sglang_llm_engine
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
+    ensure_sglang_tensor_image_size,
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
 )
@@ -117,6 +119,74 @@ def test_compat_restores_sglang_top_level_exports():
                 delattr(sgl, "ServerArgs")
         else:
             sgl.ServerArgs = original_server_args
+
+
+def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatch):
+    from sglang.srt.multimodal.processors.base_processor import (
+        BaseMultimodalProcessor,
+        BaseMultiModalProcessorOutput,
+        MultimodalSpecialTokens,
+    )
+
+    class Processor:
+        image_sizes = None
+
+        def _get_num_multimodal_tokens(self, *, image_sizes):
+            self.image_sizes = image_sizes
+            return SimpleNamespace(num_image_tokens=[4])
+
+    class ConcreteMultimodalProcessor(BaseMultimodalProcessor):
+        async def process_mm_data_async(self, *args, **kwargs):
+            raise NotImplementedError
+
+    original = BaseMultimodalProcessor.resolve_image_token_counts
+    try:
+        ensure_sglang_tensor_image_size()
+        installed = BaseMultimodalProcessor.resolve_image_token_counts
+        ensure_sglang_tensor_image_size()
+
+        processor = object.__new__(ConcreteMultimodalProcessor)
+        processor._processor = Processor()
+        image_token_id = 99
+        processor._process_and_collect_mm_items = lambda **kwargs: (
+            [],
+            torch.tensor(
+                [20, image_token_id, image_token_id, image_token_id, image_token_id, 21]
+            ),
+            {},
+        )
+        base_output = BaseMultiModalProcessorOutput(
+            input_text="decoded prompt",
+            input_ids=[10, image_token_id, 11],
+            images=[torch.empty((3, 48, 80), dtype=torch.uint8)],
+        )
+        mm_tokens = MultimodalSpecialTokens(image_token_id=image_token_id)
+        monkeypatch.setenv("SGLANG_MM_AVOID_RETOKENIZE", "1")
+
+        with caplog.at_level(
+            logging.WARNING,
+            logger="sglang.srt.multimodal.processors.base_processor",
+        ):
+            _, input_ids, _ = processor.process_and_combine_mm_data(
+                base_output, mm_tokens
+            )
+
+        assert installed is BaseMultimodalProcessor.resolve_image_token_counts
+        assert processor._processor.image_sizes == [(48, 80)]
+        assert input_ids.tolist() == [
+            10,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            11,
+        ]
+        assert not any(
+            "falling back to decode+retokenize" in record.message
+            for record in caplog.records
+        )
+    finally:
+        BaseMultimodalProcessor.resolve_image_token_counts = original
 
 
 def test_compat_filters_async_generate_kwargs_for_older_engines():

@@ -22,7 +22,7 @@ Runtime data-contract notes (not code-level shims):
 
 import inspect
 import logging
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,49 @@ def ensure_sglang_top_level_exports() -> None:
 
 
 ensure_sglang_top_level_exports()
+
+
+def ensure_sglang_tensor_image_size() -> None:
+    """Allow SGLang's image-token resolver to handle decoded image tensors.
+
+    SGLang 0.5.13 and 0.5.14 assume every decoded image exposes the PIL
+    ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
+    CHW tensor, causing multimodal requests to fall back to retokenization.
+
+    Remove this compatibility override once the minimum supported SGLang
+    release handles tensor image dimensions itself.
+    """
+    import torch
+    from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
+
+    original = getattr(BaseMultimodalProcessor, "resolve_image_token_counts", None)
+    if original is None or getattr(
+        original, "_dynamo_tensor_image_size_support", False
+    ):
+        return
+
+    @wraps(original)
+    def resolve_image_token_counts(self: Any, images: list[Any]) -> list[int]:
+        if not any(isinstance(image, torch.Tensor) for image in images):
+            return original(self, images)
+
+        image_sizes: list[tuple[int, int]] = []
+        for image in images:
+            if isinstance(image, torch.Tensor):
+                if image.ndim < 2:
+                    raise ValueError(f"Invalid image tensor shape: {image.shape}")
+                height, width = image.shape[-2:]
+            else:
+                height, width = image.height, image.width
+            image_sizes.append((int(height), int(width)))
+
+        token_counts = self._processor._get_num_multimodal_tokens(
+            image_sizes=image_sizes
+        ).num_image_tokens
+        return [int(count) for count in token_counts]
+
+    setattr(resolve_image_token_counts, "_dynamo_tensor_image_size_support", True)
+    BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
 
 
 @lru_cache(maxsize=32)
@@ -120,6 +163,7 @@ def enable_disjoint_streaming_output(server_args: Any) -> None:
 
 __all__ = [
     "enable_disjoint_streaming_output",
+    "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
 ]
