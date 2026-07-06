@@ -78,7 +78,9 @@ RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRO
 RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/ucx-v1.12.0.patch -O /tmp/ucx.patch
 
 # Install Intel GPU runtime packages
-RUN apt update -y && apt upgrade -y && \
+RUN apt update -y && \
+    apt-get remove -y level-zero 2>/dev/null || true && \
+    apt upgrade -y && \
     apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd  \
     libze-intel-gpu-raytracing intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -295,7 +297,7 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
 # NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
 # GPU images) and VP9 from libvpx (BSD).
-# Do not delete the source tarball for legal reasons.
+# Do not delete the source tree for legal reasons.
 ARG FFMPEG_VERSION
 ARG NV_CODEC_HEADERS_REF
 ARG LIBVPX_REF
@@ -328,8 +330,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     make install && \
     ldconfig && \
     cd /tmp && \
-    curl --retry 5 --retry-delay 3 -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
-    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    git clone --depth 1 --branch n${FFMPEG_VERSION} https://github.com/FFmpeg/FFmpeg.git ffmpeg-${FFMPEG_VERSION} && \
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
         --prefix=/usr/local \
