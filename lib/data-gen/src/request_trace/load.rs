@@ -19,7 +19,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use flate2::read::MultiGzDecoder;
 use serde::Deserialize;
-use serde_json::Value;
+use serde::de::IgnoredAny;
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RequestTraceRecord {
@@ -106,6 +106,39 @@ pub(crate) struct ClaudeToolReplayMetrics {
     pub(crate) child_session_id: Option<String>,
     /// Whether parent execution blocked or continued in the background.
     pub(crate) execution_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum JsonLineEnvelope {
+    Object(TraceRecordEnvelope),
+    Other(IgnoredAny),
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceRecordEnvelope {
+    #[serde(default)]
+    event_type: Option<String>,
+    #[serde(default)]
+    event: Option<TraceEventEnvelope>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TraceEventEnvelope {
+    Object(TraceEventFields),
+    Other(IgnoredAny),
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceEventFields {
+    #[serde(default)]
+    event_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WrappedTraceRecord {
+    event: RequestTraceRecord,
 }
 
 #[derive(Debug, Clone)]
@@ -252,12 +285,28 @@ fn open_trace_reader(path: &Path) -> Result<Box<dyn BufRead>> {
 }
 
 fn parse_trace_record(line: &str) -> Result<Option<RequestTraceRecord>> {
-    let value: Value = serde_json::from_str(line)?;
-    let event = value.get("event").unwrap_or(&value);
-    if !event.is_object() {
-        return Ok(None);
+    let envelope = match serde_json::from_str::<JsonLineEnvelope>(line)? {
+        JsonLineEnvelope::Object(envelope) => envelope,
+        JsonLineEnvelope::Other(_) => return Ok(None),
+    };
+
+    match envelope.event {
+        Some(TraceEventEnvelope::Object(event)) => {
+            if event.event_type.as_deref() == Some("request_payload") {
+                return Ok(None);
+            }
+            Ok(Some(
+                serde_json::from_str::<WrappedTraceRecord>(line)?.event,
+            ))
+        }
+        Some(TraceEventEnvelope::Other(_)) => Ok(None),
+        None => {
+            if envelope.event_type.as_deref() == Some("request_payload") {
+                return Ok(None);
+            }
+            Ok(Some(serde_json::from_str(line)?))
+        }
     }
-    Ok(Some(serde_json::from_value(event.clone())?))
 }
 
 fn request_entry(record: RequestTraceRecord) -> Result<RequestEntry> {
@@ -404,11 +453,61 @@ mod tests {
     }
 
     #[test]
+    fn loads_wrapped_request_trace_record() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":1,"event":{{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"request":{{"request_id":"req-1","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":3,"input_sequence_hashes":[11,22]}}}}}}}}"#
+        )
+        .unwrap();
+
+        let loaded = load_request_trace_records(&[file.path().to_path_buf()]).unwrap();
+        assert_eq!(loaded.requests.len(), 1);
+        assert_eq!(loaded.requests[0].request.request_id, "req-1");
+    }
+
+    #[test]
     fn skips_request_payload_records() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
             file,
             r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_payload","event_time_unix_ms":1050,"payload":{{"request_id":"req-1","endpoint":"openai.chat_completion","requested_streaming":false,"model":"test","request":{{"model":"test","messages":[{{"role":"user","content":"hi"}}]}},"payload_complete":true}}}}"#
+        )
+        .unwrap();
+        let large_payload = "x".repeat(4096);
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "timestamp": 1051,
+                "event": {
+                    "schema": "dynamo.request.trace.v1",
+                    "event_type": "request_payload",
+                    "event_time_unix_ms": 1051,
+                    "payload": {
+                        "request_id": "req-1",
+                        "endpoint": "openai.chat_completion",
+                        "requested_streaming": false,
+                        "model": "test",
+                        "request": {
+                            "model": "test",
+                            "messages": [{
+                                "role": "user",
+                                "content": large_payload.clone(),
+                            }],
+                        },
+                        "response": {
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": large_payload,
+                                },
+                            }],
+                        },
+                        "payload_complete": true,
+                    },
+                },
+            })
         )
         .unwrap();
         writeln!(
