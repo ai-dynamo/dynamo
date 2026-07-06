@@ -161,6 +161,8 @@ def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatc
             images=[torch.empty((3, 48, 80), dtype=torch.uint8)],
         )
         mm_tokens = MultimodalSpecialTokens(image_token_id=image_token_id)
+        # SGLang defaults this on to preserve caller token IDs and expand only
+        # image placeholders instead of decoding and retokenizing the prompt.
         monkeypatch.setenv("SGLANG_MM_AVOID_RETOKENIZE", "1")
 
         with caplog.at_level(
@@ -187,6 +189,32 @@ def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatc
         )
     finally:
         BaseMultimodalProcessor.resolve_image_token_counts = original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_multimodal", [False, True])
+async def test_tensor_image_size_compat_uses_resolved_model_capability(
+    monkeypatch, mock_sglang_cli, is_multimodal
+):
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=is_multimodal),
+    )
+    install_calls = []
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ensure_sglang_tensor_image_size",
+        lambda: install_calls.append(True),
+    )
+    mock_sglang_cli(model="/tmp")
+
+    await parse_args(sys.argv[1:])
+
+    assert install_calls == ([True] if is_multimodal else [])
 
 
 def test_compat_filters_async_generate_kwargs_for_older_engines():

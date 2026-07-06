@@ -532,7 +532,8 @@ async def parse_args(
         )
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)
-        ensure_sglang_tensor_image_size()
+        if server_args.get_model_config().is_multimodal:
+            ensure_sglang_tensor_image_size()
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(
