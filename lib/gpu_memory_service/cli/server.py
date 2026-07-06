@@ -26,16 +26,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-_TAGS = ("weights", "kv_cache")
-
-
 def _start_processes(devices: list[int]) -> list[subprocess.Popen]:
     processes = []
     for device in devices:
-        command = [sys.executable, "-m", "gpu_memory_service", "--device", str(device)]
-        for tag in _TAGS:
-            command += ["--tag", tag]
-        proc = subprocess.Popen(command)
+        # The child defaults to serving every production tag (GMS_TAGS).
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "gpu_memory_service", "--device", str(device)]
+        )
         logger.info("Started GMS device=%d pid=%d", device, proc.pid)
         processes.append(proc)
     return processes
