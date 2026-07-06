@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-06T19:58:21Z",
+  "mirror": "http://dockerhub-pull-cache:5000/",
+  "registry_image": "registry:3.1.1@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33",
+  "runner_uid_sha256": "66b75fab79ee71e70b3f327855b9dca3ba0d6cad21dccb79eeed2f56aa677bcc",
+  "restart_counts": [
+    {
+      "name": "dind",
+      "restart_count": 0
+    },
+    {
+      "name": "runner",
+      "restart_count": 0
+    }
+  ],
+  "cache_bytes_before": 2085120360,
+  "cache_bytes_after": 2085120360,
+  "test_ref": "docker.io/library/hello-world:latest",
+  "image_id": "sha256:e2ac70e7319a02c5a477f5825259bd118b94e8b02c279c67afa63adab6d8685b",
+  "repeated_image_id_equal": true,
+  "quota_before": "75;w=3600",
+  "quota_after": "75;w=3600",
+  "quota_unchanged": true
+}

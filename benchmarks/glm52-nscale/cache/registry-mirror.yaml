@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dockerhub-pull-cache-config
+data:
+  config.yml: |
+    version: 0.1
+    log:
+      level: info
+      fields:
+        service: dockerhub-pull-cache
+    storage:
+      delete:
+        enabled: true
+      filesystem:
+        rootdirectory: /artifacts/cache/dockerhub-registry
+    http:
+      addr: :5000
+    health:
+      storagedriver:
+        enabled: true
+        interval: 10s
+        threshold: 3
+    proxy:
+      remoteurl: https://registry-1.docker.io
+      ttl: 8760h
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dockerhub-pull-cache
+  labels:
+    app.kubernetes.io/name: dockerhub-pull-cache
+    app.kubernetes.io/part-of: glm52-nscale-benchmark
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dockerhub-pull-cache
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dockerhub-pull-cache
+        app.kubernetes.io/part-of: glm52-nscale-benchmark
+      annotations:
+        benchmarks.nvidia.com/cache-config-version: "20260706-2"
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: registry
+          image: registry:3.1.1@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33
+          imagePullPolicy: IfNotPresent
+          args:
+            - /etc/distribution/config.yml
+          ports:
+            - name: registry
+              containerPort: 5000
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: registry
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/distribution/config.yml
+              subPath: config.yml
+              readOnly: true
+            - name: artifacts
+              mountPath: /artifacts
+      volumes:
+        - name: config
+          configMap:
+            name: dockerhub-pull-cache-config
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: glm52-benchmark-artifacts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dockerhub-pull-cache
+  labels:
+    app.kubernetes.io/name: dockerhub-pull-cache
+    app.kubernetes.io/part-of: glm52-nscale-benchmark
+spec:
+  selector:
+    app.kubernetes.io/name: dockerhub-pull-cache
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: registry

@@ -507,13 +507,13 @@
   "issues": [
     {
       "id": "swebench-dockerhub-pull-rate-limit",
-      "variant": "dynamo-vllm / swebench-verified / ab",
+      "variant": "all SWE-bench variants",
       "severity": "high",
       "status": "fixed",
       "error": "The initial full Dynamo + vLLM A/B Verified evaluation reached Docker Hub's anonymous pull limit after 189 valid reports; a first same-run resume recovered 294 more reports before 17 remaining image pulls hit the same limit.",
       "impact": "Both partial attempts failed closed with benchmark_score null and were excluded from official results; generation remained complete and the 483 valid evaluator reports were preserved.",
-      "fix": "After quota replenished, the 17 missing task images were staged serially into the existing Docker daemon and each image ID and RepoDigest was matched to generation-time task-images.json evidence. The unchanged prediction-digest run then reused 483 reports and evaluated only the remaining 17 instances.",
-      "verification": "The final guarded resume completed 500/500 reports with zero evaluator errors and stable serving continuity. The strict artifact reports 436 resolved, 64 unresolved, benchmark_score 0.872, and was accepted by the immutable importer."
+      "fix": "After quota replenished, the 17 missing task images were staged serially and identity-matched before the unchanged run completed. A persistent CNCF Distribution v3.1.1 Docker Hub pull-through cache was then deployed on the 1 TiB artifact PVC, and Docker's supported online registry-mirror reload enabled it without restarting the evaluator runner. Existing generation and evaluation image-identity guards remain unchanged.",
+      "verification": "The recovered cell completed 500/500 reports with zero evaluator errors, stable continuity, and an imported benchmark_score of 0.872. Committed verification artifact results/cache-verification/dockerhub-pull-cache-20260706T195852Z.json (SHA-256 7939566cc7e834479c8b3c3b6c8061501be1538cf0b849e65c7467d0ab2c175c) records two v3.1.1 cache-hit pulls with the identical image ID and Docker Hub allowance unchanged at 75/100. The first live SWE-bench batch stored 2.09 GB on the PVC; the runner UID and both container restart counts remained unchanged."
     },
     {
       "id": "setup-dynamo-vllm-tool-routing",

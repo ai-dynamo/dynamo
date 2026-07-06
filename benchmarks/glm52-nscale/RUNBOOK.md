@@ -16,6 +16,10 @@ cp benchmarks/glm52-nscale/campaign.local.env.example \
 # Fill in the ignored local file, then provision nvcr-secret and hf-token-secret.
 
 benchmarks/glm52-nscale/eval/deploy-runner.sh
+benchmarks/glm52-nscale/cache/deploy.sh
+benchmarks/glm52-nscale/cache/configure-runner.sh
+benchmarks/glm52-nscale/cache/assert-ready.sh
+benchmarks/glm52-nscale/cache/verify.sh
 benchmarks/glm52-nscale/eval/exec-runner.sh \
   /workspace/eval/bfcl/scripts/bootstrap.sh
 benchmarks/glm52-nscale/eval/exec-runner.sh \
@@ -108,6 +112,7 @@ temperature 0, 64,000 output tokens, and zero inference errors.
 Use suite `verified`, `pro`, or `multilingual`:
 
 ```bash
+benchmarks/glm52-nscale/cache/assert-ready.sh
 suite=verified
 run_name=${variant}-${phase}
 run_dir=/artifacts/glm52-nscale/swebench/results/${run_name}/${suite}
