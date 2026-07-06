@@ -683,7 +683,8 @@ impl OpenAIPreprocessor {
                 .await
                 .with_context(|| "Failed to gather tokens")?
         };
-        TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
+        let tokenize_elapsed = tokenize_start.elapsed();
+        TOKENIZE_SECONDS.observe(tokenize_elapsed.as_secs_f64());
 
         let _mm_image_entries = self
             .gather_multi_modal_data(

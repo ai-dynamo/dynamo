@@ -118,8 +118,7 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-    /// "prefill" or "decode" — used only to label the `decode_select`/`prefill_select`
-    /// DYN_STALL_OP_TRACE lines; carries no scheduling behavior.
+    /// "prefill" or "decode" — labels scheduling metrics by worker pool; carries no scheduling behavior.
     worker_type: &'static str,
 }
 
@@ -684,53 +683,9 @@ impl<
                 .select_worker(&workers, &request, eligibility, self.block_size)
         };
 
-        // Full distribution, every call, regardless of DYN_STALL_OP_TRACE: a Prometheus histogram
-        // (cheap atomic bucket increment) rather than a WARN log that only samples the tail.
         #[cfg(feature = "metrics")]
         super::metrics::SchedulingMetrics::get_or_init()
             .observe_admission_compute(self.worker_type, op_start.elapsed().as_millis());
-
-        // Per-op BUSY-time attribution (DYN_STALL_OP_TRACE=1): project_worker_loads + select_worker run
-        // synchronously on the scheduler-actor task (which lives on the frontend runtime), so this is
-        // on-event-loop busy time (no await above). WARN past DYN_STALL_OP_WARN_MS so a residual
-        // frontend stall can be attributed to scheduler admission vs request-path hashing. Zero-cost off.
-        // op name is `decode_select`/`prefill_select` per this queue's worker_type — same underlying
-        // work (project_worker_loads + select_worker), just labeled by which pool it ran for.
-        {
-            static STALL_OP_WARN_MS: std::sync::OnceLock<Option<u128>> = std::sync::OnceLock::new();
-            let warn = *STALL_OP_WARN_MS.get_or_init(|| {
-                if std::env::var("DYN_STALL_OP_TRACE")
-                    .ok()
-                    .is_some_and(|v| v == "1" || v == "true")
-                {
-                    Some(
-                        std::env::var("DYN_STALL_OP_WARN_MS")
-                            .ok()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(50u128),
-                    )
-                } else {
-                    None
-                }
-            });
-            if let Some(warn_ms) = warn {
-                let ms = op_start.elapsed().as_millis();
-                if ms >= warn_ms {
-                    let op = if self.worker_type == "prefill" {
-                        "prefill_select"
-                    } else {
-                        "decode_select"
-                    };
-                    tracing::warn!(
-                        target: "dynamo_stall_op",
-                        op = op,
-                        busy_ms = ms as u64,
-                        isl_tokens = request.isl_tokens,
-                        "scheduler admission busy on actor task"
-                    );
-                }
-            }
-        }
 
         let selection = match selection {
             Ok(s) => s,

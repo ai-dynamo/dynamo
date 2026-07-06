@@ -24,6 +24,7 @@ use dynamo_runtime::{
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
     error::{DynamoError, ErrorType},
+    metrics::frontend_perf::{HASH_BLOCKS_MS, HASH_SEQ_MS, INDEX_LOOKUP_MS, SCHEDULE_MS},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
         async_trait, error::PipelineError,
@@ -518,6 +519,22 @@ where
                 total_elapsed,
             );
         }
+
+        HASH_BLOCKS_MS.observe(hash_elapsed.as_secs_f64() * 1000.0);
+        HASH_SEQ_MS.observe(
+            seq_hash_elapsed
+                .saturating_sub(hash_elapsed)
+                .as_secs_f64()
+                * 1000.0,
+        );
+        INDEX_LOOKUP_MS.observe(indexer_duration.as_secs_f64() * 1000.0);
+        SCHEDULE_MS.observe(
+            total_elapsed
+                .saturating_sub(find_matches_elapsed)
+                .as_secs_f64()
+                * 1000.0,
+        );
+
 
         // Observe per-request shared cache metrics.
         if let Some(hits) = sc_hits_for_metrics

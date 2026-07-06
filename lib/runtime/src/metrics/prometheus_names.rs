@@ -651,6 +651,14 @@ pub mod frontend_perf {
     pub const EVENT_LOOP_DELAY_SECONDS: &str = "event_loop_delay_seconds";
     /// Count of event loop stalls (delay > 5ms)
     pub const EVENT_LOOP_STALL_TOTAL: &str = "event_loop_stall_total";
+    /// Block-hash CPU time per request in kv_router.route() (milliseconds).
+    pub const HASH_BLOCKS_MS: &str = "hash_blocks_ms";
+    /// Sequential-hash CPU delta (seq_hash - hash_blocks) per request (milliseconds).
+    pub const HASH_SEQ_MS: &str = "hash_seq_ms";
+    /// KV index lookup time per request: radix-tree walk (local) or remote round-trip (milliseconds).
+    pub const INDEX_LOOKUP_MS: &str = "index_lookup_ms";
+    /// Scheduler actor wait per request: enqueue -> admission -> booking -> response wake-up (milliseconds).
+    pub const SCHEDULE_MS: &str = "schedule_ms";
 }
 
 /// Tokio runtime metrics
@@ -713,7 +721,15 @@ pub mod request_plane {
     pub const BUILD_ENVELOPE_MS: &str = "build_envelope_ms";
     /// Time for dispatch_buffer to complete (transport write of the built envelope),
     /// in milliseconds. Finer-grained sibling of SEND_SECONDS at the same call site.
+    /// Labeled by `worker` (endpoint address) to surface per-worker ACK latency.
     pub const DISPATCH_BUFFER_MS: &str = "dispatch_buffer_ms";
+    /// ACK write-task scheduling delay: time from decoded_at to the write task
+    /// dequeueing the frame (worker SharedTcpEndpoint write_loop). Decomposes
+    /// ack_flush_seconds into scheduling starvation vs socket write cost.
+    pub const ACK_WRITE_QUEUE_MS: &str = "ack_write_queue_ms";
+    /// ACK socket write time: time from write task dequeue to flush complete
+    /// (worker SharedTcpEndpoint write_loop). Complements ACK_WRITE_QUEUE_MS.
+    pub const ACK_SOCKET_WRITE_MS: &str = "ack_socket_write_ms";
 }
 
 /// Transport-specific metrics (TCP / NATS)

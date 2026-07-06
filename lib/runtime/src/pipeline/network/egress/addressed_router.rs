@@ -543,8 +543,11 @@ impl AddressedPushRouter {
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
         let tx_start = Instant::now();
+        let worker_label = address.trim_start_matches("tcp://").to_string();
         let request_plane_response = self.dispatch_buffer(address, buffer, context.id()).await?;
-        REQUEST_PLANE_DISPATCH_BUFFER_MS.observe(tx_start.elapsed().as_secs_f64() * 1000.0);
+        REQUEST_PLANE_DISPATCH_BUFFER_MS
+            .with_label_values(&[&worker_label])
+            .observe(tx_start.elapsed().as_secs_f64() * 1000.0);
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         // A worker load-shed surfaces on the request-plane ACK, not the response

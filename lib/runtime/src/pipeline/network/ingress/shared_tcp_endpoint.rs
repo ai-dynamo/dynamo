@@ -816,6 +816,10 @@ impl SharedTcpServer {
                 // to cross the log threshold.
                 crate::metrics::request_plane::REQUEST_PLANE_ACK_FLUSH_SECONDS
                     .observe(now.duration_since(meta.decoded_at).as_secs_f64());
+                crate::metrics::request_plane::REQUEST_PLANE_ACK_WRITE_QUEUE_MS
+                    .observe(queue_ms as f64);
+                crate::metrics::request_plane::REQUEST_PLANE_ACK_SOCKET_WRITE_MS
+                    .observe(write_ms as f64);
                 if total_ms >= warn_ms {
                     tracing::warn!(
                         target: "dynamo_ack_trace",
