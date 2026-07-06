@@ -6,9 +6,9 @@
 #
 # Architecture:
 #   DGD gp-ctrl:      Frontend + GlobalRouter + GlobalPlanner
-#   DGD gp-prefill-0: LocalRouter + VllmPrefillWorker (TP1) + Planner
-#   DGD gp-prefill-1: LocalRouter + VllmPrefillWorker (TP1) + Planner
-#   DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
+#   DGD gp-prefill-0: LocalRouter + prefill (TP1) + Planner
+#   DGD gp-prefill-1: LocalRouter + prefill (TP1) + Planner
+#   DGD gp-decode-0:  LocalRouter + decode  (TP1) + Planner
 #
 # Prerequisites:
 #   - Cluster Prometheus deployed and scraping LocalRouter pods via PodMonitor
@@ -198,7 +198,7 @@ spec:
             - "16"
             - --no-router-track-active-blocks
 
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -299,7 +299,7 @@ spec:
             - "16"
             - --no-router-track-active-blocks
 
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -401,7 +401,7 @@ spec:
             - --router-kv-overlap-score-credit
             - "0"
 
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
