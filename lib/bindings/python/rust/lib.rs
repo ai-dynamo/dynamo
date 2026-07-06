@@ -27,12 +27,12 @@ use dynamo_runtime::config;
 use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
-    slug::Slug,
     pipeline::{
         AsyncEngineContextProvider, EngineStream, ManyOut, SingleIn, context::Context as RsContext,
         network::egress::push_router::RouterMode as RsRouterMode,
     },
     protocols::annotated::Annotated as RsAnnotated,
+    slug::Slug,
     traits::DistributedRuntimeProvider,
 };
 
