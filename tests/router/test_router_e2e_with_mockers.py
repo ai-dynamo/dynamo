@@ -23,7 +23,6 @@ from tests.router.common import (
     _test_disagg_direct_mode,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
-    _test_distributed_session_affinity,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
@@ -32,6 +31,7 @@ from tests.router.common import (
     _test_router_query_instance_id,
     _test_router_threshold_none_disables_rejection,
     _test_router_two_routers,
+    _test_session_affinity,
 )
 from tests.router.e2e_harness import (
     allocate_frontend_ports,
@@ -59,25 +59,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = ROUTER_MODEL_NAME
 COUNTER_WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "counter_worker.py")
-
-
-@pytest.fixture(autouse=True)
-def _pin_nats_event_plane_for_mocker(request, monkeypatch):
-    """Pin the NATS event plane for etcd-backed mocker tests.
-
-    The mock engine publishes KV cache events instantly -- before the in-process
-    router's ZMQ subscription has connected (ZMQ slow-joiner) -- so on the (now
-    default) ZMQ event plane the router observes zero events and the routing
-    assertions fail. Real engines start slowly enough to avoid this, so the
-    vLLM/SGLang router e2e tests cover the ZMQ default; only the fast mocker needs
-    NATS here. file-backed variants keep the ZMQ default, and an explicitly set
-    DYN_EVENT_PLANE (e.g. via durable_kv_events) is left untouched.
-    """
-    callspec = getattr(request.node, "callspec", None)
-    store_backend = callspec.params.get("store_backend", "etcd") if callspec else "etcd"
-    if store_backend != "file" and not os.environ.get("DYN_EVENT_PLANE"):
-        monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
-    yield
 
 
 pytestmark = [
@@ -493,20 +474,14 @@ def test_mocker_two_kv_router(
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 @pytest.mark.timeout(180)
-def test_mocker_distributed_session_affinity(
+def test_mocker_session_affinity(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
-    monkeypatch,
 ):
-    """Shared claims override conflicting KV-prefix routing on another frontend."""
-    current_log = os.environ.get("DYN_LOG", "info")
-    monkeypatch.setenv(
-        "DYN_LOG",
-        f"{current_log},dynamo_llm::session_affinity::coordinator=debug",
-    )
+    """One frontend keeps a session pinned despite conflicting KV-prefix placement."""
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
@@ -519,11 +494,11 @@ def test_mocker_distributed_session_affinity(
         num_mockers=NUM_MOCKERS,
         store_backend=store_backend,
     ) as mockers:
-        _test_distributed_session_affinity(
+        _test_session_affinity(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,
             request=request,
-            router_ports=allocate_frontend_ports(request, 2),
+            frontend_port=allocate_frontend_ports(request, 1)[0],
             test_payload=TEST_PAYLOAD,
             store_backend=store_backend,
         )

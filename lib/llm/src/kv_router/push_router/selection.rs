@@ -49,6 +49,7 @@ impl<'a> RoutingRequestParts<'a> {
 pub(super) struct SelectionOptions {
     pub(super) affinity_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
+    pub(super) session_id: Option<String>,
 }
 
 struct BestMatchArgs<'a> {
@@ -61,6 +62,7 @@ struct BestMatchArgs<'a> {
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
+    session_id: Option<String>,
     expected_output_tokens: Option<u32>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -83,6 +85,7 @@ impl KvPushRouter {
                 args.priority_jump,
                 args.strict_priority,
                 args.policy_class,
+                args.session_id,
                 args.expected_output_tokens,
                 args.pinned_worker,
                 args.allowed_worker_ids,
@@ -137,10 +140,15 @@ impl KvPushRouter {
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
         let explicit_pin = pinned_worker_hint(phase, routing);
-        let affinity_pin = options
-            .affinity_worker
-            .map(|worker| (worker.worker_id, Some(worker.dp_rank)));
-        let Some((pinned_worker_id, requested_dp_rank)) = affinity_pin.or(explicit_pin) else {
+        let SelectionOptions {
+            affinity_worker,
+            policy_class,
+            session_id,
+        } = options;
+        let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let Some((pinned_worker_id, requested_dp_rank)) =
+            merge_affinity_pin(explicit_pin, affinity_pin)
+        else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
                 .select_best_match(BestMatchArgs {
@@ -152,7 +160,8 @@ impl KvPushRouter {
                     lora_name,
                     priority_jump,
                     strict_priority,
-                    policy_class: options.policy_class.clone(),
+                    policy_class,
+                    session_id,
                     expected_output_tokens,
                     pinned_worker: None,
                     allowed_worker_ids,
@@ -222,7 +231,8 @@ impl KvPushRouter {
             lora_name,
             priority_jump,
             strict_priority,
-            policy_class: options.policy_class,
+            policy_class,
+            session_id,
             expected_output_tokens,
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
@@ -230,6 +240,21 @@ impl KvPushRouter {
             scheduler_tracked: !is_query_only,
         })
         .await
+    }
+}
+
+fn merge_affinity_pin(
+    explicit: Option<(u64, Option<u32>)>,
+    affinity: Option<(u64, Option<u32>)>,
+) -> Option<(u64, Option<u32>)> {
+    match (explicit, affinity) {
+        (Some((worker_id, None)), Some((affinity_worker_id, affinity_rank)))
+            if worker_id == affinity_worker_id =>
+        {
+            Some((worker_id, affinity_rank))
+        }
+        (Some(explicit), _) => Some(explicit),
+        (None, affinity) => affinity,
     }
 }
 
@@ -278,7 +303,7 @@ mod tests {
         scheduling::{RoutingEligibility, WorkerEligibilityError},
     };
 
-    use super::{pinned_worker_hint, resolve_pinned_worker_rank};
+    use super::{merge_affinity_pin, pinned_worker_hint, resolve_pinned_worker_rank};
     use crate::{
         local_model::runtime_config::ModelRuntimeConfig,
         protocols::common::{preprocessor::RoutingHints, timing::RequestPhase},
@@ -304,6 +329,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("requires an explicit dp_rank"));
+    }
+
+    #[test]
+    fn affinity_pin_supplies_rank_for_matching_explicit_worker() {
+        assert_eq!(
+            merge_affinity_pin(Some((7, None)), Some((7, Some(0)))),
+            Some((7, Some(0)))
+        );
+        assert_eq!(
+            merge_affinity_pin(Some((7, Some(2))), Some((7, Some(3)))),
+            Some((7, Some(2)))
+        );
     }
 
     #[test]
