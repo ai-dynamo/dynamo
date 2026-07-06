@@ -5,9 +5,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
-use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 mod metadata;
@@ -24,28 +22,6 @@ pub use kube::{KubeDiscoveryClient, hash_pod_name};
 pub mod utils;
 use crate::component::{DeviceType, TransportType};
 pub use utils::watch_and_extract_field;
-
-pub type ClaimPayload = serde_json::Value;
-pub type ClaimPayloadFuture<'a> = Pin<Box<dyn Future<Output = Result<ClaimPayload>> + Send + 'a>>;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ClaimOutcome {
-    Created(ClaimPayload),
-    Existing(ClaimPayload),
-    Unsupported,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaimCloseOutcome {
-    Closed,
-    Unsupported,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClaimEvent {
-    Delete(String),
-    Reset,
-}
 
 /// Transport kind for event plane - used for configuration and env var selection.
 ///
@@ -867,34 +843,6 @@ pub trait Discovery: Send + Sync {
         query: DiscoveryQuery,
         cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream>;
-
-    /// Returns an existing immutable claim or atomically creates it from a deferred proposal.
-    ///
-    /// Implementations read before polling `proposed_payload`, atomically insert only when
-    /// absent, and return the winning stored payload after an insertion race. Payloads in
-    /// [`ClaimOutcome::Created`] and [`ClaimOutcome::Existing`] are authoritative.
-    /// [`ClaimOutcome::Unsupported`] leaves coordination process-local. Storage errors must
-    /// propagate to the caller before scheduler bookkeeping or dispatch.
-    async fn create_or_get_claim(
-        &self,
-        _key: &str,
-        _proposed_payload: &mut ClaimPayloadFuture<'_>,
-    ) -> Result<ClaimOutcome> {
-        Ok(ClaimOutcome::Unsupported)
-    }
-
-    /// Idempotently closes an immutable claim.
-    ///
-    /// Close is terminal under the session-ID no-reuse contract; deleting an absent claim
-    /// succeeds.
-    async fn close_claim(&self, _key: &str) -> Result<ClaimCloseOutcome> {
-        Ok(ClaimCloseOutcome::Unsupported)
-    }
-
-    /// Subscribes to process-local claim invalidation events.
-    fn subscribe_claim_events(&self) -> Option<broadcast::Receiver<ClaimEvent>> {
-        None
-    }
 
     /// Clean up resources held by this discovery backend.
     /// For KV store backends, this deletes owned registrations immediately rather than

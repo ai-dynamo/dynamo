@@ -427,6 +427,7 @@ def setup_kv_event_publisher(
 
 
 def setup_fpm_relay(
+    config: Config,
     generate_endpoint: Endpoint,
     vllm_config: VllmConfig,
 ) -> Optional[list]:
@@ -441,7 +442,7 @@ def setup_fpm_relay(
     Returns:
         List of FpmEventRelay instances, or None if FPM is not enabled.
     """
-    if not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+    if not (envs.is_set("DYN_FORWARDPASS_METRIC_PORT") or config.fpm_trace):
         return None
 
     try:
