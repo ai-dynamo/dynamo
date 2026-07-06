@@ -147,7 +147,7 @@ mod tests {
             [
                 ("DYN_REQUEST_TRACE", Some("1")),
                 ("DYN_REQUEST_TRACE_SINKS", Some("nats")),
-                ("DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE", Some("true")),
+                ("DYN_REQUEST_TRACE_RECORDS", Some("request_payload")),
                 ("DYN_REQUEST_TRACE_NATS_SUBJECT", Some(TEST_SUBJECT)),
             ],
             async {
@@ -206,15 +206,15 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Manual testing only - requires NATS on localhost:4222
-    async fn test_audit_nats_include_request_response_ignores_store_flag() {
-        // Test that the explicit include flag emits payloads regardless of store.
-        const TEST_SUBJECT: &str = "test.request_trace.include_request_response";
+    async fn test_audit_nats_request_payload_records_ignore_store_flag() {
+        // Test that request_payload records are emitted regardless of store.
+        const TEST_SUBJECT: &str = "test.request_trace.request_payload";
 
         async_with_vars(
             [
                 ("DYN_REQUEST_TRACE", Some("1")),
                 ("DYN_REQUEST_TRACE_SINKS", Some("nats")),
-                ("DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE", Some("true")),
+                ("DYN_REQUEST_TRACE_RECORDS", Some("request_payload")),
                 ("DYN_REQUEST_TRACE_NATS_SUBJECT", Some(TEST_SUBJECT)),
             ],
             async {
@@ -252,7 +252,7 @@ mod tests {
                 assert_eq!(
                     messages.len(),
                     2,
-                    "Should emit records for store=true and store=false when include is enabled"
+                    "Should emit records for store=true and store=false when request_payload records are enabled"
                 );
                 let request_ids: std::collections::HashSet<_> = messages
                     .iter()

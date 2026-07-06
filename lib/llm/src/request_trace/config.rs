@@ -46,6 +46,23 @@ impl RequestTraceSinkKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestTraceRecordKind {
+    RequestEnd,
+    RequestPayload,
+    Tool,
+}
+
+impl RequestTraceRecordKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestEnd => "request_end",
+            Self::RequestPayload => "request_payload",
+            Self::Tool => "tool",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestTraceFileFormat {
     Jsonl,
 }
@@ -76,7 +93,7 @@ impl RequestTraceFileCompression {
 #[derive(Clone, Debug)]
 pub struct RequestTracePolicy {
     pub enabled: bool,
-    pub include_request_response: bool,
+    pub records: Vec<RequestTraceRecordKind>,
     pub sinks: Vec<RequestTraceSinkKind>,
     pub file_path: Option<String>,
     pub file_format: RequestTraceFileFormat,
@@ -96,6 +113,23 @@ impl RequestTracePolicy {
     pub fn sink_names(&self) -> Vec<&'static str> {
         self.sinks.iter().map(|sink| sink.as_str()).collect()
     }
+
+    pub fn record_names(&self) -> Vec<&'static str> {
+        self.records.iter().map(|record| record.as_str()).collect()
+    }
+
+    pub fn emit_request_end_records(&self) -> bool {
+        self.records.contains(&RequestTraceRecordKind::RequestEnd)
+    }
+
+    pub fn emit_request_payload_records(&self) -> bool {
+        self.records
+            .contains(&RequestTraceRecordKind::RequestPayload)
+    }
+
+    pub fn emit_tool_records(&self) -> bool {
+        self.records.contains(&RequestTraceRecordKind::Tool)
+    }
 }
 
 static POLICY: OnceLock<RequestTracePolicy> = OnceLock::new();
@@ -103,8 +137,10 @@ static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_UNINITIALIZED);
 
 fn load_from_env() -> RequestTracePolicy {
     let legacy_audit_sinks = env_trimmed(env_audit::DYN_AUDIT_SINKS);
-    let enabled =
-        env_is_truthy(env_request_trace::DYN_REQUEST_TRACE) || legacy_audit_sinks.is_some();
+    let request_trace_enabled = env_is_truthy(env_request_trace::DYN_REQUEST_TRACE);
+    let audit_force_logging = env_bool(&[env_audit::DYN_AUDIT_FORCE_LOGGING]).unwrap_or(false);
+    let records = load_records(request_trace_enabled, audit_force_logging);
+    let enabled = !records.is_empty();
     let (sinks, legacy_file_compression, legacy_audit_sinks_selected) =
         load_sinks(enabled, legacy_audit_sinks.as_deref());
     let has_file_sink = sinks.contains(&RequestTraceSinkKind::File);
@@ -151,11 +187,6 @@ fn load_from_env() -> RequestTracePolicy {
         env_audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
     ])
     .filter(|value| *value > 0);
-    let include_request_response = env_bool(&[
-        env_request_trace::DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE,
-        env_audit::DYN_AUDIT_FORCE_LOGGING,
-    ])
-    .unwrap_or(false);
     let nats_subject = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT)
         .or_else(|| env_trimmed(env_audit::DYN_AUDIT_NATS_SUBJECT))
         .unwrap_or_else(|| {
@@ -186,7 +217,7 @@ fn load_from_env() -> RequestTracePolicy {
 
     RequestTracePolicy {
         enabled,
-        include_request_response,
+        records,
         sinks,
         file_path,
         file_format,
@@ -203,6 +234,50 @@ fn load_from_env() -> RequestTracePolicy {
     }
 }
 
+fn load_records(
+    request_trace_enabled: bool,
+    audit_force_logging: bool,
+) -> Vec<RequestTraceRecordKind> {
+    if let Some(value) = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_RECORDS) {
+        return parse_record_kind_names(&value);
+    }
+
+    let mut records = Vec::new();
+    if request_trace_enabled {
+        push_record(&mut records, RequestTraceRecordKind::RequestEnd);
+        push_record(&mut records, RequestTraceRecordKind::Tool);
+    }
+    if audit_force_logging {
+        push_record(&mut records, RequestTraceRecordKind::RequestPayload);
+    }
+    records
+}
+
+fn parse_record_kind_names(value: &str) -> Vec<RequestTraceRecordKind> {
+    let mut records = Vec::new();
+    for name in value
+        .split(',')
+        .map(|v| v.trim().to_lowercase())
+        .filter(|v| !v.is_empty())
+    {
+        match name.as_str() {
+            "request_end" => push_record(&mut records, RequestTraceRecordKind::RequestEnd),
+            "request_payload" => push_record(&mut records, RequestTraceRecordKind::RequestPayload),
+            "tool" | "tools" | "tool_start" | "tool_end" | "tool_error" => {
+                push_record(&mut records, RequestTraceRecordKind::Tool)
+            }
+            other => tracing::warn!(%other, "request trace: unknown record type ignored"),
+        }
+    }
+    records
+}
+
+fn push_record(records: &mut Vec<RequestTraceRecordKind>, record: RequestTraceRecordKind) {
+    if !records.contains(&record) {
+        records.push(record);
+    }
+}
+
 fn load_sinks(
     enabled: bool,
     legacy_audit_sinks: Option<&str>,
@@ -211,16 +286,18 @@ fn load_sinks(
     Option<RequestTraceFileCompression>,
     bool,
 ) {
+    if !enabled {
+        return (Vec::new(), None, false);
+    }
+
     if let Some(value) = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_SINKS) {
         let (sinks, compression) = parse_sink_kind_names(&value);
         (sinks, compression, false)
     } else if let Some(value) = legacy_audit_sinks {
         let (sinks, compression) = parse_sink_kind_names(value);
         (sinks, compression, true)
-    } else if enabled {
-        (vec![RequestTraceSinkKind::File], None, false)
     } else {
-        (Vec::new(), None, false)
+        (vec![RequestTraceSinkKind::File], None, false)
     }
 }
 
@@ -363,7 +440,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
         env_request_trace::DYN_REQUEST_TRACE_FILE_COMPRESSION,
         env_request_trace::DYN_REQUEST_TRACE_CAPACITY,
-        env_request_trace::DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE,
+        env_request_trace::DYN_REQUEST_TRACE_RECORDS,
         env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
         env_request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
         env_request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,
@@ -409,15 +486,24 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn master_switch_enables_default_file_sink_and_path() {
+    fn master_switch_enables_default_request_end_and_tool_records() {
         with_request_trace_env(&[(env_request_trace::DYN_REQUEST_TRACE, "1")], || {
             let policy = load_from_env();
             assert!(policy.enabled);
+            assert_eq!(
+                policy.records,
+                vec![
+                    RequestTraceRecordKind::RequestEnd,
+                    RequestTraceRecordKind::Tool
+                ]
+            );
+            assert!(policy.emit_request_end_records());
+            assert!(!policy.emit_request_payload_records());
+            assert!(policy.emit_tool_records());
             assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
             assert_eq!(policy.file_path.as_deref(), Some(DEFAULT_FILE_PATH));
             assert_eq!(policy.file_format, RequestTraceFileFormat::Jsonl);
             assert_eq!(policy.file_compression, RequestTraceFileCompression::Gzip);
-            assert!(!policy.include_request_response);
             assert_eq!(policy.nats_subject, DEFAULT_NATS_SUBJECT);
             assert_eq!(
                 policy.otel_max_payload_bytes,
@@ -428,10 +514,58 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn explicit_record_selector_enables_payload_without_request_end() {
+        with_request_trace_env(
+            &[(
+                env_request_trace::DYN_REQUEST_TRACE_RECORDS,
+                " request_payload, tool_start, request_payload, unknown ",
+            )],
+            || {
+                let policy = load_from_env();
+                assert!(policy.enabled);
+                assert_eq!(
+                    policy.records,
+                    vec![
+                        RequestTraceRecordKind::RequestPayload,
+                        RequestTraceRecordKind::Tool,
+                    ]
+                );
+                assert!(!policy.emit_request_end_records());
+                assert!(policy.emit_request_payload_records());
+                assert!(policy.emit_tool_records());
+                assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
+                assert_eq!(policy.file_path.as_deref(), Some(DEFAULT_FILE_PATH));
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn empty_record_selector_disables_trace_even_with_sink() {
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE_RECORDS, " , "),
+                (env_request_trace::DYN_REQUEST_TRACE_SINKS, "nats"),
+            ],
+            || {
+                let policy = load_from_env();
+                assert!(!policy.enabled);
+                assert!(policy.records.is_empty());
+                assert!(policy.sinks.is_empty());
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn master_switch_yields_to_new_sink_overrides() {
         with_request_trace_env(
             &[
                 (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_RECORDS,
+                    "request_end,request_payload,tool",
+                ),
                 (
                     env_request_trace::DYN_REQUEST_TRACE_SINKS,
                     "file,stderr,nats,otel",
@@ -445,10 +579,6 @@ mod tests {
                     "none",
                 ),
                 (env_request_trace::DYN_REQUEST_TRACE_FILE_ROLL_LINES, "10"),
-                (
-                    env_request_trace::DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE,
-                    "true",
-                ),
                 (
                     env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
                     "custom.request.trace",
@@ -465,6 +595,14 @@ mod tests {
             || {
                 let policy = load_from_env();
                 assert_eq!(
+                    policy.records,
+                    vec![
+                        RequestTraceRecordKind::RequestEnd,
+                        RequestTraceRecordKind::RequestPayload,
+                        RequestTraceRecordKind::Tool,
+                    ]
+                );
+                assert_eq!(
                     policy.sinks,
                     vec![
                         RequestTraceSinkKind::File,
@@ -479,7 +617,6 @@ mod tests {
                 );
                 assert_eq!(policy.file_compression, RequestTraceFileCompression::None);
                 assert_eq!(policy.file_roll_lines, Some(10));
-                assert!(policy.include_request_response);
                 assert_eq!(policy.nats_subject, "custom.request.trace");
                 assert_eq!(policy.otel_max_payload_bytes, 1234);
                 assert_eq!(
@@ -550,7 +687,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn legacy_audit_sinks_enable_request_trace_sinks() {
+    fn legacy_audit_sinks_do_not_enable_request_trace_records() {
         with_request_trace_env(
             &[
                 (env_audit::DYN_AUDIT_SINKS, "nats,otel"),
@@ -559,11 +696,9 @@ mod tests {
             ],
             || {
                 let policy = load_from_env();
-                assert!(policy.enabled);
-                assert_eq!(
-                    policy.sinks,
-                    vec![RequestTraceSinkKind::Nats, RequestTraceSinkKind::Otel]
-                );
+                assert!(!policy.enabled);
+                assert!(policy.records.is_empty());
+                assert!(policy.sinks.is_empty());
                 assert_eq!(policy.nats_subject, "legacy.audit.subject");
                 assert_eq!(policy.otel_max_payload_bytes, 5678);
             },
@@ -572,13 +707,57 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn legacy_audit_nats_sink_uses_legacy_default_subject() {
-        with_request_trace_env(&[(env_audit::DYN_AUDIT_SINKS, "nats")], || {
+    fn legacy_audit_force_logging_adds_payload_to_request_trace_defaults() {
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (env_audit::DYN_AUDIT_FORCE_LOGGING, "true"),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(
+                    policy.records,
+                    vec![
+                        RequestTraceRecordKind::RequestEnd,
+                        RequestTraceRecordKind::Tool,
+                        RequestTraceRecordKind::RequestPayload,
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn legacy_audit_force_logging_enables_request_payload_records() {
+        with_request_trace_env(&[(env_audit::DYN_AUDIT_FORCE_LOGGING, "true")], || {
             let policy = load_from_env();
             assert!(policy.enabled);
-            assert_eq!(policy.sinks, vec![RequestTraceSinkKind::Nats]);
-            assert_eq!(policy.nats_subject, DEFAULT_LEGACY_AUDIT_NATS_SUBJECT);
+            assert_eq!(policy.records, vec![RequestTraceRecordKind::RequestPayload]);
+            assert!(!policy.emit_request_end_records());
+            assert!(policy.emit_request_payload_records());
+            assert!(!policy.emit_tool_records());
+            assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
+            assert_eq!(policy.file_path.as_deref(), Some(DEFAULT_FILE_PATH));
         });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn legacy_audit_nats_sink_uses_legacy_default_subject_when_payloads_enabled() {
+        with_request_trace_env(
+            &[
+                (env_audit::DYN_AUDIT_FORCE_LOGGING, "true"),
+                (env_audit::DYN_AUDIT_SINKS, "nats"),
+            ],
+            || {
+                let policy = load_from_env();
+                assert!(policy.enabled);
+                assert_eq!(policy.records, vec![RequestTraceRecordKind::RequestPayload]);
+                assert_eq!(policy.sinks, vec![RequestTraceSinkKind::Nats]);
+                assert_eq!(policy.nats_subject, DEFAULT_LEGACY_AUDIT_NATS_SUBJECT);
+            },
+        );
     }
 
     #[test]
@@ -614,10 +793,10 @@ mod tests {
             || {
                 let policy = load_from_env();
                 assert!(policy.enabled);
+                assert_eq!(policy.records, vec![RequestTraceRecordKind::RequestPayload]);
                 assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
                 assert_eq!(policy.file_path.as_deref(), Some("/tmp/legacy-audit"));
                 assert_eq!(policy.file_compression, RequestTraceFileCompression::Gzip);
-                assert!(policy.include_request_response);
                 assert_eq!(policy.file_buffer_bytes, 64);
                 assert_eq!(policy.file_flush_interval_ms, 5);
                 assert_eq!(policy.file_roll_bytes, 100);
@@ -638,6 +817,13 @@ mod tests {
             || {
                 let policy = load_from_env();
                 assert_eq!(policy.sinks, vec![RequestTraceSinkKind::Stderr]);
+                assert_eq!(
+                    policy.records,
+                    vec![
+                        RequestTraceRecordKind::RequestEnd,
+                        RequestTraceRecordKind::Tool
+                    ]
+                );
                 assert!(policy.file_path.is_none());
             },
         );
@@ -674,6 +860,7 @@ mod tests {
         with_request_trace_env(&[], || {
             let policy = load_from_env();
             assert!(!policy.enabled);
+            assert!(policy.records.is_empty());
             assert!(policy.sinks.is_empty());
             assert!(policy.file_path.is_none());
             assert!(policy.tool_events_zmq_endpoint.is_none());

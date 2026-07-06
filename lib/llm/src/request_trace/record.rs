@@ -125,6 +125,10 @@ pub(crate) fn emit_request_payload(payload: RequestTracePayload, event_time_unix
 }
 
 pub(crate) fn publish_tool_record(record: RequestTraceRecord) {
+    if !super::config::capture_enabled() || !super::config::policy().emit_tool_records() {
+        return;
+    }
+
     if let Err(error) = validate_tool_record(&record) {
         tracing::warn!(
             %error,

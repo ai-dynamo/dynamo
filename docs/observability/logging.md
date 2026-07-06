@@ -349,8 +349,9 @@ files, stderr, NATS, and OTLP log export.
 Request payload logging is opt-in and independent of `OTEL_EXPORT_ENABLED`
 (which controls application log and trace export). By default, Dynamo does not
 emit request or response payload rows, even when the OpenAI request sets
-`store=true`. Set `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true` to emit
-payload rows for every eligible chat request.
+`store=true`. Set `DYN_REQUEST_TRACE_RECORDS=request_payload` to emit payload
+rows for every eligible chat request, or include `request_payload` alongside
+other selected record types.
 
 > [!WARNING]
 > Audit payload logging has migrated to request trace. This is a breaking
@@ -383,17 +384,19 @@ Payload-related request trace variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DYN_REQUEST_TRACE` | Master switch for request trace and request payload logging. | unset (disabled) |
+| `DYN_REQUEST_TRACE` | Master switch for request trace. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. | unset (disabled) |
+| `DYN_REQUEST_TRACE_RECORDS` | Comma-separated record types: `request_end`, `request_payload`, `tool`. Include `request_payload` to emit request and response payload bodies. | `request_end,tool` when `DYN_REQUEST_TRACE=1`; unset otherwise |
 | `DYN_REQUEST_TRACE_SINKS` | Comma-separated sinks: `file`, `stderr`, `nats`, `otel`. | `file` when enabled |
-| `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE` | Include request and response payload bodies by emitting `request_payload` rows for all eligible chat requests. When `false`, no payload rows are emitted, even if `store=true`. | `false` |
 | `DYN_REQUEST_TRACE_NATS_SUBJECT` | Subject used by the `nats` sink. | `dynamo.request_trace.v1` |
 | `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. Oversized payload rows emit a marker with `payload_complete=false` and `payload_drop_reason`. | `4194304` (4 MiB) |
 
 > [!WARNING]
 > Deprecated. `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`,
 > `DYN_AUDIT_NATS_SUBJECT`, and `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are
-> migration shims, not legacy audit compatibility aliases. They configure
-> request trace sinks and request trace records. Prefer the
+> migration shims, not legacy audit compatibility aliases.
+> `DYN_AUDIT_FORCE_LOGGING=true` maps to
+> `DYN_REQUEST_TRACE_RECORDS=request_payload`; `DYN_AUDIT_SINKS` only selects
+> destinations and does not enable `request_end` replay metadata. Prefer the
 > `DYN_REQUEST_TRACE_*` variables for new deployments.
 
 The `otel` sink ships over OTLP using the standard
@@ -423,9 +426,8 @@ Export chat-completion payload rows over OTLP gRPC to a collector, logging every
 request:
 
 ```bash
-export DYN_REQUEST_TRACE=1
+export DYN_REQUEST_TRACE_RECORDS=request_payload
 export DYN_REQUEST_TRACE_SINKS=otel
-export DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true
 export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4317
 export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
 ```

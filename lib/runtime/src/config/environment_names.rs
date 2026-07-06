@@ -428,7 +428,7 @@ pub mod llm {
         /// `jsonl` and `jsonl_gz` map to the request trace `file` sink.
         pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
 
-        /// Deprecated alias for `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE`.
+        /// Deprecated migration shim for `DYN_REQUEST_TRACE_RECORDS=request_payload`.
         pub const DYN_AUDIT_FORCE_LOGGING: &str = "DYN_AUDIT_FORCE_LOGGING";
 
         /// Deprecated alias for `DYN_REQUEST_TRACE_CAPACITY`.
@@ -487,9 +487,9 @@ pub mod llm {
         /// In-process trace bus capacity.
         pub const DYN_REQUEST_TRACE_CAPACITY: &str = "DYN_REQUEST_TRACE_CAPACITY";
 
-        /// Include request and response payload bodies in request trace output.
-        pub const DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE: &str =
-            "DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE";
+        /// Request trace record selection. Comma-separated values: `request_end`,
+        /// `request_payload`, `tool`.
+        pub const DYN_REQUEST_TRACE_RECORDS: &str = "DYN_REQUEST_TRACE_RECORDS";
 
         /// NATS subject the request trace sink publishes to.
         pub const DYN_REQUEST_TRACE_NATS_SUBJECT: &str = "DYN_REQUEST_TRACE_NATS_SUBJECT";
@@ -814,7 +814,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_COMPRESSION,
             llm::request_trace::DYN_REQUEST_TRACE_CAPACITY,
-            llm::request_trace::DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE,
+            llm::request_trace::DYN_REQUEST_TRACE_RECORDS,
             llm::request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
             llm::request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,

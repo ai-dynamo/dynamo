@@ -16,8 +16,9 @@ Request trace can also emit `request_payload` rows for OpenAI
 `/v1/chat/completions` requests. Payload rows include the client request and,
 when the response completes, the response. By default, Dynamo does not emit
 request or response payload rows, even when `store=true`. Set
-`DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true` to emit payload rows for every
-eligible chat request.
+`DYN_REQUEST_TRACE_RECORDS=request_payload` to emit payload rows for every
+eligible chat request, or include `request_payload` alongside other selected
+record types.
 
 Enable the default rotating gzip file sink:
 
@@ -37,13 +38,13 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 
 | Variable | Default when enabled | Values | Description |
 | --- | --- | --- | --- |
-| `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. |
+| `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. |
+| `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` when `DYN_REQUEST_TRACE=1`; unset otherwise | `request_end`, `request_payload`, `tool` | Comma-separated record types to emit. Setting this variable enables only the listed records. |
 | `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel` | Comma-separated record sinks. |
 | `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | File path or segment prefix | Literal path when compression is `none`; gzip segment prefix when compression is `gzip`. |
 | `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl` | `jsonl` | File record format. |
 | `DYN_REQUEST_TRACE_FILE_COMPRESSION` | `gzip` | `gzip`, `none` | File compression. `gzip` writes `<prefix>.<index>.jsonl.gz`; `none` writes a literal JSONL path. |
 | `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Positive integer | Best-effort in-process broadcast capacity. |
-| `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE` | `false` | `true`, `false` | Include request and response payload bodies by emitting `request_payload` rows for all eligible chat requests. When `false`, no payload rows are emitted, even if `store=true`. |
 | `DYN_REQUEST_TRACE_NATS_SUBJECT` | `dynamo.request_trace.v1` | NATS subject | Subject used when `DYN_REQUEST_TRACE_SINKS` includes `nats`. |
 | `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | `4194304` | Positive integer bytes | Max serialized OTEL payload attribute size. Oversized `request_payload` rows emit a marker with `payload_complete=false` and `payload_drop_reason`. |
 | `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES` | `1048576` | Integer bytes | File batching threshold. |
@@ -62,8 +63,10 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 > with `DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip`. The legacy audit variables
 > `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`, `DYN_AUDIT_OUTPUT_PATH`,
 > `DYN_AUDIT_NATS_SUBJECT`, `DYN_AUDIT_JSONL_*`, and
-> `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are also accepted as aliases for the
-> corresponding request trace settings.
+> `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are accepted as migration shims, not
+> legacy wire-compatibility aliases. `DYN_AUDIT_FORCE_LOGGING=true` maps to
+> `DYN_REQUEST_TRACE_RECORDS=request_payload`; `DYN_AUDIT_SINKS` only selects
+> destinations and does not enable `request_end` replay metadata.
 
 Set the ZMQ endpoint on the process that should own tool-event ingress, usually
 the frontend process. If the same bind address is exported to multiple Dynamo

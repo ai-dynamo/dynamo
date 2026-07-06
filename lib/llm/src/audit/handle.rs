@@ -84,7 +84,7 @@ pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> O
         req,
         request_id,
         crate::request_trace::capture_enabled(),
-        policy.include_request_response,
+        policy.emit_request_payload_records(),
     )
 }
 
@@ -98,9 +98,9 @@ fn create_handle_with_config(
     req: &NvCreateChatCompletionRequest,
     request_id: &str,
     enabled: bool,
-    include_request_response: bool,
+    emit_request_payload: bool,
 ) -> Option<AuditHandle> {
-    if !enabled || !include_request_response {
+    if !enabled || !emit_request_payload {
         return None;
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
@@ -165,24 +165,24 @@ mod tests {
     }
 
     #[test]
-    fn include_request_response_emits_even_when_store_is_false() {
+    fn request_payload_records_emit_even_when_store_is_false() {
         let request = create_test_request("test-model", false);
         let handle = create_handle_with_config(&request, "test-id", true, true);
 
         assert!(
             handle.is_some(),
-            "include_request_response=true should create a handle even with store=false"
+            "request_payload records should create a handle even with store=false"
         );
     }
 
     #[test]
-    fn include_request_response_false_skips_store_true_payloads() {
+    fn request_payload_records_disabled_skips_store_true_payloads() {
         let request = create_test_request("test-model", true);
         let handle = create_handle_with_config(&request, "test-id", true, false);
 
         assert!(
             handle.is_none(),
-            "include_request_response=false should skip payloads even with store=true"
+            "request_payload records disabled should skip payloads even with store=true"
         );
     }
 
