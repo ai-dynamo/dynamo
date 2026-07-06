@@ -5,7 +5,7 @@ title: Request Replay Tracing
 subtitle: Capture live chat and completion traffic for direct DynoSim replay
 ---
 
-Request replay tracing records `dynamo.request.trace.v1` rows for eligible Rust
+Request replay tracing records `dynamo.request.trace.v1` rows for eligible
 OpenAI chat or completion requests. The compact `request_end` row contains
 replay metadata. With session headers, the same stream also includes session
 identity, request metrics, finish metadata, and optional harness tool events.
@@ -173,7 +173,6 @@ Payload row:
           "content": "Hello"
         }
       ],
-      "store": true
     },
     "response": {
       "id": "chatcmpl-example",
