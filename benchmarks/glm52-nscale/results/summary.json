@@ -190,14 +190,64 @@
   "paired_disagreements": [],
   "issues": [
     {
-      "id": "setup-vllm-omni-plugin-import",
+      "id": "setup-dynamo-vllm-tool-routing",
       "variant": "dynamo-vllm",
+      "severity": "medium",
+      "status": "fixed",
+      "error": "The initial Dynamo frontend recipe did not explicitly match standalone vLLM's GLM automatic-tool and reasoning parsing path.",
+      "impact": "Forced and automatic tool calls could diverge between the two vLLM variants before comparative evaluation.",
+      "fix": "Enabled automatic tool choice on the Dynamo frontend and pinned the glm47 tool parser plus glm45 reasoning parser.",
+      "verification": "Exact-text, forced-tool, and automatic-tool smoke requests pass; the fail-closed BFCL validation set passed 5/5 with zero inference errors."
+    },
+    {
+      "id": "bfcl-partial-evaluation-fail-open",
+      "variant": "all variants",
+      "severity": "high",
+      "status": "fixed",
+      "error": "Upstream partial BFCL evaluation could exit zero after malformed or incomplete generation output.",
+      "impact": "An incomplete BFCL run could have been mistaken for valid benchmark evidence.",
+      "fix": "Added exact generated/scored population gates, category accounting, inference-error rejection, immutable resume metadata, and independent weighted-score recomputation.",
+      "verification": "The pinned five-case smoke gate rejects incomplete output and passed 5/5 against every validated serving path; full imports require all 5,217 generated and 5,106 scored IDs."
+    },
+    {
+      "id": "terminalbench-infrastructure-fail-open",
+      "variant": "all variants",
+      "severity": "high",
+      "status": "fixed",
+      "error": "The first Terminal-Bench runner lacked Docker Compose v2, while Harbor emitted infrastructure exceptions but returned a zero process status.",
+      "impact": "Three infrastructure-invalid trials could have been reported as a passing harness invocation.",
+      "fix": "Pinned Docker 27.5.1 and Compose 2.33.0, mounted the required runner paths into DinD, and made exceptions, missing rewards, or incomplete task sets fail closed.",
+      "verification": "The corrected strict validation run completed all three pinned tasks at 3/3 reward with zero exceptions."
+    },
+    {
+      "id": "terminalbench-generation-contract",
+      "variant": "all variants",
+      "severity": "medium",
+      "status": "fixed",
+      "error": "Harbor 0.17.1 recorded max_output_tokens for accounting but did not forward it on Chat Completions, and its default 900-second task timeout was too short for the published GLM-5.2 settings.",
+      "impact": "Early calibrations used non-representative output limits or terminated valid long-running tasks as infrastructure failures.",
+      "fix": "Pinned the published Terminus-2 sampling contract at temperature 1.0, top-p 1.0, 48,000 output tokens, 256K advertised task context, and a 14,400-second task timeout.",
+      "verification": "The replacement smoke produced terminating turns and the corrected strict three-task run completed in 37 minutes at 3/3 reward with zero exceptions."
+    },
+    {
+      "id": "evaluator-transport-disconnect",
+      "variant": "all variants",
+      "severity": "high",
+      "status": "fixed",
+      "error": "A long foreground kubectl exec lost its Teleport transport and left an orphaned evaluator process without a valid continuity attestation.",
+      "impact": "The interrupted partial result was invalid and could not be imported; another disconnect could have wasted a multi-hour full cell.",
+      "fix": "Moved evaluator ownership to a detached runner-side supervisor with atomic locking and state publication, bounded reconnectable control calls, explicit cancellation, process-group cleanup, and fail-closed postflight attestation.",
+      "verification": "All 166 campaign tests pass, including disconnect/start-race/cancellation coverage; the replacement full cell crossed the prior failure boundary and has accepted multiple exact batches without a transport retry."
+    },
+    {
+      "id": "setup-vllm-omni-plugin-import",
+      "variant": "vLLM pair",
       "severity": "low",
       "status": "observed",
       "error": "The pinned runtime logs a vllm_omni plugin ImportError for supports_xccl while loading plugins.",
-      "impact": "The text model continues initializing; benchmark impact is not yet established.",
+      "impact": "Startup log noise only: the unused plugin fails to register, while the GLM text model continues initializing.",
       "fix": null,
-      "verification": null
+      "verification": "The same traceback is present in standalone vLLM and Dynamo + vLLM from the identical pinned image; both become ready, pass validation, and show no post-ready serving failure from the plugin."
     }
   ],
   "notes": [
