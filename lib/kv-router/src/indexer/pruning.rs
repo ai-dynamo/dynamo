@@ -580,19 +580,17 @@ impl WorkerPruneManagerInner {
         let mut expired = Vec::new();
 
         loop {
-            let Some((Reverse(expiry), worker)) = ({
-                let mut expiries = self
-                    .next_expiries
-                    .lock()
-                    .expect("worker expiry index mutex poisoned");
-                let Some((Reverse(expiry), _)) = expiries.peek().copied() else {
-                    break;
-                };
-                if expiry > now {
-                    break;
-                }
-                expiries.pop()
-            }) else {
+            let mut expiries = self
+                .next_expiries
+                .lock()
+                .expect("worker expiry index mutex poisoned");
+            let Some((Reverse(expiry), _)) = expiries.peek().copied() else {
+                break;
+            };
+            if expiry > now {
+                break;
+            }
+            let Some((Reverse(expiry), worker)) = ({ expiries.pop() }) else {
                 break;
             };
 
