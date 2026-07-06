@@ -57,17 +57,6 @@ fn detect_has_context(generator: &PyObject) -> bool {
 /// item is either a `PyObject` frame or the `PyErr` the generator raised.
 type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 
-#[derive(Clone, Copy)]
-enum PythonStreamPolling {
-    /// Preserve the existing one-item-prefetched bridge for typed, in-process
-    /// engines whose response forwarder snapshots each item into Rust data.
-    Prefetched,
-    /// Poll the Python generator only when the downstream consumer requests
-    /// another item. Network engines need this so a reused mutable PyObject is
-    /// encoded before Python resumes and mutates it for the next yield.
-    DemandDriven,
-}
-
 /// Invoke the Python `generate` callable and convert the async generator it
 /// returns into a Rust [`Stream`] of `PyObject` items.
 ///
@@ -80,10 +69,11 @@ enum PythonStreamPolling {
 ///
 /// The GIL is acquired on a blocking task rather than inline: under contention
 /// it can block for an unbounded time, which would park the tokio reactor.
+/// The returned stream polls `__anext__` only when its consumer requests an
+/// item, preventing Python from mutating a reused object before it is consumed.
 async fn invoke_generator<F, G>(
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
-    stream_polling: PythonStreamPolling,
     to_python_input: F,
     to_python_context: Option<G>,
 ) -> Result<PyItemStream>
@@ -107,18 +97,7 @@ where
             }?;
 
             let locals = TaskLocals::new(event_loop.bind(py).clone());
-            match stream_polling {
-                PythonStreamPolling::Prefetched => {
-                    pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
-                        locals,
-                        gen_result.into_bound(py),
-                    )
-                    .map(|stream| Box::pin(stream) as PyItemStream)
-                }
-                PythonStreamPolling::DemandDriven => {
-                    demand_driven_python_stream(locals, gen_result.into_bound(py))
-                }
-            }
+            demand_driven_python_stream(locals, gen_result.into_bound(py))
         })
     })
     .await
@@ -230,7 +209,6 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
         generate_python_stream(
             &self.0,
             request,
-            PythonStreamPolling::DemandDriven,
             |_py, request| Ok(request.into_inner()),
             unbuffered_python_response_stream,
         )
@@ -297,7 +275,6 @@ where
         generate_python_stream(
             self,
             request,
-            PythonStreamPolling::Prefetched,
             |py, request| Ok(pythonize(py, &request)?.unbind()),
             buffered_typed_response_stream::<Resp>,
         )
@@ -308,7 +285,6 @@ where
 async fn generate_python_stream<Req, Resp, ToPythonInput, ForwardResponses>(
     engine: &PythonServerStreamingEngine,
     request: SingleIn<Req>,
-    stream_polling: PythonStreamPolling,
     to_python_input: ToPythonInput,
     forward_responses: ForwardResponses,
 ) -> Result<ManyOut<Resp>, Error>
@@ -329,7 +305,6 @@ where
     let stream = invoke_generator(
         engine.generator.clone(),
         engine.event_loop.clone(),
-        stream_polling,
         move |py| to_python_input(py, request),
         engine.has_context.then_some({
             let ctx = ctx.clone();
@@ -451,6 +426,9 @@ const RESPONSE_CHANNEL_DEPTH: usize = 128;
 /// and emitted as annotated error frames, so a failing generator returns as
 /// an error to the client rather than a silently truncated stream.
 /// On a deserialize mismatch the request context is told to stop generating.
+/// The generator is not polled again until [`process_item`] has converted the
+/// current `PyObject` into an owned Rust value, so this channel never buffers
+/// mutable Python objects that a generator could reuse for a later yield.
 fn spawn_response_forwarder<Resp>(
     stream: PyItemStream,
     ctx: Arc<dyn AsyncEngineContext>,
@@ -725,7 +703,6 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
         let stream = invoke_generator(
             self.generator.clone(),
             self.event_loop.clone(),
-            PythonStreamPolling::DemandDriven,
             move |py| Ok(Py::new(py, py_request_stream)?.into_any()),
             self.has_context.then_some({
                 let ctx = ctx.clone();
