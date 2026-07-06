@@ -758,13 +758,16 @@ async fn completions_single(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        let error_type = super::metrics::error_type_from_chain(e.as_ref());
+        if matches!(error_type, Some(super::metrics::ErrorType::Overload)) {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Completions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error(
+            error_type.unwrap_or_else(|| extract_error_type_from_response(&err_response)),
+        );
         err_response
     })?;
 
@@ -929,13 +932,16 @@ async fn completions_batch(
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
-            if super::metrics::request_was_rejected(e.as_ref()) {
+            let error_type = super::metrics::error_type_from_chain(e.as_ref());
+            if matches!(error_type, Some(super::metrics::ErrorType::Overload)) {
                 state
                     .metrics_clone()
                     .inc_rejection(&model, super::metrics::Endpoint::Completions);
             }
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            inflight_guard.mark_error(
+                error_type.unwrap_or_else(|| extract_error_type_from_response(&err_response)),
+            );
             err_response
         })?;
 
@@ -1129,13 +1135,16 @@ async fn embeddings(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        let error_type = super::metrics::error_type_from_chain(e.as_ref());
+        if matches!(error_type, Some(super::metrics::ErrorType::Overload)) {
             state
                 .metrics_clone()
                 .inc_rejection(&model_name, super::metrics::Endpoint::Embeddings);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error(
+            error_type.unwrap_or_else(|| extract_error_type_from_response(&err_response)),
+        );
         err_response
     })?;
 
@@ -1855,13 +1864,16 @@ async fn chat_completions(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        let error_type = super::metrics::error_type_from_chain(e.as_ref());
+        if matches!(error_type, Some(super::metrics::ErrorType::Overload)) {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error(
+            error_type.unwrap_or_else(|| extract_error_type_from_response(&err_response)),
+        );
         err_response
     })?;
 
@@ -2334,13 +2346,16 @@ async fn responses(
 
     // issue the generate call on the engine
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        let error_type = super::metrics::error_type_from_chain(e.as_ref());
+        if matches!(error_type, Some(super::metrics::ErrorType::Overload)) {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Responses);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        inflight_guard.mark_error(
+            error_type.unwrap_or_else(|| extract_error_type_from_response(&err_response)),
+        );
         err_response
     })?;
 
@@ -2903,13 +2918,16 @@ async fn images(
     // NOT for client-facing SSE streaming. The stream is immediately folded into
     // a single response below.
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        let error_type = super::metrics::error_type_from_chain(e.as_ref());
+        if matches!(error_type, Some(super::metrics::ErrorType::Overload)) {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error(
+            error_type.unwrap_or_else(|| extract_error_type_from_response(&err_response)),
+        );
         err_response
     })?;
 
@@ -3020,13 +3038,16 @@ async fn videos(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        let error_type = super::metrics::error_type_from_chain(e.as_ref());
+        if matches!(error_type, Some(super::metrics::ErrorType::Overload)) {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error(
+            error_type.unwrap_or_else(|| extract_error_type_from_response(&err_response)),
+        );
         err_response
     })?;
 
@@ -3130,13 +3151,16 @@ async fn video_stream(
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        let error_type = super::metrics::error_type_from_chain(e.as_ref());
+        if matches!(error_type, Some(super::metrics::ErrorType::Overload)) {
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
-        inflight.mark_error(extract_error_type_from_response(&err_response));
+        inflight.mark_error(
+            error_type.unwrap_or_else(|| extract_error_type_from_response(&err_response)),
+        );
         err_response
     })?;
 

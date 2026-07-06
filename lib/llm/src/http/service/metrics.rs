@@ -54,6 +54,28 @@ pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
 }
 
+/// Classify an error chain into its metric [`ErrorType`] from the original
+/// semantic signals — `ResourceExhausted` → [`ErrorType::Overload`],
+/// `Unavailable` → [`ErrorType::Unavailable`], `Cancelled` →
+/// [`ErrorType::Cancelled`] — *before* it is mapped to an HTTP status code.
+///
+/// Returns `None` when none of those signals is present, so callers apply their
+/// own default (code-based classification for the OpenAI frontend, `Internal`
+/// for Anthropic). Classifying from the error here — rather than from the
+/// response status — keeps overload rejections counted as `Overload` regardless
+/// of the configured [`crate::http::service::error::overload_status_code`].
+pub fn error_type_from_chain(err: &(dyn std::error::Error + 'static)) -> Option<ErrorType> {
+    if request_was_rejected(err) {
+        Some(ErrorType::Overload)
+    } else if request_was_unavailable(err) {
+        Some(ErrorType::Unavailable)
+    } else if request_was_cancelled(err) {
+        Some(ErrorType::Cancelled)
+    } else {
+        None
+    }
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;

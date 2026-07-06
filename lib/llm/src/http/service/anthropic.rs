@@ -360,36 +360,36 @@ async fn anthropic_messages(
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
-            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
-            return anthropic_sanitized_error_with_details(
-                SanitizedError::Overloaded,
-                format!("{e:#}"),
-            );
+        // Classify from the original error semantics (shared with the OpenAI
+        // frontend), not the HTTP status code.
+        match super::metrics::error_type_from_chain(e.as_ref()) {
+            Some(super::metrics::ErrorType::Overload) => {
+                state
+                    .metrics_clone()
+                    .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+                inflight_guard.mark_error(super::metrics::ErrorType::Overload);
+                anthropic_sanitized_error_with_details(SanitizedError::Overloaded, format!("{e:#}"))
+            }
+            Some(super::metrics::ErrorType::Unavailable) => {
+                inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
+                anthropic_sanitized_error_with_details(
+                    SanitizedError::Unavailable,
+                    format!("{e:#}"),
+                )
+            }
+            // Cancelled: client disconnected before the response was sent.
+            Some(super::metrics::ErrorType::Cancelled) => {
+                inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+                anthropic_sanitized_error_with_details(SanitizedError::Cancelled, format!("{e:#}"))
+            }
+            _ => {
+                inflight_guard.mark_error(super::metrics::ErrorType::Internal);
+                anthropic_sanitized_error_with_details(
+                    SanitizedError::Internal,
+                    format!("Failed to generate Anthropic completions: {e}"),
+                )
+            }
         }
-        if super::metrics::request_was_unavailable(e.as_ref()) {
-            inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
-            return anthropic_sanitized_error_with_details(
-                SanitizedError::Unavailable,
-                format!("{e:#}"),
-            );
-        }
-        // Check for cancelled request (client disconnected before response was sent)
-        if super::metrics::request_was_cancelled(e.as_ref()) {
-            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
-            return anthropic_sanitized_error_with_details(
-                SanitizedError::Cancelled,
-                format!("{e:#}"),
-            );
-        }
-        inflight_guard.mark_error(super::metrics::ErrorType::Internal);
-        anthropic_sanitized_error_with_details(
-            SanitizedError::Internal,
-            format!("Failed to generate Anthropic completions: {e}"),
-        )
     })?;
 
     let ctx = engine_stream.context();
