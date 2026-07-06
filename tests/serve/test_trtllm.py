@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass, field
 
 import pytest
+import yaml
 
 from tests.serve.common import (
     SERVE_TEST_DIR,
@@ -42,6 +43,17 @@ class TRTLLMConfig(EngineConfig):
 trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/trtllm"
 )
+qwen3_vl_engine_config_dir = os.path.join(
+    WORKSPACE_DIR,
+    "examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct",
+)
+qwen3_vl_engine_config_files = (
+    "agg.yaml",
+    "decode.yaml",
+    "encode.yaml",
+    "prefill.yaml",
+)
+qwen3_vl_torch_dtype = "bfloat16"
 
 # TensorRT-LLM test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~442s (7m 22s) total to run sequentially (with models pre-cached)
@@ -677,6 +689,23 @@ def test_deployment(
         }
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.trtllm
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("config_file", qwen3_vl_engine_config_files)
+def test_qwen3_vl_multimodal_engine_configs_pin_torch_dtype(config_file):
+    config_path = os.path.join(qwen3_vl_engine_config_dir, config_file)
+    with open(config_path, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    model_kwargs = config.get("model_kwargs")
+    assert isinstance(model_kwargs, dict), f"{config_path} missing model_kwargs"
+    assert model_kwargs.get("torch_dtype") == qwen3_vl_torch_dtype
+
+    text_config = model_kwargs.get("text_config")
+    assert isinstance(text_config, dict), f"{config_path} missing text_config"
+    assert text_config.get("torch_dtype") == qwen3_vl_torch_dtype
 
 
 # ---------------------------------------------------------------------------
