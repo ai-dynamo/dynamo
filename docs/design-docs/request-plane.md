@@ -58,35 +58,6 @@ The value is case-insensitive.
 
 If `DYN_REQUEST_PLANE` is not set or contains an invalid value, Dynamo defaults to `tcp`.
 
-### Payload Codec
-
-The request plane uses MessagePack for request and response payloads by default. This is
-independent of the request-plane transport selected by `DYN_REQUEST_PLANE`: both TCP and NATS
-use the same payload codec. Control messages, response prologues, and framing metadata remain
-JSON.
-
-Set `DYN_REQUEST_PLANE_CODEC=json` on request-producing processes to use the compatibility
-codec instead:
-
-```bash
-export DYN_REQUEST_PLANE_CODEC=json
-```
-
-Valid values are `msgpack` (default) and `json`. An unset, empty, or invalid value selects
-MessagePack; invalid values also produce a warning. Payloads retain Dynamo's JSON-compatible
-data model, so MessagePack extension types, bytes, and non-string map keys are not part of the
-request-plane contract.
-
-Use the JSON override during a mixed-version rollback or upgrade:
-
-- A new frontend or router sending requests to a Dynamo v1.2 worker must set
-  `DYN_REQUEST_PLANE_CODEC=json`. The older worker does not decode MessagePack payloads.
-- An old frontend or router can send requests to a new worker without an override. Control
-  messages that omit `payload_codec` are treated as legacy JSON.
-
-Codec configuration is loaded once per process. Restart the frontend or router after changing
-`DYN_REQUEST_PLANE_CODEC`.
-
 ## Usage Examples
 
 ### Using TCP (Default)
