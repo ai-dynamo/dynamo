@@ -40,7 +40,8 @@ pytestmark = [
 _FETCH_BYTES_PATH = "dynamo.common.multimodal.image_loader.fetch_bytes"
 
 
-def test_package_image_loader_import_does_not_import_torch() -> None:
+@pytest.mark.timeout(60)
+async def test_package_image_loader_import_does_not_import_torch() -> None:
     script = textwrap.dedent(
         """
         import importlib.abc
@@ -64,7 +65,9 @@ def test_package_image_loader_import_does_not_import_torch() -> None:
         """
     )
 
-    subprocess.run([sys.executable, "-c", script], check=True)
+    await asyncio.to_thread(
+        subprocess.run, [sys.executable, "-c", script], check=True, timeout=30
+    )
 
 
 def _make_png_bytes() -> bytes:
