@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::LazyLock;
+
 use axum::http::StatusCode;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use thiserror::Error;
@@ -10,14 +12,18 @@ use thiserror::Error;
 /// Defaults to 529 ("Site is overloaded"). Operators can override it via the
 /// `DYN_HTTP_OVERLOAD_STATUS_CODE` env var (e.g. `503` for Service Unavailable
 /// retry semantics). An unset, unparseable, or out-of-range value falls back to
-/// the 529 default.
+/// the 529 default. Resolved once on first use — env vars don't change at
+/// runtime, and this is on the rejection path.
 pub(crate) fn overload_status_code() -> StatusCode {
-    let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
-    std::env::var(env_llm::DYN_HTTP_OVERLOAD_STATUS_CODE)
-        .ok()
-        .and_then(|s| s.trim().parse::<u16>().ok())
-        .and_then(|n| StatusCode::from_u16(n).ok())
-        .unwrap_or(default)
+    static CODE: LazyLock<StatusCode> = LazyLock::new(|| {
+        let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
+        std::env::var(env_llm::DYN_HTTP_OVERLOAD_STATUS_CODE)
+            .ok()
+            .and_then(|s| s.trim().parse::<u16>().ok())
+            .and_then(|n| StatusCode::from_u16(n).ok())
+            .unwrap_or(default)
+    });
+    *CODE
 }
 
 /// Implementation of the Completion Engines served by the HTTP service should
