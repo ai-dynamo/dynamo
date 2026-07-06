@@ -623,6 +623,10 @@ impl AggRuntime {
     /// Drain all worker-completion events scheduled for the current logical timestamp.
     fn apply_worker_completions(&mut self) -> anyhow::Result<bool> {
         let mut changed = false;
+        // TODO: Same-time DP-rank completions settle in deterministic event order, and
+        // each pass may drain router-pending work before its sibling ranks are applied.
+        // Preserve this lower-rank-first tie-break for now. Atomic settlement requires
+        // splitting router state mutation from pending-admission draining.
         while let Some(payload) = pop_ready_worker_completion(&mut self.events, self.now_ms) {
             debug_assert_eq!(payload.stage, SimulationWorkerStage::Aggregated);
             let payload = self.engine.on_scheduled_completion(payload)?;
