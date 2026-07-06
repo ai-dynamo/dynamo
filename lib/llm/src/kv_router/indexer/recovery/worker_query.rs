@@ -1,17 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StartupMutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dashmap::DashMap;
 use dynamo_runtime::component::{Component, Instance};
-use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryQuery, EndpointInstanceId};
+use dynamo_runtime::discovery::{Discovery, DiscoveryEvent, DiscoveryQuery, EndpointInstanceId};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::StreamExt;
 use rand::Rng;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Notify, Semaphore};
 
 use super::worker_query_directory::{DiscoveredQueryEndpoint, WorkerQueryEndpointDirectory};
 #[cfg(test)]
@@ -43,6 +44,299 @@ use dynamo_runtime::pipeline::{AsyncEngine, SingleIn};
 const RECOVERY_MAX_RETRIES: u32 = 8;
 const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
 const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
+const RECOVERY_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
+struct StartupRecoveryGate {
+    inner: Arc<StartupMutex<StartupRecoveryGateState>>,
+    notify: Arc<Notify>,
+    started_at: Instant,
+}
+
+struct StartupRecoveryGateState {
+    phase: StartupRecoveryPhase,
+    obligations: HashMap<StartupRecoveryObligationId, StartupRecoveryObligation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StartupRecoveryObligationId {
+    key: RecoveryKey,
+    endpoint_id: EndpointInstanceId,
+}
+
+#[derive(Clone)]
+struct StartupRecoveryObligationHandle {
+    gate: StartupRecoveryGate,
+    id: StartupRecoveryObligationId,
+}
+
+struct StartupRecoveryObligation {
+    status: StartupRecoveryStatus,
+    recovered_events: usize,
+    drained_events: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupRecoveryPhase {
+    Discovering,
+    Recovering,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupRecoveryStatus {
+    Discovering,
+    Recovering,
+    Ready,
+    Degraded,
+    Failed,
+}
+
+#[derive(Clone, Copy)]
+enum StartupRecoveryOutcome {
+    Ready,
+    Degraded,
+    Failed,
+}
+
+#[derive(Default)]
+struct RecoveryTaskStats {
+    recovered_events: usize,
+    drained_events: usize,
+}
+
+struct StartupRecoverySnapshot {
+    phase: StartupRecoveryPhase,
+    scheduled: usize,
+    recovering: usize,
+    ready: usize,
+    degraded: usize,
+    failed: usize,
+    recovered_events: usize,
+    drained_events: usize,
+    elapsed_secs: f64,
+}
+
+impl StartupRecoverySnapshot {
+    fn is_complete(&self) -> bool {
+        matches!(self.phase, StartupRecoveryPhase::Recovering)
+            && self.recovering == 0
+            && self.ready + self.degraded + self.failed == self.scheduled
+    }
+
+    fn total_recovered_events(&self) -> usize {
+        self.recovered_events + self.drained_events
+    }
+}
+
+impl StartupRecoveryGate {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(StartupMutex::new(StartupRecoveryGateState {
+                phase: StartupRecoveryPhase::Discovering,
+                obligations: HashMap::new(),
+            })),
+            notify: Arc::new(Notify::new()),
+            started_at: Instant::now(),
+        }
+    }
+
+    fn register(&self, endpoint: &DiscoveredQueryEndpoint) -> StartupRecoveryObligationHandle {
+        let endpoint_id = endpoint.target.endpoint_instance_id();
+        let id = StartupRecoveryObligationId {
+            key: (endpoint.worker_id, endpoint.dp_rank),
+            endpoint_id: endpoint_id.clone(),
+        };
+        let mut state = self.inner.lock().expect("startup recovery gate poisoned");
+        if matches!(state.phase, StartupRecoveryPhase::Discovering) {
+            state
+                .obligations
+                .entry(id.clone())
+                .or_insert_with(|| StartupRecoveryObligation {
+                    status: StartupRecoveryStatus::Discovering,
+                    recovered_events: 0,
+                    drained_events: 0,
+                });
+        }
+
+        StartupRecoveryObligationHandle {
+            gate: self.clone(),
+            id,
+        }
+    }
+
+    fn finish_discovery(&self) {
+        let mut state = self.inner.lock().expect("startup recovery gate poisoned");
+        state.phase = StartupRecoveryPhase::Recovering;
+        drop(state);
+        self.notify.notify_waiters();
+    }
+
+    fn fail_all_open(&self) {
+        let mut state = self.inner.lock().expect("startup recovery gate poisoned");
+        state.phase = StartupRecoveryPhase::Recovering;
+        for obligation in state.obligations.values_mut() {
+            if matches!(
+                obligation.status,
+                StartupRecoveryStatus::Discovering | StartupRecoveryStatus::Recovering
+            ) {
+                obligation.status = StartupRecoveryStatus::Failed;
+            }
+        }
+        drop(state);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait_for_initial_recovery(
+        &self,
+        cancellation_token: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        tracing::info!("Waiting for initial worker KV recovery before serving traffic");
+
+        loop {
+            let snapshot = self.snapshot();
+            if snapshot.is_complete() {
+                self.log_initial_complete(&snapshot);
+                return Ok(());
+            }
+
+            tokio::select! {
+                biased;
+
+                _ = cancellation_token.cancelled() => {
+                    anyhow::bail!("cancelled before initial worker KV recovery completed");
+                }
+
+                _ = self.notify.notified() => {}
+
+                _ = tokio::time::sleep(RECOVERY_PROGRESS_LOG_INTERVAL) => {
+                    self.log_waiting(&snapshot);
+                }
+            }
+        }
+    }
+
+    fn snapshot(&self) -> StartupRecoverySnapshot {
+        let state = self.inner.lock().expect("startup recovery gate poisoned");
+        let mut snapshot = StartupRecoverySnapshot {
+            phase: state.phase,
+            scheduled: state.obligations.len(),
+            recovering: 0,
+            ready: 0,
+            degraded: 0,
+            failed: 0,
+            recovered_events: 0,
+            drained_events: 0,
+            elapsed_secs: self.started_at.elapsed().as_secs_f64(),
+        };
+
+        for obligation in state.obligations.values() {
+            match obligation.status {
+                StartupRecoveryStatus::Discovering | StartupRecoveryStatus::Recovering => {
+                    snapshot.recovering += 1;
+                }
+                StartupRecoveryStatus::Ready => snapshot.ready += 1,
+                StartupRecoveryStatus::Degraded => snapshot.degraded += 1,
+                StartupRecoveryStatus::Failed => snapshot.failed += 1,
+            }
+            snapshot.recovered_events += obligation.recovered_events;
+            snapshot.drained_events += obligation.drained_events;
+        }
+        snapshot
+    }
+
+    fn log_waiting(&self, snapshot: &StartupRecoverySnapshot) {
+        tracing::info!(
+            scheduled = snapshot.scheduled,
+            recovering = snapshot.recovering,
+            ready = snapshot.ready,
+            degraded = snapshot.degraded,
+            failed = snapshot.failed,
+            total_recovered_events = snapshot.total_recovered_events(),
+            elapsed_secs = snapshot.elapsed_secs,
+            "Waiting for initial worker KV recovery"
+        );
+    }
+
+    fn log_initial_complete(&self, snapshot: &StartupRecoverySnapshot) {
+        tracing::info!(
+            scheduled = snapshot.scheduled,
+            ready = snapshot.ready,
+            degraded = snapshot.degraded,
+            failed = snapshot.failed,
+            recovered_events = snapshot.recovered_events,
+            drained_events = snapshot.drained_events,
+            total_recovered_events = snapshot.total_recovered_events(),
+            elapsed_secs = snapshot.elapsed_secs,
+            "Initial worker KV recovery completed before serving traffic"
+        );
+    }
+}
+
+impl StartupRecoveryObligationHandle {
+    fn start_recovery(&self) {
+        let mut state = self
+            .gate
+            .inner
+            .lock()
+            .expect("startup recovery gate poisoned");
+        if let Some(obligation) = state.obligations.get_mut(&self.id)
+            && !matches!(
+                obligation.status,
+                StartupRecoveryStatus::Ready
+                    | StartupRecoveryStatus::Degraded
+                    | StartupRecoveryStatus::Failed
+            )
+        {
+            obligation.status = StartupRecoveryStatus::Recovering;
+        }
+        drop(state);
+        self.gate.notify.notify_waiters();
+    }
+
+    fn record_task_stats(&self, stats: RecoveryTaskStats) {
+        let mut state = self
+            .gate
+            .inner
+            .lock()
+            .expect("startup recovery gate poisoned");
+        if let Some(obligation) = state.obligations.get_mut(&self.id) {
+            obligation.recovered_events += stats.recovered_events;
+            obligation.drained_events += stats.drained_events;
+        }
+    }
+
+    fn finish(&self, outcome: StartupRecoveryOutcome) {
+        let status = match outcome {
+            StartupRecoveryOutcome::Ready => StartupRecoveryStatus::Ready,
+            StartupRecoveryOutcome::Degraded => StartupRecoveryStatus::Degraded,
+            StartupRecoveryOutcome::Failed => StartupRecoveryStatus::Failed,
+        };
+        let mut state = self
+            .gate
+            .inner
+            .lock()
+            .expect("startup recovery gate poisoned");
+        if let Some(obligation) = state.obligations.get_mut(&self.id)
+            && !matches!(
+                obligation.status,
+                StartupRecoveryStatus::Ready
+                    | StartupRecoveryStatus::Degraded
+                    | StartupRecoveryStatus::Failed
+            )
+        {
+            obligation.status = status;
+        }
+        drop(state);
+        self.gate.notify.notify_waiters();
+        tracing::debug!(
+            worker_id = self.id.key.0,
+            dp_rank = self.id.key.1,
+            endpoint_id = %self.id.endpoint_id.to_path(),
+            status = ?status,
+            "Startup worker KV recovery obligation finished"
+        );
+    }
+}
 
 /// Router-side client for querying worker local KV indexers.
 ///
@@ -64,6 +358,7 @@ pub struct WorkerQueryClient {
     worker_states: DashMap<WorkerId, Arc<Mutex<WorkerState>>>,
     query_endpoints: WorkerQueryEndpointDirectory,
     recovery_semaphore: Arc<Semaphore>,
+    startup_recovery_gate: StartupMutex<Option<StartupRecoveryGate>>,
     /// Per-rank cancellation for in-flight recovery tasks; cancelled on rank
     /// removal so retry backoff stops polling workers that no longer exist.
     recovery_cancels: DashMap<RecoveryKey, tokio_util::sync::CancellationToken>,
@@ -74,6 +369,7 @@ impl WorkerQueryClient {
         component: Component,
         indexer: Indexer,
         transport: Arc<dyn WorkerQueryTransport>,
+        wait_for_initial_recovery: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             component,
@@ -82,6 +378,9 @@ impl WorkerQueryClient {
             worker_states: DashMap::new(),
             query_endpoints: WorkerQueryEndpointDirectory::default(),
             recovery_semaphore: Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
+            startup_recovery_gate: StartupMutex::new(
+                wait_for_initial_recovery.then(StartupRecoveryGate::new),
+            ),
             recovery_cancels: DashMap::new(),
         })
     }
@@ -91,19 +390,62 @@ impl WorkerQueryClient {
     /// The background loop watches `ComponentEndpoints` discovery for query endpoints,
     /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
     /// events when all dp_ranks for a worker disappear.
-    pub async fn spawn(component: Component, indexer: Indexer) -> Result<Arc<Self>> {
+    pub async fn spawn(
+        component: Component,
+        indexer: Indexer,
+        wait_for_initial_recovery: bool,
+    ) -> Result<Arc<Self>> {
         let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
-        let client = Self::new(component.clone(), indexer, transport);
+        let client = Self::new(
+            component.clone(),
+            indexer,
+            transport,
+            wait_for_initial_recovery,
+        );
 
         let client_bg = client.clone();
         let cancel_token = component.drt().primary_token();
         tokio::spawn(async move {
-            if let Err(e) = client_bg.run_discovery_loop(cancel_token).await {
+            if let Err(e) = client_bg.clone().run_discovery_loop(cancel_token).await {
                 tracing::error!("WorkerQueryClient discovery loop failed: {e}");
+                client_bg.fail_startup_recovery_gate();
             }
         });
 
         Ok(client)
+    }
+
+    fn fail_startup_recovery_gate(&self) {
+        let Some(gate) = self
+            .startup_recovery_gate
+            .lock()
+            .expect("startup recovery gate poisoned")
+            .clone()
+        else {
+            return;
+        };
+        gate.fail_all_open();
+    }
+
+    pub(crate) async fn wait_for_initial_recovery(
+        &self,
+        cancellation_token: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let Some(gate) = self
+            .startup_recovery_gate
+            .lock()
+            .expect("startup recovery gate poisoned")
+            .clone()
+        else {
+            return Ok(());
+        };
+
+        gate.wait_for_initial_recovery(cancellation_token).await?;
+        *self
+            .startup_recovery_gate
+            .lock()
+            .expect("startup recovery gate poisoned") = None;
+        Ok(())
     }
 
     /// Background loop: watches ComponentEndpoints and schedules worker-coordinated recovery.
@@ -112,14 +454,16 @@ impl WorkerQueryClient {
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<()> {
         let discovery = self.component.drt().discovery();
+        let query = DiscoveryQuery::ComponentEndpoints {
+            namespace: self.component.namespace().name(),
+            component: self.component.name().to_string(),
+        };
+
+        self.recover_initial_discovery_snapshot(discovery.as_ref(), query.clone())
+            .await?;
+
         let mut stream = discovery
-            .list_and_watch(
-                DiscoveryQuery::ComponentEndpoints {
-                    namespace: self.component.namespace().name(),
-                    component: self.component.name().to_string(),
-                },
-                Some(cancel_token.clone()),
-            )
+            .list_and_watch(query, Some(cancel_token.clone()))
             .await?;
 
         while let Some(result) = stream.next().await {
@@ -154,6 +498,42 @@ impl WorkerQueryClient {
             }
         }
 
+        Ok(())
+    }
+
+    async fn recover_initial_discovery_snapshot(
+        self: &Arc<Self>,
+        discovery: &dyn Discovery,
+        query: DiscoveryQuery,
+    ) -> Result<()> {
+        let Some(gate) = self
+            .startup_recovery_gate
+            .lock()
+            .expect("startup recovery gate poisoned")
+            .clone()
+        else {
+            return Ok(());
+        };
+
+        let mut endpoints = HashMap::<RecoveryKey, DiscoveredQueryEndpoint>::new();
+        for instance in discovery.list(query).await? {
+            if let Some(endpoint) = WorkerQueryEndpointDirectory::parse_added(instance) {
+                endpoints.insert((endpoint.worker_id, endpoint.dp_rank), endpoint);
+            }
+        }
+
+        tracing::info!(
+            initial_recovery_obligations = endpoints.len(),
+            "WorkerQueryClient: discovered initial worker KV recovery obligations"
+        );
+
+        for endpoint in endpoints.into_values() {
+            let obligation = gate.register(&endpoint);
+            self.handle_discovered_query_endpoint_with_obligation(endpoint, Some(obligation))
+                .await;
+        }
+
+        gate.finish_discovery();
         Ok(())
     }
 
@@ -203,6 +583,15 @@ impl WorkerQueryClient {
     }
 
     async fn handle_discovered_query_endpoint(self: &Arc<Self>, endpoint: DiscoveredQueryEndpoint) {
+        self.handle_discovered_query_endpoint_with_obligation(endpoint, None)
+            .await;
+    }
+
+    async fn handle_discovered_query_endpoint_with_obligation(
+        self: &Arc<Self>,
+        endpoint: DiscoveredQueryEndpoint,
+        startup_obligation: Option<StartupRecoveryObligationHandle>,
+    ) {
         let worker_id = endpoint.worker_id;
         let dp_rank = endpoint.dp_rank;
         let endpoint_id = endpoint.target.endpoint_instance_id();
@@ -240,7 +629,9 @@ impl WorkerQueryClient {
         };
 
         if let Some(epoch) = spawn {
-            self.spawn_recovery_task((worker_id, dp_rank), epoch, None, None);
+            self.spawn_recovery_task((worker_id, dp_rank), epoch, None, None, startup_obligation)
+        } else if let Some(obligation) = startup_obligation {
+            obligation.finish(StartupRecoveryOutcome::Ready);
         }
     }
 
@@ -354,13 +745,13 @@ impl WorkerQueryClient {
             }
             LiveEventAction::ApplyClear(_) => unreachable!("clear is applied under worker lock"),
             LiveEventAction::SpawnFullRestore { epoch } => {
-                self.spawn_recovery_task(key, epoch, None, None);
+                self.spawn_recovery_task(key, epoch, None, None, None);
             }
             LiveEventAction::SpawnIncremental {
                 epoch,
                 start_event_id,
             } => {
-                self.spawn_recovery_task(key, epoch, Some(start_event_id), None);
+                self.spawn_recovery_task(key, epoch, Some(start_event_id), None, None);
             }
         }
     }
@@ -371,7 +762,12 @@ impl WorkerQueryClient {
         epoch: u64,
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
+        startup_obligation: Option<StartupRecoveryObligationHandle>,
     ) {
+        if let Some(obligation) = startup_obligation.as_ref() {
+            obligation.start_recovery();
+        }
+
         let client = self.clone();
 
         tokio::spawn(async move {
@@ -406,6 +802,9 @@ impl WorkerQueryClient {
                         key.0,
                         key.1
                     );
+                    if let Some(obligation) = startup_obligation.as_ref() {
+                        obligation.finish(StartupRecoveryOutcome::Degraded);
+                    }
                     return;
                 };
                 cancel
@@ -438,13 +837,20 @@ impl WorkerQueryClient {
                 biased;
                 _ = cancel.cancelled() => {
                     tracing::debug!("Recovery cancelled for worker {} dp_rank {}", key.0, key.1);
+                    if let Some(obligation) = startup_obligation.as_ref() {
+                        obligation.finish(StartupRecoveryOutcome::Degraded);
+                    }
                     return;
                 }
                 result = recovery => result,
             };
 
             if let Some(result) = result {
-                client.finish_recovery_task(key, epoch, result).await;
+                client
+                    .finish_recovery_task(key, epoch, result, startup_obligation)
+                    .await;
+            } else if let Some(obligation) = startup_obligation.as_ref() {
+                obligation.finish(StartupRecoveryOutcome::Failed);
             }
         });
     }
@@ -454,8 +860,12 @@ impl WorkerQueryClient {
         key: RecoveryKey,
         epoch: u64,
         result: Result<WorkerKvQueryResponse>,
+        startup_obligation: Option<StartupRecoveryObligationHandle>,
     ) {
         let Some(worker_state) = self.worker_states.get(&key.0).map(|entry| entry.clone()) else {
+            if let Some(obligation) = startup_obligation.as_ref() {
+                obligation.finish(StartupRecoveryOutcome::Degraded);
+            }
             return;
         };
         let mut worker_state = worker_state.lock().await;
@@ -465,14 +875,21 @@ impl WorkerQueryClient {
                 key.0,
                 key.1
             );
+            if let Some(obligation) = startup_obligation.as_ref() {
+                obligation.finish(StartupRecoveryOutcome::Degraded);
+            }
             return;
         }
 
         let Some(mut new_cursor) = worker_state.rank_cursor(key.1) else {
+            if let Some(obligation) = startup_obligation.as_ref() {
+                obligation.finish(StartupRecoveryOutcome::Degraded);
+            }
             return;
         };
 
         let mut successful_response = false;
+        let mut task_stats = RecoveryTaskStats::default();
 
         match result {
             Ok(WorkerKvQueryResponse::Events {
@@ -485,6 +902,7 @@ impl WorkerQueryClient {
                     key.1,
                     count = events.len()
                 );
+                task_stats.recovered_events += events.len();
                 for event in events {
                     let event_id = event.event.event_id;
                     if matches!(&event.event.data, KvCacheEventData::Cleared) {
@@ -518,6 +936,7 @@ impl WorkerQueryClient {
                     last_event_id,
                     "Got tree dump (range too old or unspecified)"
                 );
+                task_stats.recovered_events += events.len();
                 self.apply_tree_dump_replace_locked(key.0, key.1, events)
                     .await;
                 new_cursor = new_cursor.advance_to(last_event_id);
@@ -563,6 +982,7 @@ impl WorkerQueryClient {
             loop {
                 match worker_state.next_pending_drain_action(key.1) {
                     PendingDrainAction::Apply(event) => {
+                        task_stats.drained_events += 1;
                         self.indexer.apply_event(event).await;
                     }
                     PendingDrainAction::RecoverFrom(start_event_id) => {
@@ -578,8 +998,24 @@ impl WorkerQueryClient {
         let follow_up_epoch = worker_state.epoch;
         drop(worker_state);
 
+        if let Some(obligation) = startup_obligation.as_ref() {
+            obligation.record_task_stats(task_stats);
+        }
+
         if let Some(start_event_id) = follow_up_start {
-            self.spawn_recovery_task(key, follow_up_epoch, Some(start_event_id), None);
+            self.spawn_recovery_task(
+                key,
+                follow_up_epoch,
+                Some(start_event_id),
+                None,
+                startup_obligation,
+            );
+        } else if let Some(obligation) = startup_obligation {
+            if successful_response {
+                obligation.finish(StartupRecoveryOutcome::Ready);
+            } else {
+                obligation.finish(StartupRecoveryOutcome::Failed);
+            }
         }
     }
 
@@ -824,7 +1260,21 @@ mod tests {
         let component = make_test_component(name).await;
         let (kv_indexer, indexer) = make_test_indexer();
         let transport = Arc::new(MockWorkerQueryTransport::default());
-        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let client = WorkerQueryClient::new(component, indexer, transport.clone(), false);
+        (client, transport, kv_indexer)
+    }
+
+    async fn make_test_client_with_startup_gate(
+        name: &str,
+    ) -> (
+        Arc<WorkerQueryClient>,
+        Arc<MockWorkerQueryTransport>,
+        KvIndexer,
+    ) {
+        let component = make_test_component(name).await;
+        let (kv_indexer, indexer) = make_test_indexer();
+        let transport = Arc::new(MockWorkerQueryTransport::default());
+        let client = WorkerQueryClient::new(component, indexer, transport.clone(), true);
         (client, transport, kv_indexer)
     }
 
@@ -1015,6 +1465,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_initial_recovery_wait_blocks_until_worker_restore_finishes() {
+        let (client, transport, kv_indexer) =
+            make_test_client_with_startup_gate("initial-recovery-wait").await;
+        let wait_cancellation_token = CancellationToken::new();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        transport.push_action(
+            (100, 4),
+            MockQueryAction {
+                started: Some(started.clone()),
+                release: Some(release.clone()),
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![make_store_event(100, 4, 90)],
+                    last_event_id: 90,
+                }),
+            },
+        );
+
+        let wait_client = client.clone();
+        let wait_handle = tokio::spawn(async move {
+            wait_client
+                .wait_for_initial_recovery(&wait_cancellation_token)
+                .await
+        });
+
+        let endpoint = DiscoveredQueryEndpoint {
+            worker_id: 100,
+            dp_rank: 4,
+            target: make_instance(worker_kv_indexer_query_endpoint_for_worker(100, 4), 11),
+        };
+        let gate = client
+            .startup_recovery_gate
+            .lock()
+            .expect("startup recovery gate poisoned")
+            .clone()
+            .expect("startup gate should be enabled for this test");
+        let obligation = gate.register(&endpoint);
+        client
+            .handle_discovered_query_endpoint_with_obligation(endpoint, Some(obligation))
+            .await;
+        gate.finish_discovery();
+
+        started.notified().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !wait_handle.is_finished(),
+            "initial recovery wait returned before restore completed"
+        );
+
+        release.notify_waiters();
+        wait_handle
+            .await
+            .expect("wait task should join")
+            .expect("initial recovery wait should succeed");
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(stored_block_hashes_for(&events, 100, 4), vec![90]);
+    }
+
+    #[tokio::test]
     async fn test_query_endpoint_replacement_resets_rank_and_restores_new_target() {
         let (client, transport, kv_indexer) = make_test_client("replace-route").await;
         let key = (100, 4);
@@ -1176,7 +1688,7 @@ mod tests {
         // liveness check must drop it before it ever queries the transport — and
         // without registering a cancellation token that no later teardown would
         // ever reclaim.
-        client.spawn_recovery_task((1, 0), 0, Some(5), None);
+        client.spawn_recovery_task((1, 0), 0, Some(5), None, None);
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(transport.call_count(), 0);

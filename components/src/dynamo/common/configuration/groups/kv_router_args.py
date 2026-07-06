@@ -35,6 +35,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "use_kv_events",
     "durable_kv_events",
     "router_replica_sync",
+    "wait_for_recovery",
     "router_track_active_blocks",
     "router_track_output_blocks",
     "router_assume_kv_reuse",
@@ -118,6 +119,7 @@ class KvRouterConfigBase(ConfigBase):
     use_kv_events: bool
     durable_kv_events: bool
     router_replica_sync: bool
+    wait_for_recovery: bool
     router_track_active_blocks: bool
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
@@ -291,6 +293,17 @@ class KvRouterArgGroup(ArgGroup):
                 "KV Router: Enable replica synchronization across multiple router instances. "
                 "When true, routers will publish and subscribe to events to maintain "
                 "consistent state."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--wait-for-recovery",
+            env_var="DYN_ROUTER_WAIT_FOR_RECOVERY",
+            default=False,
+            dest="wait_for_recovery",
+            help=(
+                "KV Router: Wait for initial worker KV recovery before serving traffic. "
+                "This is independent of the initial worker-discovery wait."
             ),
         )
         add_negatable_bool_argument(

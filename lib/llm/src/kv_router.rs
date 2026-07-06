@@ -307,8 +307,22 @@ where
         if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
-            indexer::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
-                .await?;
+            let initial_worker_count = workers_with_configs.borrow().len();
+            let wait_for_initial_recovery =
+                kv_router_config.wait_for_recovery && initial_worker_count > 1;
+            if kv_router_config.wait_for_recovery && !wait_for_initial_recovery {
+                tracing::info!(
+                    initial_worker_count,
+                    "Skipping initial worker KV recovery wait because fewer than two workers are available"
+                );
+            }
+            indexer::start_subscriber(
+                component.clone(),
+                &kv_router_config,
+                indexer.clone(),
+                wait_for_initial_recovery,
+            )
+            .await?;
         } else {
             tracing::info!(
                 "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",

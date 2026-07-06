@@ -27,6 +27,7 @@ async fn start_kv_router_background_event_plane(
     component: Component,
     indexer: Indexer,
     transport_kind: EventTransportKind,
+    wait_for_initial_recovery: bool,
 ) -> Result<()> {
     let cancellation_token = component.drt().primary_token();
 
@@ -44,8 +45,10 @@ async fn start_kv_router_background_event_plane(
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
-    // No blocking wait — recovery happens asynchronously as endpoints are discovered.
-    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer).await?;
+    let worker_query_client =
+        WorkerQueryClient::spawn(component.clone(), indexer, wait_for_initial_recovery).await?;
+    let worker_query_client_for_events = worker_query_client.clone();
+    let event_loop_cancellation_token = cancellation_token.clone();
     let kv_event_subject = format!(
         "namespace.{}.component.{}.{}",
         component.namespace().name(),
@@ -73,7 +76,7 @@ async fn start_kv_router_background_event_plane(
             tokio::select! {
                 biased;
 
-                _ = cancellation_token.cancelled() => {
+                _ = event_loop_cancellation_token.cancelled() => {
                     tracing::debug!("KV Router event plane background task received cancellation signal");
                     break;
                 }
@@ -100,13 +103,23 @@ async fn start_kv_router_background_event_plane(
                         event.event.dp_rank,
                         event.event.event_id
                     );
-                    worker_query_client.handle_live_event(event).await;
+                    worker_query_client_for_events.handle_live_event(event).await;
                 }
             }
         }
 
         tracing::debug!("KV Router event plane background task exiting");
     });
+
+    if wait_for_initial_recovery {
+        tracing::info!("Waiting for initial worker KV recovery to complete");
+        worker_query_client
+            .wait_for_initial_recovery(&cancellation_token)
+            .await?;
+        tracing::info!("Initial worker KV recovery complete");
+    } else {
+        tracing::info!("Skipping initial worker KV recovery wait");
+    }
 
     Ok(())
 }
@@ -116,6 +129,7 @@ pub async fn start_subscriber(
     component: Component,
     kv_router_config: &KvRouterConfig,
     indexer: Indexer,
+    wait_for_initial_recovery: bool,
 ) -> Result<()> {
     let transport_kind = component.drt().default_event_transport_kind();
 
@@ -156,6 +170,12 @@ pub async fn start_subscriber(
             tracing::info!("Using NATS Core subscription (local_indexer mode)");
         }
 
-        start_kv_router_background_event_plane(component, indexer, transport_kind).await
+        start_kv_router_background_event_plane(
+            component,
+            indexer,
+            transport_kind,
+            wait_for_initial_recovery,
+        )
+        .await
     }
 }

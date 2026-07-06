@@ -245,6 +245,29 @@ def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
     assert kwargs["overlap_score_weight"] is None
 
 
+def test_wait_for_recovery_cli_flows_to_binding_kwargs() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--wait-for-recovery"])
+
+    assert args.wait_for_recovery is True
+    config = KvRouterConfigBase.from_cli_args(args)
+    assert config.kv_router_kwargs()["wait_for_recovery"] is True
+
+
+def test_wait_for_recovery_env_flows_to_binding_kwargs(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_ROUTER_WAIT_FOR_RECOVERY", "true")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    assert args.wait_for_recovery is True
+    config = KvRouterConfigBase.from_cli_args(args)
+    assert config.kv_router_kwargs()["wait_for_recovery"] is True
+
+
 def test_load_aware_env_applies_no_cache_load_balancing_preset(monkeypatch) -> None:
     monkeypatch.setenv("DYN_ROUTER_LOAD_AWARE", "true")
     parser = argparse.ArgumentParser()
