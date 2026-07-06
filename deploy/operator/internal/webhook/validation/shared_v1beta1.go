@@ -215,7 +215,7 @@ func (v *sharedValidation) validateExperimentalSpec(
 	if experimental.Checkpoint != nil && experimental.Checkpoint.Enabled && experimental.Failover != nil {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath.Child("checkpoint"),
-			"checkpoint/snapshot is not supported with active/passive failover",
+			dynamo.CheckpointFailoverUnsupportedMessage,
 		))
 	}
 

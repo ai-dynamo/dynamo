@@ -27,6 +27,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -442,8 +443,9 @@ func (v *SharedSpecValidatorV1Alpha1) validateCheckpointWithFailover() error {
 		return nil
 	}
 	return fmt.Errorf(
-		"%s.checkpoint cannot be enabled with failover.enabled=true: checkpoint/snapshot is not supported with active/passive failover",
+		"%s.checkpoint cannot be enabled with failover.enabled=true: %s",
 		v.fieldPath,
+		dynamo.CheckpointFailoverUnsupportedMessage,
 	)
 }
 
