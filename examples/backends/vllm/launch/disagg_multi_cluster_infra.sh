@@ -20,6 +20,11 @@
 
 set -euo pipefail
 
+if [[ "${BASH_VERSINFO[0]}" -lt 4 || ( "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -lt 3 ) ]]; then
+    echo "This script requires bash 4.3+ (for wait -n), found ${BASH_VERSION}" >&2
+    exit 1
+fi
+
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<'EOF'
 Usage: INFRA_IP=<reachable-ip> ./disagg_multi_cluster_infra.sh
@@ -107,5 +112,6 @@ echo
 echo "ETCD_ENDPOINTS=http://${INFRA_IP}:${ETCD_CLIENT_PORT}"
 echo "NATS_SERVER=nats://${INFRA_IP}:${NATS_PORT}"
 
-# Stop both services if either one exits.
-wait -n "$etcd_pid" "$nats_pid"
+# Stop both services if either one exits. Bare `wait -n` covers exactly the
+# two children above; `wait -n <pid>...` would require bash 5.1.
+wait -n

@@ -81,7 +81,7 @@ export PREFILL_TP_SIZE=2
 ./examples/backends/vllm/launch/disagg_multi_cluster_prefill.sh
 ```
 
-The vLLM engine publishes its events to a process-local ZMQ endpoint. Dynamo consumes that endpoint and republishes the events through the NATS event plane, avoiding a cross-cluster ZMQ listener. The prefill worker also advertises a fixed Dynamo TCP endpoint. Start another prefill endpoint by running the script on another host with the same namespace. When two endpoints share a host, give each process distinct `PREFILL_TCP_PORT`, `PREFILL_SYSTEM_PORT`, `VLLM_NIXL_SIDE_CHANNEL_PORT`, and `KV_EVENTS_PORT` values.
+The vLLM engine publishes its events to a ZMQ endpoint on the worker host. Dynamo consumes that endpoint on the same host and republishes the events through the NATS event plane, avoiding a cross-cluster ZMQ listener. The prefill worker also advertises a fixed Dynamo TCP endpoint. Start another prefill endpoint by running the script on another host with the same namespace. When two endpoints share a host, give each process distinct `PREFILL_TCP_PORT`, `PREFILL_SYSTEM_PORT`, `VLLM_NIXL_SIDE_CHANNEL_PORT`, and `KV_EVENTS_PORT` values.
 
 ## Start Decode and Frontend
 
