@@ -21,3 +21,4 @@
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$
 ^https://etcd\.io/docs/v3\.5/install/?$
+^https://cert-manager\.io/docs/?$
