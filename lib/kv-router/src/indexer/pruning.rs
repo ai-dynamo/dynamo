@@ -593,6 +593,7 @@ impl WorkerPruneManagerInner {
             let Some((Reverse(expiry), worker)) = ({ expiries.pop() }) else {
                 break;
             };
+            drop(expiries);
 
             let (mut worker_expired, next_expiry) = {
                 let Some(state) = self.workers.get(&worker) else {
