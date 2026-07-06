@@ -76,6 +76,7 @@ const (
 
 	// Annotation keys
 	AnnotationAdditionalResources = "dgdr.nvidia.com/additional-resources"
+	AnnotationGeneratedDGDSpec    = "nvidia.com/generated-dgd-spec"
 
 	// Annotation keys for v1alpha1 round-trip compatibility.
 	// The conversion layer stores v1alpha1 fields that have no v1beta1 spec equivalent
@@ -419,6 +420,16 @@ func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryReader() (client.Re
 	return r.APIReader, true
 }
 
+// authoritativeReader bypasses the informer cache when a read must observe a
+// write that causally preceded it. APIReader is configured in production; the
+// client fallback keeps unit tests and direct reconciler construction working.
+func (r *DynamoGraphDeploymentRequestReconciler) authoritativeReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 // FinalizeResource implements commonController.Finalizer interface
 func (r *DynamoGraphDeploymentRequestReconciler) FinalizeResource(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) error {
 	logger := log.FromContext(ctx)
@@ -499,7 +510,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) Reconcile(ctx context.Context, 
 		return r.handleFailedPhase(ctx, dgdr)
 	default:
 		logger.Info("Unknown phase", "phase", dgdr.Status.Phase)
-		return r.updatePhaseAndRequeue(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, MessageInvalidState)
+		return r.updatePhase(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, MessageInvalidState)
 	}
 }
 
@@ -545,7 +556,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, MessageJobCreationFailed, err.Error())
 	}
 	if requeue {
-		return ctrl.Result{Requeue: true}, nil
+		// The successful DGDR update is watched and drives the next reconcile.
+		return ctrl.Result{}, nil
 	}
 
 	// Record event with appropriate message
@@ -626,7 +638,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) checkProfilerFailureInConfigMap
 ) (bool, string, error) {
 	outputCMName := getOutputConfigMapName(dgdr)
 	cm := &corev1.ConfigMap{}
-	if err := r.Get(ctx, types.NamespacedName{
+	if err := r.authoritativeReader().Get(ctx, types.NamespacedName{
 		Name: outputCMName, Namespace: dgdr.Namespace,
 	}, cm); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -724,7 +736,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 		if err := r.Status().Update(ctx, dgdr); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{}, nil
 	}
 
 	profilingResults, dgdName, err := r.generateDGDSpec(ctx, dgdr)
@@ -733,10 +745,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageGenerationFailed, err.Error())
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
 	}
-	if err := r.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, dgdr); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to refetch DGDR after generateDGDSpec: %w", err)
-	}
-
 	dgdr.ClearProfilingPhase()
 	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 		Type:               nvidiacomv1beta1.ConditionTypeProfiling,
@@ -798,21 +806,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	}
 
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	err := r.Get(ctx, types.NamespacedName{
+	err := r.getDGD(ctx, types.NamespacedName{
 		Name:      dgdr.Status.DGDName,
 		Namespace: dgdr.Namespace,
 	}, dgd)
 
 	if apierrors.IsNotFound(err) {
-		// Annotation present means DGD was never created (spec ready but create not yet called).
-		// Annotation absent means DGD was previously created and then manually deleted.
-		if _, hasSpec := dgdr.Annotations["nvidia.com/generated-dgd-spec"]; hasSpec {
-			return r.createDGD(ctx, dgdr)
-		}
-		return r.handleDGDDeleted(ctx, dgdr)
+		return r.handleDGDNotFound(ctx, dgdr)
 	}
 
 	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.removeGeneratedSpecAnnotation(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -865,14 +871,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 
 	// Check if DGD still exists and monitor its status
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	err := r.Get(ctx, types.NamespacedName{
+	err := r.getDGD(ctx, types.NamespacedName{
 		Name:      dgdr.Status.DGDName,
 		Namespace: dgdr.Namespace,
 	}, dgd)
 
 	if apierrors.IsNotFound(err) {
-		// DGD was deleted by user
-		return r.handleDGDDeleted(ctx, dgdr)
+		return r.handleDGDNotFound(ctx, dgdr)
 	}
 
 	if err != nil {
@@ -938,14 +943,62 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 }
 
+// getDGD confirms a cached NotFound directly with the API server. A DGD create
+// and the DGDR status event that follows it are delivered through independent
+// informers, so cache absence alone is not proof that the DGD was deleted.
+func (r *DynamoGraphDeploymentRequestReconciler) getDGD(
+	ctx context.Context,
+	key types.NamespacedName,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	err := r.Get(ctx, key, dgd)
+	if apierrors.IsNotFound(err) && r.APIReader != nil {
+		return r.APIReader.Get(ctx, key, dgd)
+	}
+	return err
+}
+
+// handleDGDNotFound refreshes the DGDR before deciding whether absence means
+// "creation still pending" or "a previously created DGD was deleted". The
+// generated-spec annotation is the existing durable transaction marker: it is
+// removed only after the intended DGD is created or observed.
+func (r *DynamoGraphDeploymentRequestReconciler) handleDGDNotFound(
+	ctx context.Context,
+	cachedDGDR *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) (ctrl.Result, error) {
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+	if err := r.authoritativeReader().Get(ctx, types.NamespacedName{
+		Name: cachedDGDR.Name, Namespace: cachedDGDR.Namespace,
+	}, dgdr); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("failed to refresh DGDR after DGD was not found: %w", err)
+	}
+
+	switch dgdr.Status.Phase {
+	case nvidiacomv1beta1.DGDRPhaseDeploying:
+		if dgdr.Annotations[AnnotationGeneratedDGDSpec] != "" {
+			return r.createDGD(ctx, dgdr)
+		}
+		return r.handleDGDDeleted(ctx, dgdr)
+	case nvidiacomv1beta1.DGDRPhaseDeployed:
+		return r.handleDGDDeleted(ctx, dgdr)
+	default:
+		// The cached phase was stale; its authoritative watch event will select
+		// the appropriate handler.
+		return ctrl.Result{}, nil
+	}
+}
+
 // createDGD creates a DynamoGraphDeployment with the generated spec
 func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Extract DGD spec from annotation (stored by generateDGDSpec)
-	dgdSpecYAML, ok := dgdr.Annotations["nvidia.com/generated-dgd-spec"]
+	dgdSpecYAML, ok := dgdr.Annotations[AnnotationGeneratedDGDSpec]
 	if !ok || dgdSpecYAML == "" {
-		return ctrl.Result{}, fmt.Errorf("generated DGD spec not found in annotation nvidia.com/generated-dgd-spec")
+		return ctrl.Result{}, fmt.Errorf("generated DGD spec not found in annotation %s", AnnotationGeneratedDGDSpec)
 	}
 
 	generatedDGD, err := r.extractDGDFromYAML([]byte(dgdSpecYAML))
@@ -998,16 +1051,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 		if apierrors.IsAlreadyExists(err) {
 			logger.Info("DGD already exists, updating status")
 			existingDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
-			if getErr := r.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: dgdNamespace}, existingDGD); getErr != nil {
+			if getErr := r.authoritativeReader().Get(ctx, types.NamespacedName{Name: dgdName, Namespace: dgdNamespace}, existingDGD); getErr != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to get existing DGD %s: %w", dgdName, getErr)
+			}
+			if updateErr := r.removeGeneratedSpecAnnotation(ctx, dgdr); updateErr != nil {
+				logger.Error(updateErr, "Failed to remove generated-dgd-spec annotation on IsAlreadyExists path")
+				return ctrl.Result{}, updateErr
 			}
 			if adoptErr := r.adoptAdditionalResources(ctx, dgdr, existingDGD); adoptErr != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for existing DGD %s: %w", dgdName, adoptErr)
-			}
-			delete(dgdr.Annotations, "nvidia.com/generated-dgd-spec")
-			if updateErr := r.Update(ctx, dgdr); updateErr != nil {
-				logger.Error(updateErr, "Failed to remove generated-dgd-spec annotation on IsAlreadyExists path")
-				return ctrl.Result{}, updateErr
 			}
 			dgdr.Status.DGDName = dgdName
 			return ctrl.Result{}, r.Status().Update(ctx, dgdr)
@@ -1025,15 +1077,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 		return ctrl.Result{}, err
 	}
 
-	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for DGD %s: %w", dgdName, err)
-	}
-
-	delete(dgdr.Annotations, "nvidia.com/generated-dgd-spec")
-	if err := r.Update(ctx, dgdr); err != nil {
+	if err := r.removeGeneratedSpecAnnotation(ctx, dgdr); err != nil {
 		// Return the error to force a retry. The DGD was created successfully, so a
 		// retry will hit the IsAlreadyExists path above and attempt cleanup again.
 		return ctrl.Result{}, fmt.Errorf("failed to remove generated-dgd-spec annotation after DGD creation: %w", err)
+	}
+	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for DGD %s: %w", dgdName, err)
 	}
 
 	// Update status
@@ -1052,6 +1102,24 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	logger.Info("DynamoGraphDeployment created successfully", "name", dgdName)
 
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
+}
+
+// removeGeneratedSpecAnnotation commits the creation transaction after a DGD
+// has been observed. Retrying this cleanup whenever the DGD exists repairs a
+// crash between Create and marker removal; a subsequent deletion is terminal.
+func (r *DynamoGraphDeploymentRequestReconciler) removeGeneratedSpecAnnotation(
+	ctx context.Context,
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) error {
+	if dgdr.Annotations[AnnotationGeneratedDGDSpec] == "" {
+		return nil
+	}
+	base := dgdr.DeepCopy()
+	delete(dgdr.Annotations, AnnotationGeneratedDGDSpec)
+	if err := r.Patch(ctx, dgdr, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return fmt.Errorf("failed to remove generated DGD annotation: %w", err)
+	}
+	return nil
 }
 
 // adoptAdditionalResources makes profiling-generated ConfigMaps follow the DGD lifecycle.
@@ -1883,7 +1951,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) checkProfilingJobStatus(ctx con
 	jobName := getProfilingJobName(dgdr)
 
 	job := &batchv1.Job{}
-	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: dgdr.Namespace}, job); err != nil {
+	key := types.NamespacedName{Name: jobName, Namespace: dgdr.Namespace}
+	err := r.Get(ctx, key, job)
+	if apierrors.IsNotFound(err) && r.APIReader != nil {
+		// Job Create events are filtered. Confirm cache absence directly because
+		// the DGDR phase update can be observed before the Job informer catches up.
+		err = r.APIReader.Get(ctx, key, job)
+	}
+	if err != nil {
 		return false, err
 	}
 
@@ -2014,8 +2089,9 @@ func computeDGDName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string 
 }
 
 // generateDGDSpec reads profiling output from the sidecar ConfigMap, extracts the
-// DynamoGraphDeployment spec and pareto configs, stores the spec in an annotation via
-// r.Update, and returns the ProfilingResultsStatus and DGD name.
+// DGD and supporting resources, then persists both generated annotations in one
+// optimistic patch. Patch updates dgdr's resourceVersion in place, so the caller
+// can safely commit status without a read-after-write cache lookup.
 func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (*nvidiacomv1beta1.ProfilingResultsStatus, string, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Generating DGD spec from profiling results", "name", dgdr.Name, "backend", dgdr.Spec.Backend)
@@ -2023,7 +2099,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	// Read the generated spec from ConfigMap (created by sidecar)
 	outputConfigMapName := getOutputConfigMapName(dgdr)
 	cm := &corev1.ConfigMap{}
-	err := r.Get(ctx, types.NamespacedName{
+	err := r.authoritativeReader().Get(ctx, types.NamespacedName{
 		Name:      outputConfigMapName,
 		Namespace: dgdr.Namespace,
 	}, cm)
@@ -2061,15 +2137,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 
 	logger.Info("Parsed profiling output", "profilerDGDName", dgd.Name, "additionalResources", len(additionalResources))
 
+	patchBase := dgdr.DeepCopy()
 	if len(additionalResources) > 0 {
-		if err := r.storeAdditionalResources(ctx, dgdr, additionalResources); err != nil {
+		if err := storeAdditionalResources(dgdr, additionalResources); err != nil {
 			logger.Error(err, "Failed to store additional resources")
 			return nil, "", err
-		}
-		// storeAdditionalResources calls r.Update internally, bumping resourceVersion.
-		// Refetch so the subsequent r.Update for the spec annotation doesn't 409.
-		if err := r.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, dgdr); err != nil {
-			return nil, "", fmt.Errorf("failed to refetch DGDR after storing additional resources: %w", err)
 		}
 	}
 
@@ -2096,10 +2168,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	if dgdr.Annotations == nil {
 		dgdr.Annotations = make(map[string]string)
 	}
-	dgdr.Annotations["nvidia.com/generated-dgd-spec"] = string(dgdYAML)
+	dgdr.Annotations[AnnotationGeneratedDGDSpec] = string(dgdYAML)
 
-	if err := r.Update(ctx, dgdr); err != nil {
-		return nil, "", fmt.Errorf("failed to update DGDR with generated DGD annotation: %w", err)
+	if err := r.Patch(ctx, dgdr, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
+		return nil, "", fmt.Errorf("failed to persist generated DGDR annotations: %w", err)
 	}
 	return profilingResults, dgd.Name, nil
 }
@@ -2208,7 +2280,7 @@ func stripYAMLComments(s string) string {
 
 // storeAdditionalResources marshals additional resources to YAML and stores them in DGDR annotations.
 // Validates annotation size and fails gracefully if too large.
-func (r *DynamoGraphDeploymentRequestReconciler) storeAdditionalResources(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, resources []*unstructured.Unstructured) error {
+func storeAdditionalResources(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, resources []*unstructured.Unstructured) error {
 	if len(resources) == 0 {
 		return nil
 	}
@@ -2238,7 +2310,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) storeAdditionalResources(ctx co
 	}
 	dgdr.Annotations[AnnotationAdditionalResources] = string(resourcesYAML)
 
-	return r.Update(ctx, dgdr)
+	return nil
 }
 
 // extractResourcesFromYAML parses multi-document YAML from profiling output,
@@ -2387,8 +2459,9 @@ func setSucceededCondition(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, 
 	})
 }
 
-// updatePhaseAndRequeue updates the DGDR phase and requeues
-func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseAndRequeue(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, phase nvidiacomv1beta1.DGDRPhase, message string) (ctrl.Result, error) {
+// updatePhase updates the DGDR phase. The successful status write is watched
+// and drives any required follow-up reconcile without rate-limited requeueing.
+func (r *DynamoGraphDeploymentRequestReconciler) updatePhase(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, phase nvidiacomv1beta1.DGDRPhase, message string) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Updating DGDR phase", "name", dgdr.Name, "phase", phase, "message", message)
 	dgdr.Status.Phase = phase
@@ -2397,7 +2470,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseAndRequeue(ctx conte
 	if err := r.Status().Update(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{Requeue: true}, nil
+	return ctrl.Result{}, nil
 }
 
 // updatePhaseWithCondition updates phase and adds/updates a condition
@@ -2428,7 +2501,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseWithCondition(
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{Requeue: true}, nil
+	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager

@@ -31,13 +31,16 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -55,6 +58,39 @@ func (m *MockRBACManager) EnsureServiceAccountWithRBAC(ctx context.Context, targ
 		return m.EnsureServiceAccountWithRBACFunc(ctx, targetNamespace, serviceAccountName, clusterRoleName)
 	}
 	return nil
+}
+
+// laggingReadClient simulates selected informer misses while writes still use
+// the real envtest client.
+type laggingReadClient struct {
+	client.Client
+	staleDGDR       *nvidiacomv1beta1.DynamoGraphDeploymentRequest
+	hiddenDGD       map[types.NamespacedName]bool
+	hiddenJob       map[types.NamespacedName]bool
+	hiddenConfigMap map[types.NamespacedName]bool
+}
+
+func (c *laggingReadClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeployment); ok && c.hiddenDGD[key] {
+		return apierrors.NewNotFound(schema.GroupResource{
+			Group: nvidiacomv1beta1.GroupVersion.Group, Resource: "dynamographdeployments",
+		}, key.Name)
+	}
+	if _, ok := obj.(*batchv1.Job); ok && c.hiddenJob[key] {
+		return apierrors.NewNotFound(schema.GroupResource{
+			Group: batchv1.GroupName, Resource: "jobs",
+		}, key.Name)
+	}
+	if _, ok := obj.(*corev1.ConfigMap); ok && c.hiddenConfigMap[key] {
+		return apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, key.Name)
+	}
+	if dgdr, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeploymentRequest); ok &&
+		c.staleDGDR != nil &&
+		key.Name == c.staleDGDR.Name && key.Namespace == c.staleDGDR.Namespace {
+		c.staleDGDR.DeepCopyInto(dgdr)
+		return nil
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
 }
 
 var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
@@ -458,7 +494,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 	})
 
 	Context("When profiling completes", func() {
-		It("Should generate DGD spec from ConfigMap", func() {
+		It("Should tolerate a cached DGDR that has not observed its metadata write", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-profiling-complete"
 			namespace := defaultNamespace
@@ -491,6 +527,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			// Update status to Profiling using Status subresource
 			dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
+			staleDGDR := dgdr.DeepCopy()
 
 			// Create completed profiling job
 			jobName := getProfilingJobName(dgdr)
@@ -527,8 +564,17 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			}}
 			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
 
-			// Create output ConfigMap with DGD spec
-			dgdYAML := `apiVersion: nvidia.com/v1alpha1
+			// Include a prerequisite ConfigMap so the reconcile must retain both
+			// generated annotations while its DGDR cache remains stale.
+			const additionalConfigMapName = "planner-config-stale-cache"
+			dgdYAML := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: planner-config-stale-cache
+data:
+  planner_config.json: "{}"
+---
+apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: test-dgd
@@ -550,7 +596,12 @@ spec:
 			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cm) }()
 
-			// Reconcile to process the profiling completion
+			// Every cached DGDR read returns the pre-write object. Reconciliation must
+			// not depend on the informer observing its own metadata write.
+			reconciler.Client = &laggingReadClient{
+				Client: k8sClient, staleDGDR: staleDGDR,
+			}
+			reconciler.APIReader = k8sClient
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
@@ -561,10 +612,11 @@ spec:
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 
 			// Check that DGD spec was generated (stored in annotation)
-			generatedSpec := updated.Annotations["nvidia.com/generated-dgd-spec"]
+			generatedSpec := updated.Annotations[AnnotationGeneratedDGDSpec]
 			Expect(generatedSpec).NotTo(BeEmpty())
 			Expect(generatedSpec).Should(ContainSubstring("apiVersion: nvidia.com/v1beta1"))
 			Expect(generatedSpec).Should(ContainSubstring("kind: DynamoGraphDeployment"))
+			Expect(updated.Annotations[AnnotationAdditionalResources]).Should(ContainSubstring(additionalConfigMapName))
 			Expect(updated.Status.ProfilingResults).ShouldNot(BeNil())
 			Expect(updated.Status.ProfilingResults.SelectedConfig).ShouldNot(BeNil())
 			Expect(string(updated.Status.ProfilingResults.SelectedConfig.Raw)).Should(ContainSubstring("nvidia.com/v1beta1"))
@@ -572,6 +624,37 @@ spec:
 
 			// autoApply defaults to true in v1beta1, so after profiling the DGDR transitions to Deploying
 			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeploying))
+
+			additionalCM := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: additionalConfigMapName, Namespace: namespace}, additionalCM)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, additionalCM) }()
+		})
+
+		It("Should confirm a cached profiling Job miss with the API server", func() {
+			ctx := context.Background()
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr-hidden-job", Namespace: defaultNamespace},
+			}
+			key := types.NamespacedName{Name: getProfilingJobName(dgdr), Namespace: defaultNamespace}
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+				Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test", Image: "test"}}, RestartPolicy: corev1.RestartPolicyNever,
+				}}},
+			}
+			Expect(k8sClient.Create(ctx, job)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, job) }()
+			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
+
+			reconciler.Client = &laggingReadClient{
+				Client: k8sClient, hiddenJob: map[types.NamespacedName]bool{key: true},
+			}
+			reconciler.APIReader = k8sClient
+
+			completed, err := reconciler.checkProfilingJobStatus(ctx, dgdr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(completed).Should(BeTrue())
 		})
 	})
 
@@ -674,6 +757,11 @@ spec:
 			}
 			Expect(k8sClient.Create(ctx, cm)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cm) }()
+			cmKey := types.NamespacedName{Name: outputConfigMapName, Namespace: namespace}
+			reconciler.Client = &laggingReadClient{
+				Client: k8sClient, hiddenConfigMap: map[types.NamespacedName]bool{cmKey: true},
+			}
+			reconciler.APIReader = k8sClient
 
 			// Reconcile to generate spec (transitions to Deploying because autoApply=true)
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
@@ -1058,7 +1146,7 @@ spec:
 	})
 
 	Context("When handling DGD deletion", func() {
-		It("Should transition to Failed phase when DGD is deleted", func() {
+		It("Should not recreate a missing DGD from a stale transaction marker", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-dgd-deleted"
 			namespace := defaultNamespace
@@ -1085,16 +1173,32 @@ spec:
 					AutoApply: ptr.To(true),
 				},
 			}
+			commonController.AddFinalizer(dgdr)
 
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			// Update status to Deployed with Deployment info using Status subresource
-			dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
+			// The authoritative object has completed the creation transaction: it is
+			// Deploying with no generated-spec marker.
+			dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeploying
 			dgdr.Status.DGDName = "test-dgd-to-delete"
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
-			// Reconcile when DGD doesn't exist (simulating deletion)
+			// The cache has the same phase and status but still sees the pre-creation
+			// marker. Only an authoritative annotation read distinguishes deletion
+			// from a creation that has not been attempted yet.
+			staleDGDR := dgdr.DeepCopy()
+			staleDGDR.Annotations = map[string]string{
+				AnnotationGeneratedDGDSpec: `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgd-to-delete
+spec:
+  services: {}`,
+			}
+			reconciler.Client = &laggingReadClient{Client: k8sClient, staleDGDR: staleDGDR}
+			reconciler.APIReader = k8sClient
+
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
@@ -1104,6 +1208,8 @@ spec:
 			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseFailed))
+			missingDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "test-dgd-to-delete", Namespace: namespace}, missingDGD))).Should(BeTrue())
 		})
 	})
 })
@@ -2133,7 +2239,7 @@ spec:
 	})
 
 	Context("v1beta1-specific behavior", func() {
-		It("Should transition to Deployed when DGD reaches Ready", func() {
+		It("Should confirm a cached DGD miss before declaring deletion", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-deployed-phase"
 			namespace := defaultNamespace
@@ -2142,6 +2248,14 @@ spec:
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdrName,
 					Namespace: namespace,
+					Annotations: map[string]string{
+						AnnotationGeneratedDGDSpec: `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgd-deployed
+spec:
+  services: {}`,
+					},
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
@@ -2187,7 +2301,14 @@ spec:
 			dgd.Status.State = nvidiacomv1beta1.DGDStateSuccessful
 			Expect(k8sClient.Status().Update(ctx, dgd)).Should(Succeed())
 
-			// Reconcile — should transition DGDR to Deployed
+			key := types.NamespacedName{Name: dgd.Name, Namespace: namespace}
+			reconciler.Client = &laggingReadClient{
+				Client: k8sClient, hiddenDGD: map[types.NamespacedName]bool{key: true},
+			}
+			reconciler.APIReader = k8sClient
+
+			// The cached miss must be confirmed through APIReader, which sees the
+			// successful DGD and allows the normal transition to Deployed.
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
@@ -2196,6 +2317,18 @@ spec:
 			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeployed))
+			Expect(updated.Annotations).NotTo(HaveKey(AnnotationGeneratedDGDSpec))
+
+			// Once an existing DGD has been observed, a later deletion must not be
+			// recreated from a marker left behind by a prior crash.
+			Expect(k8sClient.Delete(ctx, dgd)).Should(Succeed())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
+			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseFailed))
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, &nvidiacomv1beta1.DynamoGraphDeployment{}))).Should(BeTrue())
 		})
 
 		It("Should set Succeeded condition at each phase transition", func() {
