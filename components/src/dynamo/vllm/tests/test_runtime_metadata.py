@@ -5,7 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.llm import ModelType, WorkerType
 from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
+from dynamo.vllm.main import should_publish_generate_capability
 
 pytestmark = [
     pytest.mark.unit,
@@ -70,3 +72,12 @@ def test_spec_decode_runtime_data_ignores_invalid_nextn(speculative_config):
     vllm_config = SimpleNamespace(speculative_config=None)
 
     assert get_spec_decode_runtime_data(config, vllm_config) is None
+
+
+def test_generate_capability_is_published_only_by_generative_workers():
+    assert should_publish_generate_capability(ModelType.Chat, WorkerType.Aggregated)
+    assert should_publish_generate_capability(ModelType.Chat, WorkerType.Decode)
+    assert not should_publish_generate_capability(ModelType.Prefill, WorkerType.Prefill)
+    assert not should_publish_generate_capability(
+        ModelType.Embedding, WorkerType.Aggregated
+    )

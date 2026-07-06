@@ -72,7 +72,14 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+VLLM_INFERENCE_V1_GENERATE_CAPABILITY = "vllm_inference_v1_generate"
 MX_LOAD_FORMATS = {"modelexpress", "mx"}
+
+
+def should_publish_generate_capability(
+    model_type: ModelType, worker_type: WorkerType
+) -> bool:
+    return worker_type != WorkerType.Prefill and model_type != ModelType.Embedding
 
 
 def uses_modelexpress_load_format(config: Config) -> bool:
@@ -715,6 +722,11 @@ async def register_vllm_model(
     )
     runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
     runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
+
+    if should_publish_generate_capability(model_type, worker_type):
+        runtime_config.set_engine_specific(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY, "true"
+        )
 
     # Propagate stream_interval so the frontend can respect --stream-interval.
     # set_engine_specific requires a JSON-encoded string (the Rust binding
