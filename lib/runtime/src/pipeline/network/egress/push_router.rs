@@ -677,6 +677,19 @@ where
 
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.round_robin_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn round_robin_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let (instance_id, candidate_count) = {
@@ -694,12 +707,25 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, None, prepare)
             .await
     }
 
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.random_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn random_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let (instance_id, candidate_count) = {
             let routing_instances = self.client.routing_instances();
             let count = routing_instances.free_ids().len();
@@ -716,13 +742,26 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, None, prepare)
             .await
     }
 
     /// Issue a request using power-of-two-choices: pick 2 random healthy workers,
     /// route to the one with fewer in-flight requests.
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.power_of_two_choices_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn power_of_two_choices_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let state = self.occupancy_state()?;
         let instance_id = {
             let routing_instances = self.client.routing_instances();
@@ -733,14 +772,8 @@ where
         };
         state.increment(instance_id);
         let permit = OccupancyPermit::new(state, instance_id);
-
-        match self
-            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, Some(permit), prepare)
             .await
-        {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
-            Err(err) => Err(err),
-        }
     }
 
     /// Issue a request to a specific endpoint
@@ -861,7 +894,33 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        let (instance_id, mut permit) = self.select_exact_target(request.content(), None).await?;
+        match self.router_mode {
+            RouterMode::Random => self.random_prepared(request, prepare).await,
+            RouterMode::RoundRobin => self.round_robin_prepared(request, prepare).await,
+            RouterMode::PowerOfTwoChoices => {
+                self.power_of_two_choices_prepared(request, prepare).await
+            }
+            RouterMode::LeastLoaded => self.least_loaded_prepared(request, prepare).await,
+            RouterMode::DeviceAwareWeighted => {
+                self.device_aware_weighted_prepared(request, prepare).await
+            }
+            RouterMode::KV => anyhow::bail!("KV routing should not call select_and_dispatch"),
+            RouterMode::Direct => anyhow::bail!(
+                "Direct routing should use direct_within_prepared instead of select_and_dispatch"
+            ),
+        }
+    }
+
+    async fn dispatch_selected<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        mut permit: Option<OccupancyPermit>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let (metadata, stream) = self
             .generate_with_fault_detection_prepared(
                 instance_id,
@@ -891,6 +950,19 @@ where
     /// If only one device class exists (all CPU or all non-CPU), this naturally
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.device_aware_weighted_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn device_aware_weighted_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let state = self.occupancy_state()?;
         let routing_instances = self.client.routing_instances();
         let instance_ids = routing_instances.free_ids().to_vec();
@@ -936,16 +1008,8 @@ where
             "Selected worker"
         );
 
-        match self
-            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, permit, prepare)
             .await
-        {
-            Ok(stream) => Ok(match permit {
-                Some(permit) => permit.into_tracked_stream(stream),
-                None => stream,
-            }),
-            Err(err) => Err(err),
-        }
     }
 
     fn device_aware_candidates(
@@ -1013,6 +1077,19 @@ where
 
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.least_loaded_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn least_loaded_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let state = self.occupancy_state()?;
         let routing_instances = self.client.routing_instances();
         let instance_ids = routing_instances.free_ids().to_vec();
@@ -1029,13 +1106,8 @@ where
             "Selected worker"
         );
 
-        match self
-            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, Some(permit), prepare)
             .await
-        {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
-            Err(err) => Err(err),
-        }
     }
 
     /// Select the next worker according to the routing mode.
@@ -1193,45 +1265,21 @@ where
                                 .await
                         }
                         .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-                        tracing::info!(
-                            router_mode = "device-aware-weighted",
-                            worker_id = instance_id,
-                            candidate_count = selection.candidates.len(),
-                            load = state.load(instance_id),
-                            embedding_cache_hit = selection.embedding_cache_hit,
-                            request_cache_keys = selection.request_cache_keys,
-                            "Selected worker"
-                        );
                         let permit = (!selection.full_embedding_cache_hit)
                             .then(|| OccupancyPermit::new(state, instance_id));
                         return Ok((instance_id, permit));
                     }
                     _ => unreachable!(),
                 };
-                if self.router_mode == RouterMode::LeastLoaded {
-                    tracing::info!(
-                        router_mode = "least-loaded",
-                        worker_id = instance_id,
-                        candidate_count = instance_ids.len(),
-                        load = state.load(instance_id),
-                        "Selected worker"
-                    );
-                }
                 Ok((instance_id, Some(OccupancyPermit::new(state, instance_id))))
             }
-            RouterMode::RoundRobin | RouterMode::Random => {
-                let instance_id = self.select_next_worker().ok_or_else(|| {
+            RouterMode::RoundRobin | RouterMode::Random => self
+                .select_next_worker()
+                .map(|instance_id| (instance_id, None))
+                .ok_or_else(|| {
                     let routing_instances = self.client.routing_instances();
                     self.empty_free_pool_error(&routing_instances)
-                })?;
-                tracing::info!(
-                    router_mode = ?self.router_mode,
-                    worker_id = instance_id,
-                    candidate_count = self.client.routing_instances().free_ids().len(),
-                    "Selected worker"
-                );
-                Ok((instance_id, None))
-            }
+                }),
             RouterMode::Direct => Err(anyhow::anyhow!(
                 "Worker ID required for exact dispatch in Direct routing mode"
             )),
