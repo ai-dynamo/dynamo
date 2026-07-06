@@ -211,7 +211,7 @@ pub(super) fn spawn_kv_event_source_health_monitor(
                     worker_type,
                     target_namespace,
                     target_component,
-                    "KV event routing degraded: expected worker-local KV indexer query endpoints were not discovered. Cache overlap will remain empty for the affected ranks and cache-aware routing will be ineffective. For Dynamo vLLM, verify that the worker has --kv-events-config '{{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:PORT\",\"enable_kv_cache_events\":true}}'; if it is configured, check router endpoint discovery health. To intentionally use approximate routing, set --no-router-kv-events. Continuing to serve.",
+                    "KV event routing degraded: expected worker-local KV indexer query endpoints were not discovered. Cache overlap will remain empty for the affected ranks and cache-aware routing will be ineffective. For Dynamo vLLM, verify that prefix caching is enabled (--no-enable-prefix-caching is not set) and that the worker has --kv-events-config '{{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:PORT\",\"enable_kv_cache_events\":true}}'; if both are configured, check router endpoint discovery health. To intentionally use approximate routing, set --no-router-kv-events. Continuing to serve.",
                 );
             }
 
