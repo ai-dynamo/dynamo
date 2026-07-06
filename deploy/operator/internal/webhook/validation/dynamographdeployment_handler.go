@@ -202,9 +202,8 @@ func (h *DynamoGraphDeploymentHandler) RegisterWithManager(mgr manager.Manager) 
 		h,
 	)
 
-	// Keep the v1alpha1 endpoint in the binary before the Helm registration
-	// moves to v1beta1. This lets an upgrade switch the registration only after
-	// all running operators already serve both endpoints.
+	// TODO(1.5): Remove the v1alpha1 endpoint and handler after 1.3 is no longer
+	// a supported upgrade or rollback target.
 	alphaHandler := &dynamoGraphDeploymentV1Alpha1Handler{handler: h}
 	h.registerWithManager(
 		mgr,
