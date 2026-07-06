@@ -18,7 +18,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use super::{convert_backend_top_logprobs, token_to_utf8_bytes};
+use super::convert_backend_top_logprobs;
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
 
@@ -288,13 +288,13 @@ where
 pub struct GenerateResponseChoice {
     pub index: u32,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub token_ids: Option<Vec<u32>>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<serde_json::Value>,
 
     pub finish_reason: Option<String>,
+
+    pub routed_experts: Option<String>,
 }
 
 /// Token-in/token-out generation response.
@@ -304,10 +304,8 @@ pub struct GenerateResponse {
 
     pub choices: Vec<GenerateResponseChoice>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_logprobs: Option<serde_json::Value>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_transfer_params: Option<serde_json::Value>,
 }
 
@@ -324,6 +322,7 @@ struct GenerateChoiceAcc {
     token_ids: Vec<crate::protocols::TokenIdType>,
     logprobs: Option<Vec<dynamo_protocols::types::ChatCompletionTokenLogprob>>,
     finish_reason: Option<String>,
+    routed_experts: Option<String>,
 }
 
 impl GenerateChoiceAcc {
@@ -354,6 +353,7 @@ impl GenerateChoiceAcc {
             token_ids,
             logprobs,
             finish_reason,
+            routed_experts,
         } = self;
         let logprobs = if options.include_logprobs {
             let content = logprobs.ok_or_else(|| {
@@ -366,11 +366,7 @@ impl GenerateChoiceAcc {
                     content.len(),
                     token_ids.len()
                 );
-                serde_json::to_value(dynamo_protocols::types::ChatChoiceLogprobs {
-                    content: Some(content),
-                    refusal: None,
-                })
-                .map_err(anyhow::Error::from)?
+                serde_json::json!({"content": content})
             })
         } else {
             None
@@ -381,6 +377,7 @@ impl GenerateChoiceAcc {
             token_ids: Some(token_ids),
             logprobs,
             finish_reason,
+            routed_experts,
         })
     }
 }
@@ -437,17 +434,18 @@ fn completion_logprobs_from_output(
                 })
                 .collect::<Vec<_>>();
             let logprob = clamp_vllm_logprob(*logprob as f32);
+            let mut top_logprobs =
+                convert_backend_top_logprobs(&top_logprobs, &token, *token_id, logprob, true);
+            // The token-native API exposes opaque `token_id:<id>` placeholders,
+            // not decoded text, so their UTF-8 bytes are unknown.
+            for entry in &mut top_logprobs {
+                entry.bytes = None;
+            }
             dynamo_protocols::types::ChatCompletionTokenLogprob {
-                token: token.clone(),
+                token,
                 logprob,
-                bytes: token_to_utf8_bytes(&token),
-                top_logprobs: convert_backend_top_logprobs(
-                    &top_logprobs,
-                    &token,
-                    *token_id,
-                    logprob,
-                    true,
-                ),
+                bytes: None,
+                top_logprobs,
             }
         })
         .collect();
@@ -480,6 +478,7 @@ struct GenerateAggregator {
     choices: HashMap<u32, GenerateChoiceAcc>,
     prompt_logprobs: Option<PromptLogprobs>,
     kv_transfer_params: Option<Value>,
+    kv_transfer_params_from_engine_data: bool,
 }
 
 impl GenerateAggregator {
@@ -489,6 +488,7 @@ impl GenerateAggregator {
             choices: HashMap::new(),
             prompt_logprobs: None,
             kv_transfer_params: None,
+            kv_transfer_params_from_engine_data: false,
         }
     }
 
@@ -503,7 +503,10 @@ impl GenerateAggregator {
         {
             self.prompt_logprobs = Some(prompt_logprobs);
         }
-        if output.finish_reason.is_some() && output.disaggregated_params.is_some() {
+        if !self.kv_transfer_params_from_engine_data
+            && output.finish_reason.is_some()
+            && output.disaggregated_params.is_some()
+        {
             self.kv_transfer_params = output.disaggregated_params.clone();
         }
         let index = output.index.unwrap_or(0);
@@ -512,7 +515,21 @@ impl GenerateAggregator {
             token_ids: Vec::new(),
             logprobs: None,
             finish_reason: None,
+            routed_experts: None,
         });
+        if let Some(engine_data) = output.engine_data.as_ref() {
+            if let Some(routed_experts) = engine_data.get("routed_experts") {
+                choice.routed_experts = Some(
+                    serde_json::from_value(routed_experts.clone()).map_err(|error| {
+                        anyhow::anyhow!("invalid generate routed_experts payload: {error}")
+                    })?,
+                );
+            }
+            if let Some(kv_transfer_params) = engine_data.get("kv_transfer_params") {
+                self.kv_transfer_params = Some(kv_transfer_params.clone());
+                self.kv_transfer_params_from_engine_data = true;
+            }
+        }
         choice.apply(&output, options)
     }
 
@@ -535,6 +552,7 @@ impl GenerateAggregator {
             choices,
             prompt_logprobs,
             kv_transfer_params,
+            kv_transfer_params_from_engine_data: _,
         } = aggregator;
 
         let mut choices: Vec<GenerateResponseChoice> = choices
@@ -779,14 +797,15 @@ mod tests {
     }
 
     #[test]
-    fn generate_response_round_trips_without_usage_key() {
+    fn generate_response_matches_vllm_null_metadata_shape() {
         let resp = GenerateResponse {
             request_id: "req-123".to_string(),
             choices: vec![GenerateResponseChoice {
                 index: 0,
-                token_ids: Some(vec![10, 11, 12]),
+                token_ids: None,
                 logprobs: None,
-                finish_reason: Some("stop".to_string()),
+                finish_reason: None,
+                routed_experts: None,
             }],
             prompt_logprobs: None,
             kv_transfer_params: None,
@@ -797,15 +816,19 @@ mod tests {
             value.get("usage").is_none(),
             "GenerateResponse must not emit a `usage` key"
         );
-        assert!(value.get("prompt_logprobs").is_none());
-        assert!(value.get("kv_transfer_params").is_none());
+        assert_eq!(value["prompt_logprobs"], Value::Null);
+        assert_eq!(value["kv_transfer_params"], Value::Null);
+        assert_eq!(value["choices"][0]["token_ids"], Value::Null);
+        assert_eq!(value["choices"][0]["logprobs"], Value::Null);
+        assert_eq!(value["choices"][0]["finish_reason"], Value::Null);
+        assert_eq!(value["choices"][0]["routed_experts"], Value::Null);
 
         let round: GenerateResponse =
             serde_json::from_value(value).expect("round-trip deserialize");
         assert_eq!(round.request_id, "req-123");
         assert_eq!(round.choices.len(), 1);
-        assert_eq!(round.choices[0].token_ids, Some(vec![10, 11, 12]));
-        assert_eq!(round.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(round.choices[0].token_ids, None);
+        assert_eq!(round.choices[0].finish_reason, None);
     }
 
     #[tokio::test]
@@ -859,7 +882,10 @@ mod tests {
                     },
                 ]]),
                 finish_reason: Some(crate::protocols::common::FinishReason::Length),
-                disaggregated_params: Some(json!({"connector": "x"})),
+                engine_data: Some(json!({
+                    "routed_experts": "encoded-experts",
+                    "kv_transfer_params": {"connector": "x"}
+                })),
                 ..Default::default()
             },
         ];
@@ -879,12 +905,22 @@ mod tests {
         assert_eq!(response.choices.len(), 1);
         assert_eq!(response.choices[0].token_ids, Some(vec![100, 101]));
         assert_eq!(response.choices[0].finish_reason.as_deref(), Some("length"));
+        assert_eq!(
+            response.choices[0].routed_experts.as_deref(),
+            Some("encoded-experts")
+        );
         let logprobs = response.choices[0]
             .logprobs
             .as_ref()
             .expect("completion logprobs");
         assert_eq!(logprobs["content"][0]["token"], "token_id:100");
         assert_eq!(logprobs["content"][1]["token"], "token_id:101");
+        assert!(logprobs.get("refusal").is_none());
+        assert_eq!(logprobs["content"][0]["bytes"], Value::Null);
+        assert_eq!(
+            logprobs["content"][0]["top_logprobs"][0]["bytes"],
+            Value::Null
+        );
         assert_eq!(
             logprobs["content"][0]["top_logprobs"][1]["token"],
             "token_id:7"
@@ -901,6 +937,111 @@ mod tests {
             &json!({"connector": "x"})
         );
         assert!(response.is_complete_unary());
+    }
+
+    #[tokio::test]
+    async fn generate_response_associates_routed_experts_with_choices() {
+        let stream = futures::stream::iter([
+            Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![201],
+                index: Some(1),
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                engine_data: Some(json!({"routed_experts": "experts-1"})),
+                ..Default::default()
+            }),
+            Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![100],
+                index: Some(0),
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                engine_data: Some(json!({"routed_experts": "experts-0"})),
+                ..Default::default()
+            }),
+        ]);
+
+        let response = GenerateResponse::from_annotated_stream(stream, "req-routed".to_string())
+            .await
+            .expect("aggregate routed experts");
+
+        assert_eq!(response.choices[0].index, 0);
+        assert_eq!(
+            response.choices[0].routed_experts.as_deref(),
+            Some("experts-0")
+        );
+        assert_eq!(response.choices[1].index, 1);
+        assert_eq!(
+            response.choices[1].routed_experts.as_deref(),
+            Some("experts-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_response_rejects_malformed_routed_experts() {
+        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![100],
+            index: Some(0),
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            engine_data: Some(json!({"routed_experts": {"unexpected": "object"}})),
+            ..Default::default()
+        })]);
+
+        let error = GenerateResponse::from_annotated_stream(stream, "req-routed".to_string())
+            .await
+            .expect_err("malformed routed experts must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid generate routed_experts payload")
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_response_uses_terminal_kv_transfer_fallback() {
+        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![100],
+            index: Some(0),
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            disaggregated_params: Some(json!({"source": "terminal-fallback"})),
+            ..Default::default()
+        })]);
+
+        let response = GenerateResponse::from_annotated_stream(stream, "req-kv".to_string())
+            .await
+            .expect("aggregate terminal KV metadata");
+
+        assert_eq!(
+            response.kv_transfer_params,
+            Some(json!({"source": "terminal-fallback"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_response_prefers_engine_kv_metadata_over_later_fallback() {
+        let stream = futures::stream::iter([
+            Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![100],
+                index: Some(0),
+                engine_data: Some(json!({
+                    "kv_transfer_params": {"source": "engine-data"}
+                })),
+                ..Default::default()
+            }),
+            Annotated::from_data(LLMEngineOutput {
+                index: Some(0),
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                disaggregated_params: Some(json!({"source": "terminal-fallback"})),
+                ..Default::default()
+            }),
+        ]);
+
+        let response = GenerateResponse::from_annotated_stream(stream, "req-kv".to_string())
+            .await
+            .expect("aggregate KV metadata with precedence");
+
+        assert_eq!(
+            response.kv_transfer_params,
+            Some(json!({"source": "engine-data"}))
+        );
     }
 
     #[tokio::test]
