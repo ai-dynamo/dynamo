@@ -64,19 +64,20 @@ def _write_fake_cli(tmp_path: Path) -> Path:
             if os.environ.get("FAKE_MERGE_FAILURE"):
                 print("synthetic merge failure", file=sys.stderr)
                 raise SystemExit(2)
+            if os.environ.get("FAKE_INVALID_OUTPUT"):
+                print("not JSON")
+                raise SystemExit(0)
+            if len(sys.argv) != 1:
+                print("unexpected arguments", file=sys.stderr)
+                raise SystemExit(2)
 
-            def value(flag):
-                return sys.argv[sys.argv.index(flag) + 1]
-
-            with open(value("--blueprint"), encoding="utf-8") as source:
-                result = json.load(source)
-            with open(value("--override"), encoding="utf-8") as source:
-                override = json.load(source)
+            request = json.load(sys.stdin)
+            result = request["blueprint"]
+            override = request["override"]
             labels = result.setdefault("metadata", {}).setdefault("labels", {})
             labels["merged"] = "true"
             labels["override-api-version"] = override["apiVersion"]
-            with open(value("--output"), "w", encoding="utf-8") as destination:
-                json.dump(result, destination)
+            json.dump(result, sys.stdout)
             print("warning: synthetic warning", file=sys.stderr)
             print("synthetic diagnostic", file=sys.stderr)
             """
@@ -225,6 +226,22 @@ def test_apply_dgd_overrides_surfaces_cli_failure(
     monkeypatch.setenv("FAKE_MERGE_FAILURE", "1")
 
     with pytest.raises(DGDOverrideError, match="synthetic merge failure"):
+        apply_dgd_overrides(
+            blueprint,
+            {"apiVersion": "nvidia.com/v1beta1", "kind": "DynamoGraphDeployment"},
+            binary_path=str(binary),
+        )
+
+
+def test_apply_dgd_overrides_rejects_invalid_cli_output(
+    tmp_path: Path,
+    blueprint: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = _write_fake_cli(tmp_path)
+    monkeypatch.setenv("FAKE_INVALID_OUTPUT", "1")
+
+    with pytest.raises(DGDOverrideError, match="failed to decode effective DGD"):
         apply_dgd_overrides(
             blueprint,
             {"apiVersion": "nvidia.com/v1beta1", "kind": "DynamoGraphDeployment"},

@@ -84,10 +84,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			RuntimeConfig:           &commonController.RuntimeConfig{},
 			OperatorImage:           "registry.example/operator:test",
 			OperatorImagePullPolicy: corev1.PullAlways,
-			OperatorImagePullSecrets: []corev1.LocalObjectReference{{
-				Name: "operator-registry",
-			}},
-			RBACManager: &MockRBACManager{},
+			RBACManager:             &MockRBACManager{},
 		}
 	})
 
@@ -386,8 +383,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			toolVolume := findVolume(job.Spec.Template.Spec.Volumes, VolumeNameDGDOverrideTool)
 			Expect(toolVolume).ShouldNot(BeNil())
 			Expect(toolVolume.EmptyDir).ShouldNot(BeNil())
-			Expect(job.Spec.Template.Spec.ImagePullSecrets).Should(ContainElement(
-				corev1.LocalObjectReference{Name: "operator-registry"},
+			Expect(job.Spec.Template.Spec.ImagePullSecrets).Should(Equal(
+				[]corev1.LocalObjectReference{{Name: "nvcr-imagepullsecret"}},
 			))
 
 			_ = k8sClient.Delete(ctx, job)

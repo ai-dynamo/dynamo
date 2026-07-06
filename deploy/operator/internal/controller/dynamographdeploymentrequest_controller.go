@@ -390,15 +390,14 @@ func isValidProfilingPhase(phase string) bool {
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
 type DynamoGraphDeploymentRequestReconciler struct {
 	client.Client
-	APIReader                client.Reader
-	Recorder                 record.EventRecorder
-	Config                   *configv1alpha1.OperatorConfiguration
-	RuntimeConfig            *commonController.RuntimeConfig
-	GPUDiscoveryCache        *gpu.GPUDiscoveryCache
-	GPUDiscovery             *gpu.GPUDiscovery
-	OperatorImage            string
-	OperatorImagePullPolicy  corev1.PullPolicy
-	OperatorImagePullSecrets []corev1.LocalObjectReference
+	APIReader               client.Reader
+	Recorder                record.EventRecorder
+	Config                  *configv1alpha1.OperatorConfiguration
+	RuntimeConfig           *commonController.RuntimeConfig
+	GPUDiscoveryCache       *gpu.GPUDiscoveryCache
+	GPUDiscovery            *gpu.GPUDiscovery
+	OperatorImage           string
+	OperatorImagePullPolicy corev1.PullPolicy
 	// RBACMgr handles RBAC setup for profiling jobs
 	RBACManager RBACManager
 }
@@ -1665,7 +1664,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				job,
 				r.OperatorImage,
 				r.OperatorImagePullPolicy,
-				r.OperatorImagePullSecrets,
 			); err != nil {
 				return nil, false, err
 			}

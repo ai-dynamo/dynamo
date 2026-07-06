@@ -517,10 +517,20 @@ func TestEnsureDGDOverrideTool_ProtectsDeliveryFromOverrides(t *testing.T) {
 					{
 						Name:  "user-init",
 						Image: "user-init:latest",
-						VolumeMounts: []corev1.VolumeMount{{
-							Name:      VolumeNameDGDOverrideTool,
-							MountPath: "/unexpected-init",
-						}},
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      VolumeNameDGDOverrideTool,
+								MountPath: "/unexpected-init",
+							},
+							{
+								Name:      "conflicting-init-path",
+								MountPath: DGDOverrideToolMountPath,
+							},
+							{
+								Name:      "user-data",
+								MountPath: "/user-data",
+							},
+						},
 					},
 				},
 				Containers: []corev1.Container{{
@@ -528,10 +538,16 @@ func TestEnsureDGDOverrideTool_ProtectsDeliveryFromOverrides(t *testing.T) {
 						Name:  EnvDGDOverrideToolPath,
 						Value: "/unexpected-bin",
 					}},
-					VolumeMounts: []corev1.VolumeMount{{
-						Name:      VolumeNameDGDOverrideTool,
-						MountPath: "/unexpected-mount",
-					}},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      VolumeNameDGDOverrideTool,
+							MountPath: "/unexpected-mount",
+						},
+						{
+							Name:      "conflicting-profiler-path",
+							MountPath: DGDOverrideToolMountPath,
+						},
+					},
 				}},
 			},
 		},
@@ -541,13 +557,18 @@ func TestEnsureDGDOverrideTool_ProtectsDeliveryFromOverrides(t *testing.T) {
 		job,
 		"registry.example/operator:v1.2.3",
 		corev1.PullAlways,
-		[]corev1.LocalObjectReference{{Name: "operator-registry"}},
 	)
 	if err != nil {
 		t.Fatalf("ensureDGDOverrideTool() error = %v", err)
 	}
 
-	spec := job.Spec.Template.Spec
+	assertDGDOverrideInstaller(t, &job.Spec.Template.Spec)
+	assertDGDOverrideMountProtection(t, &job.Spec.Template.Spec)
+}
+
+func assertDGDOverrideInstaller(t *testing.T, spec *corev1.PodSpec) {
+	t.Helper()
+
 	toolVolume := findVolume(spec.Volumes, VolumeNameDGDOverrideTool)
 	if toolVolume == nil || toolVolume.EmptyDir == nil || toolVolume.PersistentVolumeClaim != nil {
 		t.Fatalf("expected protected emptyDir tool volume, got %+v", toolVolume)
@@ -570,16 +591,26 @@ func TestEnsureDGDOverrideTool_ProtectsDeliveryFromOverrides(t *testing.T) {
 	if installerMount == nil || installerMount.MountPath != DGDOverrideToolMountPath || installerMount.ReadOnly {
 		t.Errorf("unexpected installer mount: %+v", installerMount)
 	}
-	if installer.SecurityContext == nil ||
-		installer.SecurityContext.AllowPrivilegeEscalation == nil || *installer.SecurityContext.AllowPrivilegeEscalation ||
-		installer.SecurityContext.ReadOnlyRootFilesystem == nil || !*installer.SecurityContext.ReadOnlyRootFilesystem ||
-		installer.SecurityContext.RunAsNonRoot == nil || !*installer.SecurityContext.RunAsNonRoot ||
-		installer.SecurityContext.RunAsUser == nil || *installer.SecurityContext.RunAsUser != 1000 ||
-		installer.SecurityContext.RunAsGroup == nil || *installer.SecurityContext.RunAsGroup != 1000 ||
-		installer.SecurityContext.SeccompProfile == nil || installer.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault ||
-		installer.SecurityContext.Capabilities == nil || len(installer.SecurityContext.Capabilities.Drop) != 1 || installer.SecurityContext.Capabilities.Drop[0] != "ALL" {
-		t.Errorf("installer security context is not restricted: %+v", installer.SecurityContext)
+	assertRestrictedInstallerSecurityContext(t, installer.SecurityContext)
+}
+
+func assertRestrictedInstallerSecurityContext(t *testing.T, securityContext *corev1.SecurityContext) {
+	t.Helper()
+
+	if securityContext == nil ||
+		securityContext.AllowPrivilegeEscalation == nil || *securityContext.AllowPrivilegeEscalation ||
+		securityContext.ReadOnlyRootFilesystem == nil || !*securityContext.ReadOnlyRootFilesystem ||
+		securityContext.RunAsNonRoot == nil || !*securityContext.RunAsNonRoot ||
+		securityContext.RunAsUser == nil || *securityContext.RunAsUser != 1000 ||
+		securityContext.RunAsGroup == nil || *securityContext.RunAsGroup != 1000 ||
+		securityContext.SeccompProfile == nil || securityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault ||
+		securityContext.Capabilities == nil || len(securityContext.Capabilities.Drop) != 1 || securityContext.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("installer security context is not restricted: %+v", securityContext)
 	}
+}
+
+func assertDGDOverrideMountProtection(t *testing.T, spec *corev1.PodSpec) {
+	t.Helper()
 
 	userInit := findContainer(spec.InitContainers, "user-init")
 	if userInit == nil {
@@ -587,6 +618,12 @@ func TestEnsureDGDOverrideTool_ProtectsDeliveryFromOverrides(t *testing.T) {
 	}
 	if findVolumeMount(userInit.VolumeMounts, VolumeNameDGDOverrideTool) != nil {
 		t.Error("user init container should not mount the reserved tool volume")
+	}
+	if findVolumeMountByPath(userInit.VolumeMounts, DGDOverrideToolMountPath) != nil {
+		t.Error("user init container should not mount the reserved tool path")
+	}
+	if findVolumeMount(userInit.VolumeMounts, "user-data") == nil {
+		t.Error("unrelated user init container mount should be preserved")
 	}
 
 	profiler := findContainer(spec.Containers, ContainerNameProfiler)
@@ -601,6 +638,9 @@ func TestEnsureDGDOverrideTool_ProtectsDeliveryFromOverrides(t *testing.T) {
 	if toolEnv == nil || toolEnv.Value != DGDOverrideToolPath {
 		t.Errorf("unexpected profiler tool environment: %+v", toolEnv)
 	}
+	if countVolumeMountsByPath(profiler.VolumeMounts, DGDOverrideToolMountPath) != 1 {
+		t.Errorf("expected exactly one profiler mount at reserved path, got %v", profiler.VolumeMounts)
+	}
 
 	sidecar := findContainer(spec.Containers, ContainerNameOutputCopier)
 	if sidecar == nil {
@@ -609,13 +649,13 @@ func TestEnsureDGDOverrideTool_ProtectsDeliveryFromOverrides(t *testing.T) {
 	if findVolumeMount(sidecar.VolumeMounts, VolumeNameDGDOverrideTool) != nil {
 		t.Error("output copier should not mount the DGD override tool")
 	}
-	if len(spec.ImagePullSecrets) != 2 || spec.ImagePullSecrets[1].Name != "operator-registry" {
-		t.Errorf("expected operator image pull secret to be merged, got %v", spec.ImagePullSecrets)
+	if len(spec.ImagePullSecrets) != 1 || spec.ImagePullSecrets[0].Name != "nvcr-imagepullsecret" {
+		t.Errorf("expected target-namespace image pull secrets to remain unchanged, got %v", spec.ImagePullSecrets)
 	}
 }
 
 func TestEnsureDGDOverrideTool_RequiresOperatorImage(t *testing.T) {
-	err := ensureDGDOverrideTool(baseJob(), "", corev1.PullIfNotPresent, nil)
+	err := ensureDGDOverrideTool(baseJob(), "", corev1.PullIfNotPresent)
 	if err == nil || err.Error() != "operator image must be configured when a DGD override is present" {
 		t.Fatalf("expected missing operator image error, got %v", err)
 	}
@@ -1075,6 +1115,25 @@ func findVolumeMount(mounts []corev1.VolumeMount, name string) *corev1.VolumeMou
 		}
 	}
 	return nil
+}
+
+func findVolumeMountByPath(mounts []corev1.VolumeMount, path string) *corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].MountPath == path {
+			return &mounts[i]
+		}
+	}
+	return nil
+}
+
+func countVolumeMountsByPath(mounts []corev1.VolumeMount, path string) int {
+	count := 0
+	for i := range mounts {
+		if mounts[i].MountPath == path {
+			count++
+		}
+	}
+	return count
 }
 
 func findEnv(env []corev1.EnvVar, name string) *corev1.EnvVar {

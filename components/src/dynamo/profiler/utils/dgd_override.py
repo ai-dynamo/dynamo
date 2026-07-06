@@ -11,12 +11,9 @@ import logging
 import os
 import shutil
 import subprocess
-import tempfile
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -64,13 +61,18 @@ def resolve_dgd_override_binary(binary_path: str | None = None) -> str:
     )
 
 
-def _run_cli(command: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_cli(
+    command: list[str],
+    *,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             command,
             check=False,
             capture_output=True,
             text=True,
+            input=input_text,
             timeout=_COMMAND_TIMEOUT_SECONDS,
         )
     except OSError as exc:
@@ -149,43 +151,30 @@ def apply_dgd_overrides(
     executable = resolve_dgd_override_binary(binary_path)
     _verify_protocol(executable)
 
-    with tempfile.TemporaryDirectory(prefix="dgd-override-") as directory:
-        work_dir = Path(directory)
-        blueprint_path = work_dir / "blueprint.json"
-        override_path = work_dir / "override.json"
-        output_path = work_dir / "effective.yaml"
-        blueprint_path.write_text(json.dumps(blueprint), encoding="utf-8")
-        override_path.write_text(json.dumps(versioned_override), encoding="utf-8")
+    result = _run_cli(
+        [executable],
+        input_text=json.dumps(
+            {"blueprint": blueprint, "override": versioned_override}
+        ),
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no error output"
+        raise DGDOverrideError(f"failed to apply DGD override: {detail}")
 
-        result = _run_cli(
-            [
-                executable,
-                "--blueprint",
-                str(blueprint_path),
-                "--override",
-                str(override_path),
-                "--output",
-                str(output_path),
-            ]
-        )
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "no error output"
-            raise DGDOverrideError(f"failed to apply DGD override: {detail}")
+    for diagnostic in result.stderr.splitlines():
+        diagnostic = diagnostic.strip()
+        if not diagnostic:
+            continue
+        if diagnostic.startswith("warning: "):
+            logger.warning("DGD override: %s", diagnostic.removeprefix("warning: "))
+        else:
+            logger.info("DGD override CLI: %s", diagnostic)
 
-        for diagnostic in result.stderr.splitlines():
-            diagnostic = diagnostic.strip()
-            if not diagnostic:
-                continue
-            if diagnostic.startswith("warning: "):
-                logger.warning("DGD override: %s", diagnostic.removeprefix("warning: "))
-            else:
-                logger.info("DGD override CLI: %s", diagnostic)
-
-        try:
-            effective = yaml.safe_load(output_path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError) as exc:
-            raise DGDOverrideError(
-                f"failed to read effective DGD from override binary: {exc}"
-            ) from exc
+    try:
+        effective = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise DGDOverrideError(
+            f"failed to decode effective DGD from override binary: {exc}"
+        ) from exc
 
     return _validate_dgd(effective, "effective DGD")

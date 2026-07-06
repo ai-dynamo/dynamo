@@ -83,9 +83,6 @@ spec:
         - --operator-version={{ .Chart.AppVersion }}
         - {{ printf "--operator-image=%s:%s" .Values.controllerManager.manager.image.repository (.Values.controllerManager.manager.image.tag | default .Chart.AppVersion) | quote }}
         - {{ printf "--operator-image-pull-policy=%s" (.Values.controllerManager.manager.image.pullPolicy | default "IfNotPresent") | quote }}
-        {{- range .Values.imagePullSecrets }}
-        - {{ printf "--operator-image-pull-secret=%s" .name | quote }}
-        {{- end }}
         command:
         - /manager
         env:

@@ -181,24 +181,17 @@ func main() {
 	var operatorVersion string
 	var operatorImage string
 	var operatorImagePullPolicy string
-	var operatorImagePullSecrets []string
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
-	flag.StringVar(&operatorImage, "operator-image", "", "Operator image used to deliver version-matched helper binaries")
+	flag.StringVar(
+		&operatorImage,
+		"operator-image",
+		"",
+		"Operator image used to deliver version-matched helper binaries for DGD overrides",
+	)
 	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
 		"Image pull policy for operator helper init containers")
-	flag.Func(
-		"operator-image-pull-secret",
-		"Image pull secret for the operator image (repeatable)",
-		func(value string) error {
-			if value == "" {
-				return fmt.Errorf("image pull secret name must not be empty")
-			}
-			operatorImagePullSecrets = append(operatorImagePullSecrets, value)
-			return nil
-		},
-	)
 	opts := zap.Options{
 		Development: true,
 	}
@@ -210,11 +203,6 @@ func main() {
 		setupLog.Error(nil, "--config flag is required")
 		os.Exit(1)
 	}
-	if operatorImage == "" {
-		setupLog.Error(nil, "--operator-image flag is required")
-		os.Exit(1)
-	}
-
 	// Load, default, and validate operator configuration
 	operatorCfg, err := LoadAndValidateOperatorConfig(configFile)
 	if err != nil {
@@ -237,10 +225,6 @@ func main() {
 	default:
 		setupLog.Error(nil, "operator-image-pull-policy is invalid", "provided", operatorImagePullPolicy)
 		os.Exit(1)
-	}
-	pullSecrets := make([]corev1.LocalObjectReference, 0, len(operatorImagePullSecrets))
-	for _, name := range operatorImagePullSecrets {
-		pullSecrets = append(pullSecrets, corev1.LocalObjectReference{Name: name})
 	}
 
 	// Initialize runtime config (will be populated after detection)
@@ -641,7 +625,7 @@ func main() {
 	if err := registerControllers(
 		mgr, operatorCfg, runtimeConfig,
 		dockerSecretRetriever, sshKeyManager,
-		operatorImage, pullPolicy, pullSecrets,
+		operatorImage, pullPolicy,
 	); err != nil {
 		setupLog.Error(err, "failed to register controllers")
 		os.Exit(1)
@@ -703,7 +687,6 @@ func registerControllers(
 	sshKeyManager *secret.SSHKeyManager,
 	operatorImage string,
 	operatorPullPolicy corev1.PullPolicy,
-	operatorPullSecrets []corev1.LocalObjectReference,
 ) error {
 	if err := (&controller.DynamoComponentDeploymentReconciler{
 		Client:                mgr.GetClient(),
@@ -747,17 +730,16 @@ func registerControllers(
 	}
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:                   mgr.GetClient(),
-		APIReader:                mgr.GetAPIReader(),
-		Recorder:                 mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		Config:                   operatorCfg,
-		RuntimeConfig:            runtimeConfig,
-		GPUDiscoveryCache:        gpu.NewGPUDiscoveryCache(),
-		GPUDiscovery:             gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
-		OperatorImage:            operatorImage,
-		OperatorImagePullPolicy:  operatorPullPolicy,
-		OperatorImagePullSecrets: operatorPullSecrets,
-		RBACManager:              rbacManager,
+		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
+		Recorder:                mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Config:                  operatorCfg,
+		RuntimeConfig:           runtimeConfig,
+		GPUDiscoveryCache:       gpu.NewGPUDiscoveryCache(),
+		GPUDiscovery:            gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
+		OperatorImage:           operatorImage,
+		OperatorImagePullPolicy: operatorPullPolicy,
+		RBACManager:             rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
 	}

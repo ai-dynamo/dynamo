@@ -270,21 +270,26 @@ curl http://localhost:8000/v1/models
 ### Local Runs with DGD Overrides
 
 The operator supplies `dgd-apply-overrides` to Kubernetes profiling jobs when
-`overrides.dgd` is present. To run the profiler directly with a DGD override,
-install the matching binary on `PATH` or set `DYNAMO_DGD_APPLY_OVERRIDES_BIN` to
-its absolute path. The profiler does not download the binary at runtime.
-
-To build the binary from the same Dynamo checkout:
+`overrides.dgd` is present. For a local run, put the matching binary on `PATH`.
+From a Dynamo checkout with Go installed, build and install it with:
 
 ```bash
-mkdir -p .build
-go -C deploy/operator build -o ../../.build/dgd-apply-overrides ./cmd/dgd-apply-overrides
-export DYNAMO_DGD_APPLY_OVERRIDES_BIN="$PWD/.build/dgd-apply-overrides"
+go -C deploy/operator install ./cmd/dgd-apply-overrides
 python -m dynamo.profiler --config /path/to/dgdr-spec.yaml
 ```
 
+`go install` writes the binary to `GOBIN`, or to `$(go env GOPATH)/bin` when
+`GOBIN` is unset. Add that directory to `PATH` if needed. Alternatively, set
+`DYNAMO_DGD_APPLY_OVERRIDES_BIN` to the binary's absolute path. The profiler
+does not download the binary at runtime.
+
 Use a binary from the same Dynamo release as the profiler. The profiler checks
 the binary protocol before applying an override and rejects incompatible versions.
+
+Registry credentials are namespace-scoped. The operator chart's
+`imagePullSecrets` pull the operator Pod only. A profiling Job that needs
+credentials for the operator image must receive them from its ServiceAccount or
+from `overrides.profilingJob.template.spec.imagePullSecrets` in the DGDR namespace.
 
 ## Profiling Method
 

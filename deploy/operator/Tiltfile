@@ -303,8 +303,6 @@ operator_entrypoint = [
     '--operator-image=' + IMG_REF,
     '--operator-image-pull-policy=IfNotPresent',
 ]
-if IMAGE_PULL_SECRET:
-    operator_entrypoint.append('--operator-image-pull-secret=' + IMAGE_PULL_SECRET)
 
 docker_build_with_restart(
     IMG_REF,

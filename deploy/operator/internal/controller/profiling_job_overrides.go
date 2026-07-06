@@ -87,7 +87,6 @@ func ensureDGDOverrideTool(
 	job *batchv1.Job,
 	operatorImage string,
 	pullPolicy corev1.PullPolicy,
-	pullSecrets []corev1.LocalObjectReference,
 ) error {
 	if operatorImage == "" {
 		return errors.New("operator image must be configured when a DGD override is present")
@@ -107,12 +106,11 @@ func ensureDGDOverrideTool(
 		}},
 		func(volume corev1.Volume) string { return volume.Name },
 	)
-	spec.ImagePullSecrets = mergeImagePullSecrets(spec.ImagePullSecrets, pullSecrets)
-
 	for i := range spec.InitContainers {
-		spec.InitContainers[i].VolumeMounts = removeVolumeMountByName(
+		spec.InitContainers[i].VolumeMounts = removeVolumeMountByNameOrPath(
 			spec.InitContainers[i].VolumeMounts,
 			VolumeNameDGDOverrideTool,
+			DGDOverrideToolMountPath,
 		)
 	}
 	installer := corev1.Container{
@@ -148,9 +146,10 @@ func ensureDGDOverrideTool(
 	foundProfiler := false
 	for i := range spec.Containers {
 		container := &spec.Containers[i]
-		container.VolumeMounts = removeVolumeMountByName(
+		container.VolumeMounts = removeVolumeMountByNameOrPath(
 			container.VolumeMounts,
 			VolumeNameDGDOverrideTool,
+			DGDOverrideToolMountPath,
 		)
 		if container.Name != ContainerNameProfiler {
 			continue
@@ -223,6 +222,20 @@ func removeVolumeMountByName(mounts []corev1.VolumeMount, name string) []corev1.
 	result := make([]corev1.VolumeMount, 0, len(mounts))
 	for _, mount := range mounts {
 		if mount.Name != name {
+			result = append(result, mount)
+		}
+	}
+	return result
+}
+
+func removeVolumeMountByNameOrPath(mounts []corev1.VolumeMount, name, path string) []corev1.VolumeMount {
+	if len(mounts) == 0 {
+		return mounts
+	}
+
+	result := make([]corev1.VolumeMount, 0, len(mounts))
+	for _, mount := range mounts {
+		if mount.Name != name && mount.MountPath != path {
 			result = append(result, mount)
 		}
 	}
