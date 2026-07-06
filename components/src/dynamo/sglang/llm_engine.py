@@ -163,6 +163,13 @@ class SglangLLMEngine(LLMEngine):
             server_args.enable_custom_logit_processor = True
             server_args.skip_tokenizer_init = False
 
+        # When the frontend skips tokenization, every worker role (prefill and
+        # decode/agg alike) receives raw prompt text and must tokenize it.
+        # SGLang's default skip_tokenizer_init=True leaves no tokenizer loaded,
+        # so force it off for all serving modes here.
+        if os.getenv("DYN_SKIP_FRONTEND_TOKENIZE") in ("1", "true"):
+            server_args.skip_tokenizer_init = False
+
         model_input = (
             ModelInput.Text if dynamo_args.use_sglang_tokenizer else ModelInput.Tokens
         )
