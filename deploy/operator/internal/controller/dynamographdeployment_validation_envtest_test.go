@@ -20,22 +20,27 @@ package controller
 import (
 	"fmt"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 )
 
 var _ = Describe("DynamoGraphDeployment API validation", func() {
-	const restartOnCreateErr = "spec.restart must be unset on create"
+	const (
+		restartOnCreateErr   = "spec.restart must be unset on create"
+		backendFrameworkVLLM = "vllm"
+	)
 
 	newDGD := func(name string) *nvidiacomv1beta1.DynamoGraphDeployment {
 		return &nvidiacomv1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
-				Namespace: "default",
+				Namespace: envtestNamespace,
 			},
 			Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 				Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
@@ -69,5 +74,38 @@ var _ = Describe("DynamoGraphDeployment API validation", func() {
 
 		dgd.Spec.Restart = &nvidiacomv1beta1.Restart{ID: "restart-1"}
 		Expect(k8sClient.Update(ctx, dgd)).To(Succeed())
+	})
+
+	It("converts a v1beta1 DGD to v1alpha1", func() {
+		GinkgoT().Log("Create a v1beta1 DGD through the API server")
+		dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("conversion-dgd-%d", GinkgoRandomSeed()),
+				Namespace: envtestNamespace,
+			},
+			Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: backendFrameworkVLLM,
+				Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+					ComponentName: "frontend",
+					ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
+		DeferCleanup(func() {
+			err := k8sClient.Delete(ctx, dgd)
+			if err != nil && !apierrors.IsNotFound(err) {
+				Expect(err).NotTo(HaveOccurred())
+			}
+		})
+
+		GinkgoT().Log("Read the DGD as v1alpha1 through the conversion webhook")
+		var alpha nvidiacomv1alpha1.DynamoGraphDeployment
+		key := types.NamespacedName{Name: dgd.Name, Namespace: envtestNamespace}
+		Expect(k8sClient.Get(ctx, key, &alpha)).To(Succeed())
+
+		GinkgoT().Log("Assert the converted DGD uses the v1alpha1 service map shape")
+		Expect(alpha.Spec.BackendFramework).To(Equal(backendFrameworkVLLM))
+		Expect(alpha.Spec.Services["frontend"]).NotTo(BeNil())
 	})
 })
