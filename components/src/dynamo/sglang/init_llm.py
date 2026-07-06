@@ -57,6 +57,9 @@ async def init_decode(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    clear_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
+    )
 
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
@@ -160,6 +163,10 @@ async def init_decode(
                 handler.list_loras,
                 metrics_labels=metrics_labels,
             ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks,
+                metrics_labels=metrics_labels,
+            ),
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
@@ -169,6 +176,8 @@ async def init_decode(
                 readiness_gate=ready_event,
                 worker_type=decode_worker_type,
                 needs=decode_needs,
+                # Decode workers serve the LoRA load endpoints, so they may advertise capacity.
+                serves_lora_load=True,
             ),
         ]
         await asyncio.gather(*gather_tasks)
@@ -203,6 +212,9 @@ async def init_prefill(
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
+    )
+    clear_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
     )
 
     # Use pre-created engine if provided (snapshot mode)
@@ -290,6 +302,10 @@ async def init_prefill(
                 handler.list_loras,
                 metrics_labels=metrics_labels,
             ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks,
+                metrics_labels=metrics_labels,
+            ),
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
@@ -306,6 +322,9 @@ async def init_prefill(
                 readiness_gate=ready_event,
                 worker_type=WorkerType.Prefill,
                 needs=[[WorkerType.Decode]],
+                # Prefill workers also serve the LoRA load endpoints (init_prefill), so they may
+                # advertise capacity.
+                serves_lora_load=True,
             ),
         )
     except Exception as e:

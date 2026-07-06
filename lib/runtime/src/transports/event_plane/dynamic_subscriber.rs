@@ -58,8 +58,9 @@ impl DynamicSubscriber {
         let (event_tx, event_rx) = mpsc::channel::<Bytes>(channel_cap);
 
         // Track active endpoint connections with instance ID to endpoint mapping
-        let active_endpoints: Arc<RwLock<HashMap<String, (String, CancellationToken)>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let active_endpoints: Arc<
+            RwLock<HashMap<DiscoveryInstanceId, (String, CancellationToken)>>,
+        > = Arc::new(RwLock::new(HashMap::new()));
 
         // Clone self for the spawned task
         let subscriber_clone = Arc::clone(&self);
@@ -103,19 +104,19 @@ impl DynamicSubscriber {
                 match event_result {
                     Ok(DiscoveryEvent::Added(instance)) => {
                         tracing::info!(instance = ?instance, "Discovery Added event received");
-                        let instance_id = instance.instance_id().to_string();
+                        let instance_id = instance.id();
 
                         // Extract ZMQ endpoint from the instance
-                        if let Some(endpoint) = Self::extract_zmq_endpoint(&instance) {
+                        if let Some(endpoint) = Self::extract_zmq_endpoint(&instance, &zmq_topic) {
                             let mut endpoints_guard = endpoints.write().await;
 
                             // Skip if instance already tracked
                             if endpoints_guard.contains_key(&instance_id) {
-                                tracing::debug!(endpoint = %endpoint, instance_id = %instance_id, "Already connected to ZMQ publisher");
+                                tracing::debug!(endpoint = %endpoint, ?instance_id, "Already connected to ZMQ publisher");
                                 continue;
                             }
 
-                            tracing::info!(endpoint = %endpoint, instance_id = %instance_id, "Connecting to new ZMQ publisher");
+                            tracing::info!(endpoint = %endpoint, ?instance_id, "Connecting to new ZMQ publisher");
 
                             // Create cancellation token for this endpoint's stream
                             let endpoint_cancel = CancellationToken::new();
@@ -151,25 +152,44 @@ impl DynamicSubscriber {
                                 endpoints_clone.write().await.remove(&instance_id_clone);
                             });
                         } else {
-                            tracing::warn!(
+                            tracing::debug!(
                                 instance = ?instance,
-                                "Discovery Added event did not contain a ZMQ endpoint"
+                                expected_topic = %zmq_topic,
+                                "Discovery event is not a matching ZMQ publisher"
                             );
                         }
                     }
                     Ok(DiscoveryEvent::Removed(instance_id)) => {
-                        let id_str = instance_id.instance_id().to_string();
+                        let is_expected_topic = matches!(
+                            &instance_id,
+                            DiscoveryInstanceId::EventChannel(channel_id)
+                                if channel_id.topic == zmq_topic
+                        );
+                        if !is_expected_topic {
+                            tracing::debug!(
+                                ?instance_id,
+                                expected_topic = %zmq_topic,
+                                "Ignoring removal for unrelated event channel"
+                            );
+                            continue;
+                        }
+
                         tracing::info!(
-                            instance_id = %id_str,
+                            ?instance_id,
                             "ZMQ publisher removed from discovery, cancelling endpoint stream"
                         );
 
                         // Cancel the endpoint's stream via its CancellationToken
-                        if let Some((_endpoint, cancel)) = endpoints.write().await.remove(&id_str) {
+                        if let Some((_endpoint, cancel)) =
+                            endpoints.write().await.remove(&instance_id)
+                        {
                             cancel.cancel();
-                            tracing::info!(instance_id = %id_str, "Cancelled endpoint stream");
+                            tracing::info!(?instance_id, "Cancelled endpoint stream");
                         } else {
-                            tracing::warn!(instance_id = %id_str, "No active endpoint found for removed stream instance");
+                            tracing::debug!(
+                                ?instance_id,
+                                "No active endpoint found for removed stream instance"
+                            );
                         }
                     }
                     Err(e) => {
@@ -201,8 +221,11 @@ impl DynamicSubscriber {
     }
 
     /// Extract ZMQ endpoint from a discovery instance.
-    fn extract_zmq_endpoint(instance: &DiscoveryInstance) -> Option<String> {
-        if let DiscoveryInstance::EventChannel { transport, .. } = instance
+    fn extract_zmq_endpoint(instance: &DiscoveryInstance, expected_topic: &str) -> Option<String> {
+        if let DiscoveryInstance::EventChannel {
+            topic, transport, ..
+        } = instance
+            && topic == expected_topic
             && let EventTransport::Zmq { endpoint } = transport
         {
             return Some(endpoint.clone());
@@ -276,5 +299,43 @@ impl DynamicSubscriber {
 impl Drop for DynamicSubscriber {
     fn drop(&mut self) {
         self.cancel_token.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event_channel(topic: &str, transport: EventTransport) -> DiscoveryInstance {
+        DiscoveryInstance::EventChannel {
+            namespace: "test-ns".to_string(),
+            component: "test-component".to_string(),
+            topic: topic.to_string(),
+            instance_id: 1,
+            transport,
+        }
+    }
+
+    #[test]
+    fn extracts_only_matching_zmq_topic() {
+        let matching = event_channel("kv-events", EventTransport::zmq("tcp://127.0.0.1:1"));
+        let wrong_topic = event_channel("kv-metrics", EventTransport::zmq("tcp://127.0.0.1:2"));
+        let wrong_transport = event_channel(
+            "kv-events",
+            EventTransport::nats("namespace.test-ns.component.test-component"),
+        );
+
+        assert_eq!(
+            DynamicSubscriber::extract_zmq_endpoint(&matching, "kv-events").as_deref(),
+            Some("tcp://127.0.0.1:1")
+        );
+        assert_eq!(
+            DynamicSubscriber::extract_zmq_endpoint(&wrong_topic, "kv-events"),
+            None
+        );
+        assert_eq!(
+            DynamicSubscriber::extract_zmq_endpoint(&wrong_transport, "kv-events"),
+            None
+        );
     }
 }

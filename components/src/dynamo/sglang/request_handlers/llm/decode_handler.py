@@ -395,7 +395,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
-                **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
@@ -463,7 +462,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
-                **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
@@ -580,18 +578,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
                     out["engine_data"] = {"routed_experts": routed_experts}
                 if finish_reason:
-                    input_tokens = meta_info["prompt_tokens"]
-                    completion_tokens = meta_info["completion_tokens"]
-                    cached_tokens = meta_info["cached_tokens"]
+                    input_tokens = meta_info.get("prompt_tokens")
+                    completion_tokens = meta_info.get("completion_tokens")
+                    cached_tokens = meta_info.get("cached_tokens")
                     prefill_prompt_tokens_details = None
                     if cached_tokens is not None and cached_tokens > 0:
                         prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    out["completion_usage"] = {
-                        "prompt_tokens": input_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": input_tokens + completion_tokens,
-                        "prompt_tokens_details": prefill_prompt_tokens_details,
-                    }
+                    if input_tokens is not None and completion_tokens is not None:
+                        completion_usage = {
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": input_tokens + completion_tokens,
+                        }
+                        if prefill_prompt_tokens_details is not None:
+                            completion_usage[
+                                "prompt_tokens_details"
+                            ] = prefill_prompt_tokens_details
+                        out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:
                             await metadata_uploader.upload_choice(output_idx, meta_info)

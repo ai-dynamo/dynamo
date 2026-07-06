@@ -30,6 +30,7 @@ from typing import (
 )
 
 import torch
+from vllm import PoolingParams
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
@@ -121,6 +122,14 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+_DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
+    {
+        "allow_unpaused",
+        "engine_rpc",
+        "reset_prefix_cache",
+        "weight_version",
+    }
+)
 
 
 class _DeferredAbort:
@@ -400,6 +409,85 @@ def _compute_mm_uuids(
         return None
     uuids = compute_mm_uuids_from_images(images)
     return {"image": uuids}
+
+
+def _normalize_forwarded_mm_modality(
+    modality: str,
+    use_unified_vision_chunk: bool,
+) -> str:
+    if use_unified_vision_chunk and modality == "image":
+        return "vision_chunk"
+    return modality
+
+
+def _build_forwarded_mm_uuids(
+    extra_args: Dict[str, Any],
+    use_unified_vision_chunk: bool,
+) -> dict[str, Any] | None:
+    grouped_hashes = extra_args.get("mm_hashes_by_modality")
+    if isinstance(grouped_hashes, dict):
+        mm_uuids: dict[str, Any] = {}
+        for modality, hashes in grouped_hashes.items():
+            if not hashes:
+                continue
+            modality_key = _normalize_forwarded_mm_modality(
+                str(modality),
+                use_unified_vision_chunk,
+            )
+            mm_uuids.setdefault(modality_key, []).extend(
+                _pad_mm_hashes_to_64(list(hashes))
+            )
+        if mm_uuids:
+            return mm_uuids
+
+    forwarded_hashes = extra_args.get("mm_hashes")
+    if forwarded_hashes:
+        modality_key = _normalize_forwarded_mm_modality(
+            "image",
+            use_unified_vision_chunk,
+        )
+        return {modality_key: _pad_mm_hashes_to_64(list(forwarded_hashes))}
+
+    return None
+
+
+def _get_modality_extra_values(
+    extra_args: Dict[str, Any],
+    grouped_key: str,
+    flat_key: str,
+    metadata_modality: str,
+    backend_modality: str,
+) -> Any | None:
+    grouped_values = extra_args.get(grouped_key)
+    if isinstance(grouped_values, dict):
+        for key in (metadata_modality, backend_modality):
+            values = grouped_values.get(key)
+            if values:
+                return values
+    if metadata_modality != "image":
+        return None
+    return extra_args.get(flat_key)
+
+
+def _placeholder_range_from_extra_arg(value: Any) -> PlaceholderRange:
+    if isinstance(value, dict):
+        offset = int(value["offset"])
+        length = int(value["length"])
+        is_embed_raw = value.get("is_embed")
+        is_embed = (
+            None
+            if is_embed_raw is None
+            else torch.as_tensor(is_embed_raw, dtype=torch.bool)
+        )
+        if is_embed is not None and is_embed.numel() != length:
+            raise ValueError(
+                "forwarded mm placeholder is_embed length "
+                f"{is_embed.numel()} does not match placeholder length {length}"
+            )
+        return PlaceholderRange(offset=offset, length=length, is_embed=is_embed)
+
+    offset, length = value
+    return PlaceholderRange(offset=offset, length=length)
 
 
 # Helpers for nvext response fields requested through `nvext.extra_fields`.
@@ -874,6 +962,12 @@ def build_sampling_params_openai(
     # Handle min_tokens (custom extension)
     if "min_tokens" in request and request["min_tokens"] is not None:
         sampling_params.min_tokens = request["min_tokens"]
+
+    nvext_max_thinking_tokens = (request.get("nvext") or {}).get("max_thinking_tokens")
+    if nvext_max_thinking_tokens is not None and hasattr(
+        sampling_params, "thinking_token_budget"
+    ):
+        sampling_params.thinking_token_budget = nvext_max_thinking_tokens
 
     return sampling_params
 
@@ -1628,8 +1722,28 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
+        allow_unpaused = body.get("allow_unpaused", False)
+        reset_prefix_cache = body.get("reset_prefix_cache", True)
+        if not isinstance(allow_unpaused, bool):
+            return {
+                "status": "error",
+                "message": "'allow_unpaused' must be a boolean",
+            }
+        if not isinstance(reset_prefix_cache, bool):
+            return {
+                "status": "error",
+                "message": "'reset_prefix_cache' must be a boolean",
+            }
+        if allow_unpaused and reset_prefix_cache:
+            return {
+                "status": "error",
+                "message": (
+                    "Unpaused weight updates cannot reset the prefix cache. "
+                    "Set 'reset_prefix_cache' to false or pause generation first."
+                ),
+            }
         async with self._pause_lock:
-            if not getattr(self, "_paused", False):
+            if not self._paused and not allow_unpaused:
                 return {
                     "status": "error",
                     "message": (
@@ -1643,13 +1757,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             rpc_kwargs = {
                 k: v
                 for k, v in body.items()
-                if k not in ("engine_rpc", "weight_version")
+                if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
             }
             try:
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
-                # Weights changed: stale prefix/KV cache must be invalidated
-                # before resume so it is not reused under the new weights.
-                await self.engine_client.reset_prefix_cache()
+                if reset_prefix_cache:
+                    # Weights changed: stale prefix/KV cache must be invalidated
+                    # before resume so it is not reused under the new weights.
+                    await self.engine_client.reset_prefix_cache()
                 self._weight_version = version
                 logger.info(
                     f"[RL] Weights received via distributed "
@@ -2139,6 +2254,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 base_model_path=self.config.model,
                                 worker_type=lora_worker_type,
                                 needs=lora_needs,
+                                # Publish the worker's per-worker LoRA slot budget so the frontend
+                                # allocator sizes placement against real capacity instead of the
+                                # hard-coded default.
+                                max_gpu_lora_count=getattr(
+                                    self.config.engine_args, "max_loras", None
+                                ),
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
@@ -2456,8 +2577,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         color = "magenta" if transport == "nixl" else "cyan"
         rng = _nvtx.start_range(f"mm_backend:{transport}_receive", color=color)
         try:
-            mm_hashes = extra_args.get("mm_hashes")
-            mm_placeholders = extra_args.get("mm_placeholders")
+            backend_modality = _normalize_forwarded_mm_modality(
+                metadata.modality,
+                self._use_unified_vision_chunk,
+            )
+            mm_hashes = (
+                _get_modality_extra_values(
+                    extra_args,
+                    "mm_hashes_by_modality",
+                    "mm_hashes",
+                    metadata.modality,
+                    backend_modality,
+                )
+                or metadata.mm_hashes
+            )
+            mm_placeholders = _get_modality_extra_values(
+                extra_args,
+                "mm_placeholders_by_modality",
+                "mm_placeholders",
+                metadata.modality,
+                backend_modality,
+            )
             if not mm_hashes or not mm_placeholders:
                 logger.warning(
                     "[mm-routing] %s present but mm_hashes/mm_placeholders missing",
@@ -2505,8 +2645,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
                 return None
 
-            mm_hashes_dict = {metadata.modality: mm_hashes}
-            mm_kwargs_dict = {metadata.modality: kwargs_items}
+            mm_hashes_dict = {backend_modality: mm_hashes}
+            mm_kwargs_dict = {backend_modality: kwargs_items}
             with _nvtx.annotate(
                 f"mm_backend:{transport}_build_engine_input", color=color
             ):
@@ -2516,9 +2656,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "mm_kwargs": mm_kwargs_dict,
                     "mm_hashes": mm_hashes_dict,
                     "mm_placeholders": {
-                        metadata.modality: [
-                            PlaceholderRange(offset=off, length=length)
-                            for off, length in mm_placeholders
+                        backend_modality: [
+                            _placeholder_range_from_extra_arg(placeholder)
+                            for placeholder in mm_placeholders
                         ],
                     },
                 }
@@ -2788,26 +2928,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     },
                 )
         # Normal path: use token IDs.
-        # Prefer frontend-forwarded mm_hashes for hash consistency with the
-        # routing layer. Fall back to computing from loaded image data when
-        # not in EPD mode — in EPD mode multi_modal_data carries pre-computed
-        # embeddings from the encode worker, not raw images, and raw-image
-        # identity lives upstream at the Router / URL-keyed encoder cache.
+        # Frontend-forwarded hashes are the routing/transfer identity. Preserve
+        # their canonical hash strings for vLLM/Dynamo cache metadata parsing;
+        # modality grouping belongs in the multi_modal_uuids dict keys, not in
+        # the hash value. If no hashes were forwarded, compute image UUIDs only
+        # in aggregated mode, where the worker owns raw image payloads. In EPD,
+        # image identity lives upstream at the router / encoder cache.
         extra_args = request.get("extra_args") or {}
-        forwarded_hashes = extra_args.get("mm_hashes")
         mm_uuids: dict[str, Any] | None = None
-        if forwarded_hashes:
-            forwarded_hashes = _pad_mm_hashes_to_64(forwarded_hashes)
-            # vLLM binds multi_modal_uuids by modality key string match.
-            # For models with use_unified_vision_chunk=True (e.g. Kimi-K2.5)
-            # images live under `vision_chunk`, not `image`; hardcoding
-            # `image` here would silently fail to bind and force vLLM back
-            # to its own content-derived hash, breaking router/worker
-            # cache-key alignment.
-            mm_modality_key = (
-                "vision_chunk" if self._use_unified_vision_chunk else "image"
-            )
-            mm_uuids = {mm_modality_key: forwarded_hashes}
+        forwarded_mm_uuids = _build_forwarded_mm_uuids(
+            extra_args,
+            self._use_unified_vision_chunk,
+        )
+        if forwarded_mm_uuids:
+            mm_uuids = forwarded_mm_uuids
         elif self.embedding_loader is None:
             mm_uuids = _compute_mm_uuids(multi_modal_data)
             if mm_uuids and multi_modal_data:
@@ -3387,6 +3521,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             prompt = TextPrompt(prompt=input_data)
 
+        _apply_nvext_cache_salt(request, prompt)
+
         # Build sampling params from OpenAI-style request
         sampling_params = build_sampling_params_openai(
             request, self.default_sampling_params
@@ -3833,18 +3969,15 @@ class EmbeddingWorkerHandler:
 
         The Rust frontend forwards the request dict directly. Expected keys:
         ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``.
-        Optional ``dimensions`` (Matryoshka truncation; first N floats of each
-        embedding). Optional ``encoding_format`` (``"float"`` -- default --
-        or ``"base64"``); when ``"base64"`` is requested, each per-input
-        vector is serialized as a base64-encoded string of little-endian
-        ``f32`` bytes per the OpenAI spec, applied after any
-        ``dimensions`` truncation so the byte count matches the requested
+        Optional ``dimensions`` (Matryoshka dimensionality reduction):
+        forwarded to vLLM's pooler, which truncates to N dims and
+        re-normalizes; vLLM requires the model to declare Matryoshka support.
+        Optional ``encoding_format`` (``"float"`` -- default -- or
+        ``"base64"``); when ``"base64"`` is requested, each per-input vector is
+        serialized as a base64-encoded string of little-endian ``f32`` bytes
+        per the OpenAI spec, so the byte count matches the (possibly reduced)
         dimensionality.
         """
-        # Lazy import to avoid pulling PoolingParams into handlers.py at module
-        # load time for non-embedding workers.
-        from vllm import PoolingParams
-
         model_name = request.get("model") or self.config.served_model_name or ""
         input_field = request.get("input")
         if input_field is None:
@@ -3861,7 +3994,9 @@ class EmbeddingWorkerHandler:
         prompts: list[Any] = _classify_embedding_input(input_field)
 
         dimensions = request.get("dimensions")
-        if dimensions is not None and not isinstance(dimensions, int):
+        if dimensions is not None and (
+            not isinstance(dimensions, int) or isinstance(dimensions, bool)
+        ):
             raise TypeError(
                 f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
             )
@@ -3875,7 +4010,29 @@ class EmbeddingWorkerHandler:
                 "expected 'float' or 'base64'"
             )
 
-        pooling_params = PoolingParams()
+        # Request the pooled sentence embedding. With no task, vLLM's
+        # encode() resolves to per-token output (the full ``n_tokens x
+        # hidden`` hidden-state matrix), so the OpenAI ``/v1/embeddings``
+        # response ends up with the wrong shape (dim scales with input
+        # length) instead of one vector per input. ``task="embed"`` selects
+        # the pooled embedding and runs the model's configured pooler
+        # (normalization included for models like Qwen3-Embedding), matching
+        # vLLM's own embedding server. ``use_activation`` is intentionally
+        # left at the pooler default so per-model behaviour isn't overridden.
+        #
+        # ``dimensions`` (OpenAI Matryoshka truncation) is forwarded to vLLM
+        # rather than applied here: vLLM's pooler truncates to ``dimensions``
+        # and then re-normalizes (the correct MRL behaviour) and validates
+        # that the model actually supports Matryoshka -- raising rather than
+        # silently returning a degraded, un-normalized vector for models that
+        # don't. This matches bare ``vllm serve``. Models whose HF config
+        # doesn't declare Matryoshka support (e.g. Qwen3-Embedding) must be
+        # launched with ``--hf-overrides '{"is_matryoshka": true}'`` for
+        # ``dimensions`` requests to be accepted.
+        pooling_kwargs: dict[str, Any] = {"task": "embed"}
+        if dimensions is not None:
+            pooling_kwargs["dimensions"] = dimensions
+        pooling_params = PoolingParams(**pooling_kwargs)
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
         # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id
@@ -3928,14 +4085,24 @@ class EmbeddingWorkerHandler:
         embedding_objects: list[Dict[str, Any]] = []
         prompt_tokens = 0
         for idx, final_output in enumerate(outputs):
+            # vLLM has already applied any ``dimensions`` Matryoshka reduction
+            # (truncate + re-normalize) inside the pooler, so this is the
+            # final per-input vector -- no post-hoc truncation here.
             embedding = _pooling_output_to_list(final_output.outputs.data)
-            if dimensions is not None:
-                if dimensions > len(embedding):
-                    raise ValueError(
-                        f"dimensions={dimensions} exceeds model embedding "
-                        f"dimension {len(embedding)}"
-                    )
-                embedding = embedding[:dimensions]
+
+            # vLLM rejects an unsupported ``dimensions`` for models that
+            # declare a ``matryoshka_dimensions`` list, but a model enabled
+            # via ``--hf-overrides '{"is_matryoshka": true}'`` (no explicit
+            # list) is only validated for ``dimensions >= 1`` -- the pooler
+            # then silently clamps an oversized request to the model's native
+            # size (``embeddings[..., :dimensions]``). Surface the same clear
+            # error the old post-hoc path raised instead of returning a
+            # shorter-than-requested vector.
+            if dimensions is not None and len(embedding) < dimensions:
+                raise ValueError(
+                    f"dimensions={dimensions} exceeds model embedding "
+                    f"dimension {len(embedding)}"
+                )
 
             # Always emit base64 over the worker->frontend wire format. The
             # Rust frontend decodes back to float when the client's
