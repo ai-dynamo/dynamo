@@ -94,6 +94,14 @@ repos:
         - pyyaml
         - prometheus_client>=0.23.1
         - openai
+    - id: validate-skills
+      name: Validate .agents/skills SKILL.md frontmatter and AGENTS.md index
+      entry: python3 scripts/validate_skills.py
+      language: python
+      files: ^(\.agents/skills/.*SKILL\.md|AGENTS\.md)$
+      pass_filenames: false
+      additional_dependencies:
+        - pyyaml
     - id: DCO check
       name: Checks the commit message for a developer certificate of origin signature
       entry: python3 scripts/dco_check.py
