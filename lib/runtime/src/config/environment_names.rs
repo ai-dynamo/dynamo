@@ -307,6 +307,27 @@ pub mod llm {
     /// Enable streaming tool call dispatch (`event: tool_call_dispatch` SSE events)
     pub const DYN_ENABLE_STREAMING_TOOL_DISPATCH: &str = "DYN_ENABLE_STREAMING_TOOL_DISPATCH";
 
+    /// Skip prompt tokenization on the frontend and let the engine tokenize
+    /// instead. When set to `1` or `true` the preprocessor applies the chat
+    /// template (cheap) but skips `encode_with_timing` (expensive for long
+    /// prompts). The rendered prompt text is forwarded in `prompt_text` and
+    /// `token_ids` is left empty.
+    ///
+    /// Engine support:
+    /// - **vLLM**: uses `TextPrompt` when token_ids is empty and prompt_text is set.
+    /// - **SGLang**: passes `"prompt": prompt_text` directly to `async_generate`,
+    ///   bypassing `--use-sglang-tokenizer` (which replaces the Dynamo preprocessor
+    ///   entirely); SGLang tokenizes internally.
+    /// - **TRT-LLM**: only active when `DYN_ENGINE_CONV_AFFINITY=1` (conversation-
+    ///   aware routing). Outside that mode TRT-LLM still requires token IDs for KV
+    ///   routing decisions, so the flag is ignored.
+    ///
+    /// Side-effects (when active):
+    /// - KV prefix-cache routing is disabled (no token IDs → no block hashes).
+    /// - `max_tokens` is not auto-capped to the remaining context window; each
+    ///   engine applies its own cap after tokenizing.
+    pub const DYN_SKIP_FRONTEND_TOKENIZE: &str = "DYN_SKIP_FRONTEND_TOKENIZE";
+
     /// Enable streaming reasoning dispatch (`event: reasoning_dispatch` SSE events)
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";

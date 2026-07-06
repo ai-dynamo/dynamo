@@ -1022,6 +1022,16 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             self.publisher.cleanup()
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        # When the frontend skipped tokenization (DYN_SKIP_FRONTEND_TOKENIZE=1),
+        # token_ids is empty and prompt_text carries the rendered prompt. Pass it
+        # as "prompt" so SGLang tokenizes internally. This differs from
+        # --use-sglang-tokenizer, which bypasses the Dynamo preprocessor entirely
+        # (sending a raw OpenAI ChatCompletionRequest); here the preprocessor still
+        # runs and applies the chat template before forwarding the rendered text.
+        prompt_text = request.get("prompt_text")
+        if not request.get("token_ids") and prompt_text:
+            return {"prompt": prompt_text}
+
         request_input = self.input_param_manager.get_input_param(
             request, use_tokenizer=self.use_sglang_tokenizer
         )
