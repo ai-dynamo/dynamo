@@ -35,7 +35,10 @@ def test_conversation_id_from_request():
     assert conversation_id_from_request({"routing": {"conversation_id": ""}}) is None
     assert (
         conversation_id_from_request(
-            {"token_ids": [], "routing": {"conversation_id": "conv-a:abc123", "dp_rank": 2}}
+            {
+                "token_ids": [],
+                "routing": {"conversation_id": "conv-a:abc123", "dp_rank": 2},
+            }
         )
         == "conv-a:abc123"
     )
