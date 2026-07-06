@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-/// HTTP body size limit environment variable, in MiB.
-pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
+use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BODY_LIMIT_MB;
 
 /// Default body limit in bytes (45 MiB) to support 500k+ token payloads.
 pub fn get_body_limit() -> usize {

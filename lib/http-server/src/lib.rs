@@ -226,6 +226,18 @@ impl Drop for ShutdownOnDrop {
     }
 }
 
+struct FinalizeOnDrop {
+    observer: Arc<ServiceObserver>,
+    downstream_cancel_token: CancellationToken,
+}
+
+impl Drop for FinalizeOnDrop {
+    fn drop(&mut self) {
+        self.observer.start_stopping();
+        self.downstream_cancel_token.cancel();
+    }
+}
+
 impl HttpServer {
     pub fn new(
         router: Router,
@@ -258,10 +270,11 @@ impl HttpServer {
         cancel_token: CancellationToken,
         listener: Option<tokio::net::TcpListener>,
     ) -> Result<()> {
-        let result = self.serve(cancel_token, listener).await;
-        self.observer.start_stopping();
-        self.downstream_cancel_token.cancel();
-        result
+        let _finalize = FinalizeOnDrop {
+            observer: self.observer.clone(),
+            downstream_cancel_token: self.downstream_cancel_token.clone(),
+        };
+        self.serve(cancel_token, listener).await
     }
 
     async fn serve(
@@ -667,6 +680,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let observer = Arc::new(ServiceObserver::default());
+        let downstream = CancellationToken::new();
         let server = HttpServer::new(
             Router::new()
                 .route("/", get(streaming_response))
@@ -680,14 +694,16 @@ mod tests {
                 tls: None,
                 graceful_shutdown_timeout: Duration::from_secs(1),
             },
-            observer,
-            CancellationToken::new(),
+            observer.clone(),
+            downstream.clone(),
         );
         let task = tokio::spawn(server.run_with_listener(CancellationToken::new(), listener));
         let mut client = connect_stream(address).await;
 
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(observer.stage(), ServiceStage::Stopping);
+        assert!(downstream.is_cancelled());
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let mut buffer = [0; 1024];

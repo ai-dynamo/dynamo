@@ -24,20 +24,18 @@
 //! [`ConnectionStatus`] enum to the primary task. The primary task will then use this to determine if it should
 //! cancel the request or not.
 //!
-//! The [`ConnectionHandle`] is also used to signal to the client that the request has been cancelled. This is
-//! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "[DONE]".
+//! Mid-stream backend errors emit caller-supplied terminal events. Context
+//! cancellation terminates the stream without another frame.
 //!
 
 use axum::response::sse::Event;
+use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::error::SanitizedError;
 use crate::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
-
-pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 
 /// Read the backend stream inactivity timeout from the environment.
 /// Returns `None` if unset or zero. The HTTP safety net uses twice the
@@ -55,6 +53,12 @@ pub enum ConnectionStatus {
     Disabled,
     ClosedUnexpectedly,
     ClosedGracefully,
+}
+
+#[derive(Clone, Copy)]
+pub enum StreamTerminal {
+    Completed,
+    Error,
 }
 
 pub struct ConnectionHandle {
@@ -109,9 +113,9 @@ impl Drop for ConnectionHandle {
 /// Creates a pair of handles which will monitor for disconnects from the client.
 ///
 /// The first handle is armed and will issue a [`ConnectionStatus::ClosedUnexpectedly`] signal when dropped.
-/// The second handle is disarmed and will issue a [`ConnectionStatus::ClosedGracefully`] signal when dropped.
+/// The second handle is disabled and is a no-op until the response stream arms it.
 ///
-/// The handles are returned in the order of the first being armed and the second being disarmed.
+/// The handles are returned in the order of the first being armed and the second being disabled.
 pub async fn create_connection_monitor(
     engine_context: Arc<dyn AsyncEngineContext>,
     metrics: Option<Arc<Metrics>>,
@@ -183,7 +187,7 @@ async fn connection_monitor(
 ///
 /// Uses `tokio::select!` to choose between receiving events from the source stream or detecting when
 /// the context is stopped. If the context is stopped, we break the stream. If the source stream ends
-/// naturally, we mark the request as successful and send the final `[DONE]` event.
+/// naturally, we mark the request as successful and emit the caller's terminal events.
 ///
 /// An explicit inactivity timeout adds a third arm: if no
 /// SSE event is received from the backend within the timeout window, the engine context is killed and
@@ -195,6 +199,7 @@ pub fn monitor_for_disconnects_with_timeout(
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
+    terminal_events: impl Fn(StreamTerminal) -> [Option<Event>; 2],
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -205,6 +210,10 @@ pub fn monitor_for_disconnects_with_timeout(
 
     async_stream::try_stream! {
         tokio::pin!(stream);
+        // Keep the watch-backed cancellation future alive across response frames.
+        // Recreating it per token clones a receiver and churns Notify state.
+        let stopped = context.stopped();
+        tokio::pin!(stopped);
         loop {
             tokio::select! {
                 event = stream.next() => {
@@ -221,20 +230,12 @@ pub fn monitor_for_disconnects_with_timeout(
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
                             tracing::error!("Streaming error: {err}");
-                            // Emit a structured OpenAI-style error frame + `data: [DONE]`
-                            // so naive `data:`-line parsers see both the error and a
-                            // stream terminator. Body derived from SanitizedError so
-                            // the sanitized message + status live in one place.
-                            let sanitized = SanitizedError::Internal;
-                            let err_json = serde_json::json!({
-                                "error": {
-                                    "message": sanitized.to_string(),
-                                    "type": sanitized.openai_type_slug(),
-                                    "code": sanitized.status().as_u16(),
-                                }
-                            });
-                            yield Event::default().data(err_json.to_string());
-                            yield Event::default().data("[DONE]");
+                            for event in terminal_events(StreamTerminal::Error)
+                                .into_iter()
+                                .flatten()
+                            {
+                                yield event;
+                            }
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;
                         }
@@ -243,14 +244,17 @@ pub fn monitor_for_disconnects_with_timeout(
                             inflight_guard.mark_ok();
                             stream_handle.disarm();
 
-                            // todo: if we yield a dynamo sentinel event, we need to do it before the done or the
-                            // async-openai client will chomp it.
-                            yield Event::default().data("[DONE]");
+                            for event in terminal_events(StreamTerminal::Completed)
+                                .into_iter()
+                                .flatten()
+                            {
+                                yield event;
+                            }
                             break;
                         }
                     }
                 }
-                _ = context.stopped() => {
+                _ = &mut stopped => {
                     // Mark as cancelled when context is stopped (client disconnect or timeout)
                     inflight_guard.mark_error(ErrorType::Cancelled);
                     // Token counts (input_tokens, output_tokens) are recorded on
@@ -303,12 +307,36 @@ mod tests {
     use super::*;
     use crate::metrics::{Endpoint, ErrorType, RequestType, Status};
     use futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Debug)]
-    struct MockContext;
+    fn terminal_events(terminal: StreamTerminal) -> [Option<Event>; 2] {
+        match terminal {
+            StreamTerminal::Completed => [Some(Event::default().data("[DONE]")), None],
+            StreamTerminal::Error => [
+                Some(
+                    Event::default().data(
+                        serde_json::json!({
+                            "error": {
+                                "message": "Internal server error",
+                                "type": "internal_server_error",
+                                "code": 500,
+                            }
+                        })
+                        .to_string(),
+                    ),
+                ),
+                Some(Event::default().data("[DONE]")),
+            ],
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MockContext {
+        stopped_polls: AtomicUsize,
+    }
     impl MockContext {
         fn new() -> Self {
-            Self
+            Self::default()
         }
     }
     #[async_trait::async_trait]
@@ -326,6 +354,7 @@ mod tests {
             false
         }
         async fn stopped(&self) {
+            self.stopped_polls.fetch_add(1, Ordering::Relaxed);
             std::future::pending::<()>().await;
         }
         async fn killed(&self) {
@@ -374,6 +403,47 @@ mod tests {
         (metrics, guard, context, handle)
     }
 
+    #[tokio::test]
+    async fn test_monitor_reuses_stopped_future_across_events() {
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            "reuse-stopped-future",
+            Endpoint::ChatCompletions,
+            true,
+            "req-reuse",
+        );
+        let context = Arc::new(MockContext::new());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+        let stream = futures::stream::unfold(0, |index| async move {
+            tokio::task::yield_now().await;
+            (index < 4).then(|| {
+                (
+                    Ok(Event::default().data(format!("token-{index}"))),
+                    index + 1,
+                )
+            })
+        });
+
+        let monitored = monitor_for_disconnects_with_timeout(
+            stream,
+            engine_context,
+            guard,
+            handle,
+            None,
+            terminal_events,
+        );
+        tokio::pin!(monitored);
+        while monitored.next().await.is_some() {}
+
+        assert_eq!(
+            context.stopped_polls.load(Ordering::Relaxed),
+            1,
+            "the same stopped future should remain pending across all response events"
+        );
+    }
+
     /// Zombie backend with hanging stream is terminated by inactivity timeout.
     #[tokio::test(start_paused = true)]
     async fn test_backend_inactivity_timeout_releases_inflight_gauge() {
@@ -388,6 +458,7 @@ mod tests {
             guard,
             handle,
             Some(Duration::from_secs(2)),
+            terminal_events,
         );
         tokio::pin!(monitored);
 
@@ -447,6 +518,7 @@ mod tests {
             guard_1,
             handle_1,
             Some(Duration::from_secs(10)),
+            terminal_events,
         );
         tokio::pin!(monitored_1);
 
@@ -482,6 +554,7 @@ mod tests {
             guard_2,
             handle_2,
             Some(Duration::from_secs(10)),
+            terminal_events,
         );
         tokio::pin!(monitored_2);
 
@@ -581,21 +654,19 @@ mod tests {
             .get("error")
             .and_then(|v| v.as_object())
             .unwrap_or_else(|| panic!("[{case}] `error` field is not an object. Body:\n{text}"));
-        let expected = SanitizedError::Internal;
-        let expected_message = expected.to_string();
         assert_eq!(
             error.get("message").and_then(|v| v.as_str()),
-            Some(expected_message.as_str()),
+            Some("Internal server error"),
             "[{case}] structured error `message` must be the sanitized static string. Body:\n{text}"
         );
         assert_eq!(
             error.get("type").and_then(|v| v.as_str()),
-            Some(expected.openai_type_slug()),
+            Some("internal_server_error"),
             "[{case}] structured error `type` mismatch. Body:\n{text}"
         );
         assert_eq!(
             error.get("code").and_then(|v| v.as_i64()),
-            Some(i64::from(expected.status().as_u16())),
+            Some(500),
             "[{case}] structured error `code` mismatch. Body:\n{text}"
         );
         assert!(
@@ -616,7 +687,8 @@ mod tests {
         let (_metrics, guard, ctx, handle) = setup_test("worker-kill-model", "req-wk");
         let backend_detail = "Disconnected: Stream ended before generation completed";
         let stream = simulate_mid_stream_error(3, backend_detail);
-        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
+        let monitored =
+            monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None, terminal_events);
         let body = collect_sse_body(monitored).await;
         assert_fault_contract("worker_kill", &body, backend_detail);
     }
@@ -628,7 +700,8 @@ mod tests {
         let (_metrics, guard, ctx, handle) = setup_test("py-drop-model", "req-py");
         let backend_detail = "Failed to send response: SendError { .. }";
         let stream = simulate_mid_stream_error(3, backend_detail);
-        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
+        let monitored =
+            monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None, terminal_events);
         let body = collect_sse_body(monitored).await;
         assert_fault_contract("python_consumer_drop", &body, backend_detail);
     }
@@ -641,7 +714,8 @@ mod tests {
         let (_metrics, guard, ctx, handle) = setup_test("leak-model", "req-leak");
         let backend_detail = "panicked at '/opt/dynamo/lib/python3.12/site-packages/engine/worker.py:512: ValueError: secret tensor shape mismatch'";
         let stream = simulate_mid_stream_error(2, backend_detail);
-        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
+        let monitored =
+            monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None, terminal_events);
         let body = collect_sse_body(monitored).await;
         assert_fault_contract("internal_detail_leak", &body, backend_detail);
         // Spot-check the most damaging fragments explicitly.
