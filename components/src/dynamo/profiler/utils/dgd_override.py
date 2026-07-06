@@ -153,9 +153,7 @@ def apply_dgd_overrides(
 
     result = _run_cli(
         [executable],
-        input_text=json.dumps(
-            {"blueprint": blueprint, "override": versioned_override}
-        ),
+        input_text=json.dumps({"blueprint": blueprint, "override": versioned_override}),
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no error output"

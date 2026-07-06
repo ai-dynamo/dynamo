@@ -127,8 +127,7 @@ def test_apply_dgd_overrides_invokes_cli_without_mutating_inputs(
 
     assert effective["metadata"]["labels"]["merged"] == "true"
     assert (
-        effective["metadata"]["labels"]["override-api-version"]
-        == "nvidia.com/v1alpha1"
+        effective["metadata"]["labels"]["override-api-version"] == "nvidia.com/v1alpha1"
     )
     assert blueprint == original_blueprint
     assert overrides == original_overrides
@@ -161,8 +160,7 @@ def test_explicit_versioned_override_does_not_use_legacy_fallback(
 
     assert "missing apiVersion and kind" not in caplog.text
     assert (
-        effective["metadata"]["labels"]["override-api-version"]
-        == "nvidia.com/v1beta1"
+        effective["metadata"]["labels"]["override-api-version"] == "nvidia.com/v1beta1"
     )
 
 
