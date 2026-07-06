@@ -73,6 +73,8 @@ from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import (
     VllmEnginePauseController,
+    _engine_generate_reasoning_kwargs,
+    _request_reasoning_metadata,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -440,6 +442,7 @@ class VllmLLMEngine(LLMEngine):
         # model resolves to None. With LoRA enabled, an unknown adapter name
         # raises rather than silently falling back to the base model.
         lora_request = self._resolve_lora_request(request.get("model"))
+        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         gen = self.engine_client.generate(
             prompt,
@@ -447,6 +450,11 @@ class VllmLLMEngine(LLMEngine):
             request_id,
             data_parallel_rank=local_dp_rank,
             lora_request=lora_request,
+            **_engine_generate_reasoning_kwargs(
+                self.engine_client,
+                reasoning_ended,
+                reasoning_parser_kwargs,
+            ),
             **telemetry.engine_trace_kwargs(context),
         )
 

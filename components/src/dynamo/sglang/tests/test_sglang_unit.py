@@ -173,14 +173,34 @@ def test_require_reasoning_kwarg_preserves_request_intent(request_data, expected
     assert require_reasoning_kwargs(ReasoningEngine(), request_data) == expected
 
 
-def test_require_reasoning_kwarg_is_dropped_for_older_engines():
-    """Older supported SGLang engines remain usable without the new kwarg."""
+def test_require_reasoning_kwarg_warns_once_when_dropped(caplog):
+    """A dropped true reasoning requirement is visible without log spam."""
 
     class OldEngine:
         async def async_generate(self, input_ids=None, sampling_params=None):
             return None
 
-    assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": True}) == {}
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+    with caplog.at_level(logging.WARNING):
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": True}) == {}
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": True}) == {}
+
+    assert caplog.text.count("Dropping require_reasoning=true") == 1
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+
+
+def test_require_reasoning_kwarg_silently_drops_false(caplog):
+    """A dropped false value preserves the quiet compatibility fallback."""
+
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            return None
+
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+    with caplog.at_level(logging.WARNING):
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": False}) == {}
+
+    assert "Dropping require_reasoning=true" not in caplog.text
 
 
 def test_routed_experts_kwarg_omitted_when_flag_off():

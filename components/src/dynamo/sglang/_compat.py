@@ -29,6 +29,15 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=1)
+def _warn_require_reasoning_unsupported() -> None:
+    logger.warning(
+        "Dropping require_reasoning=true because SGLang Engine.async_generate "
+        "does not support it; reasoning-aware guided decoding may fail. "
+        "Upgrade SGLang to enable this request mode."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level sglang exports: Engine, ServerArgs
 #
@@ -111,10 +120,14 @@ def filter_supported_async_generate_kwargs(
 
 def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     """Build the optional SGLang per-request reasoning-gate argument."""
-    return filter_supported_async_generate_kwargs(
+    require_reasoning = bool(request.get("require_reasoning", False))
+    kwargs = filter_supported_async_generate_kwargs(
         engine,
-        {"require_reasoning": bool(request.get("require_reasoning", False))},
+        {"require_reasoning": require_reasoning},
     )
+    if require_reasoning and "require_reasoning" not in kwargs:
+        _warn_require_reasoning_unsupported()
+    return kwargs
 
 
 def enable_disjoint_streaming_output(server_args: Any) -> None:
