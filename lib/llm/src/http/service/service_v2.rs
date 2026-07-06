@@ -657,6 +657,15 @@ impl HttpServiceConfigBuilder {
         if let Err(e) = ensure_request_plane_metrics_registered_prometheus(&registry) {
             tracing::warn!("Failed to register request-plane metrics: {}", e);
         }
+
+        // Full-distribution scheduler admission histograms (admission_compute_ms, queue_wait_ms) --
+        // complements RoutingOverheadMetrics with the pieces that live inside dynamo-kv-router's
+        // scheduler actor, which RoutingOverheadMetrics (measured at the KvRouter caller) can't see.
+        if let Err(e) =
+            dynamo_kv_router::scheduling::metrics::register_scheduling_metrics(&registry)
+        {
+            tracing::warn!("Failed to register scheduling metrics: {}", e);
+        }
         if let Err(e) = ensure_frontend_perf_metrics_registered_prometheus(&registry) {
             tracing::warn!("Failed to register frontend perf metrics: {}", e);
         }

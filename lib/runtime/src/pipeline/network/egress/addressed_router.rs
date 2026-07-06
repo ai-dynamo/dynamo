@@ -15,7 +15,9 @@ use crate::error::{DynamoError, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
 use crate::metrics::request_plane::{
-    REQUEST_PLANE_INFLIGHT, REQUEST_PLANE_QUEUE_SECONDS, REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS,
+    REQUEST_PLANE_ASSOCIATE_INSTANCE_MS, REQUEST_PLANE_BUILD_ENVELOPE_MS,
+    REQUEST_PLANE_DISPATCH_BUFFER_MS, REQUEST_PLANE_INFLIGHT, REQUEST_PLANE_QUEUE_SECONDS,
+    REQUEST_PLANE_REGISTER_STREAMS_MS, REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS,
     REQUEST_PLANE_SEND_SECONDS,
 };
 use crate::pipeline::network::ConnectionInfo;
@@ -488,9 +490,12 @@ impl AddressedPushRouter {
         // disarmed by `into_parts()` on awaiting stream provider: past that point the
         // subject is reaped by the worker's dial-in (instance healthy) or the discovery
         // watcher (instance dropped), so no cleanup is owed.
+        let register_streams_start = Instant::now();
         let (send_registered, recv_registered) = self
             .register_streams(engine_ctx.clone(), enable_request_stream, true)
             .await?;
+        REQUEST_PLANE_REGISTER_STREAMS_MS
+            .observe(register_streams_start.elapsed().as_secs_f64() * 1000.0);
         let recv_registered = recv_registered.ok_or_else(|| {
             anyhow::anyhow!("response stream registration missing despite enable_response_stream")
         })?;
@@ -502,34 +507,47 @@ impl AddressedPushRouter {
         let send_subject = send_registered
             .as_ref()
             .and_then(|r| subject_of(&r.connection_info));
-        if let (Some(subject), Some(inst)) = (&recv_subject, instance)
-            && !self
+        if let (Some(subject), Some(inst)) = (&recv_subject, instance) {
+            let associate_instance_start = Instant::now();
+            let associated = self
                 .resp_transport
                 .associate_instance(
                     subject,
                     send_subject.as_deref(),
                     &inst.endpoint_instance_id(),
                 )
-                .await
-        {
-            return Err(anyhow::anyhow!(
-                DynamoError::builder()
-                    .error_type(ErrorType::Disconnected)
-                    .message("Worker removed before request could be sent (tombstoned instance)")
-                    .build()
-            ));
+                .await;
+            REQUEST_PLANE_ASSOCIATE_INSTANCE_MS
+                .observe(associate_instance_start.elapsed().as_secs_f64() * 1000.0);
+            if !associated {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message(
+                            "Worker removed before request could be sent (tombstoned instance)",
+                        )
+                        .build()
+                ));
+            }
         }
 
+        let build_envelope_start = Instant::now();
         let buffer = build_request_envelope(
             context,
             recv_registered.connection_info.clone(),
             send_registered.as_ref().map(|r| r.connection_info.clone()),
             request,
         )?;
+        REQUEST_PLANE_BUILD_ENVELOPE_MS
+            .observe(build_envelope_start.elapsed().as_secs_f64() * 1000.0);
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
         let tx_start = Instant::now();
+        let worker_label = address.trim_start_matches("tcp://").to_string();
         let request_plane_response = self.dispatch_buffer(address, buffer, context.id()).await?;
+        REQUEST_PLANE_DISPATCH_BUFFER_MS
+            .with_label_values(&[&worker_label])
+            .observe(tx_start.elapsed().as_secs_f64() * 1000.0);
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         // A worker load-shed surfaces on the request-plane ACK, not the response

@@ -27,6 +27,7 @@ use crate::{
 mod activation;
 mod execution;
 mod inner;
+mod trace;
 mod types;
 
 use inner::InnerPrefillRouter;
@@ -84,11 +85,21 @@ impl
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        // (a) arrival: capture as early as possible, before any work. Zero-cost
+        // when DYN_PREFILL_TRACE is off (the Instant is cheap; the trace handle
+        // below is None and short-circuits everything downstream).
+        let trace_arrival = std::time::Instant::now();
+
         // Extract request data while preserving context
         let (mut req, context) = request.into_parts();
         let request_id = context.id().to_string();
         let metadata = context.metadata().clone();
         let engine_ctx = context.context();
+
+        // Per-request prefill trace (None unless DYN_PREFILL_TRACE on). isl_tokens
+        // = prompt token count of the original request.
+        let mut prefill_trace =
+            trace::PrefillTrace::new(&request_id, req.token_ids.len(), trace_arrival);
 
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
@@ -139,6 +150,10 @@ impl
                 dp_rank,
                 bootstrap_info,
             } => {
+                // (b) worker resolved/selected.
+                if let Some(t) = prefill_trace.as_mut() {
+                    t.mark_selected(Some(worker_id));
+                }
                 let topology_constraints =
                     self.preflight_kv_transfer_constraints(endpoint_id, Some(worker_id))?;
 
@@ -168,7 +183,14 @@ impl
 
                 // Pass the phase barrier to the spawned task. It is released after routing
                 // completes so worker recording finishes before phase changes to Decode.
-                self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
+                // The prefill trace (carrying a/b) is moved into the spawned task, which
+                // is the path that runs under load; it records c/d/e and emits there.
+                self.spawn_prefill_task(
+                    prefill_context,
+                    Some(worker_id),
+                    prefill_phase_barrier,
+                    prefill_trace.take(),
+                );
 
                 (
                     Ok(PrefillOutcome::Bootstrap {
@@ -215,6 +237,10 @@ impl
                 worker_id: resolved_wid,
                 dp_rank: resolved_dp_rank,
             } => {
+                // (b) worker resolved/selected.
+                if let Some(t) = prefill_trace.as_mut() {
+                    t.mark_selected(Some(resolved_wid));
+                }
                 let topology_constraints =
                     self.preflight_kv_transfer_constraints(endpoint_id, Some(resolved_wid))?;
 
@@ -242,6 +268,7 @@ impl
                     prefill_context,
                     Some(resolved_wid),
                     None,
+                    prefill_trace.take(),
                 )
                 .await?;
                 (
@@ -254,6 +281,12 @@ impl
                 )
             }
             PrefillResolveDecision::Unavailable | PrefillResolveDecision::NotActivated => {
+                // (b) no worker resolved upfront here; the router selects one inside
+                // execute_prefill. Mark select wall now with the preselected pin (may
+                // be None — worker attribution for this path is best-effort).
+                if let Some(t) = prefill_trace.as_mut() {
+                    t.mark_selected(preselected_worker);
+                }
                 let topology_constraints =
                     self.preflight_kv_transfer_constraints(endpoint_id, None)?;
 
@@ -278,6 +311,7 @@ impl
                     prefill_context,
                     preselected_worker,
                     None,
+                    prefill_trace.take(),
                 )
                 .await?;
                 let prefill_worker_id = completion

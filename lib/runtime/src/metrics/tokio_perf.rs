@@ -251,6 +251,14 @@ pub fn ensure_tokio_perf_metrics_registered_prometheus(
 pub async fn tokio_metrics_and_canary_loop(cancel: CancellationToken) {
     let canary_interval = Duration::from_millis(10);
     let stall_threshold = Duration::from_millis(5);
+    // Real-stall logging threshold: WARN to target `dynamo_stall` when this runtime's event loop is
+    // delayed past DYN_STALL_LOG_MS (default 250ms). Makes "which runtime is starved" visible directly
+    // in each process's log (frontend vs worker) without scraping. Rare/no-op when healthy.
+    let stall_log_ms: u64 = std::env::var("DYN_STALL_LOG_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(250);
+    let mut stall_warns: u64 = 0;
     let collect_interval = Duration::from_secs(1);
     let mut next_collect = Instant::now() + collect_interval;
     let mut prev_counters = PrevWorkerCounters::new();
@@ -267,6 +275,16 @@ pub async fn tokio_metrics_and_canary_loop(cancel: CancellationToken) {
         EVENT_LOOP_DELAY_SECONDS.observe(delay.as_secs_f64());
         if delay > stall_threshold {
             EVENT_LOOP_STALL_TOTAL.inc();
+        }
+        let delay_ms = delay.as_millis() as u64;
+        if delay_ms >= stall_log_ms {
+            stall_warns += 1;
+            tracing::warn!(
+                target: "dynamo_stall",
+                stall_ms = delay_ms,
+                stall_warns,
+                "event-loop stall: this runtime is starved (request-plane futures not polled)"
+            );
         }
         if Instant::now() >= next_collect {
             next_collect = Instant::now() + collect_interval;

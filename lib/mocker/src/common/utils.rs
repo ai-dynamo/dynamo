@@ -5,6 +5,16 @@ use std::time::{Duration, Instant};
 
 use crate::common::protocols::{MockEngineArgs, WorkerType};
 
+/// Returns the `MOCK_KV_WAIT_TIMEOUT_MS` threshold, or `None` if unset/invalid.
+pub fn mock_kv_wait_timeout_ms() -> Option<u64> {
+    static THRESHOLD: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("MOCK_KV_WAIT_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+    })
+}
+
 /// Compute the modeled handoff delay after a prefill worker emits its terminal token.
 ///
 /// NOTE: this intentionally does not model the internal prefill TTFT itself accurately, and the

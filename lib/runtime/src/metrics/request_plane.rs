@@ -5,7 +5,7 @@
 //! Used to pinpoint serialization vs transport roundtrip latency.
 
 use once_cell::sync::{Lazy, OnceCell};
-use prometheus::{Gauge, Histogram, HistogramOpts};
+use prometheus::{Gauge, Histogram, HistogramOpts, HistogramVec};
 
 use super::prometheus_names::{name_prefix, request_plane};
 use crate::MetricsRegistry;
@@ -65,6 +65,115 @@ pub static REQUEST_PLANE_INFLIGHT: Lazy<Gauge> = Lazy::new(|| {
     .expect("request_plane_inflight gauge")
 });
 
+/// Ingress-side ACK flush latency (worker SharedTcpEndpoint write_loop): decoded_at ->
+/// socket flush complete. Observed for every traced response (DYN_ACK_TRACE=1), not just
+/// ones that cross the DYN_ACK_TRACE_WARN_MS log threshold -- gives the full distribution
+/// instead of only the tail that happened to get logged.
+pub static REQUEST_PLANE_ACK_FLUSH_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::ACK_FLUSH_SECONDS),
+            "Ingress ACK flush latency: decoded_at -> socket flush complete (seconds)",
+        )
+        .buckets(vec![
+            0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0,
+        ]),
+    )
+    .expect("request_plane_ack_flush_seconds histogram")
+});
+
+/// Time to register the request/response stream halves with the response transport
+/// (AddressedPushRouter::register_streams).
+pub static REQUEST_PLANE_REGISTER_STREAMS_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::REGISTER_STREAMS_MS),
+            "Time to register request/response stream halves with the response transport (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0,
+        ]),
+    )
+    .expect("request_plane_register_streams_ms histogram")
+});
+
+/// Time for the tombstone-check `associate_instance` call against the response transport.
+pub static REQUEST_PLANE_ASSOCIATE_INSTANCE_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::ASSOCIATE_INSTANCE_MS),
+            "Time for the associate_instance tombstone check (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0,
+        ]),
+    )
+    .expect("request_plane_associate_instance_ms histogram")
+});
+
+/// Time to build the request envelope (build_request_envelope: serialization + control
+/// message assembly).
+pub static REQUEST_PLANE_BUILD_ENVELOPE_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::BUILD_ENVELOPE_MS),
+            "Time to build the request envelope (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0,
+        ]),
+    )
+    .expect("request_plane_build_envelope_ms histogram")
+});
+
+/// Time for dispatch_buffer to complete (transport write of the built envelope). Finer
+/// granularity sibling of REQUEST_PLANE_SEND_SECONDS at the same call site.
+/// Labeled by `worker` (the endpoint address, e.g. `host:port`) to surface per-worker ACK latency.
+pub static REQUEST_PLANE_DISPATCH_BUFFER_MS: Lazy<HistogramVec> = Lazy::new(|| {
+    HistogramVec::new(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::DISPATCH_BUFFER_MS),
+            "Time for dispatch_buffer to complete, labeled by worker endpoint (milliseconds)",
+        )
+        .buckets(vec![
+            0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0,
+        ]),
+        &["worker"],
+    )
+    .expect("request_plane_dispatch_buffer_ms histogram")
+});
+
+/// Time the ACK write task spent queued between enqueue and dequeue (write-task scheduling
+/// delay). Only observed when DYN_ACK_TRACE=1. Decomposes ack_flush_seconds into scheduling
+/// starvation vs actual socket write cost.
+pub static REQUEST_PLANE_ACK_WRITE_QUEUE_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::ACK_WRITE_QUEUE_MS),
+            "ACK write-task scheduling delay: decoded_at -> write task dequeue (milliseconds)",
+        )
+        .buckets(vec![
+            0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0,
+        ]),
+    )
+    .expect("request_plane_ack_write_queue_ms histogram")
+});
+
+/// Time the ACK write task spent actually writing to the socket (dequeue -> flush).
+/// Only observed when DYN_ACK_TRACE=1. Complements REQUEST_PLANE_ACK_WRITE_QUEUE_MS.
+pub static REQUEST_PLANE_ACK_SOCKET_WRITE_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::ACK_SOCKET_WRITE_MS),
+            "ACK socket write time: write task dequeue -> flush complete (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0,
+        ]),
+    )
+    .expect("request_plane_ack_socket_write_ms histogram")
+});
+
 /// Guards idempotency for the `MetricsRegistry` registration path.
 static METRICS_REGISTERED: OnceCell<()> = OnceCell::new();
 
@@ -92,6 +201,34 @@ pub fn ensure_request_plane_metrics_registered(registry: &MetricsRegistry) {
             Box::new(REQUEST_PLANE_INFLIGHT.clone()),
             "request_plane_inflight",
         );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_ACK_FLUSH_SECONDS.clone()),
+            "request_plane_ack_flush_seconds",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_REGISTER_STREAMS_MS.clone()),
+            "request_plane_register_streams_ms",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_ASSOCIATE_INSTANCE_MS.clone()),
+            "request_plane_associate_instance_ms",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_BUILD_ENVELOPE_MS.clone()),
+            "request_plane_build_envelope_ms",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_DISPATCH_BUFFER_MS.clone()),
+            "request_plane_dispatch_buffer_ms",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_ACK_WRITE_QUEUE_MS.clone()),
+            "request_plane_ack_write_queue_ms",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_ACK_SOCKET_WRITE_MS.clone()),
+            "request_plane_ack_socket_write_ms",
+        );
     });
 }
 
@@ -107,6 +244,13 @@ pub fn ensure_request_plane_metrics_registered_prometheus(
                 registry.register(Box::new(REQUEST_PLANE_SEND_SECONDS.clone()))?;
                 registry.register(Box::new(REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.clone()))?;
                 registry.register(Box::new(REQUEST_PLANE_INFLIGHT.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_ACK_FLUSH_SECONDS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_REGISTER_STREAMS_MS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_ASSOCIATE_INSTANCE_MS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_BUILD_ENVELOPE_MS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_DISPATCH_BUFFER_MS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_ACK_WRITE_QUEUE_MS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_ACK_SOCKET_WRITE_MS.clone()))?;
                 Ok(())
             })()
             .map_err(|e| e.to_string())

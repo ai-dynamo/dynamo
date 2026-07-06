@@ -15,6 +15,7 @@ use dynamo_runtime::{
     protocols::maybe_error::MaybeError,
 };
 
+use super::trace::{self, PrefillTrace};
 use super::{
     InnerPrefillRouter, PrefillError, PrefillQueryOutcome, PrefillResolveDecision, PrefillRouter,
 };
@@ -217,6 +218,7 @@ impl PrefillRouter {
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: Option<OwnedSemaphorePermit>,
+        mut prefill_trace: Option<PrefillTrace>,
     ) -> Result<PrefillCompletion, PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         // Clone tracker before request is consumed by generate_to_worker.
@@ -228,33 +230,24 @@ impl PrefillRouter {
             InnerPrefillRouter::SimpleRouter(_) => target_worker.map(|worker_id| (worker_id, None)),
             InnerPrefillRouter::KvRouter(_) => None,
         };
+
+        // (c) just before generate_to_worker dispatch. Take an in-flight guard for
+        // the target CTX worker so the trace shows whether the frontend keeps each
+        // CTX densely fed (inflight ≫ 1) or trickles (≈ 1–2). The guard increments
+        // now, WARNs the new depth, and decrements on drop — leak-proof across all
+        // return paths below. Both guard + trace are no-ops when DYN_PREFILL_TRACE
+        // is off. The gauge keys on `target_worker` (the resolved CTX worker on the
+        // spawned and NoBootstrapEndpoint paths); on the Unavailable fallback path
+        // the router picks internally and target_worker is None — gauge skipped.
+        if let Some(t) = prefill_trace.as_mut() {
+            t.mark_dispatched();
+        }
+        let _inflight_guard = trace::inflight_guard(target_worker);
+
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
-            .map_err(|e| {
-                // A shed prefill worker returns ResourceExhausted. Carry it as the
-                // source so the chain stays downcastable to 503; boxing the raw
-                // anyhow error instead would hide that identity.
-                if match_error_chain(e.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
-                    tracing::warn!(
-                        worker_error = %e,
-                        "Request rejected by prefill worker (at capacity) — returning HTTP 503"
-                    );
-                    return PrefillError::PrefillError(
-                        "prefill worker overloaded".to_string(),
-                        Some(Box::new(
-                            DynamoError::builder()
-                                .error_type(ErrorType::ResourceExhausted)
-                                .message(e.to_string())
-                                .build(),
-                        )),
-                    );
-                }
-                PrefillError::PrefillError(
-                    "failed to route to prefill worker".to_string(),
-                    Some(e.into()),
-                )
-            })?;
+            .map_err(map_generate_to_worker_error)?;
 
         // Release the phase barrier now that routing completed and worker recording already ran.
         // Decode may proceed without waiting for prefill output streaming to finish.
@@ -266,6 +259,11 @@ impl PrefillRouter {
                 None,
             ));
         };
+
+        // (d) first response item from the CTX worker (= prefill compute + KV-ready).
+        if let Some(t) = prefill_trace.as_mut() {
+            t.mark_first_response();
+        }
 
         // Record when prefill result arrived at the router (for KV transfer latency metric).
         // This is after drop(phase_transition_permit) and after first_output is received.
@@ -295,6 +293,14 @@ impl PrefillRouter {
                     .as_ref()
                     .and_then(|u| u.prompt_tokens_details.clone());
             }
+        }
+
+        // (e) prefill stream ended. Emit the single per-request lifecycle summary
+        // here — this is the point where the prefill output stream is fully drained
+        // and we have a clean, successful lifecycle (a→e all observed). Error
+        // returns above drop the trace without emitting (incomplete lifecycle).
+        if let Some(t) = prefill_trace.take() {
+            t.emit();
         }
 
         let Some(output) = &first_output.data else {
@@ -337,6 +343,7 @@ impl PrefillRouter {
         prefill_request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: OwnedSemaphorePermit,
+        prefill_trace: Option<PrefillTrace>,
     ) {
         let router = self.prefill_router.get().cloned();
         // Capture current span to propagate trace context to the spawned task
@@ -349,6 +356,7 @@ impl PrefillRouter {
                     prefill_request,
                     target_worker,
                     Some(phase_transition_permit),
+                    prefill_trace,
                 )
                 .await
                 {
@@ -457,6 +465,35 @@ impl PrefillRouter {
     pub fn enforce_disagg(&self) -> bool {
         self.enforce_disagg
     }
+}
+
+/// Map a `generate_to_worker` error into a `PrefillError`. Extracted verbatim
+/// from the former inline `.map_err(...)` closure so the dispatch site can use
+/// `.map_err(map_generate_to_worker_error)?` while the in-flight RAII guard
+/// cleans up the gauge on the error path.
+fn map_generate_to_worker_error(e: anyhow::Error) -> PrefillError {
+    // A shed prefill worker returns ResourceExhausted. Carry it as the
+    // source so the chain stays downcastable to 503; boxing the raw
+    // anyhow error instead would hide that identity.
+    if match_error_chain(e.as_ref(), &[ErrorType::ResourceExhausted], &[]) {
+        tracing::warn!(
+            worker_error = %e,
+            "Request rejected by prefill worker (at capacity) — returning HTTP 503"
+        );
+        return PrefillError::PrefillError(
+            "prefill worker overloaded".to_string(),
+            Some(Box::new(
+                DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message(e.to_string())
+                    .build(),
+            )),
+        );
+    }
+    PrefillError::PrefillError(
+        "failed to route to prefill worker".to_string(),
+        Some(e.into()),
+    )
 }
 
 fn prefill_worker_info(

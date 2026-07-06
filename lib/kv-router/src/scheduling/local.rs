@@ -149,6 +149,7 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            worker_type,
         ));
         let (queue_updates, _) = watch::channel(());
         let queue_remote_updates = Arc::clone(&queue);
@@ -317,13 +318,27 @@ where
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots
             .mark_prefill_completed(&request_id.to_string(), Instant::now())?;
+        #[cfg(feature = "metrics")]
+        let update_start = Instant::now();
         self.queue.update().await;
+        #[cfg(feature = "metrics")]
+        super::metrics::SchedulingMetrics::get_or_init().observe_worker_state_update_to_scheduler(
+            "prefill_completed",
+            update_start.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string(), Instant::now())?;
+        #[cfg(feature = "metrics")]
+        let update_start = Instant::now();
         self.queue.update().await;
+        #[cfg(feature = "metrics")]
+        super::metrics::SchedulingMetrics::get_or_init().observe_worker_state_update_to_scheduler(
+            "free",
+            update_start.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(())
     }
 

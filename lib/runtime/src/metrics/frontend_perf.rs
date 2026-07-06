@@ -101,6 +101,107 @@ pub static TEMPLATE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     .expect("template_seconds histogram")
 });
 
+/// Actual tokenizer.encode() CPU time in milliseconds (subset of TOKENIZE_SECONDS,
+/// which also covers null-byte stripping and tracker bookkeeping around the call).
+pub static TOKENIZE_ENCODE_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::TOKENIZE_ENCODE_MS),
+            "Tokenizer encode() CPU time (milliseconds)",
+        )
+        .buckets(vec![
+            0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0,
+        ]),
+    )
+    .expect("tokenize_encode_ms histogram")
+});
+
+/// Time between the chat-completions preprocessor operator receiving a request and
+/// calling into preprocess_request_with_options, in milliseconds.
+pub static REQUEST_PREPROCESS_WAIT_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::REQUEST_PREPROCESS_WAIT_MS),
+            "Time from preprocessor operator entry to preprocess_request_with_options call (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0,
+        ]),
+    )
+    .expect("request_preprocess_wait_ms histogram")
+});
+
+/// Time from the chat-completions HTTP handler entry to the engine.generate() call that
+/// kicks off the pipeline (request validation, template resolution, engine lookup).
+pub static HTTP_TO_PREPROCESS_WAIT_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::HTTP_TO_PREPROCESS_WAIT_MS),
+            "Time from HTTP handler entry to engine.generate() call (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0,
+        ]),
+    )
+    .expect("http_to_preprocess_wait_ms histogram")
+});
+
+/// Block-hash CPU time per request in kv_router.route() (milliseconds).
+pub static HASH_BLOCKS_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::HASH_BLOCKS_MS),
+            "Block-hash CPU time per request in kv_router.route() (milliseconds)",
+        )
+        .buckets(vec![
+            0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0,
+        ]),
+    )
+    .expect("hash_blocks_ms histogram")
+});
+
+/// Sequential-hash CPU delta (seq_hash − hash_blocks) per request (milliseconds).
+pub static HASH_SEQ_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::HASH_SEQ_MS),
+            "Sequential-hash CPU delta per request in kv_router.route() (milliseconds)",
+        )
+        .buckets(vec![
+            0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0,
+        ]),
+    )
+    .expect("hash_seq_ms histogram")
+});
+
+/// KV index lookup time per request: radix-tree walk (local) or remote round-trip (milliseconds).
+pub static INDEX_LOOKUP_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::INDEX_LOOKUP_MS),
+            "KV index lookup time per request (milliseconds)",
+        )
+        .buckets(vec![
+            0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0,
+        ]),
+    )
+    .expect("index_lookup_ms histogram")
+});
+
+/// Scheduler actor wait per request: enqueue → admission → booking → response wake-up (milliseconds).
+pub static SCHEDULE_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::SCHEDULE_MS),
+            "Scheduler actor wait per request (milliseconds)",
+        )
+        .buckets(vec![
+            0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0,
+        ]),
+    )
+    .expect("schedule_ms histogram")
+});
+
 /// Cumulative detokenization time across all tokens (microseconds).
 /// Use `rate(total) / rate(count)` in Prometheus to derive per-token average.
 pub static DETOKENIZE_TOTAL_US: Lazy<Counter> = Lazy::new(|| {
@@ -156,6 +257,15 @@ pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
         registry.add_metric(Box::new(TOKENIZE_SECONDS.clone())).ok();
         registry.add_metric(Box::new(TEMPLATE_SECONDS.clone())).ok();
         registry
+            .add_metric(Box::new(TOKENIZE_ENCODE_MS.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(REQUEST_PREPROCESS_WAIT_MS.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(HTTP_TO_PREPROCESS_WAIT_MS.clone()))
+            .ok();
+        registry
             .add_metric(Box::new(DETOKENIZE_TOTAL_US.clone()))
             .ok();
         registry
@@ -167,6 +277,10 @@ pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
         registry
             .add_metric(Box::new(TOKENIZER_CACHE_MISSES_TOTAL.clone()))
             .ok();
+        registry.add_metric(Box::new(HASH_BLOCKS_MS.clone())).ok();
+        registry.add_metric(Box::new(HASH_SEQ_MS.clone())).ok();
+        registry.add_metric(Box::new(INDEX_LOOKUP_MS.clone())).ok();
+        registry.add_metric(Box::new(SCHEDULE_MS.clone())).ok();
     });
 }
 
@@ -182,10 +296,17 @@ pub fn ensure_frontend_perf_metrics_registered_prometheus(
     registry.register(Box::new(STAGE_DURATION_SECONDS.clone()))?;
     registry.register(Box::new(TOKENIZE_SECONDS.clone()))?;
     registry.register(Box::new(TEMPLATE_SECONDS.clone()))?;
+    registry.register(Box::new(TOKENIZE_ENCODE_MS.clone()))?;
+    registry.register(Box::new(REQUEST_PREPROCESS_WAIT_MS.clone()))?;
+    registry.register(Box::new(HTTP_TO_PREPROCESS_WAIT_MS.clone()))?;
     registry.register(Box::new(DETOKENIZE_TOTAL_US.clone()))?;
     registry.register(Box::new(DETOKENIZE_TOKEN_COUNT.clone()))?;
     registry.register(Box::new(TOKENIZER_CACHE_HITS_TOTAL.clone()))?;
     registry.register(Box::new(TOKENIZER_CACHE_MISSES_TOTAL.clone()))?;
+    registry.register(Box::new(HASH_BLOCKS_MS.clone()))?;
+    registry.register(Box::new(HASH_SEQ_MS.clone()))?;
+    registry.register(Box::new(INDEX_LOOKUP_MS.clone()))?;
+    registry.register(Box::new(SCHEDULE_MS.clone()))?;
     let _ = PROMETHEUS_REGISTERED.set(());
     Ok(())
 }

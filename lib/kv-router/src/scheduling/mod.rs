@@ -4,6 +4,8 @@
 pub mod config;
 mod filter;
 mod local;
+#[cfg(feature = "metrics")]
+pub mod metrics;
 pub mod overlap_refresh;
 pub mod policy;
 pub mod prefill_load;
