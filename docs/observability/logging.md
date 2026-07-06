@@ -350,7 +350,7 @@ Request payload logging is opt-in and independent of `OTEL_EXPORT_ENABLED`
 (which controls application log and trace export). By default, Dynamo does not
 emit request or response payload rows, even when the OpenAI request sets
 `store=true`. Set `DYN_REQUEST_TRACE_RECORDS=request_payload` to emit payload
-rows for every eligible chat request, or include `request_payload` alongside
+rows for every captured chat-completions request, or include `request_payload` alongside
 other selected record types.
 
 > [!WARNING]
@@ -369,7 +369,7 @@ other selected record types.
 ### How records are emitted
 
 - One `dynamo.request.trace.v1` record with `event_type=request_payload` is
-  published per eligible chat request.
+  published per chat-completions request.
 - When requests are cancelled or fail, the record is
   still emitted with `payload.response` omitted, so those cases remain
   inspectable. A hard process crash before emission can lose a record.
