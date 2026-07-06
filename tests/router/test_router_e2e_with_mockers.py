@@ -692,7 +692,7 @@ def test_indexers_sync(
         engine_process_kwargs={
             "num_mockers": NUM_MOCKERS,
             "store_backend": store_backend,
-            "zmq_kv_events": True,
+            "raw_kv_events": True,
             "zmq_replay": True,
             "standalone_indexer": True,
             "model_name": MODEL_NAME,
@@ -739,7 +739,7 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events,zmq_kv_events,use_remote_indexer,router_predicted_ttl_secs,event_plane",
+    "durable_kv_events,use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,event_plane",
     [
         (True, True, False, False, None, None),  # JetStream mode with KV events
         (
@@ -784,7 +784,7 @@ def test_router_decisions(
     durable_kv_events,
     use_kv_events,
     request_plane,
-    zmq_kv_events,
+    raw_kv_events,
     use_remote_indexer,
     router_predicted_ttl_secs,
     event_plane,
@@ -826,9 +826,9 @@ def test_router_decisions(
 
     process_kwargs = {
         "num_mockers": NUM_MOCKERS,
-        "zmq_kv_events": zmq_kv_events,
-        "standalone_indexer": zmq_kv_events,
-        "standalone_selector": zmq_kv_events,
+        "raw_kv_events": raw_kv_events,
+        "standalone_indexer": raw_kv_events,
+        "standalone_selector": raw_kv_events,
         "model_name": MODEL_NAME,
     }
     if use_remote_indexer:
