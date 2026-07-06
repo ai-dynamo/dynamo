@@ -27,9 +27,10 @@ use crate::{
     backend::Backend,
     discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
-    http::service::metrics::Metrics,
-    kv_router::plugins::RouterPluginBuilder,
-    kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
+    kv_router::{
+        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext,
+        plugins::RouterPluginBuilder,
+    },
     local_model::runtime_config::{
         SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY, TokenizerBackend,
         VLLM_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -59,6 +60,7 @@ use crate::{
     types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
     worker_type::WorkerType,
 };
+use dynamo_http_server::metrics::Metrics;
 
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{

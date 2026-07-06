@@ -22,8 +22,6 @@ mod anthropic;
 mod batch_proxy;
 pub mod metadata;
 mod openai;
-mod server;
-mod write_timeout;
 
 pub mod busy_threshold;
 pub mod disconnect;
@@ -38,13 +36,14 @@ pub mod router_policy;
 pub mod service_v2;
 pub mod sglang_generate;
 mod worker_metrics;
+#[cfg(test)]
+mod write_timeout_tests;
 
 pub use axum;
 pub use frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
     validate_extension_route_path,
 };
-pub use metrics::Metrics;
 
 use crate::preprocessor::apply_request_tool_call_parsing_options;
 

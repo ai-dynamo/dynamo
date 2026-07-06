@@ -1,14 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::pin::Pin;
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc};
 
-use crate::grpc::service::kserve::inference::DataType;
-use crate::grpc::service::kserve::inference::ModelInput;
-use crate::grpc::service::kserve::inference::ModelOutput;
-use crate::http::service::Metrics;
-use crate::http::service::service_v2 as http_service;
+use crate::{
+    grpc::service::kserve::inference::{DataType, ModelInput, ModelOutput},
+    http::service::service_v2 as http_service,
+};
+use dynamo_http_server::metrics::Metrics;
 
 use crate::discovery::ModelManager;
 use crate::protocols::tensor::TensorModelConfig;
@@ -65,11 +64,10 @@ impl GrpcTuningConfig {
     }
 }
 
-use crate::grpc::service::dispatch_error_status;
-use crate::grpc::service::openai::completion_response_stream;
 use crate::grpc::service::tensor::{
     ExtendedNvCreateTensorResponse, kserve_metadata_shape, tensor_response_stream,
 };
+use crate::grpc::service::{dispatch_error_status, openai::completion_response_stream};
 use std::convert::{TryFrom, TryInto};
 use tonic::{Request, Response, Status, transport::Server};
 
@@ -1045,8 +1043,7 @@ mod readiness_gate_tests {
 mod infer_dispatch_tests {
     use super::*;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
-    use inference::ModelInferRequest;
-    use inference::model_infer_request::InferInputTensor;
+    use inference::{ModelInferRequest, model_infer_request::InferInputTensor};
 
     fn template(model: &str, temperature: f32, max_completion_tokens: u32) -> RequestTemplate {
         RequestTemplate {

@@ -2035,7 +2035,7 @@ mod tests {
             serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
         assert_eq!(decoded.class(), ErrorType::DeadlineExceeded);
         assert_eq!(decoded.reason().as_str(), "router.queue_deadline_exceeded");
-        assert!(crate::http::service::metrics::request_deadline_exceeded(
+        assert!(dynamo_http_server::metrics::request_deadline_exceeded(
             &decoded
         ));
     }
@@ -3017,9 +3017,10 @@ mod tests {
     async fn enroll_public_request_attempt_cancelled_during_routing_update_frees_booking() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        use dynamo_kv_router::indexer::TieredMatchDetails;
-        use dynamo_kv_router::protocols::LocalBlockHash;
-        use dynamo_kv_router::services::indexer::backend::RemotePrimary;
+        use dynamo_kv_router::{
+            indexer::TieredMatchDetails, protocols::LocalBlockHash,
+            services::indexer::backend::RemotePrimary,
+        };
 
         /// Records park until `release` is notified.
         struct PausedRecord {

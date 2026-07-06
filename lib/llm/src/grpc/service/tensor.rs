@@ -11,19 +11,20 @@ use half::{bf16, f16};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::grpc::service::dispatch_error_status;
-use crate::http::service::metadata::extract_metadata_from_grpc;
-use crate::types::Annotated;
+use crate::{
+    grpc::service::dispatch_error_status, http::service::metadata::extract_metadata_from_grpc,
+    types::Annotated,
+};
 
 use super::kserve;
 
 use validator::Validate;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
-use crate::http::service::metrics::InflightGuard;
-use crate::http::service::{
+use crate::http::service::metrics::process_response_and_observe_metrics;
+use dynamo_http_server::{
     disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
+    metrics::{CancellationLabels, Endpoint, InflightGuard},
 };
 
 use crate::protocols::tensor;
@@ -31,8 +32,7 @@ use crate::protocols::tensor::{
     NvCreateTensorRequest, NvCreateTensorResponse, RequestedOutput, Tensor, TensorMetadata,
 };
 
-use crate::grpc::service::kserve::inference;
-use crate::grpc::service::kserve::inference::DataType;
+use crate::grpc::service::kserve::inference::{self, DataType};
 
 use tonic::{Status, metadata::MetadataMap};
 
@@ -119,15 +119,15 @@ pub async fn tensor_response_stream(
         // keeps the deadline outcome. RESOURCE_EXHAUSTED mirrors the HTTP
         // surfaces' 429: the deadline elapsed waiting for capacity, so it is
         // backpressure rather than a gateway timeout. No rejection accounting.
-        if crate::http::service::metrics::request_deadline_exceeded(e.as_ref()) {
+        if dynamo_http_server::metrics::request_deadline_exceeded(e.as_ref()) {
             return Status::resource_exhausted(
-                crate::http::service::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
+                dynamo_http_server::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,
             );
         }
-        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
+        if dynamo_http_server::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, crate::http::service::metrics::Endpoint::Tensor);
+                .inc_rejection(&model_name, dynamo_http_server::metrics::Endpoint::Tensor);
             return Status::resource_exhausted(e.to_string());
         }
         dispatch_error_status(e.as_ref(), "Failed to generate tensor response stream")

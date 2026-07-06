@@ -3,11 +3,9 @@
 
 //! Full-HTTP integration coverage for the Anthropic Messages compatibility surface.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
+use dynamo_http_server::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_protocols::types::{
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageContent,

@@ -3,6 +3,7 @@
 
 [workspace]
 members = [
+    "lib/http-server",
     "lib/llm",
     "lib/rl",
     "lib/runtime",
@@ -55,6 +56,7 @@ dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = 
 aisimulate-core = { version = "=0.13.0-dev.202610160000000073" }
 
 # Local crates
+dynamo-http-server = { path = "lib/http-server", version = "1.6.0" }
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }
 dynamo-llm = { path = "lib/llm", version = "1.6.0", default-features = false }
 dynamo-rl = { path = "lib/rl", version = "1.6.0" }

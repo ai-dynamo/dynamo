@@ -2442,6 +2442,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "dynamo-custom-policy-builtin",
+ "dynamo-http-server",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-protocols",
@@ -2473,6 +2474,28 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "validator",
+]
+
+[[package]]
+name = "dynamo-http-server"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "axum 0.8.4",
+ "dynamo-runtime",
+ "futures",
+ "hyper-util",
+ "parking_lot",
+ "prometheus",
+ "rand 0.9.4",
+ "rcgen",
+ "rustls",
+ "serde",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower 0.5.3",
+ "tracing",
 ]
 
 [[package]]
@@ -2571,6 +2594,7 @@ dependencies = [
  "dialoguer",
  "dynamo-bench",
  "dynamo-custom-policy-builtin",
+ "dynamo-http-server",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2591,7 +2615,6 @@ dependencies = [
  "half",
  "hf-hub 0.4.3",
  "http-body-util",
- "hyper-util",
  "image",
  "indicatif 0.18.4",
  "insta",

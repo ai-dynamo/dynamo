@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::pin::Pin;
-use std::time::Duration;
+use std::{pin::Pin, time::Duration};
 
 use anyhow::Context as _;
 use dynamo_renderer::PromptFormatter;
@@ -12,10 +11,9 @@ use crate::{
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
-    http::service::metrics::Metrics,
-    kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{
         EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext,
+        indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
         metrics::RouterRequestMetrics,
     },
     migration::Migration,
@@ -33,6 +31,7 @@ use crate::{
         },
     },
 };
+use dynamo_http_server::metrics::Metrics;
 
 use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_runtime::{
