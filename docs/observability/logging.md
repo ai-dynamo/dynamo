@@ -370,7 +370,7 @@ other selected record types.
 
 - One `dynamo.request.trace.v1` record with `event_type=request_payload` is
   published per eligible chat request.
-- On client cancellation, gateway timeout, or aggregation failure, the record is
+- When requests are cancelled or fail, the record is
   still emitted with `payload.response` omitted, so those cases remain
   inspectable. A hard process crash before emission can lose a record.
 - Each `otel` sink record maps to one OTLP `LogRecord`: scope
