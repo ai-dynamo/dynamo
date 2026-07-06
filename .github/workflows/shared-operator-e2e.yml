@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Shared Operator E2E
+
+on:
+  workflow_call:
+    inputs:
+      namespace:
+        description: 'Host namespace where the vCluster lives'
+        type: string
+        required: true
+      vcluster_name:
+        description: 'Name of the vCluster'
+        type: string
+        required: true
+      operator_tag:
+        description: 'Operator image tag used to self-bootstrap a missing vCluster'
+        type: string
+        required: true
+    secrets:
+      AZURE_ACR_HOSTNAME:
+        required: true
+      HF_TOKEN:
+        required: true
+      DOCKERHUB_LOGIN_USER:
+        required: false
+      DOCKERHUB_ACCESS_TOKEN:
+        required: false
+
+jobs:
+  operator-e2e:
+    name: gpu_0
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 120
+    env:
+      E2E_NAMESPACE: operator-e2e-${{ github.run_id }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+
+      - name: Set up vCluster kubeconfig
+        id: kubeconfig
+        shell: bash
+        env:
+          KUBECONFIG_BASE64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+        run: |
+          set -euo pipefail
+          echo "${KUBECONFIG_BASE64}" | base64 -d > "${RUNNER_TEMP}/operator-e2e-kubeconfig"
+          chmod 600 "${RUNNER_TEMP}/operator-e2e-kubeconfig"
+          echo "KUBECONFIG=${RUNNER_TEMP}/operator-e2e-kubeconfig" >> "${GITHUB_ENV}"
+
+      - name: Prepare operator E2E namespace
+        shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          kubectl delete namespace "${E2E_NAMESPACE}" \
+            --ignore-not-found --wait=true --timeout=5m
+          kubectl create namespace "${E2E_NAMESPACE}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic hf-token-secret \
+            --namespace="${E2E_NAMESPACE}" \
+            --from-literal=HF_TOKEN="${HF_TOKEN}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version: '1.26.3'
+          cache-dependency-path: deploy/operator/go.sum
+
+      - name: Verify operator E2E prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl wait --for=condition=established \
+            crd/dynamographdeploymentrequests.nvidia.com \
+            --timeout=120s
+          kubectl get secret hf-token-secret -n "${E2E_NAMESPACE}" >/dev/null
+
+      - name: Run GPU-free operator E2E tests
+        shell: bash
+        env:
+          DGDR_IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo-planner:${{ github.sha }}-dynamo-planner
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          make -C deploy/operator test-e2e-dgdr \
+            DGDR_NAMESPACE="${E2E_NAMESPACE}" \
+            DGDR_IMAGE="${DGDR_IMAGE}" \
+            DGDR_TEST_FLAGS="-ginkgo.label-filter='validation || (rapid && gpu_0)' -ginkgo.junit-report=${GITHUB_WORKSPACE}/test-results/operator-e2e-gpu0.xml -dgdr-name-prefix=ci-${{ github.run_id }}-${{ github.run_attempt }}" \
+            2>&1 | tee "${GITHUB_WORKSPACE}/test-results/operator-e2e-gpu0.log"
+
+      - name: Collect failure diagnostics
+        if: failure() && steps.kubeconfig.outcome == 'success'
+        shell: bash
+        run: |
+          set +e
+          mkdir -p test-results
+          {
+            echo '=== DGDRs ==='
+            kubectl get dynamographdeploymentrequests -n "${E2E_NAMESPACE}" -o wide
+            echo '=== DGDs ==='
+            kubectl get dynamographdeployments -n "${E2E_NAMESPACE}" -o wide
+            echo '=== Jobs and pods ==='
+            kubectl get jobs,pods -n "${E2E_NAMESPACE}" -o wide
+            echo '=== Recent events ==='
+            kubectl get events -n "${E2E_NAMESPACE}" --sort-by='.lastTimestamp'
+            echo '=== Operator logs ==='
+            kubectl logs -n default -l control-plane=controller-manager \
+              --all-containers --tail=300
+          } 2>&1 | tee "${GITHUB_WORKSPACE}/test-results/operator-e2e-gpu0-diagnostics.log"
+
+      - name: Upload operator E2E results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: operator-e2e-gpu0-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Clean up operator E2E namespace
+        if: always() && steps.kubeconfig.outcome == 'success'
+        shell: bash
+        run: |
+          kubectl delete namespace "${E2E_NAMESPACE}" \
+            --ignore-not-found --wait=true --timeout=5m

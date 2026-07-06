@@ -834,6 +834,27 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  planner-copy-to-acr:
+    name: planner
+    needs: [planner-build]
+    if: |
+      always() && !cancelled() &&
+      github.event_name != 'workflow_dispatch' &&
+      needs.planner-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
+      target_image: ai-dynamo/dynamo-planner
+      cuda_version: '[""]'
+      override_arch: amd64 # Deploy tests only use AMD64 images.
+      copy_timeout_minutes: 10
+    secrets:
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      AZURE_ACR_USER: ${{ secrets.AZURE_ACR_USER }}
+      AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
+
   # ============================================================================
   # DEPLOYMENT JOBS
   # Deploy operator and run end-to-end tests on Kubernetes cluster
@@ -895,6 +916,21 @@ jobs:
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
+
+  deploy-test-operator-gpu0:
+    name: Operator E2E
+    needs: [deploy-operator, planner-copy-to-acr]
+    if: github.event_name != 'workflow_dispatch'
+    uses: ./.github/workflows/shared-operator-e2e.yml
+    with:
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets:
+      AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      DOCKERHUB_LOGIN_USER: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+      DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-operator-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Operator Setup
@@ -1309,7 +1345,7 @@ jobs:
 
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-operator-gpu0, deploy-test-gaie]
     runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1429,6 +1465,8 @@ jobs:
       - deploy-test-vllm
       - deploy-test-sglang
       - deploy-test-trtllm
+      - deploy-test-operator-gpu0
+      - planner-copy-to-acr
       - deploy-operator-checkpoint-vllm
       - deploy-operator-checkpoint-sglang
       - deploy-operator-checkpoint-trtllm
