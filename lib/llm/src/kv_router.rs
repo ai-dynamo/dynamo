@@ -521,12 +521,7 @@ where
         }
 
         HASH_BLOCKS_MS.observe(hash_elapsed.as_secs_f64() * 1000.0);
-        HASH_SEQ_MS.observe(
-            seq_hash_elapsed
-                .saturating_sub(hash_elapsed)
-                .as_secs_f64()
-                * 1000.0,
-        );
+        HASH_SEQ_MS.observe(seq_hash_elapsed.saturating_sub(hash_elapsed).as_secs_f64() * 1000.0);
         INDEX_LOOKUP_MS.observe(indexer_duration.as_secs_f64() * 1000.0);
         SCHEDULE_MS.observe(
             total_elapsed
@@ -534,7 +529,6 @@ where
                 .as_secs_f64()
                 * 1000.0,
         );
-
 
         // Observe per-request shared cache metrics.
         if let Some(hits) = sc_hits_for_metrics

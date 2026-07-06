@@ -318,10 +318,20 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         {
             static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             let first = !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed);
-            match request.routing.as_ref().and_then(|r| r.conversation_id.as_deref()) {
-                Some(cid) if first => tracing::info!(request_id = %context_id, conversation_id = %cid, dp_rank, "exp-H convid forwarded to worker (first; rest at debug)"),
-                Some(cid) => tracing::debug!(request_id = %context_id, conversation_id = %cid, dp_rank, "exp-H convid forwarded to worker"),
-                None if first => tracing::warn!(request_id = %context_id, dp_rank, "exp-H convid ABSENT on first routed request — conv-affinity will NOT engage (session_control missing?)"),
+            match request
+                .routing
+                .as_ref()
+                .and_then(|r| r.conversation_id.as_deref())
+            {
+                Some(cid) if first => {
+                    tracing::info!(request_id = %context_id, conversation_id = %cid, dp_rank, "exp-H convid forwarded to worker (first; rest at debug)")
+                }
+                Some(cid) => {
+                    tracing::debug!(request_id = %context_id, conversation_id = %cid, dp_rank, "exp-H convid forwarded to worker")
+                }
+                None if first => {
+                    tracing::warn!(request_id = %context_id, dp_rank, "exp-H convid ABSENT on first routed request — conv-affinity will NOT engage (session_control missing?)")
+                }
                 None => tracing::debug!(request_id = %context_id, dp_rank, "exp-H convid ABSENT"),
             }
         }

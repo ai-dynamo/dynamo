@@ -847,7 +847,10 @@ impl OpenAIPreprocessor {
                 dp_rank: nvext.dp_rank,
                 // exp H (gap #4): seed conversation_id from session_control so the engine's
                 // conversation-affinity ADP router can pin conv -> DP rank.
-                conversation_id: nvext.session_control.as_ref().map(|sc| sc.session_id.clone()),
+                conversation_id: nvext
+                    .session_control
+                    .as_ref()
+                    .map(|sc| sc.session_id.clone()),
                 prefill_dp_rank: nvext.prefill_dp_rank,
                 expected_output_tokens: hints.and_then(|h| h.osl),
                 priority_jump,

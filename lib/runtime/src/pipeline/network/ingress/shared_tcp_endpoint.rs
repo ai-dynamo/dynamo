@@ -403,7 +403,9 @@ impl SharedTcpServer {
         // worker runtime starved" without scraping. Gated by DYN_ACK_TRACE.
         if ack_trace_enabled() {
             let cancel = self.cancellation_token.clone();
-            tokio::spawn(crate::metrics::tokio_perf::tokio_metrics_and_canary_loop(cancel));
+            tokio::spawn(crate::metrics::tokio_perf::tokio_metrics_and_canary_loop(
+                cancel,
+            ));
         }
 
         // Start accepting connections in a background task
@@ -588,7 +590,12 @@ impl SharedTcpServer {
         // Encode and send a response frame; returns false if the write task is gone.
         let send_response = |msg: TcpResponseMessage, meta: Option<AckMeta>| -> bool {
             match msg.encode() {
-                Ok(encoded) => response_tx.send(ResponseItem { bytes: encoded, meta }).is_ok(),
+                Ok(encoded) => response_tx
+                    .send(ResponseItem {
+                        bytes: encoded,
+                        meta,
+                    })
+                    .is_ok(),
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to encode TCP response");
                     true
@@ -610,7 +617,10 @@ impl SharedTcpServer {
                     let error_response =
                         TcpResponseMessage::new(Bytes::from(format!("Read error: {}", e)));
                     if let Ok(encoded) = error_response.encode() {
-                        let _ = response_tx.send(ResponseItem { bytes: encoded, meta: None });
+                        let _ = response_tx.send(ResponseItem {
+                            bytes: encoded,
+                            meta: None,
+                        });
                     }
                     return Err(e.into());
                 }
@@ -627,7 +637,10 @@ impl SharedTcpServer {
                     let error_response =
                         TcpResponseMessage::new(Bytes::from_static(b"Invalid endpoint path"));
                     if let Ok(encoded) = error_response.encode() {
-                        let _ = response_tx.send(ResponseItem { bytes: encoded, meta: None });
+                        let _ = response_tx.send(ResponseItem {
+                            bytes: encoded,
+                            meta: None,
+                        });
                     }
                     continue;
                 }
@@ -696,7 +709,10 @@ impl SharedTcpServer {
                         endpoint_path
                     )));
                     if let Ok(encoded) = error_response.encode() {
-                        let _ = response_tx.send(ResponseItem { bytes: encoded, meta: None });
+                        let _ = response_tx.send(ResponseItem {
+                            bytes: encoded,
+                            meta: None,
+                        });
                     }
                     continue;
                 }

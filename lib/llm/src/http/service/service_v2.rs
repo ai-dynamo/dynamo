@@ -661,7 +661,8 @@ impl HttpServiceConfigBuilder {
         // Full-distribution scheduler admission histograms (admission_compute_ms, queue_wait_ms) --
         // complements RoutingOverheadMetrics with the pieces that live inside dynamo-kv-router's
         // scheduler actor, which RoutingOverheadMetrics (measured at the KvRouter caller) can't see.
-        if let Err(e) = dynamo_kv_router::scheduling::metrics::register_scheduling_metrics(&registry)
+        if let Err(e) =
+            dynamo_kv_router::scheduling::metrics::register_scheduling_metrics(&registry)
         {
             tracing::warn!("Failed to register scheduling metrics: {}", e);
         }

@@ -1203,22 +1203,21 @@ impl VllmCore {
             // In the mocker with instant KV (--kv-transfer-bandwidth 0), the only delay is
             // orchestration: time from receive() to first scheduling slot. Both sides fire
             // against the same MOCK_KV_WAIT_TIMEOUT_MS threshold.
-            if self.args.engine_type == EngineType::Trtllm {
-                if let Some(threshold_ms) = crate::common::utils::mock_kv_wait_timeout_ms() {
-                    if let Some(req) = self.state.requests.get(&uuid) {
-                        let wait_ms = req.enqueued_wall_time.elapsed().as_millis() as u64;
-                        if wait_ms >= threshold_ms {
-                            let worker_type = self.args.worker_type;
-                            tracing::warn!(
-                                target: "dynamo_stall_op",
-                                op = "mock_kv_timeout",
-                                %uuid,
-                                wait_ms,
-                                ?worker_type,
-                                "mock TRT-LLM KV transfer timeout: worker queue wait exceeded budget"
-                            );
-                        }
-                    }
+            if self.args.engine_type == EngineType::Trtllm
+                && let Some(threshold_ms) = crate::common::utils::mock_kv_wait_timeout_ms()
+                && let Some(req) = self.state.requests.get(&uuid)
+            {
+                let wait_ms = req.enqueued_wall_time.elapsed().as_millis() as u64;
+                if wait_ms >= threshold_ms {
+                    let worker_type = self.args.worker_type;
+                    tracing::warn!(
+                        target: "dynamo_stall_op",
+                        op = "mock_kv_timeout",
+                        %uuid,
+                        wait_ms,
+                        ?worker_type,
+                        "mock TRT-LLM KV transfer timeout: worker queue wait exceeded budget"
+                    );
                 }
             }
             self.state.transition_to_running(uuid);

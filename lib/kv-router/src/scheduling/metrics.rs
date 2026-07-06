@@ -186,7 +186,9 @@ impl SchedulingMetrics {
 /// Register scheduling metrics with the given registry. Idempotent via the underlying
 /// `OnceLock`-memoized histograms; safe to call once per process from frontend HTTP setup.
 #[cfg(feature = "metrics")]
-pub fn register_scheduling_metrics(registry: &prometheus::Registry) -> Result<(), prometheus::Error> {
+pub fn register_scheduling_metrics(
+    registry: &prometheus::Registry,
+) -> Result<(), prometheus::Error> {
     let m = SchedulingMetrics::get_or_init();
     registry.register(Box::new(m.admission_compute_ms.clone()))?;
     registry.register(Box::new(m.queue_wait_ms.clone()))?;
@@ -197,4 +199,3 @@ pub fn register_scheduling_metrics(registry: &prometheus::Registry) -> Result<()
     registry.register(Box::new(m.worker_state_update_to_scheduler_ms.clone()))?;
     Ok(())
 }
-

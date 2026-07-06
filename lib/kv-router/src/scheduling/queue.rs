@@ -432,7 +432,10 @@ impl<
                 metrics.observe_actor_mailbox_wait(
                     self.worker_type,
                     command.kind(),
-                    received_at.saturating_duration_since(command.sent_at()).as_secs_f64() * 1000.0,
+                    received_at
+                        .saturating_duration_since(command.sent_at())
+                        .as_secs_f64()
+                        * 1000.0,
                 );
                 if let Some(prev) = last_received_at {
                     metrics.observe_actor_poll_gap(
@@ -636,8 +639,10 @@ impl<
             }
             tracing::debug!("scheduling request from pending queue");
             #[cfg(feature = "metrics")]
-            super::metrics::SchedulingMetrics::get_or_init()
-                .observe_queue_wait(self.worker_type, entry.enqueue_at.elapsed().as_secs_f64() * 1000.0);
+            super::metrics::SchedulingMetrics::get_or_init().observe_queue_wait(
+                self.worker_type,
+                entry.enqueue_at.elapsed().as_secs_f64() * 1000.0,
+            );
             self.admit_one(request, admit_now);
         }
     }

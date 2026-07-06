@@ -322,11 +322,10 @@ where
         let update_start = Instant::now();
         self.queue.update().await;
         #[cfg(feature = "metrics")]
-        super::metrics::SchedulingMetrics::get_or_init()
-            .observe_worker_state_update_to_scheduler(
-                "prefill_completed",
-                update_start.elapsed().as_secs_f64() * 1000.0,
-            );
+        super::metrics::SchedulingMetrics::get_or_init().observe_worker_state_update_to_scheduler(
+            "prefill_completed",
+            update_start.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(())
     }
 
@@ -336,11 +335,10 @@ where
         let update_start = Instant::now();
         self.queue.update().await;
         #[cfg(feature = "metrics")]
-        super::metrics::SchedulingMetrics::get_or_init()
-            .observe_worker_state_update_to_scheduler(
-                "free",
-                update_start.elapsed().as_secs_f64() * 1000.0,
-            );
+        super::metrics::SchedulingMetrics::get_or_init().observe_worker_state_update_to_scheduler(
+            "free",
+            update_start.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(())
     }
 
