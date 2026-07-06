@@ -99,6 +99,8 @@ async def test_escalate_sleep_wakes_and_resleeps_deeper():
     # Discovery is not rejoined: escalation happens while unregistered.
     handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
     assert handler._pause_controller.is_paused is True
+    assert handler.idle_monitor.state is IdleSleepState.ASLEEP
+    assert handler.idle_monitor.current_level == 2
 
 
 @pytest.mark.asyncio
@@ -125,6 +127,24 @@ async def test_escalate_sleep_restores_previous_level_on_failure():
     assert handler.engine_client.sleep.await_args_list[0].args == (2,)
     assert handler.engine_client.sleep.await_args_list[1].args == (1,)
     assert handler._pause_controller.is_paused is True
+
+
+@pytest.mark.asyncio
+async def test_escalate_sleep_recovers_when_rollback_also_fails():
+    handler = _make_handler()
+    await handler.sleep({"level": 1})
+    handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
+
+    result = await handler._escalate_sleep(1, 2)
+
+    assert result["status"] == "error"
+    # Escalation and rollback both failed: the handler resumes through the
+    # wake path so the controller, discovery, and monitor stay truthful.
+    handler.engine_client.resume_generation.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    assert handler._pause_controller.is_paused is False
+    assert handler.idle_monitor.state is IdleSleepState.WARM
+    assert handler.idle_monitor.current_level is None
 
 
 @pytest.mark.asyncio

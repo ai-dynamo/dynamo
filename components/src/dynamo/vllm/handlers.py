@@ -1148,7 +1148,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Opt-in idle sleep TTL ladder. The monitor drives the same
         # unregister -> drain -> sleep path as the control/sleep route;
         # wake stays external via control/wake_up.
-        if getattr(config, "idle_sleep_enabled", False):
+        if config.idle_sleep_enabled:
             self.idle_monitor = IdleSleepMonitor(
                 sleep_fn=self._idle_sleep,
                 timeout=config.idle_sleep_timeout,
@@ -1376,7 +1376,29 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "Failed to restore sleep level %d after failed escalation",
                         from_level,
                     )
+                    # The engine is awake but the controller still reports
+                    # paused and the endpoint is unregistered. Resume through
+                    # the wake path so state stays truthful; the idle monitor
+                    # re-sleeps after a fresh TTL.
+                    try:
+                        await self._pause_controller.resume()
+                        if self.generate_endpoint is not None:
+                            await self.generate_endpoint.register_endpoint_instance()
+                        self._pause_controller.mark_resumed()
+                        if self.idle_monitor is not None:
+                            self.idle_monitor.notify_woken()
+                        logger.info(
+                            "[Sleep] Recovered to awake state after failed "
+                            "escalation rollback"
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to recover after failed escalation rollback; "
+                            "external wake_up required"
+                        )
                 return {"status": "error", "message": str(e)}
+            if self.idle_monitor is not None:
+                self.idle_monitor.notify_slept(to_level)
             return {
                 "status": "ok",
                 "message": f"Sleep escalated (level={from_level}->{to_level})",

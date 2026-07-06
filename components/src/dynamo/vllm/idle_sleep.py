@@ -173,9 +173,10 @@ class IdleSleepMonitor:
                     await asyncio.sleep(self._poll_interval)
             except asyncio.CancelledError:
                 logger.debug("[IdleSleep] Idle monitor task cancelled.")
-                break
+                raise
             except Exception:
                 logger.exception("[IdleSleep] Unexpected error in idle monitor loop")
+                raise
 
     async def _tick(self) -> None:
         if self._state is IdleSleepState.WARM:

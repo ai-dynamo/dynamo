@@ -248,6 +248,7 @@ def test_track_request_decrements_on_error():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_background_loop_sleeps_and_stops():
     sleep_fn = AsyncMock(return_value={"status": "ok"})
     slept = asyncio.Event()
@@ -274,6 +275,7 @@ async def test_background_loop_sleeps_and_stops():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_background_loop_exits_on_shutdown_event():
     shutdown_event = asyncio.Event()
     monitor = IdleSleepMonitor(
