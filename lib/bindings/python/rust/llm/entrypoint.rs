@@ -692,7 +692,7 @@ pub fn make_engine<'p>(
             let local_path = if model_path.exists() {
                 model_path
             } else {
-                // Mocker only needs tokenizer, not weights
+                // Tokenizer-only engines: weights live elsewhere (mock).
                 let ignore_weights = matches!(args.engine_type, EngineType::Mocker);
                 // Preserve the original HF model ID as source_path so the
                 // frontend can resolve model metadata even when the served

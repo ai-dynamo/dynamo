@@ -2873,6 +2873,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sglang-rs-backend"
+version = "1.3.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "clap 4.6.1",
+ "dynamo-backend-common",
+ "futures",
+ "local-ip-address",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "rand 0.9.4",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

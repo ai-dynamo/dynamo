@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-sglang-rs-backend"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Dynamo SGLang backend for Shepherd Model Gateway's scheduler gRPC service."
+
+[dependencies]
+dynamo-backend-common = { workspace = true }
+
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+local-ip-address = { version = "0.6.3" }
+prost = { version = "0.13.5" }
+prost-types = { version = "0.13.5" }
+rand = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { version = "0.13.1", features = ["transport"] }
+tracing = { workspace = true }
+
+[build-dependencies]
+tonic-build = { version = "0.13.1" }
