@@ -295,7 +295,7 @@ def create_parsers(
     guided_decoding_active = tool_choice == "required" or _is_named_tool_choice(
         tool_choice
     )
-    if reasoning_parser_name and not guided_decoding_active:
+    if reasoning_parser_name and (not guided_decoding_active or force_reasoning):
         reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
@@ -312,6 +312,16 @@ def _is_named_tool_choice(tool_choice: Any) -> bool:
         and tool_choice.get("type") == "function"
         and isinstance(tool_choice.get("function"), dict)
         and bool(tool_choice["function"].get("name"))
+    )
+
+
+def _guided_tool_choice_requires_reasoning(
+    request: dict[str, Any], force_reasoning: bool
+) -> bool:
+    """Return whether SGLang should reason before guided tool-call JSON."""
+    tool_choice = request.get("tool_choice", "auto")
+    return force_reasoning and (
+        tool_choice == "required" or _is_named_tool_choice(tool_choice)
     )
 
 

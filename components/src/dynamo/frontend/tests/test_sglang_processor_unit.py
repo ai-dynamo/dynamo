@@ -26,6 +26,7 @@ from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
     _flatten_message_content,
+    _guided_tool_choice_requires_reasoning,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _normalize_sglang_parser_name,
@@ -155,6 +156,18 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["sampling_options"]["guided_decoding"] == {
             "json": {"type": "object"}
         }
+
+    @pytest.mark.parametrize("require_reasoning", [False, True])
+    def test_require_reasoning_passthrough(self, require_reasoning):
+        """The Python chat processor preserves SGLang's reasoning gate."""
+        result = _build_dynamo_preproc(
+            {"model": "test"},
+            prompt_token_ids=[1, 2, 3],
+            model_name="test",
+            eos_token_ids=None,
+            require_reasoning=require_reasoning,
+        )
+        assert result["require_reasoning"] is require_reasoning
 
     def test_stop_conditions_string(self):
         """Single stop string is wrapped in a list."""
@@ -496,8 +509,9 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         assert tcp is None
         assert rp is not None
 
-    def test_reasoning_disabled_when_tool_choice_required(self):
-        """Reasoning parser is skipped when guided decoding is active."""
+    @pytest.mark.parametrize("force_reasoning", [False, True])
+    def test_reasoning_for_required_tool_follows_effective_mode(self, force_reasoning):
+        """Required tools parse reasoning only when the prompt enables it."""
         tools = [
             {
                 "type": "function",
@@ -511,12 +525,14 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
             {"tools": tools, "tool_choice": "required"},
             tool_call_parser_name="qwen25",
             reasoning_parser_name="qwen3",
+            force_reasoning=force_reasoning,
         )
         assert tcp is not None
-        assert rp is None
+        assert (rp is not None) is force_reasoning
 
-    def test_reasoning_disabled_when_tool_choice_named(self):
-        """Reasoning parser is skipped for named tool_choice (guided decoding)."""
+    @pytest.mark.parametrize("force_reasoning", [False, True])
+    def test_reasoning_for_named_tool_follows_effective_mode(self, force_reasoning):
+        """Named tools parse reasoning only when the prompt enables it."""
         tools = [
             {
                 "type": "function",
@@ -536,9 +552,10 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
             },
             tool_call_parser_name="qwen25",
             reasoning_parser_name="qwen3",
+            force_reasoning=force_reasoning,
         )
         assert tcp is not None
-        assert rp is None
+        assert (rp is not None) is force_reasoning
 
     def test_reasoning_active_when_tool_choice_auto(self):
         """Reasoning parser remains active for tool_choice=auto (no guided decoding)."""
@@ -632,6 +649,24 @@ def test_minimax_m3_force_reasoning_uses_thinking_mode():
         )
         is False
     )
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "force_reasoning", "expected"),
+    [
+        ("required", True, True),
+        ({"type": "function", "function": {"name": "get_weather"}}, True, True),
+        ("auto", True, False),
+        ("none", True, False),
+        ("required", False, False),
+    ],
+)
+def test_guided_tool_choice_requires_effective_reasoning(
+    tool_choice, force_reasoning, expected
+):
+    """Only reasoning-enabled required or named tools activate the gate."""
+    request = {"tool_choice": tool_choice}
+    assert _guided_tool_choice_requires_reasoning(request, force_reasoning) is expected
 
 
 class _CapturingReasoningParser:
