@@ -95,6 +95,7 @@ fn create_handle_with_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     fn create_test_request(model: &str, store: bool) -> NvCreateChatCompletionRequest {
@@ -169,25 +170,45 @@ mod tests {
         crate::request_trace::init_bus_for_test(8);
         let mut rx = crate::request_trace::subscribe();
 
-        RequestPayloadHandle::for_test("req-ok", "test-model", true)
+        RequestPayloadHandle::for_test("payload-test-req-ok", "test-model", true)
             .emit(Some(Arc::new(create_test_response("hello"))));
-        RequestPayloadHandle::for_test("req-cancel", "test-model", true).emit(None);
+        RequestPayloadHandle::for_test("payload-test-req-cancel", "test-model", true).emit(None);
 
-        let first = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("first record arrives before timeout")
-            .expect("first record receives ok");
-        let second = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("second record arrives before timeout")
-            .expect("second record receives ok");
+        let mut records = HashMap::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while records.len() < 2 {
+                let record = rx.recv().await.expect("record receives ok");
+                if record.event_type != crate::request_trace::RequestTraceEventType::RequestPayload
+                {
+                    continue;
+                }
+                let Some(payload) = record.payload.as_ref() else {
+                    continue;
+                };
+                if matches!(
+                    payload.request_id.as_str(),
+                    "payload-test-req-ok" | "payload-test-req-cancel"
+                ) {
+                    records.insert(payload.request_id.clone(), record);
+                }
+            }
+        })
+        .await
+        .expect("expected request payload records before timeout");
+
+        let first = records
+            .remove("payload-test-req-ok")
+            .expect("payload-test-req-ok record");
+        let second = records
+            .remove("payload-test-req-cancel")
+            .expect("payload-test-req-cancel record");
 
         assert_eq!(
             first.event_type,
             crate::request_trace::RequestTraceEventType::RequestPayload
         );
         let first_payload = first.payload.as_ref().expect("first payload");
-        assert_eq!(first_payload.request_id, "req-ok");
+        assert_eq!(first_payload.request_id, "payload-test-req-ok");
         assert!(first_payload.request.is_some());
         assert!(first_payload.response.is_some());
 
@@ -196,7 +217,7 @@ mod tests {
             crate::request_trace::RequestTraceEventType::RequestPayload
         );
         let second_payload = second.payload.as_ref().expect("second payload");
-        assert_eq!(second_payload.request_id, "req-cancel");
+        assert_eq!(second_payload.request_id, "payload-test-req-cancel");
         assert!(second_payload.request.is_some());
         assert!(second_payload.response.is_none());
     }
