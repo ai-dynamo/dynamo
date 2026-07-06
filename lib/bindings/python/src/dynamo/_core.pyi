@@ -3276,6 +3276,8 @@ class backend:
             structural_tag_scope: str = ...,
             structural_tag_schema: str = ...,
             route_to_encoder: bool = ...,
+            media_decoder: Optional[MediaDecoder] = None,
+            media_fetcher: Optional[MediaFetcher] = None,
         ) -> None: ...
 
     class Worker:

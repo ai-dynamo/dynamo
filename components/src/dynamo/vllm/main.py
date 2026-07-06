@@ -38,8 +38,6 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
-    MediaDecoder,
-    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -63,6 +61,7 @@ from .handlers import get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
+from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
 
@@ -735,18 +734,9 @@ async def register_vllm_model(
 
     # Configure media decoder for frontend image decoding when enabled
     # This enables frontend to decode images and transfer via NIXL RDMA
-    media_decoder = None
-    media_fetcher = None
-    if config.frontend_decoding:
-        media_decoder = MediaDecoder()
-        media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
-        # media_decoder.enable_video({})
-
-        media_fetcher = MediaFetcher()
-        media_fetcher.timeout_ms(30000)
-        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
-        media_fetcher.allow_direct_ip(allow_internal)
-        media_fetcher.allow_direct_port(allow_internal)
+    media_decoder, media_fetcher = create_frontend_media_config(
+        config.frontend_decoding
+    )
 
     await register_model(
         model_input,

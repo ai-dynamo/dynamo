@@ -80,6 +80,7 @@ from .logits_processing import (
     register_dynamo_logits_processor,
 )
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
+from .multimodal_utils.media_config import create_frontend_media_config
 from .multimodal_utils.request_processor import VllmMultimodalRequestProcessor
 
 if TYPE_CHECKING:
@@ -176,6 +177,7 @@ class VllmLLMEngine(LLMEngine):
         dyn_reasoning_parser: Optional[str] = None,
         enable_rl: bool = False,
         enable_multimodal: bool = False,
+        frontend_decoding: bool = False,
         multimodal_embedding_cache_capacity_gb: float = 0.0,
         namespace: str = "dynamo",
     ):
@@ -187,6 +189,7 @@ class VllmLLMEngine(LLMEngine):
         self._dyn_reasoning_parser = dyn_reasoning_parser
         self.enable_rl = enable_rl
         self.enable_multimodal = enable_multimodal
+        self.frontend_decoding = frontend_decoding
         self.multimodal_embedding_cache_capacity_gb = (
             multimodal_embedding_cache_capacity_gb
         )
@@ -300,16 +303,22 @@ class VllmLLMEngine(LLMEngine):
             dyn_reasoning_parser=config.dyn_reasoning_parser,
             enable_rl=config.enable_rl,
             enable_multimodal=config.enable_multimodal,
+            frontend_decoding=config.frontend_decoding,
             multimodal_embedding_cache_capacity_gb=(
                 config.multimodal_embedding_cache_capacity_gb
             ),
             namespace=config.namespace,
+        )
+        media_decoder, media_fetcher = create_frontend_media_config(
+            config.frontend_decoding
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,
             model_input=ModelInput.Tokens,
+            media_decoder=media_decoder,
+            media_fetcher=media_fetcher,
         )
         return engine, worker_config
 
@@ -361,6 +370,7 @@ class VllmLLMEngine(LLMEngine):
             model=self.engine_args.model,
             engine_client=self.engine_client,
             enable_multimodal=self.enable_multimodal,
+            enable_frontend_decoding=self.frontend_decoding,
         )
         # Resolve once the tokenizer is available (see logits_processor_spec()).
         self._logits_processor_spec = await self.logits_processor_spec()

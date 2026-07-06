@@ -614,7 +614,7 @@ Request handling:
 | Feature | Description |
 |---------|-------------|
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
-| Multimodal parity | The shared request and encoder-handoff contract are available. vLLM supports aggregated image and video inference with CPU embedding caching; P/D execution, frontend decoding, SGLang/TRT-LLM execution, and separate encode workers remain separate work. |
+| Multimodal parity | The shared request and encoder-handoff contract are available. vLLM supports aggregated image and video inference with frontend decoding/transfer and CPU embedding caching; P/D execution, SGLang/TRT-LLM execution, and separate encode workers remain separate work. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters (SGLang / TRT-LLM) | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading. **vLLM is supported on the unified path** — see [What works today](#what-works-today); SGLang and TRT-LLM advertise no LoRA updates yet. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
@@ -631,7 +631,7 @@ Request handling:
 | `KvConnectorProtocol` abstraction | Legacy abstracts NIXL pull / Mooncake push; unified uses vLLM's internal connector only |
 | `--benchmark-mode` family | The `--benchmark-*` flag family (mode, prefill/decode granularities, warmup, output path, timeout) injects into `vllm_config.additional_config` |
 | "Omni" alternative entry point | `dynamo.vllm.omni.*` parallel mode for alternative tensor workflows |
-| Multimodal (vLLM) | P/D execution, frontend decoding, Qwen VL mRoPE handoff, `EncodeWorkerHandler`, and `--route-to-encoder` |
+| Multimodal (vLLM) | P/D execution, Qwen VL mRoPE handoff, `EncodeWorkerHandler`, and `--route-to-encoder` |
 
 ### SGLang-specific gaps
 

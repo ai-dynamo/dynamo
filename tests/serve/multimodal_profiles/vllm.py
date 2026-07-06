@@ -129,6 +129,25 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             "1",
                         ],
                     ),
+                    MmCase(
+                        suffix="shm_transfer",
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                        env={
+                            "DYN_CHAT_PROCESSOR": "vllm",
+                            "DYNAMO_MM_TRANSFER": "shm",
+                        },
+                    ),
+                    MmCase(
+                        suffix="nixl_transfer",
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                        marks=[pytest.mark.post_merge],
+                        env={
+                            "DYN_CHAT_PROCESSOR": "vllm",
+                            "DYNAMO_MM_TRANSFER": "nixl",
+                        },
+                    ),
                 ],
             ),
             "agg_unified_video": TopologyConfig(
