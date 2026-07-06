@@ -34,7 +34,7 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
-    local_model::runtime_config::TokenizerBackend,
+    local_model::runtime_config::{TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY},
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -94,6 +94,15 @@ fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
             .iter()
             .flatten()
             .any(|worker_type| *worker_type == WorkerType::Encode)
+}
+
+fn supports_vllm_generate(card: &ModelDeploymentCard) -> bool {
+    matches!(
+        card.runtime_config
+            .runtime_data
+            .get(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+        Some(serde_json::Value::Bool(true))
+    )
 }
 
 /// Resolve the effective [`WorkerType`] for a card during the
@@ -158,6 +167,9 @@ pub struct ModelWatcher {
     local_model_path: Option<PathBuf>,
     /// Frontend-level tokenizer backend override for discovered model cards.
     tokenizer_backend: Option<TokenizerBackend>,
+    /// Whether the frontend configured the vLLM-compatible Generate API.
+    /// Keep the raw Generate pipeline out of non-HTTP and default-off paths.
+    generate_engine_enabled: bool,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -240,6 +252,7 @@ impl ModelWatcher {
             pending_lora_adds: DashMap::new(),
             local_model_path: None,
             tokenizer_backend: None,
+            generate_engine_enabled: false,
         }
     }
 
@@ -253,6 +266,10 @@ impl ModelWatcher {
 
     pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
         self.tokenizer_backend = tokenizer_backend;
+    }
+
+    pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
+        self.generate_engine_enabled = enabled;
     }
 
     fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
@@ -1187,6 +1204,25 @@ impl ModelWatcher {
                 }
             }
 
+            // Generate is a frontend-native token-in/token-out surface. It
+            // reuses the raw routed pipeline so the complete request envelope
+            // reaches the worker without passing through the OpenAI decoder.
+            if self.generate_engine_enabled
+                && supports_vllm_generate(card)
+                && let Some(routing) = preprocessed_routing.as_ref()
+            {
+                let generate_engine = routing
+                    .build_preprocessed_pipeline(
+                        card,
+                        self.migration_limit,
+                        self.migration_max_seq_len,
+                        self.metrics.clone(),
+                    )
+                    .context("build generate (preprocessed) pipeline")?;
+                worker_set.generate_engine = Some(generate_engine);
+                tracing::info!("Generate (token-in/token-out) is ready");
+            }
+
             // Verify we built at least one serving engine. A Tokens model that
             // ends up with no chat AND no completions engine (e.g. completions-only
             // model with no tokenizer) should fail fast rather than register an
@@ -1469,6 +1505,23 @@ fn seed_lora_state_from_card(
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
+
+    #[test]
+    fn vllm_generate_requires_explicit_worker_capability() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.model_type = ModelType::Chat | ModelType::Completions;
+        assert!(!supports_vllm_generate(&card));
+
+        card.runtime_config
+            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
+            .unwrap();
+        assert!(supports_vllm_generate(&card));
+
+        card.runtime_config
+            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, false)
+            .unwrap();
+        assert!(!supports_vllm_generate(&card));
+    }
 
     #[test]
     fn base_card_with_capacity_seeds_idle_lora_capable_worker() {
