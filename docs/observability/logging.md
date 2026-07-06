@@ -384,11 +384,11 @@ Payload-related request trace variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DYN_REQUEST_TRACE` | Master switch for request trace. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. | unset (disabled) |
-| `DYN_REQUEST_TRACE_RECORDS` | Comma-separated record types: `request_end`, `request_payload`, `tool`. Include `request_payload` to emit request and response payload bodies. | `request_end,tool` when `DYN_REQUEST_TRACE=1`; unset otherwise |
-| `DYN_REQUEST_TRACE_SINKS` | Comma-separated sinks: `file`, `stderr`, `nats`, `otel`. | `file` when enabled |
+| `DYN_REQUEST_TRACE` | Master switch for request trace. | unset (disabled) |
+| `DYN_REQUEST_TRACE_RECORDS` | Comma-separated record types: `request_end`, `request_payload`, `tool`. Include `request_payload` to emit request and response payload bodies. | `request_end,tool`  |
+| `DYN_REQUEST_TRACE_SINKS` | Comma-separated sinks: `file`, `stderr`, `nats`, `otel`. | `file` |
 | `DYN_REQUEST_TRACE_NATS_SUBJECT` | Subject used by the `nats` sink. | `dynamo.request_trace.v1` |
-| `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. Oversized payload rows emit a marker with `payload_complete=false` and `payload_drop_reason`. | `4194304` (4 MiB) |
+| `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. | `4194304` (4 MiB) |
 
 > [!WARNING]
 > Deprecated. `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`,
