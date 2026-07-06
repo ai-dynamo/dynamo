@@ -324,7 +324,7 @@ class InstrumentedScheduler(AsyncScheduler):
             return True
         return super().has_requests()
 
-    def schedule(self) -> SchedulerOutput:
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         if self._bench_active and self._bench_phase != _BenchPhase.IDLE:
             try:
                 output = self._bench_step()
@@ -333,7 +333,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_cleanup_requests()
                 self._bench_active = False
                 self._bench_phase = _BenchPhase.IDLE
-                return self._schedule_and_record_time()
+                return self._schedule_and_record_time(throttle_prefills)
             if output is not None:
                 self.kv_cache_manager.new_step_starts()
                 self._update_after_schedule(output)
@@ -376,10 +376,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._update_after_schedule(empty)
                 return empty
 
-        return self._schedule_and_record_time()
+        return self._schedule_and_record_time(throttle_prefills)
 
-    def _schedule_and_record_time(self) -> SchedulerOutput:
-        output = super().schedule()
+    def _schedule_and_record_time(
+        self, throttle_prefills: bool = False
+    ) -> SchedulerOutput:
+        output = super().schedule(throttle_prefills)
         if output.total_num_scheduled_tokens > 0:
             self._schedule_times.append(time.monotonic())
         return output

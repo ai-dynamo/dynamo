@@ -605,7 +605,7 @@ impl ModelWatcher {
             //
             // PREFILL teardown (cached endpoint is stale): drop everything for
             // this key and deactivate the decode-side router so requests fall
-            // back to aggregated mode (or fail cleanly with `enforce_disagg`).
+            // back to aggregated mode.
             //
             // DECODE teardown: keep `PrefillReady` (the cached endpoint is still
             // valid for future decode rebuilds — that's PR 8965's primary
@@ -1069,7 +1069,6 @@ impl ModelWatcher {
                             card.kv_cache_block_size,
                             Some(prefill_config),
                             self.prefill_load_estimator.clone(),
-                            router_config.enforce_disagg,
                             router_config.session_affinity_ttl_secs,
                             model_name.clone(),
                             namespace.clone(),
@@ -1100,7 +1099,6 @@ impl ModelWatcher {
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
                         uses_multimodal_cache_routing(card),
-                        router_config.enforce_disagg,
                         router_config.session_affinity_ttl_secs,
                     )
                     .await

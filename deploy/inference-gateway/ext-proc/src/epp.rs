@@ -99,25 +99,15 @@ impl Router {
     ///
     /// This waits for at least one decode worker to appear, fetches the model
     /// card, initializes the preprocessor, and creates both routers.
-    pub async fn from_discovery(
-        namespace: &str,
-        component: &str,
-        enforce_disagg: bool,
-    ) -> Result<Self> {
-        Self::from_discovery_with_namespace_match(
-            namespace,
-            NamespaceMatchKind::Exact,
-            component,
-            enforce_disagg,
-        )
-        .await
+    pub async fn from_discovery(namespace: &str, component: &str) -> Result<Self> {
+        Self::from_discovery_with_namespace_match(namespace, NamespaceMatchKind::Exact, component)
+            .await
     }
 
     pub async fn from_discovery_with_namespace_match(
         namespace: &str,
         namespace_match_kind: NamespaceMatchKind,
         component: &str,
-        enforce_disagg: bool,
     ) -> Result<Self> {
         validate_kube_discovery_mode()?;
 
@@ -187,7 +177,6 @@ impl Router {
             block_size,
             Some(prefill_config),
             None,
-            enforce_disagg,
             None,
             model_name.clone(),
             actual_namespace.to_string(),
@@ -961,16 +950,8 @@ impl EndpointPicker for Router {
 
         // Try prefill routing first (disaggregated mode).
         //
-        // If the prefill router is not activated (no prefill workers
-        // discovered yet, or the inner router has been deactivated), this
-        // returns an error. Behavior on that error depends on
-        // `DYN_ENFORCE_DISAGG`:
-        //
-        // * `enforce_disagg = false` (default): fall back to aggregated
-        //   (decode-only) routing — matches `PrefillRouter::generate`.
-        // * `enforce_disagg = true`: surface the error to Envoy and let the
-        //   request fail. Silently downgrading to aggregated would defeat
-        //   the operator's explicit "strict disagg" policy.
+        // If the prefill router is not activated (no prefill workers discovered yet, or the inner
+        // router has been deactivated), fall back to aggregated routing.
         let prefill_result = self
             .route_prefill(
                 &tokens,
@@ -983,16 +964,6 @@ impl EndpointPicker for Router {
         let is_disaggregated = match &prefill_result {
             Ok(_) => true,
             Err(e) => {
-                if self.prefill_router.enforce_disagg() {
-                    tracing::warn!(
-                        error = %e,
-                        request_id = %req.request_id,
-                        "Prefill routing failed under DYN_ENFORCE_DISAGG=true; failing request"
-                    );
-                    return Err(PickError::RoutingFailed(format!(
-                        "prefill routing failed under enforce_disagg: {e}"
-                    )));
-                }
                 tracing::debug!(
                     error = %e,
                     "Prefill routing failed; falling back to aggregated mode"

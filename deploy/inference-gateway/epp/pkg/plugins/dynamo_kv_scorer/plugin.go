@@ -118,7 +118,6 @@ var (
 	ffiNamespace         string
 	ffiNamespaceIsPrefix bool
 	ffiComponent         string
-	ffiEnforceDisagg     bool
 
 	routerInitialized bool
 
@@ -140,12 +139,13 @@ func loadDynamoConfig() {
 		ffiNamespaceIsPrefix = false
 	}
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
-	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
+	if getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false) {
+		logger.Info("DYN_ENFORCE_DISAGG is deprecated and ignored; routing topology and readiness come from registered worker types")
+	}
 	logger.Info("Dynamo KV Scorer config loaded",
 		"namespace", ffiNamespace,
 		"namespaceIsPrefix", ffiNamespaceIsPrefix,
 		"component", ffiComponent,
-		"enforce_disagg", ffiEnforceDisagg,
 		"kvCacheBlockSize", getEnvOrDefault("DYN_KV_CACHE_BLOCK_SIZE", "(from discovery)"),
 		"modelName", getEnvOrDefault("DYN_MODEL_NAME", "(from discovery)"))
 }
@@ -186,7 +186,7 @@ func initFFI() error {
 			ns,
 			C.bool(ffiNamespaceIsPrefix),
 			cm,
-			C.bool(ffiEnforceDisagg),
+			C.bool(false),
 			&routerHandles,
 		)
 		if rc != C.QUERY_ROUTER_OK {
@@ -313,9 +313,7 @@ func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error
 		}
 		requestBody["messages"] = messages
 	} else if req.Body.Completions != nil && !req.Body.Completions.Prompt.IsEmpty() {
-		requestBody["messages"] = []map[string]any{
-			{"role": "user", "content": req.Body.Completions.Prompt.PlainText()},
-		}
+		addCompletionPrompt(requestBody, req.Body.Completions.Prompt)
 	} else {
 		return nil, fmt.Errorf("no messages or prompt provided")
 	}
@@ -333,6 +331,23 @@ func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error
 	}
 
 	return requestBody, nil
+}
+
+func addCompletionPrompt(requestBody map[string]any, prompt fwkrh.Prompt) {
+	if len(prompt.TokenIDs) > 0 {
+		tokenIDs := make([]uint32, len(prompt.TokenIDs))
+		copy(tokenIDs, prompt.TokenIDs)
+		requestBody["prompt"] = tokenIDs
+		return
+	}
+
+	// Keep non-token completions on the legacy chat-shaped scorer path.
+	requestBody["messages"] = []map[string]any{
+		{
+			"role":    "user",
+			"content": prompt.PlainText(),
+		},
+	}
 }
 
 // extractNvext returns the caller-supplied nvext object from the PayloadMap,

@@ -238,7 +238,6 @@ pub async fn build_preprocessed_routing(
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enable_multimodal_cache_indexer: bool,
-    enforce_disagg: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
@@ -289,7 +288,6 @@ pub async fn build_preprocessed_routing(
         PrefillRouter::disabled(
             model_manager.clone(),
             router_mode,
-            enforce_disagg,
             session_affinity_ttl_secs,
         )
     });

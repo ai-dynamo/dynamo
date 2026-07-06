@@ -36,7 +36,6 @@ struct Config {
     namespace: String,
     namespace_match_kind: NamespaceMatchKind,
     component: String,
-    enforce_disagg: bool,
 }
 
 impl Config {
@@ -51,11 +50,16 @@ impl Config {
                 )
             };
 
+        if parse_env("DYN_ENFORCE_DISAGG", false) {
+            tracing::warn!(
+                "DYN_ENFORCE_DISAGG is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+            );
+        }
+
         Self {
             namespace,
             namespace_match_kind,
             component: env_or("DYN_COMPONENT_NAME", "").unwrap_or_else(|| "backend".to_string()),
-            enforce_disagg: parse_env("DYN_ENFORCE_DISAGG", false),
         }
     }
 }
@@ -135,7 +139,6 @@ async fn main() -> Result<()> {
         namespace = %config.namespace,
         ?config.namespace_match_kind,
         component = %config.component,
-        enforce_disagg = config.enforce_disagg,
         "Starting Dynamo Rust EPP"
     );
 
@@ -158,7 +161,6 @@ async fn main() -> Result<()> {
         &config.namespace,
         config.namespace_match_kind,
         &config.component,
-        config.enforce_disagg,
     )
     .await?;
 
