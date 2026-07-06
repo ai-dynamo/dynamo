@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/rest"
 	k8sptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -90,7 +92,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components = nil
 			}),
-			wantWebhookErrs: []string{"spec.components must have at least one component"},
+			wantWebhookErrs: []string{"spec.components: Required value: must have at least one component"},
 		},
 		{
 			name: "component replicas must be non-negative",
@@ -105,7 +107,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].minAvailable is currently supported only for Grove-backed DynamoGraphDeployment components"},
+			wantWebhookErrs: []string{"spec.components[1].minAvailable: Forbidden: is currently supported only for Grove-backed DynamoGraphDeployment components"},
 		},
 		{
 			name: "restart on create is rejected by CEL before webhook validation",
@@ -125,7 +127,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
 			}),
-			wantWebhookErrs: []string{"spec.topologyConstraint with clusterTopologyName is required when any topology constraint is set (at spec or component level)"},
+			wantWebhookErrs: []string{"spec.topologyConstraint: Required value: is required when any component topology constraint is set"},
 		},
 		{
 			name:          "inter-pod GMS requires Grove",
@@ -133,7 +135,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				enableBetaInterPodGMS(betaWorkerComponent(dgd))
 			}),
-			wantWebhookErrs: []string{"spec.components[worker]: experimental.gpuMemoryService.mode=\"InterPod\" requires the Grove pathway, but Grove is disabled in the operator configuration"},
+			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Forbidden: requires the Grove pathway, but Grove is disabled in the operator configuration"},
 		},
 		{
 			name: "inter-pod GMS requires vLLM backend",
@@ -141,7 +143,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Spec.BackendFramework = "sglang"
 				enableBetaInterPodGMS(betaWorkerComponent(dgd))
 			}),
-			wantWebhookErrs: []string{"spec.components[worker]: the inter-pod GMS layout (experimental.gpuMemoryService.mode=\"InterPod\") is currently supported only for vLLM (detected: sglang); set spec.backendFramework=\"vllm\""},
+			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: \"InterPod\": the inter-pod GMS layout is currently supported only for vLLM (detected backend: sglang)"},
 		},
 		{
 			name: "KV transfer policy selector is rejected by CEL before webhook validation",
@@ -163,7 +165,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Mode: nvidiacomv1beta1.GMSModeIntraPod,
 				}
 			}),
-			wantWebhookErrs: []string{"failover requires per-container K8s discovery; set annotation \"nvidia.com/dynamo-kube-discovery-mode\" to \"container\" on the DynamoGraphDeployment"},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: Invalid value: "": must be "container" when intra-pod failover is configured`},
 		},
 		{
 			name: "checkpoint job with checkpointRef is rejected by CEL before webhook validation",
@@ -189,7 +191,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].experimental.gpuMemoryService: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1"},
+			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService: Forbidden: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1"},
 		},
 
 		// Cross-version schema and conversion boundaries.
@@ -336,7 +338,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
 				}
 			}),
-			wantWebhookErrs: []string{"spec.services[worker].annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value \"invalid\": must be \"mp\" or \"ray\""},
+			wantWebhookErrs: []string{`spec.services[worker].annotations[nvidia.com/vllm-distributed-executor-backend]: Invalid value: "invalid": must be "mp" or "ray"`},
 		},
 		{
 			name: "v1beta1 frontend sidecar must reference an existing container",
@@ -347,7 +349,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Containers: []corev1.Container{{Name: consts.MainContainerName}},
 				}}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].frontendSidecar \"missing\" does not match any podTemplate.spec.containers name"},
+			wantWebhookErrs: []string{`spec.components[1].frontendSidecar: Invalid value: "missing": must match a podTemplate.spec.containers name`},
 		},
 		{
 			name:       "valid v1alpha1 deployment reaches the webhook",
@@ -524,7 +526,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{ClusterTopologyName: "Bad_Name", Domain: "zone"},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.experimental.kvTransferPolicy.clusterTopologyName \"Bad_Name\" is not a valid Kubernetes resource name: a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')"},
+			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy.clusterTopologyName: Invalid value: "Bad_Name": a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`},
 		},
 		{
 			name: "KV-transfer cluster topology name requires Grove pathway",
@@ -534,7 +536,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{ClusterTopologyName: "grove-topology", Domain: "zone"},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.experimental.kvTransferPolicy.clusterTopologyName requires the Grove pathway; remove or unset the \"nvidia.com/enable-grove\" annotation (currently \"false\")"},
+			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy.clusterTopologyName: Forbidden: requires the Grove pathway; remove or unset annotation "nvidia.com/enable-grove" (currently "false")`},
 		},
 		{
 			name: "KV-transfer domain is required by the schema",
@@ -595,7 +597,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{ClusterTopologyName: "missing-topology", Domain: "rack"},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.experimental.kvTransferPolicy.clusterTopologyName \"missing-topology\" references a ClusterTopology resource that was not found"},
+			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy.clusterTopologyName: Invalid value: "missing-topology": references a ClusterTopology resource that was not found`},
 		},
 		{
 			name: "KV-transfer cluster topology policy rejects missing domain",
@@ -604,7 +606,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{ClusterTopologyName: "grove-topology", Domain: "host"},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.experimental.kvTransferPolicy.domain \"host\" does not exist in ClusterTopology \"grove-topology\"; available domains: [rack zone]"},
+			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy.domain: Invalid value: "host": does not exist in ClusterTopology "grove-topology"; available domains: [rack zone]`},
 		},
 
 		// GMS and failover rules.
@@ -637,7 +639,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				enableBetaIntraPodGMS(&dgd.Spec.Components[0])
 			}),
-			wantWebhookErrs: []string{"spec.components[frontend].experimental.gpuMemoryService: GPU memory service is only supported for worker components (type must be worker, prefill, or decode)"},
+			wantWebhookErrs: []string{"spec.components[0].experimental.gpuMemoryService: Forbidden: GPU memory service is only supported for worker, prefill, or decode components"},
 		},
 		{
 			name: "GMS client container names are validated by the schema",
@@ -656,7 +658,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Failover: &nvidiacomv1beta1.FailoverSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].experimental.failover: intraPod failover requires gpuMemoryService to be set"},
+			wantWebhookErrs: []string{`spec.components[1].experimental.failover: Forbidden: gpuMemoryService is required when failover mode is "IntraPod"`},
 		},
 		{
 			name: "failover mode must match GMS mode",
@@ -668,7 +670,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					NumShadows: 1,
 				}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].experimental.failover: interPod failover requires gpuMemoryService.mode=\"InterPod\" (got \"IntraPod\")"},
+			wantWebhookErrs: []string{`spec.components[1].experimental.failover.mode: Invalid value: "InterPod": must match gpuMemoryService.mode "IntraPod"`},
 		},
 		{
 			name: "intra-pod failover shadow maximum is validated by the schema",
@@ -690,7 +692,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Failover: &nvidiacomv1beta1.FailoverSpec{Mode: nvidiacomv1beta1.GMSModeInterPod, NumShadows: 1},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].experimental.failover: interPod failover requires gpuMemoryService.mode=\"InterPod\"", "spec.components[worker]: GMS failover requires at least 1 GPU in podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu"},
+			wantWebhookErrs: []string{
+				`spec.components[1].experimental.failover: Forbidden: gpuMemoryService is required when failover mode is "InterPod"`,
+				"spec.components[1].experimental.failover: Forbidden: GMS failover requires at least 1 GPU in podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu",
+			},
 		},
 		{
 			name: "inter-pod failover shadow-count minimum is validated by the schema",
@@ -708,7 +713,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Failover: &nvidiacomv1beta1.FailoverSpec{Mode: nvidiacomv1beta1.GMSModeInterPod, NumShadows: 1},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.components[frontend].experimental.failover: interPod failover requires gpuMemoryService.mode=\"InterPod\"", "spec.components[frontend]: GMS failover requires at least 1 GPU in podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu", "spec.components[frontend]: GMS failover is not supported for type \"frontend\""},
+			wantWebhookErrs: []string{
+				`spec.components[0].experimental.failover: Forbidden: gpuMemoryService is required when failover mode is "InterPod"`,
+				"spec.components[0].experimental.failover: Forbidden: GMS failover requires at least 1 GPU in podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu",
+				`spec.components[0].experimental.failover: Forbidden: GMS failover is not supported for component type "frontend"`,
+			},
 		},
 		{
 			name:        "GMS snapshot combination requires env gate",
@@ -718,7 +727,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				enableBetaIntraPodGMS(worker)
 				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].experimental.checkpoint: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate"},
+			wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint: Forbidden: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate"},
 		},
 
 		// Source-version compatibility rules.
@@ -730,7 +739,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Create: k8sptr.To(false),
 				}}
 			}),
-			wantWebhookErrs: []string{"spec.pvcs[0].name is required"},
+			wantWebhookErrs: []string{"spec.pvcs[0].name: Required value: is required"},
 		},
 		{
 			name: "alpha ingress requires host",
@@ -744,14 +753,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.services[frontend].ingress.host is required when ingress is enabled"},
+			wantWebhookErrs: []string{"spec.services[frontend].ingress.host: Required value: is required when ingress is enabled"},
 		},
 		{
 			name: "alpha volume mounts require mount point unless used as compilation cache",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].VolumeMounts = []nvidiacomv1alpha1.VolumeMount{{Name: "cache"}}
 			}),
-			wantWebhookErrs: []string{"spec.services[worker].volumeMounts[0].mountPoint is required when useAsCompilationCache is false"},
+			wantWebhookErrs: []string{"spec.services[worker].volumeMounts[0].mountPoint: Required value: is required when useAsCompilationCache is false"},
 		},
 		{
 			name:    "alpha EPP config sources are mutually exclusive",
@@ -767,7 +776,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].eppConfig: configMapRef and config are mutually exclusive, only one can be specified"},
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
 		},
 		{
 			name: "alpha intra-pod failover shadow maximum is preserved structurally",
@@ -778,7 +787,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					NumShadows: 2,
 				}
 			}),
-			wantWebhookErrs: []string{"failover requires per-container K8s discovery; set annotation \"nvidia.com/dynamo-kube-discovery-mode\" to \"container\" on the DynamoGraphDeployment", "spec.components[worker].experimental.failover: intraPod failover requires gpuMemoryService to be set", "spec.components[worker].experimental.failover.numShadows=2 is invalid for mode=\"IntraPod\": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode=\"InterPod\" to configure numShadows"},
+			wantWebhookErrs: []string{
+				`metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: Invalid value: "": must be "container" when intra-pod failover is configured`,
+				`spec.components[0].experimental.failover: Forbidden: gpuMemoryService is required when failover mode is "IntraPod"`,
+				`spec.services[worker].failover.numShadows: Invalid value: 2: is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`,
+			},
 		},
 		{
 			name: "alpha frontend sidecar rejects generated container name conflict",
@@ -796,7 +809,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					}},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.services[frontend]: cannot inject frontend sidecar: a container named \"sidecar-frontend\" already exists in extraPodSpec.containers"},
+			wantWebhookErrs: []string{`spec.services[frontend].frontendSidecar: Forbidden: cannot inject frontend sidecar: a container named "sidecar-frontend" already exists in extraPodSpec.containers`},
 		},
 		{
 			name: "alpha GMS client container names are validated by the source schema",
@@ -856,7 +869,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				service.Autoscaling = &nvidiacomv1alpha1.Autoscaling{Enabled: true}
 			}),
 			wantWarnings: []string{
-				"spec.services[worker].dynamoNamespace is deprecated and ignored. Value 'legacy-namespace' will be replaced with 'default-test-graph'. Remove this field from your configuration",
+				`spec.services[worker].dynamoNamespace is deprecated and ignored. Value "legacy-namespace" will be replaced with "default-test-graph". Remove this field from your configuration`,
 				"spec.services[worker].autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
 			},
 		},
@@ -913,7 +926,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].eppConfig: either configMapRef or config must be specified (no default configuration provided)"},
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
 		},
 		{
 			name: "v1beta1 EPP config without a source is rejected by CEL",
@@ -959,7 +972,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.PriorityClassName = "high-priority"
 			}),
-			wantWebhookErrs: []string{"spec.priorityClassName requires the Grove pathway, but Grove is disabled in the operator configuration"},
+			wantWebhookErrs: []string{"spec.priorityClassName: Forbidden: requires the Grove pathway, but Grove is disabled in the operator configuration"},
 		},
 		{
 			name: "priority class is allowed with Grove",
@@ -995,7 +1008,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Name = longDGDName
 				betaWorkerComponent(dgd).ComponentName = tooLongComponentName
 			}),
-			wantWebhookErrs: []string{"spec.components[wxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]: combined resource name length 46 exceeds 45-character limit required for pod naming. Consider shortening the DynamoGraphDeployment name 'test-graph-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' (length 61) or component name 'wxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' (length 38). The combined length of PCS name + component name must not exceed 45 characters. The PCS name 'tes-cafb' was auto-truncated from DGD name 'test-graph-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"},
+			wantWebhookErrs: []string{fmt.Sprintf(
+				"spec.components[1].name: Invalid value: %q: combined resource name length 46 exceeds the 45-character pod-name limit (PCS name + component name); shorten DynamoGraphDeployment name %q or component name %q",
+				tooLongComponentName,
+				longDGDName,
+				tooLongComponentName,
+			)},
 		},
 		{
 			name:          "rendered Grove resource name length is skipped outside Grove",
@@ -1035,7 +1053,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "grove-topology"}
 				dgd.Spec.Components[1].TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
 			}),
-			wantWebhookErrs: []string{"spec.components[frontend].topologyConstraint is required because spec.topologyConstraint.packDomain is not set; either set a spec-level packDomain or provide a topologyConstraint for every component"},
+			wantWebhookErrs: []string{"spec.components[0].topologyConstraint: Required value: is required because spec.topologyConstraint.packDomain is not set"},
 		},
 		{
 			name: "deployment pack domain can be inherited",
@@ -1073,7 +1091,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					PackDomain:          "rack",
 				}
 			}),
-			wantWebhookErrs: []string{"topology-aware scheduling requires a ClusterTopology resource \"missing-topology\" but it was not found; ensure the cluster topology is configured per the framework documentation"},
+			wantWebhookErrs: []string{`spec.topologyConstraint.clusterTopologyName: Invalid value: "missing-topology": references a ClusterTopology resource that was not found`},
 		},
 		{
 			name:    "independent topology errors aggregate",
@@ -1082,7 +1100,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "missing-topology"}
 				dgd.Spec.Components[1].TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
 			}),
-			wantWebhookErrs: []string{"spec.components[frontend].topologyConstraint is required because spec.topologyConstraint.packDomain is not set; either set a spec-level packDomain or provide a topologyConstraint for every component"},
+			wantWebhookErrs: []string{
+				"spec.components[0].topologyConstraint: Required value: is required because spec.topologyConstraint.packDomain is not set",
+				`spec.topologyConstraint.clusterTopologyName: Invalid value: "missing-topology": references a ClusterTopology resource that was not found`,
+			},
 		},
 		{
 			name: "pack domain must exist in cluster topology",
@@ -1092,7 +1113,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					PackDomain:          "host",
 				}
 			}),
-			wantWebhookErrs: []string{"spec.topologyConstraint.packDomain: domain \"host\" does not exist in ClusterTopology \"grove-topology\"; available domains: [rack zone]"},
+			wantWebhookErrs: []string{`spec.topologyConstraint.packDomain: Invalid value: "host": does not exist in ClusterTopology "grove-topology"; available domains: [rack zone]`},
 		},
 		{
 			name: "component topology cannot be broader than spec topology",
@@ -1103,7 +1124,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 				dgd.Spec.Components[1].TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "zone"}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker]: topologyConstraint.packDomain \"zone\" is broader than spec-level \"rack\"; component constraints must be equal to or narrower than the deployment-level constraint"},
+			wantWebhookErrs: []string{`spec.components[1].topologyConstraint.packDomain: Invalid value: "zone": must be equal to or narrower than the deployment-level domain "rack"`},
 		},
 
 		// Metadata annotation rules.
@@ -1118,7 +1139,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
 			}),
-			wantWebhookErrs: []string{"annotation nvidia.com/dynamo-operator-origin-version has invalid value \"not-semver\": must be valid semver"},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`},
 		},
 		{
 			name: "vLLM backend annotation accepts mp",
@@ -1137,7 +1158,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "typo"}
 			}),
-			wantWebhookErrs: []string{"annotation nvidia.com/vllm-distributed-executor-backend has invalid value \"typo\": must be \"mp\" or \"ray\""},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: Invalid value: "typo": must be "mp" or "ray"`},
 		},
 		{
 			name: "discovery mode accepts pod",
@@ -1156,7 +1177,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "endpoint"}
 			}),
-			wantWebhookErrs: []string{"annotation nvidia.com/dynamo-kube-discovery-mode has invalid value \"endpoint\": must be \"pod\" or \"container\""},
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: Unsupported value: "endpoint": supported values: "pod", "container"`},
 		},
 		{
 			name: "independent root errors aggregate with exact field paths",
@@ -1168,7 +1189,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					consts.KubeAnnotationDynamoKubeDiscoveryMode:        "invalid",
 				}
 			}),
-			wantWebhookErrs: []string{"spec.components must have at least one component", "annotation nvidia.com/dynamo-operator-origin-version has invalid value \"not-semver\": must be valid semver", "annotation nvidia.com/vllm-distributed-executor-backend has invalid value \"invalid\": must be \"mp\" or \"ray\"", "annotation nvidia.com/dynamo-kube-discovery-mode has invalid value \"invalid\": must be \"pod\" or \"container\""},
+			wantWebhookErrs: []string{
+				`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`,
+				`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: Invalid value: "invalid": must be "mp" or "ray"`,
+				`metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: Unsupported value: "invalid": supported values: "pod", "container"`,
+				"spec.components: Required value: must have at least one component",
+			},
 		},
 
 		// Component-set updates.
@@ -1185,7 +1211,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					}}}},
 				})
 			}),
-			wantWebhookErrs: []string{"component topology is immutable and cannot be modified after creation: components added: [extra]"},
+			wantWebhookErrs: []string{"spec.components: Forbidden: component topology is immutable and cannot be modified after creation: components added: [extra]"},
 			notWantErr:      "do-not-leak-this-value",
 		},
 		{
@@ -1194,7 +1220,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
 				spec.Components = spec.Components[:1]
 			}),
-			wantWebhookErrs: []string{"component topology is immutable and cannot be modified after creation: components removed: [worker]"},
+			wantWebhookErrs: []string{"spec.components: Forbidden: component topology is immutable and cannot be modified after creation: components removed: [worker]"},
 		},
 		{
 			name:          "component add and remove reports both sides",
@@ -1208,7 +1234,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			wantWebhookErrs: []string{"component topology is immutable and cannot be modified after creation: components added: [extra], components removed: [frontend]"},
+			wantWebhookErrs: []string{"spec.components: Forbidden: component topology is immutable and cannot be modified after creation: components added: [extra], components removed: [frontend]"},
 		},
 		{
 			name:          "component reorder is allowed",
@@ -1225,7 +1251,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker] cannot change node topology (between single-node and multi-node) after creation"},
+			wantWebhookErrs: []string{`spec.components[1].multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
 		},
 		{
 			name: "node count-only update remains allowed",
@@ -1247,7 +1273,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					PackDomain:          "rack",
 				}
 			}),
-			wantWebhookErrs: []string{"spec.topologyConstraint is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints"},
+			wantWebhookErrs: []string{`spec.topologyConstraint: Invalid value: {"clusterTopologyName":"grove-topology","packDomain":"rack"}: is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints`},
 		},
 		{
 			name: "spec topology constraint change is immutable",
@@ -1263,7 +1289,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					PackDomain:          "zone",
 				}
 			}),
-			wantWebhookErrs: []string{"spec.topologyConstraint is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints"},
+			wantWebhookErrs: []string{`spec.topologyConstraint: Invalid value: {"clusterTopologyName":"grove-topology","packDomain":"zone"}: is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints`},
 		},
 		{
 			name: "spec topology constraint removal is immutable",
@@ -1274,7 +1300,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			deployment:      newBetaDGDForValidation(),
-			wantWebhookErrs: []string{"spec.topologyConstraint is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints"},
+			wantWebhookErrs: []string{"spec.topologyConstraint: Invalid value: null: is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints"},
 		},
 		{
 			name: "unchanged topology constraints are allowed",
@@ -1296,7 +1322,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "grove-topology", PackDomain: "zone"}
 				spec.Components[1].TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].topologyConstraint is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints"},
+			wantWebhookErrs: []string{`spec.components[1].topologyConstraint: Invalid value: {"packDomain":"rack"}: is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints`},
 		},
 		{
 			name: "component topology constraint change is immutable",
@@ -1308,7 +1334,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "grove-topology", PackDomain: "zone"}
 				spec.Components[1].TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "zone"}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].topologyConstraint is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints"},
+			wantWebhookErrs: []string{`spec.components[1].topologyConstraint: Invalid value: {"packDomain":"zone"}: is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints`},
 		},
 		{
 			name: "component topology constraint removal is immutable",
@@ -1319,7 +1345,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
 				spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "grove-topology", PackDomain: "zone"}
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].topologyConstraint is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints"},
+			wantWebhookErrs: []string{"spec.components[1].topologyConstraint: Invalid value: null: is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change topology constraints"},
 		},
 
 		// KV-transfer updates.
@@ -1330,7 +1356,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				LabelKey: "topology.kubernetes.io/zone",
 				Domain:   "zone",
 			}),
-			wantWebhookErrs: []string{"spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy"},
+			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy: Invalid value: {"labelKey":"topology.kubernetes.io/zone","domain":"zone"}: is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy`},
 		},
 		{
 			name: "unchanged kv transfer policy is allowed",
@@ -1351,7 +1377,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Domain:   "zone",
 			}),
 			deployment:      newBetaDGDForValidation(),
-			wantWebhookErrs: []string{"spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy"},
+			wantWebhookErrs: []string{"spec.experimental.kvTransferPolicy: Invalid value: null: is immutable and cannot be added, removed, or changed after creation; delete and recreate the DynamoGraphDeployment to change the KV transfer policy"},
 		},
 
 		// GMS and failover updates.
@@ -1361,7 +1387,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				enableBetaInterPodGMS(worker)
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].experimental.gpuMemoryService.mode: the inter-pod GMS layout cannot be toggled after creation; delete and recreate the DynamoGraphDeployment"},
+			wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService.mode: Invalid value: "InterPod": the inter-pod GMS layout cannot be toggled after creation; delete and recreate the DynamoGraphDeployment`},
 		},
 		{
 			name: "inter-pod GMS layout removal is immutable",
@@ -1369,7 +1395,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				enableBetaInterPodGMS(worker)
 			}),
 			deployment:      newBetaDGDForValidation(),
-			wantWebhookErrs: []string{"spec.components[worker].experimental.gpuMemoryService.mode: the inter-pod GMS layout cannot be toggled after creation; delete and recreate the DynamoGraphDeployment"},
+			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: null: the inter-pod GMS layout cannot be toggled after creation; delete and recreate the DynamoGraphDeployment"},
 		},
 		{
 			name: "inter-pod failover toggle is immutable",
@@ -1380,7 +1406,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				enableBetaInterPodGMS(worker)
 				enableBetaInterPodFailover(worker, 1)
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].experimental.failover: inter-pod GMS failover cannot be toggled after creation; delete and recreate the DynamoGraphDeployment"},
+			wantWebhookErrs: []string{`spec.components[1].experimental.failover: Invalid value: {"mode":"InterPod","numShadows":1}: inter-pod GMS failover cannot be toggled after creation; delete and recreate the DynamoGraphDeployment`},
 		},
 		{
 			name: "inter-pod failover removal is immutable",
@@ -1388,8 +1414,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				enableBetaInterPodGMS(worker)
 				enableBetaInterPodFailover(worker, 1)
 			}),
-			deployment:      newBetaDGDForValidation(),
-			wantWebhookErrs: []string{"spec.components[worker].experimental.gpuMemoryService.mode: the inter-pod GMS layout cannot be toggled after creation; delete and recreate the DynamoGraphDeployment", "spec.components[worker].experimental.failover: inter-pod GMS failover cannot be toggled after creation; delete and recreate the DynamoGraphDeployment"},
+			deployment: newBetaDGDForValidation(),
+			wantWebhookErrs: []string{
+				"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: null: the inter-pod GMS layout cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
+				"spec.components[1].experimental.failover: Invalid value: null: inter-pod GMS failover cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
+			},
 		},
 		{
 			name: "inter-pod failover shadow count is immutable",
@@ -1399,7 +1428,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				enableAlphaInterPodGMSFailover(dgd.Spec.Services["worker"], 2)
 			}),
-			wantWebhookErrs: []string{"spec.components[worker].experimental.failover.numShadows is immutable for inter-pod GMS failover; delete and recreate the DynamoGraphDeployment to change it"},
+			wantWebhookErrs: []string{"spec.components[0].experimental.failover.numShadows: Invalid value: 2: is immutable for inter-pod GMS failover; delete and recreate the DynamoGraphDeployment to change it"},
 		},
 
 		// Scaling adapter updates.
@@ -1417,7 +1446,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				Username: "system:serviceaccount:default:regular-user",
 			},
 			operator:        dgdAdmissionOperator,
-			wantWebhookErrs: []string{"spec.components[worker].replicas cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
+			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
 		},
 		{
 			name: "scaling adapter fails closed without user info",
@@ -1430,7 +1459,23 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.Replicas = k8sptr.To(int32(3))
 			}),
 			operator:        dgdAdmissionOperator,
-			wantWebhookErrs: []string{"spec.components[worker].replicas cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
+			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
+		},
+		{
+			name: "scaling adapter removal cannot bypass replica ownership",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(2))
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = nil
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+			userInfo: &authenticationv1.UserInfo{
+				Username: "system:serviceaccount:default:regular-user",
+			},
+			operator:        dgdAdmissionOperator,
+			wantWebhookErrs: []string{"spec.components[1].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
 		},
 		{
 			name: "operator can change scaling-adapter-owned replicas",
@@ -1464,7 +1509,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
 				spec.Restart = &nvidiacomv1beta1.Restart{ID: "new"}
 			}),
-			wantWebhookErrs: []string{"spec.restart.id cannot be changed while a rolling update is InProgress"},
+			wantWebhookErrs: []string{"spec.restart.id: Invalid value: \"new\": cannot be changed while a rolling update is InProgress"},
 		},
 		{
 			name: "restart id can stay unchanged during active rolling update",
@@ -1512,7 +1557,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Restart = betaRestart(nvidiacomv1beta1.RestartStrategyTypeSequential, "frontend", "worker", "worker")
 			}),
-			wantWebhookErrs: []string{"spec.restart.strategy.order must be unique"},
+			wantWebhookErrs: []string{`spec.restart.strategy.order: Invalid value: ["frontend","worker","worker"]: must be unique`},
 		},
 		{
 			name:          "unknown restart order component is rejected on update",
@@ -1520,7 +1565,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Restart = betaRestart(nvidiacomv1beta1.RestartStrategyTypeSequential, "frontend", "ghost")
 			}),
-			wantWebhookErrs: []string{"spec.restart.strategy.order contains unknown component: ghost"},
+			wantWebhookErrs: []string{`spec.restart.strategy.order[1]: Unsupported value: "ghost": supported values: "frontend", "worker"`},
 		},
 		{
 			name:          "incomplete restart order is rejected on update",
@@ -1528,7 +1573,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Restart = betaRestart(nvidiacomv1beta1.RestartStrategyTypeSequential, "worker")
 			}),
-			wantWebhookErrs: []string{"spec.restart.strategy.order must have the same number of unique components as the deployment"},
+			wantWebhookErrs: []string{`spec.restart.strategy.order: Invalid value: ["worker"]: must have the same number of unique components as the deployment`},
 		},
 		{
 			name:          "empty sequential restart order is valid on update",
@@ -1557,7 +1602,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Restart = betaRestart(nvidiacomv1beta1.RestartStrategyTypeParallel, "frontend", "worker")
 			}),
-			wantWebhookErrs: []string{"spec.restart.strategy.order cannot be specified when strategy is parallel"},
+			wantWebhookErrs: []string{"spec.restart.strategy.order: Forbidden: cannot be specified when strategy is parallel"},
 		},
 		{
 			name:          "v1beta1 backend framework update reaches the webhook and warns",
@@ -1565,7 +1610,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.BackendFramework = sglangBackendFramework
 			}),
-			wantWebhookErrs: []string{"spec.backendFramework is immutable and cannot be changed after creation"},
+			wantWebhookErrs: []string{"spec.backendFramework: Invalid value: \"sglang\": is immutable and cannot be changed after creation"},
 			wantWarnings:    []string{"Changing spec.backendFramework may cause unexpected behavior"},
 		},
 	}
@@ -1637,6 +1682,31 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				t.Fatalf("warnings = %v, want %v", warnings, tt.wantWarnings)
 			}
 		})
+	}
+}
+
+func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
+	dgd := newBetaDGDForValidation()
+	dgd.Spec.Components = append(dgd.Spec.Components, dgd.Spec.Components[0])
+
+	validator := newDynamoGraphDeploymentTestValidator(t, true)
+	_, err := validator.Validate(context.Background(), dgd)
+	if err == nil || !strings.Contains(err.Error(), "failed to reconstruct compatibility view") {
+		t.Fatalf("Validate() error = %v, want fatal conversion error", err)
+	}
+	if k8serrors.IsInvalid(err) {
+		t.Fatalf("Validate() error = %v, want fatal conversion error rather than field validation error", err)
+	}
+}
+
+func assertFieldPaths(t *testing.T, errs field.ErrorList, want []string) {
+	t.Helper()
+	got := make([]string, len(errs))
+	for i := range errs {
+		got[i] = errs[i].Field
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("field paths = %v, want %v", got, want)
 	}
 }
 
@@ -1940,6 +2010,11 @@ func (m *fakeManager) GetConfig() *rest.Config              { return m.config }
 func (m *fakeManager) GetScheme() *runtime.Scheme           { return m.scheme }
 func (m *fakeManager) GetWebhookServer() ctrlwebhook.Server { return m.webhookServer }
 
+func newDynamoGraphDeploymentTestValidator(t *testing.T, groveEnabled bool) *DynamoGraphDeploymentValidator {
+	t.Helper()
+	return NewDynamoGraphDeploymentValidator(newGroveTopologyTestManager(t), groveEnabled)
+}
+
 func newGroveTopologyTestManager(t *testing.T, objects ...runtime.Object) ctrl.Manager {
 	t.Helper()
 
@@ -2020,11 +2095,7 @@ func assertBetaValidationErrors(t *testing.T, err error, wantErrs []string) {
 	}
 	statusErr, ok := err.(*k8serrors.StatusError)
 	if !ok || !k8serrors.IsInvalid(err) {
-		gotErrs := strings.Split(err.Error(), "\n")
-		if !slices.Equal(gotErrs, wantErrs) {
-			t.Fatalf("webhook errors = %v, want %v", gotErrs, wantErrs)
-		}
-		return
+		t.Fatalf("error = %T %v, want typed Kubernetes invalid error", err, err)
 	}
 	if statusErr.ErrStatus.Details == nil {
 		t.Fatalf("error = %v, want typed field causes", err)

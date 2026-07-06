@@ -161,7 +161,7 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		invalid := newBetaDGDForValidation()
 		invalid.Spec.Components = nil
 		_, err := handler.ValidateUpdate(ctx, newBetaDGDForValidation(), invalid)
-		assertBetaValidationErrors(t, err, []string{"spec.components must have at least one component"})
+		assertBetaValidationErrors(t, err, []string{"spec.components: Required value: must have at least one component"})
 	})
 
 	t.Run("stateful validation failure", func(t *testing.T) {
@@ -170,7 +170,7 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		oldDGD.Spec.BackendFramework = "vllm"
 		newDGD.Spec.BackendFramework = sglangBackendFramework
 		_, err := handler.ValidateUpdate(ctx, oldDGD, newDGD)
-		assertBetaValidationErrors(t, err, []string{"spec.backendFramework is immutable and cannot be changed after creation"})
+		assertBetaValidationErrors(t, err, []string{`spec.backendFramework: Invalid value: "sglang": is immutable and cannot be changed after creation`})
 	})
 }
 
