@@ -222,6 +222,10 @@ impl Router {
         let mut request_json: serde_json::Value = serde_json::from_str(request_json)?;
 
         if request_json.get("prompt").is_some() || request_json.get("prompt_embeds").is_some() {
+            if let Some(result) = tokenize_completion_prompt_embeds(&request_json)? {
+                return Ok(result);
+            }
+
             let token_data_policy = prepare_completion_prompt_for_routing(&mut request_json);
             let request: NvCreateCompletionRequest = serde_json::from_value(request_json)?;
             let nvext = request.nvext.as_ref();
@@ -229,17 +233,6 @@ impl Router {
             let strict_priority = extract_strict_priority(nvext);
             let routing_constraints = extract_routing_constraints(nvext);
             let cache_namespace = request_cache_salt(&request).map(str::to_owned);
-
-            if request.inner.prompt_embeds.is_some() {
-                return Ok(TokenizeResult {
-                    token_ids: Vec::new(),
-                    cache_namespace,
-                    priority_jump,
-                    strict_priority,
-                    routing_constraints,
-                    token_data_policy: TokenDataPolicy::Strip,
-                });
-            }
 
             let (token_ids, _) = self.preprocessor.gather_tokens(&request, None, None)?;
 
@@ -530,6 +523,18 @@ struct TokenizeResult {
     token_data_policy: TokenDataPolicy,
 }
 
+#[derive(serde::Deserialize)]
+struct CompletionPromptEmbedsRoutingFields {
+    #[serde(rename = "model")]
+    _model: String,
+    #[serde(rename = "prompt_embeds")]
+    _prompt_embeds: String,
+    #[serde(default)]
+    cache_salt: Option<String>,
+    #[serde(default)]
+    nvext: Option<NvExt>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TokenDataPolicy {
     Inject,
@@ -544,6 +549,38 @@ impl TokenDataPolicy {
     fn strips(self) -> bool {
         matches!(self, Self::Strip)
     }
+}
+
+fn tokenize_completion_prompt_embeds(
+    request_json: &serde_json::Value,
+) -> Result<Option<TokenizeResult>> {
+    let Some(prompt_embeds) = request_json.get("prompt_embeds") else {
+        return Ok(None);
+    };
+    if prompt_embeds.is_null() {
+        return Ok(None);
+    }
+
+    let fields: CompletionPromptEmbedsRoutingFields =
+        serde_json::from_value(request_json.clone())?;
+    let nvext = fields.nvext.as_ref();
+    let priority_jump = extract_priority_jump(nvext);
+    let strict_priority = extract_strict_priority(nvext);
+    let routing_constraints = extract_routing_constraints(nvext);
+    let cache_namespace = nvext
+        .and_then(|nvext| nvext.cache_salt.as_deref())
+        .filter(|salt| !salt.is_empty())
+        .or_else(|| fields.cache_salt.as_deref().filter(|salt| !salt.is_empty()))
+        .map(str::to_owned);
+
+    Ok(Some(TokenizeResult {
+        token_ids: Vec::new(),
+        cache_namespace,
+        priority_jump,
+        strict_priority,
+        routing_constraints,
+        token_data_policy: TokenDataPolicy::Strip,
+    }))
 }
 
 /// Pick a single completion prompt shape the router can score today.
@@ -1412,6 +1449,47 @@ mod tests {
 
         assert_eq!(token_data_policy, TokenDataPolicy::Strip);
         assert_eq!(request["prompt"], "placeholder");
+    }
+
+    #[test]
+    fn completion_prompt_embeds_without_prompt_routes_without_tokens() {
+        let request = serde_json::json!({
+            "model": "test",
+            "prompt_embeds": "encoded",
+            "nvext": {
+                "agent_hints": {"priority": 5, "strict_priority": 9},
+                "routing_constraints": {"required_taints": ["gpu=A100"]}
+            }
+        });
+
+        let result = tokenize_completion_prompt_embeds(&request)
+            .expect("prompt embeds should parse")
+            .expect("prompt embeds should short-circuit");
+
+        assert!(result.token_ids.is_empty());
+        assert_eq!(result.priority_jump, 5.0);
+        assert_eq!(result.strict_priority, 9);
+        assert!(
+            result
+                .routing_constraints
+                .required_taints
+                .contains("gpu=A100")
+        );
+        assert_eq!(result.token_data_policy, TokenDataPolicy::Strip);
+    }
+
+    #[test]
+    fn completion_prompt_embeds_helper_ignores_absent_embeds() {
+        let request = serde_json::json!({
+            "model": "test",
+            "prompt": "hello"
+        });
+
+        assert!(
+            tokenize_completion_prompt_embeds(&request)
+                .expect("request should parse")
+                .is_none()
+        );
     }
 
     #[test]
