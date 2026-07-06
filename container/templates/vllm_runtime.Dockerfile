@@ -186,6 +186,24 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
 
+{% if device == "cuda" or device == "cpu" %}
+# Backport vLLM PR #45180 so Transformers >=5.10 can call
+# MistralCommonImageProcessor.fetch_images on the pinned vLLM 0.23.0 runtime.
+# Drop once the release branch takes a vLLM runtime that already includes it.
+RUN --mount=type=bind,source=./container/deps/vllm/patches/v0.23.0/0001-pr45180-mistral-fetch-images.patch,target=/tmp/0001-pr45180-mistral-fetch-images.patch,readonly \
+    set -eux; \
+    installed_vllm_version="$(python3 -c 'import importlib.metadata as md; print(md.version("vllm"))')"; \
+    test "${installed_vllm_version}" = "0.23.0"; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
+    site_parent="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
+    patch --batch --forward -p1 -d "${site_parent}" < /tmp/0001-pr45180-mistral-fetch-images.patch; \
+    apt-get purge -y patch; \
+    rm -rf /var/lib/apt/lists/*; \
+    python3 -c 'from vllm.transformers_utils.processors.pixtral import MistralCommonImageProcessor; assert hasattr(MistralCommonImageProcessor, "fetch_images"), "vLLM PR #45180 backport did not land"'
+
+{% endif %}
+
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
 # This must be done after vLLM-Omni installation to ensure no dependencies re-install triton
