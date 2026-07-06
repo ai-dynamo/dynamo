@@ -168,34 +168,12 @@ where
     attach_metrics_annotation(response, &metrics);
 }
 
-struct ReasoningChoiceState {
-    parser: Box<dyn ReasoningParser>,
-    guided_json_bypass_decision: Option<bool>,
-}
-
-impl ReasoningChoiceState {
-    fn new(parser_name: &str, prompt_injected_reasoning: bool) -> Self {
-        let mut parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
-            parser_name,
-        )) as Box<dyn ReasoningParser>;
-        if prompt_injected_reasoning {
-            parser.set_in_reasoning(true);
-        }
-
-        Self {
-            parser,
-            guided_json_bypass_decision: None,
-        }
-    }
-}
-
 // Reasoning State for reasoning parsing transformation step
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
-    parser_name: String,
-    prompt_injected_reasoning: bool,
+    reasoning_parser: Option<Box<dyn ReasoningParser>>,
     bypass_bare_guided_json: bool,
-    choices: HashMap<u32, ReasoningChoiceState>,
+    guided_json_bypass_decision: Option<bool>,
 }
 
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
@@ -2882,66 +2860,82 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        // Initialize reasoning parser from parser_name
+        let mut reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
+            parser_name.as_ref(),
+        )) as Box<dyn ReasoningParser>;
+
+        if prompt_injected_reasoning {
+            reasoning_parser.set_in_reasoning(true);
+        }
+
         let state = ReasoningState {
             stream: Box::pin(stream),
-            parser_name,
-            prompt_injected_reasoning,
+            reasoning_parser: Some(reasoning_parser),
             bypass_bare_guided_json,
-            choices: HashMap::new(),
+            guided_json_bypass_decision: None,
         };
 
         stream::unfold(state, |mut state| async move {
             if let Some(response) = state.stream.next().await {
-                let parser_name = state.parser_name.as_str();
-                let prompt_injected_reasoning = state.prompt_injected_reasoning;
-                let bypass_bare_guided_json = state.bypass_bare_guided_json;
-                let choices = &mut state.choices;
-
-                let processed_response = response.map_data(|mut data| {
-                    for choice in data.inner.choices.iter_mut() {
-                        let Some(ChatCompletionMessageContent::Text(text)) =
-                            choice.delta.content.as_ref()
-                        else {
-                            continue;
-                        };
-
-                        let choice_state = choices.entry(choice.index).or_insert_with(|| {
-                            ReasoningChoiceState::new(parser_name, prompt_injected_reasoning)
-                        });
-
-                        let should_bypass = if bypass_bare_guided_json {
-                            match choice_state.guided_json_bypass_decision {
-                                Some(decision) => decision,
-                                None => {
-                                    // Decide once per choice from its first non-whitespace text.
-                                    let trimmed = text.trim_start();
-                                    if trimmed.is_empty() {
-                                        continue;
+                let guided_json_bypass_decision = if state.bypass_bare_guided_json {
+                    match state.guided_json_bypass_decision {
+                        Some(decision) => Some(decision),
+                        None => {
+                            // Decide once from the first non-whitespace content.
+                            let decision = response.data.as_ref().and_then(|data| {
+                                data.inner.choices.iter().find_map(|choice| {
+                                    if let Some(ChatCompletionMessageContent::Text(text)) =
+                                        choice.delta.content.as_ref()
+                                    {
+                                        let text = text.trim_start();
+                                        if text.is_empty() {
+                                            return None;
+                                        }
+                                        return Some(matches!(text.as_bytes()[0], b'[' | b'{'));
                                     }
-                                    let decision = matches!(trimmed.as_bytes()[0], b'[' | b'{');
-                                    choice_state.guided_json_bypass_decision = Some(decision);
-                                    decision
-                                }
+                                    None
+                                })
+                            });
+                            if let Some(decision) = decision {
+                                state.guided_json_bypass_decision = Some(decision);
                             }
-                        } else {
-                            false
-                        };
-
-                        if should_bypass {
-                            // Keep bare JSON available to the tool jail for this choice.
-                            continue;
+                            decision
                         }
-
-                        let parser_result = choice_state
-                            .parser
-                            .parse_reasoning_streaming_incremental(text, &[]);
-                        choice.delta.content = parser_result
-                            .get_some_normal_text()
-                            .map(ChatCompletionMessageContent::Text);
-                        choice.delta.reasoning_content = parser_result.get_some_reasoning();
                     }
-                    Ok(data)
-                });
+                } else {
+                    Some(false)
+                };
+
+                // Process the response through reasoning parser if available
+                let processed_response = if guided_json_bypass_decision != Some(false) {
+                    // Keep bare JSON and leading whitespace available to the tool jail.
+                    response
+                } else if let Some(ref mut parser) = state.reasoning_parser {
+                    response.map_data(|mut data| {
+                        // Process all choices, not just the first one
+                        for choice in data.inner.choices.iter_mut() {
+                            // Reasoning parsing only applies to text content
+                            if let Some(ChatCompletionMessageContent::Text(text)) =
+                                choice.delta.content.as_ref()
+                            {
+                                let parser_result =
+                                    parser.parse_reasoning_streaming_incremental(text, &[]);
+
+                                // Update this specific choice with parsed content
+                                choice.delta.content = parser_result
+                                    .get_some_normal_text()
+                                    .map(ChatCompletionMessageContent::Text);
+                                choice.delta.reasoning_content = parser_result.get_some_reasoning();
+                            }
+                            // For multimodal content, pass through unchanged
+                        }
+                        Ok(data)
+                    })
+                } else {
+                    // No reasoning parser configured, pass through unchanged
+                    response
+                };
 
                 Some((processed_response, state))
             } else {

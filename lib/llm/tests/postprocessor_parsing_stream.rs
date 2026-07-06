@@ -414,35 +414,27 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
 
 /// Construct a terminal `finish_reason=Stop` chunk with no content.
 fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
-    mock_multi_choice_final_chunk(&[0])
-}
-
-/// Construct a terminal chunk for each requested choice index.
-fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStreamResponse {
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
     };
     #[allow(deprecated)]
-    let choices = indices
-        .iter()
-        .map(|index| ChatChoiceStream {
-            index: *index,
-            delta: ChatCompletionStreamResponseDelta {
-                role: None,
-                content: None,
-                tool_calls: None,
-                function_call: None,
-                refusal: None,
-                reasoning_content: None,
-            },
-            finish_reason: Some(FinishReason::Stop),
-            logprobs: None,
-        })
-        .collect();
+    let choice = ChatChoiceStream {
+        index: 0,
+        delta: ChatCompletionStreamResponseDelta {
+            role: None,
+            content: None,
+            tool_calls: None,
+            function_call: None,
+            refusal: None,
+            reasoning_content: None,
+        },
+        finish_reason: Some(FinishReason::Stop),
+        logprobs: None,
+    };
     NvCreateChatCompletionStreamResponse {
         inner: CreateChatCompletionStreamResponse {
             id: "test-id".to_string(),
-            choices,
+            choices: vec![choice],
             created: 0,
             model: "test-model".to_string(),
             system_fingerprint: None,
@@ -1275,92 +1267,6 @@ struct DrainOutput {
     finish_reasons: Vec<FinishReason>,
 }
 
-#[derive(Default)]
-struct MultiChoiceDrainOutput {
-    reasoning: BTreeMap<u32, String>,
-    content: BTreeMap<u32, String>,
-    tool_calls: BTreeMap<u32, BTreeMap<u32, MergedToolCall>>,
-}
-
-async fn drain_stream_by_choice(
-    output_stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
-) -> MultiChoiceDrainOutput {
-    let output_chunks: Vec<_> = Box::pin(output_stream).collect().await;
-    let mut output = MultiChoiceDrainOutput::default();
-
-    for chunk in &output_chunks {
-        let Some(data) = chunk.data.as_ref() else {
-            continue;
-        };
-        for choice in &data.inner.choices {
-            if let Some(reasoning) = &choice.delta.reasoning_content {
-                output
-                    .reasoning
-                    .entry(choice.index)
-                    .or_default()
-                    .push_str(reasoning);
-            }
-            if let Some(content) = &choice.delta.content {
-                output
-                    .content
-                    .entry(choice.index)
-                    .or_default()
-                    .push_str(get_text(content));
-            }
-            if let Some(tool_calls) = &choice.delta.tool_calls {
-                for tool_call in tool_calls {
-                    output
-                        .tool_calls
-                        .entry(choice.index)
-                        .or_default()
-                        .entry(tool_call.index)
-                        .or_default()
-                        .merge_from(tool_call);
-                }
-            }
-        }
-    }
-
-    output
-}
-
-fn assert_choice_result(
-    output: &MultiChoiceDrainOutput,
-    choice_index: u32,
-    expected_reasoning: &str,
-    expected_location: &str,
-) {
-    assert_eq!(
-        output
-            .reasoning
-            .get(&choice_index)
-            .map(String::as_str)
-            .unwrap_or_default(),
-        expected_reasoning
-    );
-    assert_eq!(
-        output
-            .content
-            .get(&choice_index)
-            .map(String::as_str)
-            .unwrap_or_default(),
-        ""
-    );
-
-    let tool_calls = output
-        .tool_calls
-        .get(&choice_index)
-        .unwrap_or_else(|| panic!("choice {choice_index} did not emit a tool call"));
-    assert_eq!(tool_calls.len(), 1);
-    let tool_call = tool_calls.values().next().unwrap();
-    assert_eq!(tool_call.name.as_deref(), Some("get_weather"));
-    assert!(
-        tool_call.arguments.contains(expected_location),
-        "choice {choice_index} arguments did not contain {expected_location:?}: {:?}",
-        tool_call.arguments
-    );
-}
-
 async fn drain_stream(
     output_stream: impl futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
 ) -> DrainOutput {
@@ -1604,75 +1510,6 @@ async fn tool_choice_force_reasoning_required_keeps_reasoning_before_guided_json
             );
         }
     }
-}
-
-/// Each streamed choice must independently decide whether guided output is
-/// bare JSON or reasoning followed by JSON.
-#[tokio::test]
-async fn tool_choice_required_tracks_guided_json_shape_per_choice() {
-    let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("nemotron_nano"));
-    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
-    let input_stream = stream::iter(
-        vec![
-            mock_multi_choice_content_chunk(&[(0, " \n"), (1, "\t")]),
-            mock_multi_choice_content_chunk(&[
-                (
-                    0,
-                    r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#,
-                ),
-                (1, "Let me check."),
-            ]),
-            mock_multi_choice_content_chunk(&[(1, "</thi")]),
-            mock_multi_choice_content_chunk(&[(
-                1,
-                r#"nk>[{"name":"get_weather","parameters":{"location":"Tokyo"}}]"#,
-            )]),
-            mock_multi_choice_final_chunk(&[0, 1]),
-        ]
-        .into_iter()
-        .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false, false)
-        .expect("postprocessor_parsing_stream should build");
-    let output = drain_stream_by_choice(output_stream).await;
-
-    assert_choice_result(&output, 0, "", "San Francisco");
-    assert_choice_result(&output, 1, "Let me check.", "Tokyo");
-}
-
-/// Interleaved choices need independent reasoning-parser state so one
-/// `</think>` boundary cannot end reasoning for another choice.
-#[tokio::test]
-async fn tool_choice_required_tracks_reasoning_parser_per_choice() {
-    let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("nemotron_nano"));
-    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
-    let input_stream = stream::iter(
-        vec![
-            mock_multi_choice_content_chunk(&[(0, "Choice zero reasoning."), (1, "Choice one")]),
-            mock_multi_choice_content_chunk(&[
-                (
-                    0,
-                    r#"</think>[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#,
-                ),
-                (1, " continues reasoning."),
-            ]),
-            mock_multi_choice_content_chunk(&[(
-                1,
-                r#"</think>[{"name":"get_weather","parameters":{"location":"Tokyo"}}]"#,
-            )]),
-            mock_multi_choice_final_chunk(&[0, 1]),
-        ]
-        .into_iter()
-        .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, false, false)
-        .expect("postprocessor_parsing_stream should build");
-    let output = drain_stream_by_choice(output_stream).await;
-
-    assert_choice_result(&output, 0, "Choice zero reasoning.", "San Francisco");
-    assert_choice_result(&output, 1, "Choice one continues reasoning.", "Tokyo");
 }
 
 /// Named guided decoding emits only the selected function's parameter object.
