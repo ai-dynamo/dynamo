@@ -52,7 +52,7 @@ pub struct ZmqEventNormalizer {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CacheNamespaceState {
-    Namespaced(String),
+    Namespaced(Arc<str>),
     Ambiguous,
 }
 
@@ -194,12 +194,26 @@ impl ZmqEventNormalizer {
                 if cache_namespace.as_deref() == Some("") {
                     *cache_namespace = None;
                 }
-                if cache_namespace.is_none()
-                    && let Some(parent) = parent_block_hash.as_ref()
-                {
+                let namespace = if let Some(namespace) = cache_namespace.as_deref() {
+                    parent_block_hash
+                        .as_ref()
+                        .and_then(|parent| {
+                            self.cache_namespaces.get(&(worker, (*parent).into_u64()))
+                        })
+                        .and_then(|state| match state {
+                            CacheNamespaceState::Namespaced(parent_namespace)
+                                if parent_namespace.as_ref() == namespace =>
+                            {
+                                Some(Arc::clone(parent_namespace))
+                            }
+                            _ => None,
+                        })
+                        .or_else(|| Some(Arc::from(namespace)))
+                } else if let Some(parent) = parent_block_hash.as_ref() {
                     match self.cache_namespaces.get(&(worker, (*parent).into_u64())) {
                         Some(CacheNamespaceState::Namespaced(namespace)) => {
-                            *cache_namespace = Some(namespace.clone());
+                            *cache_namespace = Some(namespace.to_string());
+                            Some(Arc::clone(namespace))
                         }
                         Some(CacheNamespaceState::Ambiguous) => {
                             return Err(ZmqEventFilterReason::AmbiguousCacheNamespace);
@@ -212,15 +226,15 @@ impl ZmqEventNormalizer {
                             // here would duplicate the index on the event hot path. The
                             // backend still enforces its own cache isolation; this narrow
                             // fail-open case can only pollute the router overlap score.
+                            None
                         }
                     }
-                }
+                } else {
+                    None
+                };
 
-                if let Some(namespace) = cache_namespace
-                    .as_ref()
-                    .filter(|namespace| !namespace.is_empty())
-                {
-                    let state = CacheNamespaceState::Namespaced(namespace.clone());
+                if let Some(namespace) = namespace {
+                    let state = CacheNamespaceState::Namespaced(namespace);
                     for block_hash in block_hashes.iter() {
                         self.cache_namespaces
                             .entry((worker, (*block_hash).into_u64()))

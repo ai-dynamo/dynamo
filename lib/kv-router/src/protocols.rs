@@ -21,7 +21,6 @@ pub const KV_EVENT_SUBJECT: &str = "kv-events";
 
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
-const CACHE_NAMESPACE_HASH_SEED: u64 = XXH3_SEED ^ 0xc2b2_ae3d_27d4_eb4f;
 
 /// Compute the hash of a local block.
 pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
@@ -37,18 +36,8 @@ pub struct BlockHashOptions<'a> {
 }
 
 fn block_hash_seed(options: BlockHashOptions<'_>) -> u64 {
-    let mut seed = XXH3_SEED;
-    if let Some(name) = options.lora_name.filter(|n| !n.is_empty()) {
-        // Preserve the established LoRA formula shared with dynamo-kv-hashing.
-        seed = seed.wrapping_add(xxh3::xxh3_64(name.as_bytes()));
-    }
-    if let Some(namespace) = options.cache_namespace.filter(|n| !n.is_empty()) {
-        seed = seed.wrapping_add(xxh3::xxh3_64_with_seed(
-            namespace.as_bytes(),
-            CACHE_NAMESPACE_HASH_SEED,
-        ));
-    }
-    seed
+    dynamo_kv_hashing::compute_salt_hash(options.cache_namespace, options.lora_name)
+        .expect("string salt derivation is infallible")
 }
 
 #[inline]
@@ -1380,6 +1369,31 @@ mod tests {
             namespace_a[0], lora_a[0],
             "namespace and lora salts must use independent seed domains"
         );
+    }
+
+    #[test]
+    fn test_cache_namespace_hash_matches_kv_hashing_contract() {
+        let tokens: Vec<u32> = (0..4).collect();
+        let cache_namespace = "tenant-a";
+        let lora_name = "adapter-a";
+        let actual = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some(lora_name),
+                cache_namespace: Some(cache_namespace),
+                ..Default::default()
+            },
+        );
+        let token_bytes = tokens
+            .iter()
+            .flat_map(|token| token.to_le_bytes())
+            .collect::<Vec<_>>();
+        let salt_hash =
+            dynamo_kv_hashing::compute_salt_hash(Some(cache_namespace), Some(lora_name)).unwrap();
+        let expected = LocalBlockHash(dynamo_kv_hashing::compute_hash_v2(&token_bytes, salt_hash));
+
+        assert_eq!(actual, vec![expected]);
     }
 
     #[test]

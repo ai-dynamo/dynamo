@@ -10,7 +10,7 @@ mod common;
 use std::time::Duration;
 
 use common::{EventMirror, TestBatch, ZmqPubHandle, ZmqSubHandle, init_tracing, sync_pulse};
-use kvbm_consolidator::wire::vllm_in::{BlockHashValue, RawKvEvent};
+use kvbm_consolidator::wire::vllm_in::{BlockHashValue, KvEventBatch, RawKvEvent};
 use kvbm_consolidator::{ConsolidatorBuilder, EventSource};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -22,6 +22,17 @@ fn bs_event(
     block_size: usize,
     lora_name: Option<String>,
 ) -> RawKvEvent {
+    bs_event_with_cache_namespace(block_hashes, parent, tokens, block_size, lora_name, None)
+}
+
+fn bs_event_with_cache_namespace(
+    block_hashes: Vec<u64>,
+    parent: Option<u64>,
+    tokens: Vec<u32>,
+    block_size: usize,
+    lora_name: Option<String>,
+    cache_namespace: Option<String>,
+) -> RawKvEvent {
     RawKvEvent::BlockStored {
         block_hashes: block_hashes
             .into_iter()
@@ -32,13 +43,111 @@ fn bs_event(
         block_size,
         lora_name,
         medium: None,
-        cache_namespace: None,
+        cache_namespace,
         block_mm_infos: None,
         is_eagle: None,
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
     }
+}
+
+#[tokio::test]
+async fn zmq_cache_namespaces_remain_isolated() {
+    init_tracing();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let pub_handle = ZmqPubHandle::spawn().await;
+        let egress_port = common::pick_port();
+        let egress_ep = common::make_endpoint(egress_port);
+
+        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
+            .zmq_in(&pub_handle.endpoint)
+            .poll_interval(Duration::from_millis(20))
+            .build()
+            .await
+            .expect("build consolidator");
+        let mut sub = ZmqSubHandle::spawn(&egress_ep).await.expect("spawn sub");
+        assert!(
+            sync_pulse(&pub_handle, &mut sub, Duration::from_secs(4)).await,
+            "sync_pulse timed out"
+        );
+
+        let tokens = vec![1, 2, 3, 4];
+        let batch = TestBatch(
+            1.0,
+            vec![
+                bs_event_with_cache_namespace(
+                    vec![101],
+                    None,
+                    tokens.clone(),
+                    4,
+                    None,
+                    Some("tenant-a".to_string()),
+                ),
+                bs_event_with_cache_namespace(
+                    vec![202],
+                    None,
+                    tokens,
+                    4,
+                    None,
+                    Some("tenant-b".to_string()),
+                ),
+            ],
+            None,
+        );
+        let payload = rmp_serde::to_vec_named(&batch).expect("encode named batch");
+        let decoded: KvEventBatch = rmp_serde::from_slice(&payload).expect("decode named batch");
+        let decoded_namespaces = decoded
+            .events
+            .iter()
+            .map(|event| match event {
+                RawKvEvent::BlockStored {
+                    cache_namespace, ..
+                } => cache_namespace.as_deref(),
+                other => panic!("expected BlockStored, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decoded_namespaces, [Some("tenant-a"), Some("tenant-b")]);
+        pub_handle
+            .send_frames(vec![vec![], vec![0u8; 8], payload])
+            .await
+            .expect("send_batch");
+
+        let msgs = sub.recv_n(2, Duration::from_secs(3)).await.expect("recv_n");
+        let stores = msgs
+            .iter()
+            .flat_map(|(_, batch)| batch.1.iter())
+            .filter_map(|event| match event {
+                EventMirror::BlockStored {
+                    block_hashes,
+                    lora_name,
+                    cache_namespace,
+                    ..
+                } => Some((
+                    block_hashes[0],
+                    lora_name.as_deref(),
+                    cache_namespace.as_deref(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            stores.len(),
+            2,
+            "expected one store per namespace: {stores:?}"
+        );
+        assert_ne!(stores[0].0, stores[1].0);
+        assert_eq!(stores[0].1, None);
+        assert_eq!(stores[1].1, None);
+        assert_eq!(stores[0].2, Some("tenant-a"));
+        assert_eq!(stores[1].2, Some("tenant-b"));
+
+        consolidator.shutdown().await;
+    })
+    .await
+    .expect("timed out");
 }
 
 // ─── test 1: zmq_ingress_roundtrip ───────────────────────────────────────────

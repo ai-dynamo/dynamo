@@ -26,6 +26,7 @@ standalone-selection = ["standalone-indexer"]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true, optional = true }
+dynamo-kv-hashing = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
@@ -64,7 +65,6 @@ reqwest = { workspace = true, optional = true }
 tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
-dynamo-kv-hashing = { workspace = true }
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
 serde_json = { workspace = true }

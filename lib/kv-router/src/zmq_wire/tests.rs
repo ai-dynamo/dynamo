@@ -566,6 +566,18 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
     assert!(normalizer.preprocess(parent, worker).is_some());
     let child = normalizer.preprocess(child, worker).unwrap();
 
+    let CacheNamespaceState::Namespaced(parent_namespace) =
+        &normalizer.cache_namespaces[&(worker, 1)]
+    else {
+        panic!("expected namespaced parent");
+    };
+    let CacheNamespaceState::Namespaced(child_namespace) =
+        &normalizer.cache_namespaces[&(worker, 2)]
+    else {
+        panic!("expected namespaced child");
+    };
+    assert!(Arc::ptr_eq(parent_namespace, child_namespace));
+
     let RawKvEvent::BlockStored {
         cache_namespace, ..
     } = child
@@ -573,6 +585,36 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         panic!("expected BlockStored");
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+#[test]
+fn test_normalizer_shares_cache_namespace_across_blocks() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    let event = RawKvEvent::BlockStored {
+        block_hashes: vec![BlockHashValue::Unsigned(1), BlockHashValue::Unsigned(2)],
+        parent_block_hash: None,
+        token_ids: vec![10, 11, 12, 13],
+        block_size: 2,
+        medium: None,
+        lora_name: None,
+        cache_namespace: Some("tenant-a".to_string()),
+        block_mm_infos: None,
+        is_eagle: Some(false),
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+    };
+
+    assert!(normalizer.preprocess(event, worker).is_some());
+
+    let CacheNamespaceState::Namespaced(first) = &normalizer.cache_namespaces[&(worker, 1)] else {
+        panic!("expected first block namespace");
+    };
+    let CacheNamespaceState::Namespaced(second) = &normalizer.cache_namespaces[&(worker, 2)] else {
+        panic!("expected second block namespace");
+    };
+    assert!(Arc::ptr_eq(first, second));
 }
 
 #[test]

@@ -96,6 +96,7 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             token_ids,
             block_size,
             lora_name,
+            cache_namespace,
             is_eagle,
             block_mm_infos,
             ..
@@ -149,16 +150,20 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             }
 
             let mut current_parent = parent_block_hash.map(|h| h.into_u64().to_string());
+            let cache_namespace = cache_namespace
+                .filter(|namespace| !namespace.is_empty())
+                .map(Arc::<str>::from);
 
             for (i, block_hash) in block_hashes.into_iter().enumerate() {
                 let hash_str = block_hash.into_u64().to_string();
-                tracker.handle_store(
+                tracker.handle_store_with_cache_namespace(
                     engine_source,
                     hash_str.clone(),
                     current_parent.clone(),
                     token_chunks[i].clone(),
                     block_size,
                     lora_name.clone(),
+                    cache_namespace.clone(),
                 );
                 current_parent = Some(hash_str);
             }
