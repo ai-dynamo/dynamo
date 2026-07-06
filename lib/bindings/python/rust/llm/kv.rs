@@ -1747,6 +1747,7 @@ impl KvRouter {
                     policy_class,
                     None,
                     None,
+                    None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                     routing_constraints.map(Into::into).unwrap_or_default(),
                 )
