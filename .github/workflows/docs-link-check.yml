@@ -27,6 +27,9 @@ jobs:
 
       - name: Check documentation links with lychee
         uses: lycheeverse/lychee-action@v2
+        # Accepted statuses 403/429/503: bot-blocking, rate limiting, and
+        # transient unavailability (e.g. catalog.ngc.nvidia.com WAF) are not
+        # dead links; genuinely broken links answer 404/410.
         with:
           args: >-
             --cache
@@ -38,7 +41,7 @@ jobs:
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"
             --exclude-path "./container/compliance/spdx_licenses/.*"
-            --accept "200..=299, 403, 429"
+            --accept "200..=299, 403, 429, 503"
             --exclude-all-private
             --exclude 0.0.0.0
             --verbose
