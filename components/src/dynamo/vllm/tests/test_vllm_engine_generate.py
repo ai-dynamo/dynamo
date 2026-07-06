@@ -11,10 +11,12 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 from dynamo.vllm.handlers import (
     BaseWorkerHandler,
+    PrefillWorkerHandler,
     _build_engine_generate_prompt,
     _engine_generate_priority,
     _merge_kv_transfer_params,
     _serialize_routed_experts_vllm,
+    _use_prefill_prompt_logprobs,
     build_sampling_params,
 )
 
@@ -91,6 +93,27 @@ def test_framework_kv_metadata_merges_without_replacing_caller_fields():
     }
     with pytest.raises(ValueError, match="collide"):
         _merge_kv_transfer_params({"same": 1}, {"same": 2})
+
+
+def test_pd_prompt_logprobs_are_composed_from_prefill():
+    payload = [None, {"11": {"logprob": -0.25, "rank": 1}}]
+    disaggregated = PrefillWorkerHandler._build_disaggregated_params(
+        SimpleNamespace(),
+        {"remote_engine_id": "prefill-1"},
+        prompt_logprobs=payload,
+    )
+    assert disaggregated == {
+        "kv_transfer_params": {"remote_engine_id": "prefill-1"},
+        "prompt_logprobs": payload,
+    }
+
+    decode_params = SamplingParams(prompt_logprobs=1)
+    assert _use_prefill_prompt_logprobs(decode_params, disaggregated, True) is payload
+    assert decode_params.prompt_logprobs is None
+
+    legacy_params = SamplingParams(prompt_logprobs=1)
+    assert _use_prefill_prompt_logprobs(legacy_params, disaggregated, False) is None
+    assert legacy_params.prompt_logprobs == 1
 
 
 def test_text_prompt_preserves_exact_tokens_and_cache_salt():
