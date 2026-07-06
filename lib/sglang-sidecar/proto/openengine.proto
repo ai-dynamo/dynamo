@@ -1,16 +1,16 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // OpenEngine API v1 -- vendor-neutral runtime API between inference
 // orchestration systems (e.g. Dynamo) and model engines (e.g. vLLM, SGLang,
 // TensorRT-LLM).
 //
-// This file is the CANONICAL contract. It is the single source of truth for
-// the wire shape. Both forks (dynamo/, vllm/) generate stubs from THIS file
-// via ../gen.sh -- they do not vendor a divergent copy. See ../CLAUDE.md for
-// edit + regeneration discipline.
+// This file is the CANONICAL contract and single source of truth for the wire
+// shape. Implementations should generate client and server bindings from this
+// proto or from an exact copy pinned to a known OpenEngine revision.
 //
 // Human-readable reference:
-// https://github.com/connorcarpenter15/openengine/blob/main/docs/api.md
+// https://github.com/ai-dynamo/openengine/blob/main/docs/api.md
 
 syntax = "proto3";
 
@@ -39,6 +39,14 @@ service OpenEngine {
 
   // Structured runtime events for planners/controllers.
   rpc SubscribeRuntimeEvents(SubscribeRuntimeEventsRequest) returns (stream RuntimeEvent);
+}
+
+// Optional LoRA control plane. Engines advertise support through
+// ModelInfo.supports_lora and serve this service on the OpenEngine endpoint.
+service LoraManager {
+  rpc LoadLora(LoadLoraRequest) returns (LoadLoraResponse);
+  rpc UnloadLora(UnloadLoraRequest) returns (UnloadLoraResponse);
+  rpc ListLoras(ListLorasRequest) returns (ListLorasResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +116,39 @@ message ModelInfo {
 }
 
 // ---------------------------------------------------------------------------
+// LoRA lifecycle
+// ---------------------------------------------------------------------------
+
+message LoraAdapter {
+  int64 lora_id = 1;
+  string lora_name = 2;
+  string source_path = 3;
+}
+
+message LoadLoraRequest {
+  LoraAdapter adapter = 1;
+}
+
+message LoadLoraResponse {
+  LoraAdapter adapter = 1;
+  bool already_loaded = 2;
+}
+
+message UnloadLoraRequest {
+  string lora_name = 1;
+}
+
+message UnloadLoraResponse {
+  LoraAdapter adapter = 1;
+}
+
+message ListLorasRequest {}
+
+message ListLorasResponse {
+  repeated LoraAdapter adapters = 1;
+}
+
+// ---------------------------------------------------------------------------
 // Generation API
 // ---------------------------------------------------------------------------
 
@@ -135,8 +176,8 @@ message GenerateRequest {
   // .supports_guided_decoding advertises whether the engine honors it.
   GuidedDecoding guided = 9;
 
-  // LoRA adapter name (or path) to apply to this request. Empty = base model.
-  // ModelInfo.supports_lora advertises whether the engine can honor it.
+  // Loaded LoRA adapter name to apply to this request. Empty = base model.
+  // ModelInfo.supports_lora advertises whether the engine serves LoraManager.
   string lora_name = 10;
 
   // Logprobs request controls (TokenOutput.logprobs carries the result).
