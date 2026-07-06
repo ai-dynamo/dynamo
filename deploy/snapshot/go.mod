@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/checkpoint-restore/go-criu/v8 v8.2.0
-	github.com/containerd/containerd v1.7.32
+	github.com/containerd/containerd v1.7.33
 	github.com/cyphar/filepath-securejoin v0.5.1
 	github.com/go-logr/logr v1.4.3
 	github.com/go-logr/zapr v1.3.0

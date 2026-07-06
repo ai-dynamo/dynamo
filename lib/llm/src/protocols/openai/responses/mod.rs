@@ -39,8 +39,8 @@ use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
 /// Request body for `POST /v1/responses`. Uses a plain
 /// `#[derive(Deserialize)]` — the relaxed input shapes are handled by
-/// Dynamo-owning the input chain in `dynamo_protocols::types::responses`
-/// (see that crate's `CLAUDE.md`), not by a custom pre-parse JSON patcher.
+/// Dynamo-owning the input chain in `dynamo_protocols::types::responses`,
+/// not by a custom pre-parse JSON patcher.
 /// An earlier iteration of this type carried a hand-written `impl Deserialize`
 /// that walked `serde_json::Value` to inject synthetic defaults for missing
 /// `id` / `status` / `annotations`; that was replaced by typed ownership for
@@ -102,8 +102,8 @@ pub struct NvResponse {
 ///     `store`) that are absent from upstream `Response` entirely.
 ///
 /// Rather than fork the upstream output chain (which would cascade into
-/// `OutputItem`, streaming events, and a long tail of sub-types, per
-/// `lib/protocols/CLAUDE.md`), we patch the serialized JSON. Adds a
+/// `OutputItem`, streaming events, and a long tail of sub-types), we patch
+/// the serialized JSON. Adds a
 /// single `serde_json::to_value` round-trip per response, which is
 /// negligible next to tokenization/inference cost.
 pub(crate) fn patch_response_for_spec(
@@ -1960,7 +1960,9 @@ mod tests {
         // Regression: Codex / Agents SDK round-trip Item::Reasoning mid-turn.
         // The converter must route the reasoning summary into the coalesced
         // assistant message's `reasoning_content`, not silently drop it.
-        use dynamo_protocols::types::responses::{ReasoningItem, SummaryPart, SummaryTextContent};
+        use dynamo_protocols::types::responses::{
+            InputReasoningItem, SummaryPart, SummaryTextContent,
+        };
 
         let req = NvCreateResponse {
             inner: CreateResponse {
@@ -1972,8 +1974,8 @@ mod tests {
                         role: InputRole::User,
                         status: None,
                     }))),
-                    InputItem::Item(Item::Reasoning(ReasoningItem {
-                        id: "rs_1".into(),
+                    InputItem::Item(Item::Reasoning(InputReasoningItem {
+                        id: Some("rs_1".into()),
                         summary: vec![SummaryPart::SummaryText(SummaryTextContent {
                             text: "thinking step 1".into(),
                         })],

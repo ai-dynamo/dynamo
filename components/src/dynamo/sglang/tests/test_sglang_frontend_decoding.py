@@ -97,7 +97,6 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
 
     handler._get_input_param = lambda req: {"input_ids": req.get("token_ids", [])}
     handler._resolve_lora = lambda req: None
-    handler._session_kwargs = lambda req: {}
     handler._priority_kwargs = lambda priority: {}
 
     return handler

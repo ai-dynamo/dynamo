@@ -34,6 +34,7 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
+    local_model::runtime_config::TokenizerBackend,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -81,6 +82,18 @@ fn worker_set_key(
     let mt = model_type.as_vec().join("|");
     let wt = effective_worker_type(worker_type, model_type).as_str();
     format!("{}:{}:{}", namespace, mt, wt)
+}
+
+fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
+    card.worker_type == Some(WorkerType::Encode)
+        || card.media_decoder.is_some()
+        || card.model_type.supports_images()
+        || card.model_type.supports_videos()
+        || card
+            .needs
+            .iter()
+            .flatten()
+            .any(|worker_type| *worker_type == WorkerType::Encode)
 }
 
 /// Resolve the effective [`WorkerType`] for a card during the
@@ -134,10 +147,17 @@ pub struct ModelWatcher {
     /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
     /// can await a racing put before proceeding with cleanup.
     pending_puts: DashMap<String, JoinHandle<()>>,
+    /// Maps an MDC instance path to the LoRA adapter name recorded in the pre-spawn state-tracker
+    /// addition, so a removal whose model card was never durably saved (handle_put failed before
+    /// save) can still remove exactly that adapter from the tracker instead of leaving phantom
+    /// state or wiping a live worker (R4-2 / RR3-3).
+    pending_lora_adds: DashMap<String, String>,
     /// Frontend's `--model-path`. Threaded into `download_config` so
     /// `file://` slots can fall back here when the worker's path is
     /// unreachable on this host.
     local_model_path: Option<PathBuf>,
+    /// Frontend-level tokenizer backend override for discovered model cards.
+    tokenizer_backend: Option<TokenizerBackend>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -217,7 +237,9 @@ impl ModelWatcher {
             registering_worker_sets: DashSet::new(),
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
+            pending_lora_adds: DashMap::new(),
             local_model_path: None,
+            tokenizer_backend: None,
         }
     }
 
@@ -227,6 +249,16 @@ impl ModelWatcher {
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
         self.local_model_path = path;
+    }
+
+    pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
+        self.tokenizer_backend = tokenizer_backend;
+    }
+
+    fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
+        if let Some(tokenizer_backend) = self.tokenizer_backend {
+            card.runtime_config.tokenizer_backend = Some(tokenizer_backend);
+        }
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -305,6 +337,8 @@ impl ModelWatcher {
                         continue;
                     }
 
+                    self.apply_tokenizer_backend_override(&mut card);
+
                     // If a WorkerSet already exists for this (model, namespace, type),
                     // validate that the new worker's checksum matches. Different
                     // WorkerSets (different namespaces) are allowed to have different checksums to support rolling updates.
@@ -327,6 +361,26 @@ impl ModelWatcher {
                         // The `PushRouter` is in `ModelMananger` (`self.manager` here), but inside
                         // interface `AsyncEngine` which only has a `generate` method.
                         continue;
+                    }
+
+                    // Feed the LoRA state tracker for every worker registration (before the spawn
+                    // below, so `card` is read before it is moved into the task). An adapter card
+                    // registers the loaded adapter (+capacity); a base card advertising
+                    // runtime_config.max_gpu_lora_count seeds capacity-only so idle LoRA-capable
+                    // workers are visible to the controller before any adapter is loaded there.
+                    {
+                        use crate::kv_router::protocols::WorkerWithDpRank;
+                        let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+                        if let Some(adapter_name) = seed_lora_state_from_card(
+                            self.manager.lora_state_tracker(),
+                            worker,
+                            &card,
+                        ) {
+                            // Record the adapter name keyed by instance path so a later removal
+                            // whose card was never durably saved can still remove exactly this
+                            // adapter (R4-2).
+                            self.pending_lora_adds.insert(mcid.to_path(), adapter_name);
+                        }
                     }
 
                     // Spawn each handle_put into its own task so that a slow
@@ -388,6 +442,9 @@ impl ModelWatcher {
                         }
                     };
 
+                    // LoRA state-tracker cleanup runs inside handle_delete, after it waits for
+                    // any in-flight handle_put, so the card is reliably present even when a
+                    // Removed event races an in-flight add (N2).
                     match self
                         .handle_delete(model_card_instance_id, &namespace_filter)
                         .await
@@ -441,14 +498,67 @@ impl ModelWatcher {
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
+                // The card was never durably saved (e.g. an Added event whose handle_put failed
+                // before save, after the pre-spawn tracker addition). Reconcile tracker state at
+                // the right granularity:
+                //   - base worker card (`model_suffix == None`): the worker instance is gone, so
+                //     clear it entirely;
+                //   - LoRA-adapter card (`model_suffix == Some`): remove ONLY that adapter, using
+                //     the name recorded in `pending_lora_adds`, so a still-live worker's other
+                //     adapters/capacity are untouched (RR3-3 / R4-2).
+                use crate::kv_router::protocols::WorkerWithDpRank;
+                let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+                if mcid.model_suffix.is_none() {
+                    self.manager
+                        .lora_state_tracker()
+                        .handle_worker_removal(worker);
+                    // Sweep any pending fallback entries for this worker's LoRA cards so they
+                    // can't linger if their own remove events never arrive (RF-2).
+                    let prefix = format!("{}/", mcid.to_path());
+                    self.pending_lora_adds
+                        .retain(|k, _| !k.starts_with(&prefix));
+                } else if let Some((_, lora_name)) = self.pending_lora_adds.remove(&key) {
+                    self.manager
+                        .lora_state_tracker()
+                        .handle_mdc_removal(worker, &lora_name);
+                }
                 tracing::warn!(
                     key = %key,
-                    "ModelDeploymentCard already absent during removal; ignoring duplicate or stale remove event"
+                    "ModelDeploymentCard absent during removal; reconciled LoRA tracker state from pending add"
                 );
                 return Ok(None);
             }
         };
         let model_name = card.name().to_string();
+
+        // Feed the LoRA state tracker now that any in-flight handle_put has completed and the
+        // card is available (N2 — avoids the race where a Removed event outran the add). A LoRA
+        // adapter card unregisters just that adapter; the base worker card means the worker
+        // instance is gone, so drop its capacity + all loaded-LoRA bookkeeping (F4/F5).
+        {
+            use crate::kv_router::protocols::WorkerWithDpRank;
+            let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+            match card.lora {
+                Some(ref lora_info) => self
+                    .manager
+                    .lora_state_tracker()
+                    .handle_mdc_removal(worker, &lora_info.name),
+                None => self
+                    .manager
+                    .lora_state_tracker()
+                    .handle_worker_removal(worker),
+            }
+        }
+        // The card-based cleanup above is authoritative; drop the pending fallback entry for a
+        // LoRA card, or sweep all of this worker's suffixed entries for a base card (RF-2).
+        if card.lora.is_some() {
+            self.pending_lora_adds.remove(&key);
+        } else {
+            let prefix = format!("{}/", mcid.to_path());
+            self.pending_lora_adds
+                .retain(|k, _| !k.starts_with(&prefix));
+        }
+
         let worker_namespace = &mcid.namespace;
         let worker_component = &mcid.component;
         let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
@@ -459,12 +569,25 @@ impl ModelWatcher {
             .await
             .with_context(|| model_name.clone())?;
 
-        // Check if instances of the SAME component remain in this namespace.
-        // In disaggregated deployments, prefill and decode are different components
-        // in the same namespace, so we must check at the component level to avoid
-        // removing one type's WorkerSet while the other still has workers.
-        let component_has_instances = active_instances.iter().any(|(eid, _)| {
-            eid.namespace == *worker_namespace && eid.component == *worker_component
+        // Check if instances of the SAME role and component remain in
+        // this namespace. In disaggregated deployments, prefill and
+        // decode are different components in the same namespace -- so
+        // checking only (ns, component) is necessary but not sufficient.
+        // Encode workers can share a (ns, component) with Aggregated, so
+        // we ALSO require the remaining instance to map to the same
+        // computed `ws_key` (which folds in worker_type for Encode). If
+        // we used only (ns, component), removing the last Encode
+        // instance from a namespace that still has an Aggregated worker
+        // in the same component would see "instances exist" and skip
+        // remove_worker_set, leaking the Encode WorkerSet forever.
+        let component_has_instances = active_instances.iter().any(|(eid, other_card)| {
+            eid.namespace == *worker_namespace
+                && eid.component == *worker_component
+                && worker_set_key(
+                    &eid.namespace,
+                    other_card.model_type,
+                    other_card.worker_type,
+                ) == ws_key
         });
 
         if !component_has_instances {
@@ -482,7 +605,7 @@ impl ModelWatcher {
             //
             // PREFILL teardown (cached endpoint is stale): drop everything for
             // this key and deactivate the decode-side router so requests fall
-            // back to aggregated mode (or fail cleanly with `enforce_disagg`).
+            // back to aggregated mode.
             //
             // DECODE teardown: keep `PrefillReady` (the cached endpoint is still
             // valid for future decode rebuilds — that's PR 8965's primary
@@ -946,7 +1069,7 @@ impl ModelWatcher {
                             card.kv_cache_block_size,
                             Some(prefill_config),
                             self.prefill_load_estimator.clone(),
-                            router_config.enforce_disagg,
+                            router_config.session_affinity_ttl_secs,
                             model_name.clone(),
                             namespace.clone(),
                             prefill_enable_eagle,
@@ -975,7 +1098,8 @@ impl ModelWatcher {
                         worker_monitor.clone(),
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
-                        router_config.enforce_disagg,
+                        uses_multimodal_cache_routing(card),
+                        router_config.session_affinity_ttl_secs,
                     )
                     .await
                     .context("build_preprocessed_routing")?,
@@ -1111,9 +1235,7 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
             }
@@ -1122,9 +1244,7 @@ impl ModelWatcher {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
@@ -1256,7 +1376,8 @@ impl ModelWatcher {
         let mut results = Vec::with_capacity(instances.len());
         for instance in instances {
             match instance.deserialize_model::<ModelDeploymentCard>() {
-                Ok(card) => {
+                Ok(mut card) => {
+                    self.apply_tokenizer_backend_override(&mut card);
                     let endpoint_id = match &instance {
                         dynamo_runtime::discovery::DiscoveryInstance::Model {
                             namespace,
@@ -1316,9 +1437,97 @@ impl ModelWatcher {
     }
 }
 
+/// Seed the LoRA state tracker from a worker's MDC.
+///
+/// - Adapter card (`card.lora` is `Some`): register the loaded adapter (which also records the
+///   worker's capacity) and return the adapter name so the caller can track it for failed-save
+///   removal reconciliation.
+/// - Base worker card advertising `runtime_config.max_gpu_lora_count`: seed capacity-only (no
+///   phantom adapter) so the controller sees idle-but-LoRA-capable workers before the first
+///   adapter load. Returns `None`.
+/// - Otherwise (non-LoRA worker): no-op, returns `None`.
+///
+/// Split out of the discovery loop so the base-card capacity data flow is unit-testable without
+/// constructing a full `ModelWatcher`.
+fn seed_lora_state_from_card(
+    state_tracker: &crate::lora::LoraStateTracker,
+    worker: crate::kv_router::protocols::WorkerWithDpRank,
+    card: &ModelDeploymentCard,
+) -> Option<String> {
+    if let Some(lora_info) = card.lora.as_ref() {
+        state_tracker.handle_mdc_addition(worker, lora_info);
+        Some(lora_info.name.clone())
+    } else if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
+        state_tracker.set_worker_capacity(worker, capacity);
+        None
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_card::ModelDeploymentCard;
+
+    #[test]
+    fn base_card_with_capacity_seeds_idle_lora_capable_worker() {
+        // jh-nv (watcher base-card seeding): a base worker card (lora=None) carrying
+        // runtime_config.max_gpu_lora_count must seed capacity-only so the controller sees the
+        // idle LoRA-capable worker before any adapter loads. Pins the base-card -> capacity flow
+        // that the discovery loop relies on.
+        let st = crate::lora::LoraStateTracker::new();
+        let worker = crate::kv_router::protocols::WorkerWithDpRank::new(7, 0);
+        let mut card = ModelDeploymentCard::with_name_only("base-model");
+        card.runtime_config.max_gpu_lora_count = Some(4);
+        assert!(card.lora.is_none());
+
+        let adapter = seed_lora_state_from_card(&st, worker, &card);
+        assert_eq!(adapter, None, "a base card registers no adapter name");
+        assert_eq!(
+            st.list_workers(),
+            vec![worker],
+            "idle LoRA-capable worker must be visible to the controller"
+        );
+        assert_eq!(st.total_lora_slots(), 4);
+    }
+
+    #[test]
+    fn base_card_without_capacity_seeds_nothing() {
+        // A non-LoRA base card must not seed any worker capacity.
+        let st = crate::lora::LoraStateTracker::new();
+        let card = ModelDeploymentCard::with_name_only("base-model");
+        assert!(card.runtime_config.max_gpu_lora_count.is_none());
+
+        let adapter = seed_lora_state_from_card(
+            &st,
+            crate::kv_router::protocols::WorkerWithDpRank::new(1, 0),
+            &card,
+        );
+        assert_eq!(adapter, None);
+        assert!(
+            st.list_workers().is_empty(),
+            "a non-LoRA base card must not seed capacity"
+        );
+    }
+
+    #[test]
+    fn adapter_card_registers_adapter_and_returns_name() {
+        // An adapter card registers the loaded adapter (+capacity) and returns its name so the
+        // caller can track it in pending_lora_adds.
+        let st = crate::lora::LoraStateTracker::new();
+        let worker = crate::kv_router::protocols::WorkerWithDpRank::new(3, 0);
+        let mut card = ModelDeploymentCard::with_name_only("base-model");
+        card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-x".to_string(),
+            max_gpu_lora_count: Some(2),
+        });
+
+        let adapter = seed_lora_state_from_card(&st, worker, &card);
+        assert_eq!(adapter.as_deref(), Some("adapter-x"));
+        assert!(st.is_loaded("adapter-x", &worker));
+        assert_eq!(st.total_lora_slots(), 2);
+    }
 
     #[test]
     fn test_is_model_type_list_empty_on_empty_manager() {
@@ -1430,5 +1639,24 @@ mod tests {
         );
         let prefill = worker_set_key("ns1", ModelType::empty(), Some(WorkerType::Prefill));
         assert_ne!(decode, prefill);
+    }
+
+    #[test]
+    fn worker_set_key_encode_and_aggregated_coexist_in_same_namespace() {
+        // Regression for the Encode/Aggregated key collision: Encode and
+        // Aggregated workers in the same namespace MUST map to different keys,
+        // so both can register without an MDC checksum mismatch. Under the
+        // role-in-key scheme, an Encode worker registers surface-less
+        // (ModelType::empty()) and lands in `{ns}::encode`, while Aggregated
+        // keeps its `{ns}:chat|completions:aggregated` bucket.
+        let agg_key = worker_set_key(
+            "dynamo",
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Aggregated),
+        );
+        let enc_key = worker_set_key("dynamo", ModelType::empty(), Some(WorkerType::Encode));
+        assert_ne!(agg_key, enc_key);
+        assert_eq!(agg_key, "dynamo:chat|completions:aggregated");
+        assert_eq!(enc_key, "dynamo::encode");
     }
 }

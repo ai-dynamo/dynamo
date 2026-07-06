@@ -215,6 +215,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Images => todo!(),
         Endpoint::Videos => todo!(),
         Endpoint::Audios => todo!(),
+        Endpoint::Generate => todo!(),
     };
 
     let request_type = match request_type {
@@ -1112,7 +1113,7 @@ async fn test_nvext_disabled_strips_request_and_response() {
 
     let response = reqwest::Client::new()
         .post(format!("http://localhost:{port}/v1/chat/completions"))
-        .header("x-worker-instance-id", "42")
+        .header("x-dynamo-worker-instance-id", "42")
         .json(&serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "hi"}],

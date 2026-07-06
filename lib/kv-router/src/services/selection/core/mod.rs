@@ -14,13 +14,10 @@ use crate::protocols::{
     ActiveSequenceEvent, LocalBlockHash, RoutingConstraints, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
-use crate::scheduling::overlap::{
-    cache_hit_estimates_from_tiered_matches, tier_overlap_blocks_from_tiered_matches,
-};
-use crate::scheduling::policy::RouterSchedulingPolicy;
 use crate::scheduling::selector::DefaultWorkerSelector;
 use crate::scheduling::{
-    KvSchedulerError, LocalScheduler, PotentialLoad, effective_prefill_tokens,
+    KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, PotentialLoad, ScheduleMode,
+    ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
@@ -32,12 +29,11 @@ use crate::services::common::replica_sync::{
 use crate::services::indexer::backend::Indexer;
 use crate::services::indexer::recovery;
 use crate::services::indexer::registry::WorkerRegistry;
-use crate::services::overlap::build_mooncake_overlap_summaries;
+use crate::services::overlap::MooncakeOverlapSummary;
 
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::input::PromptRequest;
-use super::scoring::{OverlapInputs, build_overlap_scores_response};
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
@@ -45,8 +41,12 @@ use super::types::{
     WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
 };
 
-type SelectionScheduler =
-    LocalScheduler<ScopedSequencePublisher, SelectionWorkerConfig, RouterSchedulingPolicy>;
+type SelectionScheduler = LocalScheduler<
+    ScopedSequencePublisher,
+    SelectionWorkerConfig,
+    DefaultWorkerSelector,
+    TieredOverlapRefresher<Indexer>,
+>;
 
 struct SelectionEntry {
     key: SelectionKey,
@@ -59,9 +59,10 @@ struct SelectionEntry {
 }
 
 struct PreparedSelectionInputs {
+    block_hashes: Vec<LocalBlockHash>,
     sequence_hashes: Vec<SequenceHash>,
     isl_tokens: usize,
-    overlap: OverlapInputs,
+    overlap: OverlapSignals,
 }
 
 struct SelectionOperation {
@@ -73,6 +74,8 @@ struct SelectionOperation {
     expected_output_tokens: Option<u32>,
     priority_jump: f64,
     strict_priority: u32,
+    policy_class: Option<String>,
+    session_id: Option<String>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
@@ -304,7 +307,8 @@ impl SelectionCore {
         }
 
         let reasons = record.missing_schedulable_metadata(
-            self.kv_router_config.router_queue_threshold.is_some(),
+            self.kv_router_config.router_queue_threshold.is_some()
+                || self.kv_router_config.router_policy_config.is_some(),
             self.kv_router_config.use_kv_events,
         );
         if !reasons.is_empty() {
@@ -417,17 +421,27 @@ impl SelectionCore {
         });
         slots.start_periodic_force_expiry_across_all_workers(self.cancel_token.child_token());
 
+        let indexer = self
+            .indexer_registry
+            .get_or_create_indexer(key.indexer_key(), block_size);
+        let overlap_refresh = Arc::new(TieredOverlapRefresher::new(
+            indexer.clone(),
+            self.kv_router_config.clone(),
+            block_size,
+        ));
         let selector = DefaultWorkerSelector::new(Some(self.kv_router_config.clone()), WORKER_TYPE);
-        let scheduler = LocalScheduler::new_without_overlap_refresh(
+        let profile = self
+            .kv_router_config
+            .policy_profile(Some(&key.model_name))
+            .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
+        let scheduler = LocalScheduler::new_with_policy_profile(
             slots,
             workers_rx,
-            self.kv_router_config.router_queue_threshold,
-            self.kv_router_config
-                .router_queue_by_incoming_missing_isl
-                .clone(),
+            profile,
             block_size,
             selector,
-            RouterSchedulingPolicy::new(self.kv_router_config.router_queue_policy),
+            None,
+            Some(overlap_refresh),
             None,
             self.kv_router_config.router_queue_recheck_interval(),
             self.kv_router_config.router_track_prefill_tokens,
@@ -435,10 +449,6 @@ impl SelectionCore {
             WORKER_TYPE,
             true,
         );
-
-        let indexer = self
-            .indexer_registry
-            .get_or_create_indexer(key.indexer_key(), block_size);
         let entry = Arc::new(SelectionEntry {
             key: key.clone(),
             block_size,
@@ -551,6 +561,14 @@ impl SelectionCore {
     }
 
     pub async fn select(&self, req: SelectRequest) -> Result<SelectResponse, SelectionError> {
+        self.select_with_policy_class(req, None).await
+    }
+
+    pub async fn select_with_policy_class(
+        &self,
+        req: SelectRequest,
+        policy_class: Option<String>,
+    ) -> Result<SelectResponse, SelectionError> {
         self.schedule_selection(
             SelectionOperation {
                 key: SelectionKey::new(req.model_name, req.tenant_id),
@@ -561,6 +579,8 @@ impl SelectionCore {
                 expected_output_tokens: req.expected_output_tokens,
                 priority_jump: req.priority_jump.unwrap_or_default(),
                 strict_priority: req.strict_priority.unwrap_or(0),
+                policy_class,
+                session_id: req.session_id,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -573,6 +593,14 @@ impl SelectionCore {
     pub async fn select_and_reserve(
         &self,
         req: SelectAndReserveRequest,
+    ) -> Result<SelectResponse, SelectionError> {
+        self.select_and_reserve_with_policy_class(req, None).await
+    }
+
+    pub async fn select_and_reserve_with_policy_class(
+        &self,
+        req: SelectAndReserveRequest,
+        policy_class: Option<String>,
     ) -> Result<SelectResponse, SelectionError> {
         let reservation_id = req
             .reservation_id
@@ -587,6 +615,8 @@ impl SelectionCore {
                 expected_output_tokens: req.expected_output_tokens,
                 priority_jump: req.priority_jump.unwrap_or_default(),
                 strict_priority: req.strict_priority.unwrap_or(0),
+                policy_class,
+                session_id: req.session_id,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -610,6 +640,8 @@ impl SelectionCore {
             expected_output_tokens,
             priority_jump,
             strict_priority,
+            policy_class,
+            session_id,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
@@ -618,49 +650,48 @@ impl SelectionCore {
 
         let entry = self.ready_entry(&key)?;
         let PreparedSelectionInputs {
+            block_hashes,
             sequence_hashes,
             isl_tokens,
             overlap,
         } = self.prepare_selection_inputs(&entry, &prompt).await?;
-        let OverlapInputs {
-            tier_overlap_blocks,
-            effective_overlap_blocks,
-            effective_cached_tokens,
-            mooncake_summaries,
-        } = overlap;
-        let scheduler_request_id = if book {
-            Some(reservation_id.clone().ok_or_else(|| {
-                SelectionError::Internal(
-                    "booked selection did not include a reservation ID".to_string(),
-                )
-            })?)
+        let mode = if book {
+            ScheduleMode::Tracked {
+                request_id: reservation_id.clone().ok_or_else(|| {
+                    SelectionError::Internal(
+                        "booked selection did not include a reservation ID".to_string(),
+                    )
+                })?,
+            }
         } else {
-            None
+            ScheduleMode::QueryOnly {
+                request_id: selection_id.clone(),
+            }
+        };
+        let schedule_request = ScheduleRequest {
+            mode,
+            token_seq: Some(sequence_hashes),
+            block_hashes: Some(block_hashes),
+            isl_tokens,
+            overlap,
+            router_config_override,
+            lora_name: prompt.lora_name,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            shared_cache_hits: None,
         };
         let response = tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => {
                 return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
             }
-            result = entry.scheduler.schedule_with_block_hashes(
-                scheduler_request_id,
-                isl_tokens,
-                Some(sequence_hashes),
-                None,
-                tier_overlap_blocks,
-                effective_overlap_blocks.into_iter().collect(),
-                effective_cached_tokens.into_iter().collect(),
-                router_config_override.as_ref(),
-                book,
-                prompt.lora_name,
-                priority_jump,
-                strict_priority,
-                expected_output_tokens,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-                None,
-            ) => result?,
+            result = entry.scheduler.schedule_request(schedule_request) => result?,
         };
         let endpoint = self
             .catalog
@@ -671,14 +702,10 @@ impl SelectionCore {
                     response.best_worker.worker_id
                 ))
             })?;
-        let mut overlap = mooncake_summaries
-            .get(&response.best_worker.worker_id)
-            .cloned()
-            .unwrap_or_default();
-        overlap
-            .dp
-            .entry(response.best_worker.dp_rank.to_string())
-            .or_insert(0);
+        let overlap = MooncakeOverlapSummary::from_selected_worker_tiers(
+            &response.selected_worker_tiers,
+            entry.block_size,
+        );
 
         Ok(SelectResponse {
             selection_id,
@@ -850,11 +877,7 @@ impl SelectionCore {
         Ok(entry.scheduler.get_potential_loads(
             Some(prepared.sequence_hashes),
             prepared.isl_tokens,
-            prepared
-                .overlap
-                .effective_cached_tokens
-                .into_iter()
-                .collect(),
+            prepared.overlap.effective_cached_tokens,
             track_prefill_tokens,
         ))
     }
@@ -868,19 +891,24 @@ impl SelectionCore {
         let normalized = req
             .prompt
             .normalize_for_selection(entry.block_size, entry.is_eagle)?;
+        let num_blocks = normalized.block_hashes.len();
         let tiered = entry
             .indexer
             .find_tiered_matches(normalized.block_hashes)
             .await
             .map_err(|error| SelectionError::Internal(error.to_string()))?;
         let schedulable_workers = self.schedulable_worker_ranks(&key);
-        Ok(build_overlap_scores_response(
-            &self.kv_router_config,
-            req.router_config_override.as_ref(),
-            &tiered,
-            entry.block_size,
-            schedulable_workers,
-        ))
+        Ok(
+            OverlapAnalysis::new(&self.kv_router_config, entry.block_size, &tiered)
+                .scores_response(
+                    req.router_config_override.as_ref(),
+                    num_blocks,
+                    schedulable_workers,
+                    false,
+                    None,
+                    None,
+                ),
+        )
     }
 
     async fn prepare_selection_inputs(
@@ -889,43 +917,23 @@ impl SelectionCore {
         prompt: &PromptRequest,
     ) -> Result<PreparedSelectionInputs, SelectionError> {
         let normalized = prompt.normalize_for_selection(entry.block_size, entry.is_eagle)?;
-        let overlap = self.overlap_inputs(entry, &normalized.block_hashes).await?;
-        Ok(PreparedSelectionInputs {
-            sequence_hashes: normalized.sequence_hashes,
-            isl_tokens: normalized.isl_tokens,
-            overlap,
-        })
-    }
-
-    async fn overlap_inputs(
-        &self,
-        entry: &SelectionEntry,
-        block_hashes: &[LocalBlockHash],
-    ) -> Result<OverlapInputs, SelectionError> {
-        let tiered = if block_hashes.is_empty() {
+        let tiered = if normalized.block_hashes.is_empty() {
             TieredMatchDetails::default()
         } else {
             entry
                 .indexer
-                .find_tiered_matches(block_hashes.to_vec())
+                .find_tiered_matches(normalized.block_hashes.clone())
                 .await
                 .map_err(|error| SelectionError::Internal(error.to_string()))?
         };
-        let estimates = cache_hit_estimates_from_tiered_matches(
-            &self.kv_router_config,
-            entry.block_size,
-            &tiered,
-        );
-        let mooncake_summaries = build_mooncake_overlap_summaries(
-            &tiered,
-            entry.block_size,
-            self.schedulable_worker_ranks(&entry.key),
-        );
-        Ok(OverlapInputs {
-            tier_overlap_blocks: tier_overlap_blocks_from_tiered_matches(&tiered),
-            effective_overlap_blocks: estimates.effective_overlap_blocks,
-            effective_cached_tokens: estimates.cached_tokens,
-            mooncake_summaries,
+        let overlap =
+            OverlapAnalysis::new(&self.kv_router_config, entry.block_size, &tiered).signals();
+        drop(tiered);
+        Ok(PreparedSelectionInputs {
+            block_hashes: normalized.block_hashes,
+            sequence_hashes: normalized.sequence_hashes,
+            isl_tokens: normalized.isl_tokens,
+            overlap,
         })
     }
 
@@ -952,6 +960,8 @@ impl Drop for SelectionCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::StorageTier;
+    use crate::services::indexer::backend::test_util::store_event;
     use std::time::Duration;
 
     fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
@@ -1183,5 +1193,98 @@ mod tests {
             err,
             SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown)
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn queued_selection_returns_refreshed_overlap_snapshot() {
+        let mut config = test_config(false);
+        config.router_queue_threshold = Some(0.0);
+        let core = Arc::new(SelectionCore::new(config, 1, CancellationToken::new()));
+
+        for worker_id in [1, 2] {
+            let mut request = worker(worker_id);
+            request.max_num_batched_tokens = Some(8);
+            core.upsert_worker(request).await.expect("worker upsert");
+        }
+        let key = SelectionKey::new("model".to_string(), "default".to_string());
+        let entry = core.entries.read().get(&key).cloned().expect("entry");
+        entry
+            .indexer
+            .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
+            .await;
+        entry.indexer.dump_events().await.expect("flush indexer");
+
+        for worker_id in [1, 2] {
+            core.create_reservation(ReservationRequest {
+                model_name: "model".to_string(),
+                tenant_id: "default".to_string(),
+                reservation_id: format!("occupy-{worker_id}"),
+                worker_id,
+                dp_rank: Some(0),
+                prompt: PromptRequest {
+                    token_ids: None,
+                    mm_routing_info: None,
+                    block_mm_infos: None,
+                    block_hashes: None,
+                    sequence_hashes: Some(vec![1, 2]),
+                    isl_tokens: Some(8),
+                    lora_name: None,
+                    is_eagle: None,
+                },
+                router_config_override: None,
+                expected_output_tokens: None,
+                effective_prefill_tokens: Some(8),
+            })
+            .await
+            .expect("occupy worker");
+        }
+
+        let queued_core = Arc::clone(&core);
+        let queued = tokio::spawn(async move {
+            queued_core
+                .select_and_reserve(SelectAndReserveRequest {
+                    model_name: "model".to_string(),
+                    tenant_id: "default".to_string(),
+                    selection_id: Some("refresh-selection".to_string()),
+                    reservation_id: Some("refreshed-request".to_string()),
+                    prompt: PromptRequest {
+                        token_ids: None,
+                        mm_routing_info: None,
+                        block_mm_infos: None,
+                        block_hashes: Some(vec![11, 12]),
+                        sequence_hashes: Some(vec![101, 102]),
+                        isl_tokens: Some(8),
+                        lora_name: None,
+                        is_eagle: None,
+                    },
+                    router_config_override: None,
+                    expected_output_tokens: None,
+                    priority_jump: None,
+                    strict_priority: None,
+                    pinned_worker: None,
+                    allowed_worker_ids: None,
+                    routing_constraints: RoutingConstraints::default(),
+                })
+                .await
+        });
+        wait_for_pending_selection(&core).await;
+
+        entry
+            .indexer
+            .apply_event_routed(store_event(2, 0, 1, &[], &[11, 12], StorageTier::Device))
+            .await;
+        entry.indexer.dump_events().await.expect("flush indexer");
+        tokio::time::advance(Duration::from_secs(11)).await;
+        core.free_reservation("occupy-2")
+            .await
+            .expect("release worker 2");
+
+        let response = queued.await.expect("selection task").expect("selection");
+        assert_eq!(response.worker_id, 2);
+        assert_eq!(response.effective_prefill_tokens, 0);
+        assert_eq!(response.overlap.gpu, 8);
+        assert_eq!(response.overlap.cpu, 8);
+        assert_eq!(response.overlap.disk, 8);
+        assert_eq!(response.overlap.dp, HashMap::from([("0".to_string(), 8)]));
     }
 }

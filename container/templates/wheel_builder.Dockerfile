@@ -33,6 +33,11 @@ ARG CARGO_BUILD_JOBS
 ARG DEVICE
 
 WORKDIR /workspace
+
+# Compliance: always create the rust license-harvest dir so the licenses stage's
+# `COPY --from=wheel_builder /opt/dynamo/rust-licenses` never fails, even for
+# targets that build no wheels. runtime_wheel_builder populates it post-build.
+RUN mkdir -p /opt/dynamo/rust-licenses
 {% if device == "xpu" or device == "cpu" %}
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
@@ -215,10 +220,12 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 # Cache uv downloads; uv handles its own locking for this cache.
+# pyyaml: needed by the compliance NOTICES-bundling steps below (overrides.py
+# imports yaml at module scope); the system python3 doesn't ship it.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
 
@@ -249,6 +256,33 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
         ln -s /opt/sccache/sccache /usr/local/bin/sccache && \
         /tmp/use-sccache.sh install; \
     fi
+
+# Compliance: native source archives drop here. RUN git clone / wget …tar lines
+# in the wheel_builder pipeline preserve their resulting archive at
+# /tmp/native-sources/<name>-<version>.tar.gz so the per-image `sources_collect`
+# stage can COPY them out for OSRB submission. Created here unconditionally
+# (cheap) so the COPY always succeeds even when no native source builds run
+# for this framework.
+RUN mkdir -p /tmp/native-sources
+
+# Compliance source-archival pattern (do NOT add ARG ENABLE_SOURCE_ARCHIVAL
+# at this scope — it would invalidate every downstream layer when the flag
+# flips between PR builds and post-merge builds).
+#
+# When future work adds cargo-vendor / go-mod-vendor / native source-tree
+# preservation, declare the ARG INLINE in the smallest possible scope,
+# immediately before the gated RUN, e.g.:
+#
+#     ARG ENABLE_SOURCE_ARCHIVAL=false
+#     RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+#           cargo vendor --locked --manifest-path /opt/dynamo/Cargo.toml \
+#               /tmp/native-sources/rust-vendor; \
+#         fi
+#
+# This way the cache invalidation is contained to one RUN layer (the gated
+# one), not the rest of wheel_builder_base. shared-build-image.yml passes
+# ENABLE_SOURCE_ARCHIVAL=true via extra_build_args on push / release /
+# workflow_dispatch events; PR builds get the default "false" and skip.
 
 # Set SCCACHE environment variables (RUSTC_WRAPPER is set dynamically by
 # setup-env only when the sccache server starts successfully)
@@ -494,6 +528,64 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
+# Compliance: harvest each crate's real LICENSE files from the cargo registry
+# source cache so the rust NOTICES generator can inline upstream license text
+# (the runtime image keeps only the compiled wheel). Keyed "<name>-<version>"
+# to match generators/rust.py. Best-effort: unreadable/absent files are skipped
+# and the generator falls back to canonical SPDX text. cargo's registry lives
+# under CARGO_HOME and/or the cache-mounted /root/.cargo — scan both.
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
+        [ -d "$src" ] || continue; \
+        find "$src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do \
+            dest="/opt/dynamo/rust-licenses/$(basename "$crate")"; \
+            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
+                [ -e "$lf" ] || continue; \
+                mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+            done; \
+        done; \
+    done; \
+    echo "rust license harvest: $(find /opt/dynamo/rust-licenses -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) crates with license files"; \
+    true
+
+# Compliance: bundle the human-readable third-party Rust NOTICES into the
+# maturin wheels themselves (PEP 639 <dist-info>/licenses/), using the harvested
+# crate license texts. The wheel already carries maturin's CycloneDX SBOM (the
+# machine-readable inventory); this adds the texts the redistributed wheel's
+# MIT/BSD/Apache attribution clauses require. Best-effort + non-fatal: a failure
+# leaves the wheel with its SBOM intact rather than breaking the build.
+# Must run with the build venv's python: bundle_wheel_notices imports
+# compliance.overrides, which needs pyyaml (installed in the venv above);
+# the bare system python3 lacks it and the step would no-op with a warning.
+COPY container/compliance /opt/compliance
+RUN set -u; injected=0; \
+    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl; do \
+        [ -e "$whl" ] || continue; \
+        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
+            --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
+            && injected=$((injected+1)) || echo "::warning::wheel NOTICES bundling failed for $whl (SBOM retained)"; \
+    done; \
+    echo "wheel NOTICES bundled into $injected wheel(s)"
+
+# Compliance source archival: vendor the workspace lockfile for the OSRB
+# bundle. Gated on ENABLE_SOURCE_ARCHIVAL so PR builds skip the ~200-400 MB
+# vendor pull. The vendor tree is consumed downstream by each runtime
+# template's sources_collect stage, which filters against the installed
+# wheels' embedded SBOMs to keep only the third-party crates we actually
+# ship. Stay scoped to one RUN layer (cache invalidation contained).
+ARG ENABLE_SOURCE_ARCHIVAL=false
+# Mount cargo registry + git caches so re-runs don't re-download the
+# ~750 crates from crates.io every build. `sharing=shared` lets parallel
+# builds (e.g. multiple frameworks in CI) read the same cache concurrently.
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        mkdir -p /tmp/dynamo-vendor-full && \
+        cd /opt/dynamo && \
+        cargo vendor --locked /tmp/dynamo-vendor-full > /dev/null && \
+        cp Cargo.toml Cargo.lock /tmp/dynamo-vendor-full/ ; \
+    fi
+
 {% else %}
 # Dev/local-dev targets do not have pre-built wheels or /workspace source code.
 # After you start the local-dev/dev container, you will need to build from source:
@@ -663,6 +755,32 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+
+# Compliance: bundle third-party Rust NOTICES into the kvbm wheel built in this
+# stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder
+# and arrives consolidated above). Harvest kvbm's crate licenses from the cargo
+# registry, then inject into its auditwheel-repaired wheel. Best-effort/non-fatal.
+# Venv python required: compliance.overrides needs pyyaml, absent from the
+# system python3 (see the runtime_wheel_builder bundling step).
+COPY container/compliance /opt/compliance
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    set -u; \
+    for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
+        [ -d "$src" ] || continue; \
+        find "$src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do \
+            dest="/opt/dynamo/rust-licenses/$(basename "$crate")"; \
+            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
+                [ -e "$lf" ] || continue; mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+            done; \
+        done; \
+    done; \
+    for whl in /opt/dynamo/dist/kvbm*.whl; do \
+        [ -e "$whl" ] || continue; \
+        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
+            --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
+            || echo "::warning::kvbm wheel NOTICES bundling failed (SBOM retained)"; \
+    done; \
+    echo "kvbm wheel NOTICES step done"
 
 {% else %}
 # SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and

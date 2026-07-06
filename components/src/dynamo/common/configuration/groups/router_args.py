@@ -5,10 +5,11 @@
 
 Defines the router configuration parameters once so that both
 ``dynamo.frontend`` and other components can reuse them without duplication.
-Field names on ``RouterConfigBase`` match the ``RouterConfig`` Python
+Active field names on ``RouterConfigBase`` match the ``RouterConfig`` Python
 constructor kwargs 1:1 (for the non-positional args), so ``router_kwargs()``
 returns a dict that can be unpacked into
-``RouterConfig(mode, kv_config, **config.router_kwargs())``.
+``RouterConfig(mode, kv_config, **config.router_kwargs())``. Deprecated fields
+remain parseable but are not forwarded.
 """
 
 import logging
@@ -30,7 +31,12 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_decode_blocks_threshold",
     "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
-    "enforce_disagg",
+    "session_affinity_ttl_secs",
+)
+
+_ENFORCE_DISAGG_DEPRECATION = (
+    "--enforce-disagg and DYN_ENFORCE_DISAGG are deprecated and ignored; "
+    "routing topology and readiness are determined from registered worker types"
 )
 
 # Valid values for --admission-control.
@@ -74,6 +80,7 @@ class RouterConfigBase(ConfigBase):
     router_mode: str
     min_initial_workers: int
     enforce_disagg: bool
+    session_affinity_ttl_secs: Optional[int]
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -85,6 +92,8 @@ class RouterConfigBase(ConfigBase):
     def router_kwargs(self) -> dict:
         """Return a dict suitable for ``RouterConfig(mode, kv_config, **kwargs)``."""
         self.apply_admission_control()
+        if self.enforce_disagg:
+            logger.warning(_ENFORCE_DISAGG_DEPRECATION)
         return {f: getattr(self, f) for f in _ROUTER_FIELDS}
 
     def apply_admission_control(self) -> None:
@@ -236,6 +245,19 @@ class RouterArgGroup(ArgGroup):
             arg_type=int,
             dest="min_initial_workers",
         )
+        add_argument(
+            g,
+            flag_name="--router-session-affinity-ttl-secs",
+            env_var="DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
+            default=None,
+            help=(
+                "Enable router-local session affinity with this idle TTL in seconds. "
+                "Affinity is disabled when this option is omitted. "
+                "This is independent of KV prediction TTL settings."
+            ),
+            arg_type=int,
+            dest="session_affinity_ttl_secs",
+        )
         add_negatable_bool_argument(
             g,
             flag_name="--enforce-disagg",
@@ -243,10 +265,8 @@ class RouterArgGroup(ArgGroup):
             default=False,
             dest="enforce_disagg",
             help=(
-                "Strictly enforce disaggregated mode. Requests will fail if the prefill router "
-                "has not activated yet (e.g., prefill workers still registering). This is stricter "
-                "than the default: without this flag, requests arriving before prefill workers are "
-                "discovered fall through to aggregated decode-only routing."
+                "DEPRECATED: accepted for compatibility but ignored. Routing topology and "
+                "readiness are determined from registered worker types."
             ),
         )
         add_argument(

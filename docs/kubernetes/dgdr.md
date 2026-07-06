@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: DGDR Reference
+subtitle: Field reference for DynamoGraphDeploymentRequest, the deploy-by-intent generator that profiles and produces a DGD.
 ---
 
 A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's deploy-by-intent generator
@@ -315,9 +316,7 @@ so it cannot be used to add a missing `Epp` service to a DGDR-generated
 deployment. Use a direct DGD manifest or a GAIE recipe for EPP deployments.
 For manifests, `frontendSidecar` configuration, direct routing, EPP routing
 variables such as `DYN_USE_KV_EVENTS`, and route setup, see
-[Gateway API Inference Extension](inference-gateway.md). The same guide also
-documents the optional [Rust EPP](inference-gateway.md#4b-build-rust-epp-image-optional--experimental),
-which is currently experimental.
+[Gateway API Inference Extension](gateway-api/README.mdx).
 
 ### SKU Format
 

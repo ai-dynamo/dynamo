@@ -5,7 +5,9 @@ use async_trait::async_trait;
 
 use std::sync::Arc;
 
-use super::{AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, WorkerTask};
+use super::{
+    AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, TieredMatchDetails, WorkerTask,
+};
 use crate::protocols::*;
 
 /// Trait for querying an external shared KV cache pool.
@@ -21,6 +23,14 @@ pub trait SharedKvCache: Send + Sync {
         tokens: &[u32],
         block_size: u32,
     ) -> Result<SharedCacheHits, KvRouterError>;
+}
+
+#[async_trait]
+pub trait TieredMatchProvider: Send + Sync {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError>;
 }
 
 /// Per-shard size snapshot returned by [`KvIndexerInterface::shard_sizes`].

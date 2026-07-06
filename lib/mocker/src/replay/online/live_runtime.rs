@@ -58,7 +58,7 @@ impl LiveRuntime {
             router_config,
             prefill_load_estimator,
             num_workers,
-        ));
+        )?);
         let mut schedulers = Vec::with_capacity(num_workers);
         let mut senders = Vec::with_capacity(num_workers);
 

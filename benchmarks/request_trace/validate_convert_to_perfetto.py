@@ -22,9 +22,7 @@ def check_convert_records_emits_request_stages_and_metadata():
                     "event_time_unix_ms": 2000,
                     "event_source": "dynamo",
                     "agent_context": {
-                        "session_type_id": "agent_harness",
-                        "session_id": "session-1",
-                        "trajectory_id": "session-1:researcher",
+                        "session_id": "session-1:researcher",
                     },
                     "request": {
                         "request_id": "req-1",
@@ -108,56 +106,6 @@ def check_convert_records_emits_request_stages_and_metadata():
     assert markers[0]["ts"] == 1_012_000
 
 
-def check_convert_records_can_emit_stages_on_separate_tracks():
-    trace, _ = convert_records(
-        [
-            {
-                "event": {
-                    "schema": "dynamo.request.trace.v1",
-                    "event_type": "request_end",
-                    "event_time_unix_ms": 1050,
-                    "agent_context": {
-                        "session_id": "session-1",
-                        "trajectory_id": "session-1:researcher",
-                    },
-                    "request": {
-                        "request_id": "req-1",
-                        "model": "test-model",
-                        "request_received_ms": 1000,
-                        "prefill_wait_time_ms": 5,
-                        "prefill_time_ms": 7,
-                        "ttft_ms": 12,
-                        "total_time_ms": 50,
-                    },
-                },
-            }
-        ],
-        include_stages=True,
-        include_markers=False,
-        separate_stage_tracks=True,
-    )
-
-    request = next(
-        event for event in trace["traceEvents"] if event.get("cat") == "dynamo.llm"
-    )
-    stage_tids = {
-        event["tid"]
-        for event in trace["traceEvents"]
-        if event.get("cat") == "dynamo.llm.stage"
-    }
-    assert stage_tids != {request["tid"]}
-
-    thread_names = [
-        event["args"]["name"]
-        for event in trace["traceEvents"]
-        if event.get("name") == "thread_name"
-    ]
-    assert thread_names == [
-        "session-1:researcher",
-        "session-1:researcher stages",
-    ]
-
-
 def check_convert_records_accepts_enriched_request_trace_schema():
     trace, converted = convert_records(
         [
@@ -168,8 +116,7 @@ def check_convert_records_accepts_enriched_request_trace_schema():
                     "event_time_unix_ms": 1050,
                     "event_source": "dynamo",
                     "agent_context": {
-                        "session_id": "session-1",
-                        "trajectory_id": "session-1:researcher",
+                        "session_id": "session-1:researcher",
                     },
                     "request": {
                         "request_id": "req-1",
@@ -187,8 +134,7 @@ def check_convert_records_accepts_enriched_request_trace_schema():
                     "event_time_unix_ms": 1100,
                     "event_source": "harness",
                     "agent_context": {
-                        "session_id": "session-1",
-                        "trajectory_id": "session-1:researcher",
+                        "session_id": "session-1:researcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -255,8 +201,7 @@ def check_convert_records_clamps_stage_rounding_overlap():
                     "event_type": "request_end",
                     "event_time_unix_ms": 49_743.776002,
                     "agent_context": {
-                        "session_id": "session-1",
-                        "trajectory_id": "session-1:searcher",
+                        "session_id": "session-1:searcher",
                     },
                     "request": {
                         "request_id": "req-1",
@@ -293,7 +238,7 @@ def check_convert_records_clamps_stage_rounding_overlap():
     assert stages[1]["ts"] + stages[1]["dur"] == stages[2]["ts"]
 
 
-def check_convert_records_splits_overlapping_trajectory_requests_into_lanes():
+def check_convert_records_splits_overlapping_session_requests_into_lanes():
     def record(request_id: str, start_ms: int, total_ms: int):
         return {
             "event": {
@@ -301,9 +246,7 @@ def check_convert_records_splits_overlapping_trajectory_requests_into_lanes():
                 "event_type": "request_end",
                 "event_time_unix_ms": start_ms + total_ms,
                 "agent_context": {
-                    "session_type_id": "agent_harness",
-                    "session_id": "session-1",
-                    "trajectory_id": "session-1:searcher",
+                    "session_id": "session-1:searcher",
                 },
                 "request": {
                     "request_id": request_id,
@@ -355,7 +298,6 @@ def check_convert_records_uses_one_process_for_all_sessions():
                 "event_time_unix_ms": 1050,
                 "agent_context": {
                     "session_id": session_id,
-                    "trajectory_id": session_id,
                 },
                 "request": {
                     "request_id": session_id,
@@ -391,9 +333,7 @@ def check_convert_records_emits_tool_duration_slices():
                     "event_time_unix_ms": 1300,
                     "event_source": "harness",
                     "agent_context": {
-                        "session_type_id": "agent_harness",
-                        "session_id": "session-1",
-                        "trajectory_id": "session-1:searcher",
+                        "session_id": "session-1:searcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -449,10 +389,8 @@ def check_convert_records_infers_tool_slices_between_requests():
                 "event_time_unix_ms": start_ms + total_ms,
                 "event_source": "dynamo",
                 "agent_context": {
-                    "session_type_id": "codex",
                     "session_id": "codex-session",
-                    "trajectory_id": "codex-session",
-                    "parent_trajectory_id": "parent-session",
+                    "parent_session_id": "parent-session",
                 },
                 "request": {
                     "request_id": request_id,
@@ -507,7 +445,7 @@ def check_convert_records_infers_tool_slices_between_requests():
     assert tool_event["args"]["source_request_id"] == "req-tool-call"
     assert tool_event["args"]["next_request_id"] == "req-after-tool"
     assert tool_event["args"]["tool_call_id"] == "call-1"
-    assert tool_event["args"]["parent_trajectory_id"] == "parent-session"
+    assert tool_event["args"]["parent_session_id"] == "parent-session"
 
     thread_names = [
         event["args"]["name"]
@@ -598,9 +536,7 @@ def check_convert_records_infers_tool_slices_between_requests():
                     "event_time_unix_ms": 1175,
                     "event_source": "harness",
                     "agent_context": {
-                        "session_type_id": "codex",
                         "session_id": "codex-session",
-                        "trajectory_id": "codex-session",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -637,8 +573,7 @@ def check_convert_records_pairs_tool_start_and_end_without_duration():
                     "event_time_unix_ms": 1000,
                     "event_source": "harness",
                     "agent_context": {
-                        "session_id": "session-1",
-                        "trajectory_id": "session-1:searcher",
+                        "session_id": "session-1:searcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -654,8 +589,7 @@ def check_convert_records_pairs_tool_start_and_end_without_duration():
                     "event_time_unix_ms": 1250,
                     "event_source": "harness",
                     "agent_context": {
-                        "session_id": "session-1",
-                        "trajectory_id": "session-1:searcher",
+                        "session_id": "session-1:searcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -694,8 +628,7 @@ def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
                     "event_time_unix_ms": 1000,
                     "event_source": "harness",
                     "agent_context": {
-                        "session_id": "session-1",
-                        "trajectory_id": "session-1:searcher",
+                        "session_id": "session-1:searcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -711,8 +644,7 @@ def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
                     "event_time_unix_ms": 1000,
                     "event_source": "harness",
                     "agent_context": {
-                        "session_id": "session-1",
-                        "trajectory_id": "session-1:searcher",
+                        "session_id": "session-1:searcher",
                     },
                     "tool": {
                         "tool_call_id": "call-1",
@@ -748,11 +680,10 @@ def check_convert_records_renders_zero_duration_tool_as_synthetic_span():
 
 CHECKS = [
     check_convert_records_emits_request_stages_and_metadata,
-    check_convert_records_can_emit_stages_on_separate_tracks,
     check_convert_records_accepts_enriched_request_trace_schema,
     check_convert_records_accepts_context_free_request_trace_schema,
     check_convert_records_clamps_stage_rounding_overlap,
-    check_convert_records_splits_overlapping_trajectory_requests_into_lanes,
+    check_convert_records_splits_overlapping_session_requests_into_lanes,
     check_convert_records_uses_one_process_for_all_sessions,
     check_convert_records_emits_tool_duration_slices,
     check_convert_records_infers_tool_slices_between_requests,

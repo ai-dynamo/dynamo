@@ -22,6 +22,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -166,6 +168,29 @@ func TestBugDGDRStaleAlphaDeploymentDeletedRequiresDGDNameMatch(t *testing.T) {
 	}
 	if dst.Status.Deployment.Created {
 		t.Fatal("deployment.created = true, want false")
+	}
+}
+
+func TestBugDGDREmptyAlphaDeploymentStatusRoundTrips(t *testing.T) {
+	original := &DynamoGraphDeploymentRequest{
+		Status: DynamoGraphDeploymentRequestStatus{
+			State:      DGDRStateReady,
+			Deployment: &DeploymentStatus{},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := original.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+
+	restored := &DynamoGraphDeploymentRequest{}
+	if err := restored.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
+		t.Fatalf("status mismatch after round-trip (-want +got):\n%s", diff)
 	}
 }
 

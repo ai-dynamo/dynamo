@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
+use std::time::Duration;
 use tokio_stream::StreamExt;
 
 use super::local_model::RoutingConstraints;
@@ -704,6 +705,46 @@ impl WorkerMetricsPublisher {
     ) -> PyResult<()> {
         self.inner
             .publish(dp_rank, active_decode_blocks, kv_used_blocks)
+            .map_err(to_pyerr)
+    }
+}
+
+#[pyclass]
+pub(crate) struct MultimodalEmbeddingCachePublisher {
+    inner: Arc<llm_rs::kv_router::publisher::MultimodalEmbeddingCachePublisher>,
+}
+
+#[pymethods]
+impl MultimodalEmbeddingCachePublisher {
+    #[new]
+    fn new() -> Self {
+        let inner = llm_rs::kv_router::publisher::MultimodalEmbeddingCachePublisher::new();
+        Self {
+            inner: inner.into(),
+        }
+    }
+
+    #[pyo3(signature = (endpoint))]
+    fn create_endpoint<'p>(
+        &self,
+        py: Python<'p>,
+        endpoint: Endpoint,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let rs_publisher = self.inner.clone();
+        let rs_component = endpoint.inner.component().clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            rs_publisher
+                .create_endpoint(rs_component)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    #[pyo3(signature = (added_keys, removed_keys))]
+    fn publish_delta(&self, added_keys: Vec<String>, removed_keys: Vec<String>) -> PyResult<()> {
+        self.inner
+            .publish_delta(added_keys, removed_keys)
             .map_err(to_pyerr)
     }
 }
@@ -1433,13 +1474,19 @@ impl KvRouter {
     /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
     /// (contains "prefill") or by `router_track_active_blocks` being disabled.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
         aic_perf_config: Option<&AicPerfConfig>,
+        session_affinity_ttl_secs: Option<u64>,
     ) -> PyResult<Self> {
+        if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
+            return Err(PyValueError::new_err(
+                "session_affinity_ttl_secs must be between 1 and 31536000",
+            ));
+        }
         let prefill_load_estimator = aic_perf_config
             .map(|config| {
                 Python::with_gil(|py| {
@@ -1453,6 +1500,11 @@ impl KvRouter {
                         config.moe_tp_size(),
                         config.moe_ep_size(),
                         config.attention_dp_size(),
+                        config.gemm_dtype(),
+                        config.moe_dtype(),
+                        config.fmha_dtype(),
+                        config.kv_cache_dtype(),
+                        config.comm_dtype(),
                         config.nextn(),
                         config.nextn_accept_rates(),
                     )
@@ -1487,7 +1539,12 @@ impl KvRouter {
             )
             .await?;
 
-            let kv_push_router = RsKvPushRouter::new(push_router, kv_router);
+            let kv_push_router = RsKvPushRouter::new(
+                push_router,
+                kv_router,
+                session_affinity_ttl_secs.map(Duration::from_secs),
+            )
+            .map_err(to_pyerr)?;
 
             Ok(Self {
                 inner: Arc::new(kv_push_router),
@@ -1567,6 +1624,7 @@ impl KvRouter {
                     |infos| llm_rs::protocols::common::preprocessor::MmRoutingInfo {
                         routing_token_ids: token_ids.clone(),
                         block_mm_infos: infos,
+                        expanded_prompt_len: token_ids.len(),
                     },
                 )
             };
@@ -1645,7 +1703,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None, strict_priority=0))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None, strict_priority=0, policy_class=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -1657,6 +1715,7 @@ impl KvRouter {
         lora_name: Option<String>,
         routing_constraints: Option<RoutingConstraints>,
         strict_priority: u32,
+        policy_class: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: RouterConfigOverride =
@@ -1675,7 +1734,7 @@ impl KvRouter {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let outcome = chooser
-                .find_best_match_details(
+                .find_best_match_details_with_policy_class(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
@@ -1685,6 +1744,8 @@ impl KvRouter {
                     lora_name.clone(),
                     0.0,
                     strict_priority,
+                    policy_class,
+                    None,
                     None,
                     None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
@@ -1698,30 +1759,8 @@ impl KvRouter {
                     overlap_blocks,
                     ..
                 } => (worker, overlap_blocks),
-                llm_rs::kv_router::FindBestMatchOutcome::Backpressure {
-                    reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens,
-                } => {
-                    // Note: Backpressure is currently treated as Unavailable and falls through
-                    // to the error path. Distinguishing backpressure from regular errors in Python
-                    // would require returning a structured result type instead of raising an exception,
-                    // which is a breaking API change. For now, callers should treat any error from
-                    // best_worker as potentially transient and implement retry logic accordingly.
-                    // The backpressure info (reason, queued_isl_tokens, max_queued_isl_tokens) is logged but
-                    // not exposed to Python callers.
-                    tracing::warn!(
-                        reason = ?reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens = ?max_queued_isl_tokens,
-                        "Router backpressure - treating as unavailable"
-                    );
-                    return Err(to_pyerr(anyhow::anyhow!(
-                        "router backpressure: {:?} (queued_isl_tokens={}, max_queued_isl_tokens={:?})",
-                        reason,
-                        queued_isl_tokens,
-                        max_queued_isl_tokens
-                    )));
+                llm_rs::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                    return Err(crate::errors::queue_rejection_to_pyerr(rejection));
                 }
             };
 
