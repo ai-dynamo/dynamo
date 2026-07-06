@@ -252,33 +252,44 @@ def rebind_nonparameter_tensors(
             continue
         ptr = int(tensor.data_ptr())
         if not any(
-            va <= ptr < va + mapping.aligned_size
-            for va, mapping in mappings.items()
+            va <= ptr < va + mapping.aligned_size for va, mapping in mappings.items()
         ):
             # Allocated outside the GMS pool; already private.
             continue
 
         mod, attr = _resolve_module_attr(model, name)
-        clone = tensor.detach().clone()
         if (
             tensor_type == "buffer"
             and hasattr(mod, "_buffers")
             and attr in mod._buffers
         ):
-            mod._buffers[attr] = clone
+            mod._buffers[attr] = tensor.detach().clone()
         elif attr.isdigit() and not isinstance(mod, torch.nn.Module):
             # Element of a tensor list/tuple attribute.
-            if not isinstance(mod, list):
-                logger.debug("[GMS] Cannot rebind immutable container %r", name)
+            if isinstance(mod, list):
+                mod[int(attr)] = tensor.detach().clone()
+            elif isinstance(mod, tuple):
+                # Tuples are immutable: rebuild the tuple on its owner.
+                container_name, _ = name.rsplit(".", 1)
+                owner, container_attr = _resolve_module_attr(model, container_name)
+                if isinstance(getattr(type(owner), container_attr, None), property):
+                    # Read-only derived attribute; the underlying tensors
+                    # are iterated (and rebound) separately.
+                    logger.debug("[GMS] Skipping property attribute %r", name)
+                    continue
+                elements = list(mod)
+                elements[int(attr)] = tensor.detach().clone()
+                setattr(owner, container_attr, tuple(elements))
+            else:
+                logger.debug("[GMS] Cannot rebind container element %r", name)
                 continue
-            mod[int(attr)] = clone
         else:
             if isinstance(getattr(type(mod), attr, None), property):
                 # Read-only derived attribute; the underlying tensor is
                 # iterated (and rebound) separately.
                 logger.debug("[GMS] Skipping property attribute %r", name)
                 continue
-            setattr(mod, attr, clone)
-        rebound_bytes += clone.numel() * clone.element_size()
+            setattr(mod, attr, tensor.detach().clone())
+        rebound_bytes += tensor.numel() * tensor.element_size()
 
     return rebound_bytes
