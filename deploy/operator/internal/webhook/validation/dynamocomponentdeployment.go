@@ -42,9 +42,9 @@ func NewDynamoComponentDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoC
 // Context is required for operations that may need to query the cluster (e.g., CRD checks).
 // Returns warnings and error.
 func (v *DynamoComponentDeploymentValidator) Validate(ctx context.Context) (admission.Warnings, error) {
-	// Validate shared spec fields using SharedSpecValidator
+	// Validate shared spec fields using SharedSpecValidatorV1Alpha1
 	calculatedNamespace := v.deployment.GetDynamoNamespace()
-	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec", calculatedNamespace, false)
+	sharedValidator := NewSharedSpecValidatorV1Alpha1(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec", calculatedNamespace, false)
 
 	return sharedValidator.Validate(ctx)
 }

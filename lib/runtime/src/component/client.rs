@@ -380,7 +380,6 @@ impl RoutingInstancesState {
         self.snapshot().routable_ids().to_vec()
     }
 
-    #[cfg(test)]
     fn free_ids(&self) -> Vec<u64> {
         self.snapshot().free_ids.clone()
     }
@@ -520,8 +519,9 @@ impl Client {
         self.routing_instances.routable_ids()
     }
 
-    #[cfg(test)]
-    pub(crate) fn instance_ids_free(&self) -> Vec<u64> {
+    /// Routable instance ids excluding those currently flagged overloaded — the set used
+    /// for load-aware (random / round-robin) worker selection.
+    pub fn instance_ids_free(&self) -> Vec<u64> {
         self.routing_instances.free_ids()
     }
 

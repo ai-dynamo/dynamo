@@ -16,6 +16,7 @@ from concurrent.futures import wait as _futures_wait
 from dataclasses import dataclass
 from typing import Any
 
+from sglang.srt.parser.conversation import chat_template_exists
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
@@ -40,6 +41,7 @@ from .utils import (
     make_internal_error,
     nvext_extra_field_requested,
     random_uuid,
+    read_jinja_chat_template,
     resolve_chat_template,
     worker_warmup,
 )
@@ -57,12 +59,34 @@ def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
     return cached_tokens if isinstance(cached_tokens, int) else None
 
 
+def _normalize_eos_token_ids(value: Any) -> list[int]:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        token_ids: list[int] = []
+        seen: set[int] = set()
+        for token_id in value:
+            if isinstance(token_id, int) and not isinstance(token_id, bool):
+                if token_id not in seen:
+                    token_ids.append(token_id)
+                    seen.add(token_id)
+        return token_ids
+    return []
+
+
+def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
+    eos_token_ids = _normalize_eos_token_ids(getattr(tokenizer, "eos_token_ids", None))
+    if eos_token_ids:
+        return eos_token_ids
+    return _normalize_eos_token_ids(getattr(tokenizer, "eos_token_id", None))
+
+
 def _load_tokenizer(source_path: str, trust_remote_code: bool):
     """Load the SGLang tokenizer, falling back to an on-disk chat template
     (e.g. chat_template.json) when the tokenizer defines none."""
     tokenizer = get_tokenizer(source_path, trust_remote_code=trust_remote_code)
     if getattr(tokenizer, "chat_template", None) is None:
-        tokenizer.chat_template = resolve_chat_template(source_path)
+        tokenizer.chat_template = resolve_chat_template(source_path, backend="sglang")
     return tokenizer
 
 
@@ -120,6 +144,30 @@ _w_exclude_tools_when_tool_choice_none: bool = True
 _w_template_force_reasoning: bool = False
 
 
+def _load_chat_template(chat_template: str | None) -> str | None:
+    """Load a chat template override from a Jinja template file."""
+    if not chat_template:
+        return None
+    if chat_template_exists(chat_template):
+        raise ValueError(
+            "SGLang built-in chat template names are not supported by "
+            "Dynamo's SGLang chat processor; pass a .jinja template file path."
+        )
+    expanded_template = os.path.expanduser(os.path.expandvars(chat_template))
+    if not os.path.exists(expanded_template):
+        raise FileNotFoundError(f"Chat template file not found: {expanded_template}")
+    if not os.path.isfile(expanded_template):
+        raise FileNotFoundError(
+            f"Chat template path is not a file: {expanded_template}"
+        )
+    if not expanded_template.endswith(".jinja"):
+        raise ValueError(
+            "Dynamo's SGLang chat processor supports only .jinja chat template "
+            f"files, got: {expanded_template}"
+        )
+    return read_jinja_chat_template(expanded_template, backend="sglang")
+
+
 @dataclass
 class SglangPreprocessWorkerResult:
     """Picklable return value from the SGLang preprocess worker."""
@@ -142,11 +190,14 @@ def _init_worker(
     exclude_tools_when_tool_choice_none: bool = True,
     trust_remote_code: bool = False,
     template_force_reasoning: bool = False,
+    chat_template: str | None = None,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
+    if chat_template is not None:
+        _w_tokenizer.chat_template = chat_template
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
@@ -156,7 +207,7 @@ def _init_worker(
 def _preprocess_worker(
     request: dict[str, Any],
     model_name: str,
-    eos_token_id: int | None,
+    eos_token_ids: list[int] | None,
 ) -> SglangPreprocessWorkerResult:
     """Preprocess a request in a worker process and return a picklable result."""
     pre = preprocess_chat_request(
@@ -176,7 +227,7 @@ def _preprocess_worker(
         request,
         pre.prompt_token_ids,
         model_name,
-        eos_token_id,
+        eos_token_ids,
         pre.guided_decoding,
         pre.tool_call_parser,
     )
@@ -198,7 +249,7 @@ def _build_dynamo_preproc(
     request: dict[str, Any],
     prompt_token_ids: list[int],
     model_name: str,
-    eos_token_id: int | None,
+    eos_token_ids: int | list[int] | None,
     guided_decoding: dict[str, Any] | None = None,
     tool_call_parser: ToolCallParserType | None = None,
 ) -> dict[str, Any]:
@@ -261,7 +312,7 @@ def _build_dynamo_preproc(
             "skip_special_tokens": tool_call_parser is None,
             "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
-        "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
+        "eos_token_ids": _normalize_eos_token_ids(eos_token_ids),
         "annotations": [],
         "routing": request.get("routing"),
     }
@@ -288,7 +339,7 @@ class SglangProcessor:
         routed_engine: RoutedEngine,
         tool_call_parser_name: str | None,
         reasoning_parser_name: str | None,
-        eos_token_id: int | None,
+        eos_token_ids: list[int] | None,
         debug_perf: bool = False,
         preprocess_pool: ProcessPoolExecutor | None = None,
         preprocess_workers: int = 0,
@@ -313,7 +364,7 @@ class SglangProcessor:
         self.tool_call_parser_name = tool_call_parser_name
         self.reasoning_parser_name = reasoning_parser_name
         self.exclude_tools_when_tool_choice_none = True
-        self.eos_token_id = eos_token_id
+        self.eos_token_ids = _normalize_eos_token_ids(eos_token_ids)
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
         self.preprocess_pool = preprocess_pool
@@ -393,10 +444,12 @@ class SglangProcessor:
                 request,
                 tokens,
                 request["model"],
-                self.eos_token_id,
+                self.eos_token_ids,
                 pre.guided_decoding,
                 pre.tool_call_parser,
             )
+        except PreprocessError as exc:
+            raise InvalidArgument(str(exc)) from exc
         except InvalidArgument:
             raise
         except Exception as exc:
@@ -412,6 +465,7 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            eos_token_ids=self.eos_token_ids,
         )
 
         async for item in self._generate_and_stream(
@@ -434,7 +488,7 @@ class SglangProcessor:
                     _preprocess_worker,
                     request,
                     request["model"],
-                    self.eos_token_id,
+                    self.eos_token_ids,
                 )
                 preproc_result: SglangPreprocessWorkerResult = (
                     await asyncio.wrap_future(future)
@@ -468,6 +522,7 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            eos_token_ids=self.eos_token_ids,
         )
 
         async for item in self._generate_and_stream(
@@ -552,6 +607,7 @@ class SglangProcessor:
                 # First chunk flushes immediately (si=1) to minimize TTFT.
                 flush_threshold = 1 if first_chunk else stream_interval
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
+                    usage_for_metrics = pending_usage
                     mapped_response = {
                         "token_ids": pending_token_ids,
                         "finish_reason": finish_reason,
@@ -578,6 +634,7 @@ class SglangProcessor:
                         }
                         if pending_usage:
                             dynamo_out["usage"] = pending_usage
+                            pending_usage = None
                         response_nvext: dict[str, Any] = {}
                         if stop_reason is not None and nvext_extra_field_requested(
                             request, "stop_reason"
@@ -597,7 +654,7 @@ class SglangProcessor:
                         "output_tokens": cumulative_output_tokens,
                         "chunk_tokens": len(pending_token_ids),
                     }
-                    cached_tokens = _cached_tokens_from_usage(pending_usage)
+                    cached_tokens = _cached_tokens_from_usage(usage_for_metrics)
                     if cached_tokens is not None:
                         metrics["cached_tokens"] = cached_tokens
                     envelope["event"] = "llm_metrics"
@@ -634,11 +691,13 @@ class SglangEngineFactory:
         debug_perf: bool = False,
         tool_call_parser_name: str | None = None,
         reasoning_parser_name: str | None = None,
+        chat_template: str | None = None,
     ):
         self.config = config
         self.debug_perf = debug_perf
         self.tool_call_parser_name = tool_call_parser_name
         self.reasoning_parser_name = reasoning_parser_name
+        self.chat_template = chat_template
 
         self.trust_remote_code = config.trust_remote_code
         self.stream_interval = 20
@@ -676,8 +735,12 @@ class SglangEngineFactory:
 
         logger.info("Loading SGLang tokenizer from %s", local_dir)
         tokenizer = _load_tokenizer(local_dir, self.trust_remote_code)
+        chat_template = _load_chat_template(self.chat_template)
+        if chat_template is not None:
+            logger.info("Using custom chat template override")
+            tokenizer.chat_template = chat_template
 
-        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        eos_token_ids = _tokenizer_eos_token_ids(tokenizer)
 
         # Static reasoning-template scan (mirrors sglang's template_manager).
         # Shared with worker-pool processes via initargs so they compute the
@@ -718,6 +781,7 @@ class SglangEngineFactory:
                     self.config.exclude_tools_when_tool_choice_none,
                     self.trust_remote_code,
                     template_force_reasoning,
+                    chat_template,
                 ),
             )
             futures = [
@@ -748,7 +812,7 @@ class SglangEngineFactory:
             routed_engine,
             tool_call_parser_name,
             reasoning_parser_name,
-            eos_token_id,
+            eos_token_ids,
             debug_perf=self.debug_perf,
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,

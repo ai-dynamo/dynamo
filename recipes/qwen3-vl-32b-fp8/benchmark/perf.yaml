@@ -28,7 +28,7 @@ spec:
           set -e
           apt-get update && apt-get install -y curl jq procps git && apt-get clean
 
-          pip install aiperf==0.9.0
+          pip install aiperf==0.10.0
           echo "aiperf installation completed"
 
           export COLUMNS=200

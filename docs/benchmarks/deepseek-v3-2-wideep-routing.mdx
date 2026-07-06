@@ -93,7 +93,7 @@ The benchmark runs as a Kubernetes Job; tail it with `kubectl logs -f -l job-nam
 ## Notes
 
 - The source publishes the comparison as a results video plus the dataset statistics above, not a numeric results table; run both configurations to produce TTFT/ITL/goodput deltas for your cluster.
-- `perf.yaml` pins `transformers==4.57.6` alongside `aiperf==0.6.0` — older transformers cannot load the `deepseek_v32` tokenizer and AIPerf surfaces it as "Failed to load tokenizer".
+- `perf.yaml` pins `transformers==4.57.6` alongside `aiperf==0.10.0` — the trtllm-runtime base ships transformers 4.55.0, and aiperf's `transformers>=4.56.0` floor would otherwise pull 5.x, which cannot load the `deepseek_v32` tokenizer (surfaces as "Failed to load tokenizer").
 - Multi-node GB200 deployments need the ComputeDomain CR so the DRA scheduler co-locates worker pods on MNNVL-connected nodes; if you rename it, mirror the change in each `deploy.yaml` under `extraPodSpec.resourceClaims` and `resources.claims`.
 - Background on the underlying optimizations: [Optimizing DeepSeek-V3.2 on NVIDIA Blackwell GPUs](https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog15_Optimizing_DeepSeek_V32_on_NVIDIA_Blackwell_GPUs.html).
 - Source: [recipes/deepseek-v32-fp4](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4)
