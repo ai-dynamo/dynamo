@@ -161,7 +161,6 @@ fn supports_encoder_result_handoff(card: &ModelDeploymentCard) -> bool {
 
 // Generate's opaque request state is not yet verified for migration replay.
 const GENERATE_MIGRATION_LIMIT: u32 = 0;
-
 /// Resolve the effective [`WorkerType`] for a card during the
 /// cross-version rollout.
 ///
@@ -229,9 +228,6 @@ pub struct ModelWatcher {
     local_model_path: Option<PathBuf>,
     /// Frontend-level tokenizer backend override for discovered model cards.
     tokenizer_backend: Option<TokenizerBackend>,
-    /// Whether the frontend configured the vLLM-compatible Generate API.
-    /// Keep the raw Generate pipeline out of non-HTTP and default-off paths.
-    generate_engine_enabled: bool,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -357,7 +353,6 @@ impl ModelWatcher {
             pending_lora_adds: DashMap::new(),
             local_model_path: None,
             tokenizer_backend: None,
-            generate_engine_enabled: false,
         }
     }
 
@@ -371,10 +366,6 @@ impl ModelWatcher {
 
     pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
         self.tokenizer_backend = tokenizer_backend;
-    }
-
-    pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
-        self.generate_engine_enabled = enabled;
     }
 
     fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
@@ -1694,7 +1685,7 @@ impl ModelWatcher {
                             )
                             .context("PreprocessedRouting::build_pipeline")?,
                         )
-                } else if needs_generate_pipeline {
+                } else if self.enable_engine_apis {
                     tracing::warn!(
                         "Skipping chat engine: no supported Rust tokenizer or chat_engine_factory; Generate remains available"
                     );
@@ -1743,27 +1734,7 @@ impl ModelWatcher {
                 }
             }
 
-            // Generate is a frontend-native token-in/token-out surface. It
-            // reuses the raw routed pipeline so the complete request envelope
-            // reaches the worker without passing through the OpenAI decoder.
-            if needs_generate_pipeline {
-                let routing = preprocessed_routing.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("generate pipeline requires preprocessed routing")
-                })?;
-                let generate_engine = routing
-                    .build_preprocessed_pipeline(
-                        card,
-                        GENERATE_MIGRATION_LIMIT,
-                        None,
-                        self.metrics.clone(),
-                    )
-                    .context("build generate (preprocessed) pipeline")?;
-                worker_set.generate_engine = Some(generate_engine);
-                tracing::info!("Generate (token-in/token-out) is ready");
-            }
-
-            // Verify we built at least one serving engine. Generate can be the
-            // sole engine because token-native requests need no frontend tokenizer.
+            // Verify that at least one request-serving engine was built.
             if !worker_set.has_any_serving_engine() {
                 anyhow::bail!(
                     "Model '{}' requires frontend tokenization/preprocessing (ModelInput::Tokens) \

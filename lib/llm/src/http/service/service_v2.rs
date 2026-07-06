@@ -492,8 +492,6 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
-    /// Resolved startup gate for the vLLM-compatible Generate API.
-    generate_api_enabled: bool,
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
@@ -608,10 +606,6 @@ impl HttpService {
 
     pub fn anthropic_api_enabled(&self) -> bool {
         self.state().anthropic_api_enabled()
-    }
-
-    pub fn generate_api_enabled(&self) -> bool {
-        self.generate_api_enabled
     }
 
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
@@ -1089,7 +1083,6 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
-            generate_api_enabled: engine_api_enabled,
             rl_router,
             rl_port: config.rl_port,
         })
@@ -1507,26 +1500,6 @@ mod tests {
                 !svc.state.nvext_enabled(),
                 "builder=false wins even if disable is unset"
             );
-        });
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn generate_api_enabled_reports_resolved_startup_gate() {
-        temp_env::with_var_unset(env_llm::DYN_ENABLE_ENGINE_API, || {
-            let disabled = HttpService::builder().build().unwrap();
-            assert!(!disabled.generate_api_enabled());
-
-            let enabled = HttpService::builder()
-                .enable_engine_apis(true)
-                .build()
-                .unwrap();
-            assert!(enabled.generate_api_enabled());
-        });
-
-        temp_env::with_var(env_llm::DYN_ENABLE_ENGINE_API, Some("1"), || {
-            let enabled = HttpService::builder().build().unwrap();
-            assert!(enabled.generate_api_enabled());
         });
     }
 }

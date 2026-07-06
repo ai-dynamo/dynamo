@@ -455,7 +455,7 @@ mod tests {
     fn generate_cancellation_labels() -> CancellationLabels {
         CancellationLabels {
             model: "test-model".to_string(),
-            endpoint: Endpoint::Generate.to_string(),
+            endpoint: "generate".to_string(),
             request_type: "unary".to_string(),
         }
     }

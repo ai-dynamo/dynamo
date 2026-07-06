@@ -320,18 +320,4 @@ mod tests {
         assert!(endpoints.contains(&EndpointType::Chat));
         assert!(endpoints.contains(&EndpointType::Realtime));
     }
-
-    #[test]
-    fn token_generating_models_do_not_imply_vllm_generate_support() {
-        assert!(
-            !ModelType::Chat
-                .as_endpoint_types()
-                .contains(&EndpointType::Generate)
-        );
-        assert!(
-            !ModelType::Completions
-                .as_endpoint_types()
-                .contains(&EndpointType::Generate)
-        );
-    }
 }
