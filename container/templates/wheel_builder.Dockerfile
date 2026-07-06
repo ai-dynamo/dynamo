@@ -297,7 +297,7 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
 # NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
 # GPU images) and VP9 from libvpx (BSD).
-# Do not delete the source tree for legal reasons.
+# Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
 ARG NV_CODEC_HEADERS_REF
 ARG LIBVPX_REF
@@ -330,7 +330,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     make install && \
     ldconfig && \
     cd /tmp && \
-    git clone --depth 1 --branch n${FFMPEG_VERSION} https://github.com/FFmpeg/FFmpeg.git ffmpeg-${FFMPEG_VERSION} && \
+    curl --retry 5 --retry-delay 3 -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
         --prefix=/usr/local \
