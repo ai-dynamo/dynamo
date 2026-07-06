@@ -34,7 +34,6 @@ impl RequestPayloadHandle {
             super::RequestTracePayload {
                 request_id: self.request_id,
                 endpoint: "openai.chat_completion".to_string(),
-                requested_streaming: self.requested_streaming,
                 model: self.model,
                 request: Some(self.request),
                 response,

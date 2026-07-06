@@ -471,7 +471,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
             file,
-            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_payload","event_time_unix_ms":1050,"payload":{{"request_id":"req-1","endpoint":"openai.chat_completion","requested_streaming":false,"model":"test","request":{{"model":"test","messages":[{{"role":"user","content":"hi"}}]}},"payload_complete":true}}}}"#
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_payload","event_time_unix_ms":1050,"payload":{{"request_id":"req-1","endpoint":"openai.chat_completion","model":"test","request":{{"model":"test","messages":[{{"role":"user","content":"hi"}}]}},"payload_complete":true}}}}"#
         )
         .unwrap();
         let large_payload = "x".repeat(4096);
@@ -487,7 +487,6 @@ mod tests {
                     "payload": {
                         "request_id": "req-1",
                         "endpoint": "openai.chat_completion",
-                        "requested_streaming": false,
                         "model": "test",
                         "request": {
                             "model": "test",

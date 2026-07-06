@@ -57,7 +57,6 @@ impl RequestTraceEventType {
 pub struct RequestTracePayload {
     pub request_id: String,
     pub endpoint: String,
-    pub requested_streaming: bool,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request: Option<Arc<NvCreateChatCompletionRequest>>,
@@ -382,7 +381,6 @@ mod tests {
             payload: Some(RequestTracePayload {
                 request_id: "req-1".to_string(),
                 endpoint: "openai.chat_completion".to_string(),
-                requested_streaming: false,
                 model: "test-model".to_string(),
                 request: Some(Arc::new(request)),
                 response: Some(Arc::new(response)),
@@ -396,6 +394,7 @@ mod tests {
         assert_eq!(value["event_type"], "request_payload");
         assert_eq!(value["payload"]["request_id"], "req-1");
         assert_eq!(value["payload"]["endpoint"], "openai.chat_completion");
+        assert!(value["payload"].get("requested_streaming").is_none());
         assert_eq!(value["payload"]["payload_complete"], true);
         assert_eq!(value["payload"]["request"]["model"], "test-model");
         assert_eq!(

@@ -162,7 +162,6 @@ Payload row:
   "payload": {
     "request_id": "dynamo-request-id",
     "endpoint": "openai.chat_completion",
-    "requested_streaming": true,
     "model": "my-model",
     "request": {
       "model": "my-model",

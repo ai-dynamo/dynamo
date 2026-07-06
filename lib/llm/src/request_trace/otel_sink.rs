@@ -300,10 +300,6 @@ impl RequestTraceSink for OtelRequestTraceSink {
                 "endpoint",
                 AnyValue::String(payload_record.endpoint.clone().into()),
             );
-            otel_record.add_attribute(
-                "streaming",
-                AnyValue::Boolean(payload_record.requested_streaming),
-            );
         }
         otel_record.add_attribute("payload_complete", AnyValue::Boolean(payload_complete));
         if let Some(reason) = payload_drop_reason {
@@ -354,7 +350,6 @@ mod tests {
             payload: Some(RequestTracePayload {
                 request_id: "req-otel".to_string(),
                 endpoint: "openai.chat_completion".to_string(),
-                requested_streaming: true,
                 model: "test-model".to_string(),
                 request: Some(Arc::new(request)),
                 response: None,
