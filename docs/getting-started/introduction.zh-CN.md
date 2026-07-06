@@ -9,8 +9,6 @@ sidebar-title: 简介
   <a href="./introduction.md" hreflang="en">English</a> | <strong>简体中文</strong>
 </p>
 
-# Dynamo 简介
-
 Dynamo 是一个开源、高吞吐、低延迟的推理框架，专为在分布式环境中服务生成式 AI 工作负载而设计。本页概述 Dynamo 的设计原则、性能优势和生产级功能。
 
 > [!TIP]

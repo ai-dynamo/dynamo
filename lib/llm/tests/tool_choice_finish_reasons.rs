@@ -63,13 +63,15 @@ async fn apply_jail_transformation(
     raw_response: dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
     tool_choice: Option<ChatCompletionToolChoiceOption>,
 ) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
-    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use dynamo_runtime::protocols::annotated::Annotated;
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+    use dynamo_parsers::tool_calling::jail::{Annotated as JailAnnotated, JailedStream};
     use futures::StreamExt;
     use futures::stream;
 
-    let input_stream = stream::iter(vec![Annotated {
-        data: Some(raw_response),
+    // The jail moved to dynamo-parsers and operates on the shared
+    // CreateChatCompletionStreamResponse; adapt Nv <-> jail Annotated here.
+    let input_stream = stream::iter(vec![JailAnnotated {
+        data: Some(raw_response.inner),
         id: None,
         event: None,
         comment: None,
@@ -92,7 +94,12 @@ async fn apply_jail_transformation(
     let output_stream = jail.apply_with_finish_reason(input_stream);
 
     tokio::pin!(output_stream);
-    output_stream.next().await.unwrap().data.unwrap()
+    let out = output_stream.next().await.unwrap();
+    NvCreateChatCompletionStreamResponse {
+        inner: out.data.unwrap(),
+        nvext: None,
+        llm_metrics: None,
+    }
 }
 
 #[tokio::test]

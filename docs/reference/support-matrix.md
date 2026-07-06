@@ -212,7 +212,7 @@ For version-specific artifact details, installation commands, and release histor
   - [kvbm](https://pypi.org/project/kvbm/) as a standalone implementation.
 
 - **Dynamo Container Images**: We distribute multi-arch images (x86 & ARM64 compatible) on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo):
-  - [Dynamo Frontend](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend) *(New in v0.8.0)*
+  - [Dynamo Frontend](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/dynamo-frontend/-) *(New in v0.8.0)*
   - [SGLang Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime)
   - [SGLang Runtime (CUDA 13)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.2.1-cuda13)
   - [TensorRT-LLM Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime)
