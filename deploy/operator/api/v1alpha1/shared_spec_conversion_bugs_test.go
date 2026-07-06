@@ -80,11 +80,18 @@ func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 			Services: map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType: "worker",
-					VolumeMounts: []VolumeMount{{
-						Name:                  "model-cache",
-						MountPoint:            "/models",
-						UseAsCompilationCache: true,
-					}},
+					VolumeMounts: []VolumeMount{
+						{
+							Name:                  "model-cache",
+							MountPoint:            "/models",
+							UseAsCompilationCache: true,
+						},
+						{
+							Name:                  "compile-cache",
+							MountPoint:            "/compile",
+							UseAsCompilationCache: true,
+						},
+					},
 					ExtraPodSpec: &ExtraPodSpec{
 						PodSpec: &corev1.PodSpec{
 							Volumes: []corev1.Volume{{
@@ -120,6 +127,7 @@ func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 	wantHubMounts := []corev1.VolumeMount{
 		{Name: "config", MountPath: "/config"},
 		{Name: "model-cache", MountPath: "/models"},
+		{Name: "compile-cache", MountPath: "/compile"},
 	}
 	if diff := cmp.Diff(wantHubMounts, main.VolumeMounts); diff != "" {
 		t.Fatalf("converted main volume mounts mismatch (-want +got):\n%s", diff)
@@ -138,6 +146,12 @@ func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 	}
 	if diff := cmp.Diff(in.Spec.Services["worker"].ExtraPodSpec.MainContainer.VolumeMounts, got.ExtraPodSpec.MainContainer.VolumeMounts); diff != "" {
 		t.Fatalf("extra main volume mounts changed after round-trip (-want +got):\n%s", diff)
+	}
+	if got.ExtraPodSpec.PodSpec == nil {
+		t.Fatalf("expected converted ExtraPodSpec.PodSpec, got nil")
+	}
+	if diff := cmp.Diff(in.Spec.Services["worker"].ExtraPodSpec.PodSpec.Volumes, got.ExtraPodSpec.PodSpec.Volumes); diff != "" {
+		t.Fatalf("extra pod volumes changed after round-trip (-want +got):\n%s", diff)
 	}
 }
 

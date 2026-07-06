@@ -546,8 +546,10 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		return err
 	}
 
-	fillSharedAlphaOnlyFromPreserved(dst, restored, sharedHasMainContainer(src))
+	// Restore lossy cache flags before field-origin reconstruction so every
+	// compilation-cache mount is excluded from main-container origin matching.
 	restoreSharedPreservedFlatVolumeMounts(dst, restored, src)
+	fillSharedAlphaOnlyFromPreserved(dst, restored, sharedHasMainContainer(src))
 	pruneEmptyExtraPodSpec(dst, restored)
 	if save != nil {
 		if err := saveSharedHubOnlySpec(src, dst, save); err != nil {
