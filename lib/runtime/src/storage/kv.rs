@@ -274,10 +274,6 @@ impl Manager {
         Manager(Arc::new(s))
     }
 
-    pub fn is_memory(&self) -> bool {
-        matches!(self.0.as_ref(), KeyValueStoreEnum::Memory(_))
-    }
-
     pub async fn get_or_create_bucket(
         &self,
         bucket_name: &str,

@@ -128,6 +128,15 @@ jobs:
             --exclude='index.yml' \
             source-checkout/docs/ docs-checkout/fern/pages-dev/
 
+          # Sync Fern's native-localization mirror as-is:
+          # fern/translations/<lang>/pages-dev/<path> pairs with the base page
+          # at fern/pages-dev/<path>, per locale
+          rm -rf docs-checkout/fern/translations
+          if [ -d source-checkout/fern/translations ]; then
+            echo "Syncing translations/ to docs-website branch..."
+            cp -r source-checkout/fern/translations docs-checkout/fern/translations
+          fi
+
           # Sync index.yml as versions/dev.yml and transform paths for docs-website layout
           echo "Syncing index.yml to docs-website branch as versions/dev.yml..."
           cp source-checkout/docs/index.yml docs-checkout/fern/versions/dev.yml
@@ -187,7 +196,23 @@ jobs:
         run: |
           echo "Converting GitHub-style callouts to Fern format in pages/..."
           python3 docs-checkout/fern/convert_callouts.py --dir docs-checkout/fern/pages-dev
+          if [ -d docs-checkout/fern/translations ]; then
+            python3 docs-checkout/fern/convert_callouts.py --dir docs-checkout/fern/translations
+          fi
           echo "Callout conversion complete."
+
+      - name: Resolve relative links in translated pages
+        run: |
+          # Rewrites relative page links in translations to site URLs computed
+          # from the current nav (Fern's early-access localization does not yet
+          # resolve them; see fern/resolve_translation_links.py).
+          if [ -d docs-checkout/fern/translations ]; then
+            pip install --quiet pyyaml
+            python3 source-checkout/fern/resolve_translation_links.py \
+              --nav source-checkout/docs/index.yml \
+              --translations-root docs-checkout/fern/translations \
+              --site-root /dynamo --version-slug dev
+          fi
 
       - name: Update docs.yml preserving products
         run: |
@@ -232,7 +257,11 @@ jobs:
         id: changes
         run: |
           cd docs-checkout
-          if git diff --quiet && git diff --cached --quiet; then
+          # git status --porcelain also reports untracked files: a
+          # translation-only change arrives as a new untracked file under
+          # fern/translations/ with no tracked edit alongside it (unlike a
+          # new English page, which always touches the nav).
+          if [ -z "$(git status --porcelain)" ]; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "No changes detected"
           else

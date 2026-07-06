@@ -72,10 +72,10 @@ impl Client {
     /// If the lease expires, the [`Runtime`] will be shutdown.
     /// If the [`Runtime`] is shutdown, the lease will be revoked.
     pub async fn new(config: ClientOptions, runtime: Runtime) -> Result<Self> {
-        let token = runtime.primary_token();
+        let runtime_for_lease = runtime.clone();
 
         let ((connector, lease_id), rt) = build_in_runtime(
-            async move { Self::connect_with_startup_retry(&config, token).await },
+            async move { Self::connect_with_startup_retry(&config, runtime_for_lease).await },
             1,
         )
         .await?;
@@ -91,8 +91,9 @@ impl Client {
     /// Connect to etcd during startup, retrying with exponential backoff for up to 2 minutes.
     async fn connect_with_startup_retry(
         config: &ClientOptions,
-        token: CancellationToken,
+        runtime: Runtime,
     ) -> Result<(Arc<Connector>, u64)> {
+        let token = runtime.primary_token();
         let deadline = Instant::now() + STARTUP_CONNECT_TIMEOUT;
         let mut backoff = STARTUP_CONNECT_INITIAL_BACKOFF;
 
@@ -101,7 +102,7 @@ impl Client {
                 anyhow::bail!("etcd startup connection cancelled");
             }
 
-            let attempt = Self::connect_startup_attempt(config, &token).await;
+            let attempt = Self::connect_startup_attempt(config, &runtime).await;
 
             match attempt {
                 Ok(connection) => return Ok(connection),
@@ -137,13 +138,14 @@ impl Client {
 
     async fn connect_startup_attempt(
         config: &ClientOptions,
-        token: &CancellationToken,
+        runtime: &Runtime,
     ) -> Result<(Arc<Connector>, u64)> {
+        let token = runtime.primary_token();
         let connector =
             Connector::new(config.etcd_url.clone(), config.etcd_connect_options.clone()).await?;
 
         let lease_id = if config.attach_lease {
-            create_lease(connector.clone(), config.lease_ttl, token.clone())
+            create_lease(connector.clone(), config.lease_ttl, runtime.clone())
                 .await
                 .with_context(|| {
                     format!(
