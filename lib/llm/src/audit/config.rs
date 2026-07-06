@@ -3,6 +3,7 @@
 
 use std::sync::OnceLock;
 
+use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm::audit as env_audit;
 
 use crate::telemetry::parse_sink_names;
@@ -71,10 +72,7 @@ fn load_from_env() -> AuditPolicy {
 
     AuditPolicy {
         enabled: !sinks.is_empty(),
-        force_logging: std::env::var(env_audit::DYN_AUDIT_FORCE_LOGGING)
-            .ok()
-            .and_then(|v| v.parse::<bool>().ok())
-            .unwrap_or(false),
+        force_logging: env_is_truthy(env_audit::DYN_AUDIT_FORCE_LOGGING),
         capacity,
         sinks,
         output_path,

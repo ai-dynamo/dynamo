@@ -138,7 +138,7 @@ static CAPTURE_STATE: AtomicU8 = AtomicU8::new(CAPTURE_UNINITIALIZED);
 fn load_from_env() -> RequestTracePolicy {
     let legacy_audit_sinks = env_trimmed(env_audit::DYN_AUDIT_SINKS);
     let request_trace_enabled = env_is_truthy(env_request_trace::DYN_REQUEST_TRACE);
-    let audit_force_logging = env_bool(&[env_audit::DYN_AUDIT_FORCE_LOGGING]).unwrap_or(false);
+    let audit_force_logging = env_is_truthy(env_audit::DYN_AUDIT_FORCE_LOGGING);
     let records = load_records(request_trace_enabled, audit_force_logging);
     let enabled = !records.is_empty();
     let (sinks, legacy_file_compression, legacy_audit_sinks_selected) =
@@ -351,14 +351,6 @@ fn env_trimmed(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn env_bool(names: &[&str]) -> Option<bool> {
-    names.iter().find_map(|name| {
-        std::env::var(name)
-            .ok()
-            .and_then(|value| value.parse::<bool>().ok())
-    })
 }
 
 fn env_usize(names: &[&str]) -> Option<usize> {
@@ -703,6 +695,17 @@ mod tests {
                 assert_eq!(policy.otel_max_payload_bytes, 5678);
             },
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn legacy_audit_force_logging_uses_truthy_values() {
+        for value in ["1", "yes", "on", "true"] {
+            with_request_trace_env(&[(env_audit::DYN_AUDIT_FORCE_LOGGING, value)], || {
+                let policy = load_from_env();
+                assert_eq!(policy.records, vec![RequestTraceRecordKind::RequestPayload]);
+            });
+        }
     }
 
     #[test]
