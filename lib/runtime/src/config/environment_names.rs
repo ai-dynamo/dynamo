@@ -463,26 +463,23 @@ pub mod llm {
 
         /// Request trace sink selection. Comma-separated values: `file`, `stderr`, `nats`, `otel`.
         ///
-        /// Legacy values map as follows: `jsonl` => `file` with no compression,
-        /// `jsonl_gz` => `file` with gzip compression, `stderr` => `stderr`,
+        /// Legacy values map as follows: `jsonl` => `file` with `jsonl` format,
+        /// `jsonl_gz` => `file` with `jsonl_gz` format, `stderr` => `stderr`,
         /// `nats` => `nats`, and `otel` => `otel`.
         pub const DYN_REQUEST_TRACE_SINKS: &str = "DYN_REQUEST_TRACE_SINKS";
 
         /// Local output path for request trace file records.
         ///
-        /// With `DYN_REQUEST_TRACE_FILE_COMPRESSION=none`, this is the literal JSONL
-        /// path. With `gzip`, this is the segment prefix used to derive
+        /// With `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl`, this is the literal JSONL
+        /// path. With `jsonl_gz`, this is the segment prefix used to derive
         /// `<prefix>.<index>.jsonl.gz` files.
         pub const DYN_REQUEST_TRACE_FILE_PATH: &str = "DYN_REQUEST_TRACE_FILE_PATH";
 
         /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_PATH`.
         pub const DYN_REQUEST_TRACE_OUTPUT_PATH: &str = "DYN_REQUEST_TRACE_OUTPUT_PATH";
 
-        /// Request trace file record format. Supported value: `jsonl`.
+        /// Request trace file record format. Supported values: `jsonl`, `jsonl_gz`.
         pub const DYN_REQUEST_TRACE_FILE_FORMAT: &str = "DYN_REQUEST_TRACE_FILE_FORMAT";
-
-        /// Request trace file compression. Supported values: `gzip`, `none`.
-        pub const DYN_REQUEST_TRACE_FILE_COMPRESSION: &str = "DYN_REQUEST_TRACE_FILE_COMPRESSION";
 
         /// In-process trace bus capacity.
         pub const DYN_REQUEST_TRACE_CAPACITY: &str = "DYN_REQUEST_TRACE_CAPACITY";
@@ -812,7 +809,6 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_FILE_PATH,
             llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
-            llm::request_trace::DYN_REQUEST_TRACE_FILE_COMPRESSION,
             llm::request_trace::DYN_REQUEST_TRACE_CAPACITY,
             llm::request_trace::DYN_REQUEST_TRACE_RECORDS,
             llm::request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,

@@ -439,8 +439,7 @@ export DYN_REQUEST_TRACE_SINKS=stderr,otel
 ```
 
 For local files, set `DYN_REQUEST_TRACE_SINKS=file` and configure
-`DYN_REQUEST_TRACE_FILE_PATH`, `DYN_REQUEST_TRACE_FILE_FORMAT`, and
-`DYN_REQUEST_TRACE_FILE_COMPRESSION`. See
+`DYN_REQUEST_TRACE_FILE_PATH` and `DYN_REQUEST_TRACE_FILE_FORMAT`. See
 [Request Replay Tracing](request-tracing.md) for the full request trace
 configuration and record schema.
 

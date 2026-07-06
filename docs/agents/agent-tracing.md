@@ -138,7 +138,7 @@ stream, select both `request_end` and `request_payload` records with
 export DYN_REQUEST_TRACE_RECORDS=request_end,request_payload
 export DYN_REQUEST_TRACE_SINKS=file
 export DYN_REQUEST_TRACE_FILE_PATH=/tmp/dynamo-trace
-export DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip
+export DYN_REQUEST_TRACE_FILE_FORMAT=jsonl_gz
 ```
 
 After the run, split metadata and payload rows by `event_type`:

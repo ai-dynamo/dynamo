@@ -28,8 +28,8 @@ pub(crate) use agent_context::{
     request_metrics_from_agent_state, start_request_trace_tool_event_ingest,
 };
 pub use config::{
-    RequestTraceFileCompression, RequestTraceFileFormat, RequestTracePolicy,
-    RequestTraceRecordKind, RequestTraceSinkKind, is_enabled, policy,
+    RequestTraceFileFormat, RequestTracePolicy, RequestTraceRecordKind, RequestTraceSinkKind,
+    is_enabled, policy,
 };
 pub(crate) use integration::{
     build_request_end_trace_state, finish_reason_metadata_handle, wrap_chat_request_end_stream,
@@ -75,7 +75,6 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
         capacity = policy.capacity,
         sinks = ?policy.sink_names(),
         file_format = policy.file_format.as_str(),
-        file_compression = policy.file_compression.as_str(),
         records = ?policy.record_names(),
         "Request trace initialized"
     );

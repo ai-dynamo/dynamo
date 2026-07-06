@@ -65,27 +65,14 @@ impl RequestTraceRecordKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestTraceFileFormat {
     Jsonl,
+    JsonlGz,
 }
 
 impl RequestTraceFileFormat {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Jsonl => "jsonl",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RequestTraceFileCompression {
-    None,
-    Gzip,
-}
-
-impl RequestTraceFileCompression {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Gzip => "gzip",
+            Self::JsonlGz => "jsonl_gz",
         }
     }
 }
@@ -97,7 +84,6 @@ pub struct RequestTracePolicy {
     pub sinks: Vec<RequestTraceSinkKind>,
     pub file_path: Option<String>,
     pub file_format: RequestTraceFileFormat,
-    pub file_compression: RequestTraceFileCompression,
     pub capacity: usize,
     pub file_buffer_bytes: usize,
     pub file_flush_interval_ms: u64,
@@ -141,7 +127,7 @@ fn load_from_env() -> RequestTracePolicy {
     let audit_force_logging = env_is_truthy(env_audit::DYN_AUDIT_FORCE_LOGGING);
     let records = load_records(request_trace_enabled, audit_force_logging);
     let enabled = !records.is_empty();
-    let (sinks, legacy_file_compression, legacy_audit_sinks_selected) =
+    let (sinks, legacy_file_format, legacy_audit_sinks_selected) =
         load_sinks(enabled, legacy_audit_sinks.as_deref());
     let has_file_sink = sinks.contains(&RequestTraceSinkKind::File);
     let file_path = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_FILE_PATH)
@@ -151,11 +137,7 @@ fn load_from_env() -> RequestTracePolicy {
     let file_format = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_FILE_FORMAT)
         .as_deref()
         .map(parse_file_format)
-        .unwrap_or(RequestTraceFileFormat::Jsonl);
-    let file_compression = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_FILE_COMPRESSION)
-        .as_deref()
-        .map(parse_file_compression)
-        .unwrap_or_else(|| legacy_file_compression.unwrap_or(RequestTraceFileCompression::Gzip));
+        .unwrap_or_else(|| legacy_file_format.unwrap_or(RequestTraceFileFormat::JsonlGz));
     let capacity = env_usize(&[
         env_request_trace::DYN_REQUEST_TRACE_CAPACITY,
         env_audit::DYN_AUDIT_CAPACITY,
@@ -221,7 +203,6 @@ fn load_from_env() -> RequestTracePolicy {
         sinks,
         file_path,
         file_format,
-        file_compression,
         capacity,
         file_buffer_bytes,
         file_flush_interval_ms,
@@ -283,7 +264,7 @@ fn load_sinks(
     legacy_audit_sinks: Option<&str>,
 ) -> (
     Vec<RequestTraceSinkKind>,
-    Option<RequestTraceFileCompression>,
+    Option<RequestTraceFileFormat>,
     bool,
 ) {
     if !enabled {
@@ -291,11 +272,11 @@ fn load_sinks(
     }
 
     if let Some(value) = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_SINKS) {
-        let (sinks, compression) = parse_sink_kind_names(&value);
-        (sinks, compression, false)
+        let (sinks, file_format) = parse_sink_kind_names(&value);
+        (sinks, file_format, false)
     } else if let Some(value) = legacy_audit_sinks {
-        let (sinks, compression) = parse_sink_kind_names(value);
-        (sinks, compression, true)
+        let (sinks, file_format) = parse_sink_kind_names(value);
+        (sinks, file_format, true)
     } else {
         (vec![RequestTraceSinkKind::File], None, false)
     }
@@ -303,10 +284,7 @@ fn load_sinks(
 
 fn parse_sink_kind_names(
     value: &str,
-) -> (
-    Vec<RequestTraceSinkKind>,
-    Option<RequestTraceFileCompression>,
-) {
+) -> (Vec<RequestTraceSinkKind>, Option<RequestTraceFileFormat>) {
     let mut sinks = Vec::new();
     let mut legacy_jsonl = false;
     let mut legacy_jsonl_gz = false;
@@ -329,15 +307,15 @@ fn parse_sink_kind_names(
         }
     }
 
-    let compression = if legacy_jsonl_gz {
-        Some(RequestTraceFileCompression::Gzip)
+    let file_format = if legacy_jsonl_gz {
+        Some(RequestTraceFileFormat::JsonlGz)
     } else if legacy_jsonl {
-        Some(RequestTraceFileCompression::None)
+        Some(RequestTraceFileFormat::Jsonl)
     } else {
         None
     };
 
-    (sinks, compression)
+    (sinks, file_format)
 }
 
 fn push_sink(sinks: &mut Vec<RequestTraceSinkKind>, sink: RequestTraceSinkKind) {
@@ -372,26 +350,13 @@ fn env_u64(names: &[&str]) -> Option<u64> {
 fn parse_file_format(value: &str) -> RequestTraceFileFormat {
     match value.trim().to_lowercase().as_str() {
         "jsonl" => RequestTraceFileFormat::Jsonl,
+        "jsonl_gz" | "jsonl.gz" => RequestTraceFileFormat::JsonlGz,
         other => {
             tracing::warn!(
                 %other,
-                "request trace: unknown file format ignored; defaulting to jsonl"
+                "request trace: unknown file format ignored; defaulting to jsonl_gz"
             );
-            RequestTraceFileFormat::Jsonl
-        }
-    }
-}
-
-fn parse_file_compression(value: &str) -> RequestTraceFileCompression {
-    match value.trim().to_lowercase().as_str() {
-        "none" | "off" | "false" => RequestTraceFileCompression::None,
-        "gzip" | "gz" | "jsonl_gz" => RequestTraceFileCompression::Gzip,
-        other => {
-            tracing::warn!(
-                %other,
-                "request trace: unknown file compression ignored; defaulting to gzip"
-            );
-            RequestTraceFileCompression::Gzip
+            RequestTraceFileFormat::JsonlGz
         }
     }
 }
@@ -430,7 +395,6 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_FILE_PATH,
         env_request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
         env_request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
-        env_request_trace::DYN_REQUEST_TRACE_FILE_COMPRESSION,
         env_request_trace::DYN_REQUEST_TRACE_CAPACITY,
         env_request_trace::DYN_REQUEST_TRACE_RECORDS,
         env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
@@ -494,8 +458,7 @@ mod tests {
             assert!(policy.emit_tool_records());
             assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
             assert_eq!(policy.file_path.as_deref(), Some(DEFAULT_FILE_PATH));
-            assert_eq!(policy.file_format, RequestTraceFileFormat::Jsonl);
-            assert_eq!(policy.file_compression, RequestTraceFileCompression::Gzip);
+            assert_eq!(policy.file_format, RequestTraceFileFormat::JsonlGz);
             assert_eq!(policy.nats_subject, DEFAULT_NATS_SUBJECT);
             assert_eq!(
                 policy.otel_max_payload_bytes,
@@ -566,10 +529,7 @@ mod tests {
                     env_request_trace::DYN_REQUEST_TRACE_FILE_PATH,
                     "/tmp/custom-request-trace",
                 ),
-                (
-                    env_request_trace::DYN_REQUEST_TRACE_FILE_COMPRESSION,
-                    "none",
-                ),
+                (env_request_trace::DYN_REQUEST_TRACE_FILE_FORMAT, "jsonl"),
                 (env_request_trace::DYN_REQUEST_TRACE_FILE_ROLL_LINES, "10"),
                 (
                     env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
@@ -607,7 +567,7 @@ mod tests {
                     policy.file_path.as_deref(),
                     Some("/tmp/custom-request-trace")
                 );
-                assert_eq!(policy.file_compression, RequestTraceFileCompression::None);
+                assert_eq!(policy.file_format, RequestTraceFileFormat::Jsonl);
                 assert_eq!(policy.file_roll_lines, Some(10));
                 assert_eq!(policy.nats_subject, "custom.request.trace");
                 assert_eq!(policy.otel_max_payload_bytes, 1234);
@@ -649,7 +609,7 @@ mod tests {
                     policy.file_path.as_deref(),
                     Some("/tmp/legacy-request-trace")
                 );
-                assert_eq!(policy.file_compression, RequestTraceFileCompression::None);
+                assert_eq!(policy.file_format, RequestTraceFileFormat::Jsonl);
                 assert_eq!(policy.file_flush_interval_ms, 25);
             },
         );
@@ -657,7 +617,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn legacy_jsonl_gz_sink_maps_to_gzip_file_sink() {
+    fn legacy_jsonl_gz_sink_maps_to_jsonl_gz_file_format() {
         with_request_trace_env(
             &[
                 (env_request_trace::DYN_REQUEST_TRACE, "1"),
@@ -671,7 +631,7 @@ mod tests {
                 let policy = load_from_env();
                 assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
                 assert_eq!(policy.file_path.as_deref(), Some(DEFAULT_FILE_PATH));
-                assert_eq!(policy.file_compression, RequestTraceFileCompression::Gzip);
+                assert_eq!(policy.file_format, RequestTraceFileFormat::JsonlGz);
                 assert_eq!(policy.file_roll_lines, Some(20));
             },
         );
@@ -799,7 +759,7 @@ mod tests {
                 assert_eq!(policy.records, vec![RequestTraceRecordKind::RequestPayload]);
                 assert_eq!(policy.sinks, vec![RequestTraceSinkKind::File]);
                 assert_eq!(policy.file_path.as_deref(), Some("/tmp/legacy-audit"));
-                assert_eq!(policy.file_compression, RequestTraceFileCompression::Gzip);
+                assert_eq!(policy.file_format, RequestTraceFileFormat::JsonlGz);
                 assert_eq!(policy.file_buffer_bytes, 64);
                 assert_eq!(policy.file_flush_interval_ms, 5);
                 assert_eq!(policy.file_roll_bytes, 100);

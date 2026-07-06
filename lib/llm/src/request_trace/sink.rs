@@ -20,8 +20,8 @@ use crate::telemetry::jsonl::{JsonlSinkOptions, JsonlWriter};
 use crate::telemetry::jsonl_gz::{JsonlGzipSinkOptions, JsonlGzipWriter};
 
 use super::{
-    RequestTraceFileCompression, RequestTraceFileFormat, RequestTracePolicy, RequestTraceRecord,
-    RequestTraceSinkKind, config, otel_sink::OtelRequestTraceSink,
+    RequestTraceFileFormat, RequestTracePolicy, RequestTraceRecord, RequestTraceSinkKind, config,
+    otel_sink::OtelRequestTraceSink,
 };
 
 static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
@@ -198,14 +198,12 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTraceSink>>
                 sinks.push(Arc::new(OtelRequestTraceSink::from_policy(policy).await?))
             }
             RequestTraceSinkKind::File => match policy.file_format {
-                RequestTraceFileFormat::Jsonl => match policy.file_compression {
-                    RequestTraceFileCompression::None => {
-                        sinks.push(Arc::new(JsonlRequestTraceSink::from_policy(policy).await?))
-                    }
-                    RequestTraceFileCompression::Gzip => sinks.push(Arc::new(
-                        JsonlGzipRequestTraceSink::from_policy(policy).await?,
-                    )),
-                },
+                RequestTraceFileFormat::Jsonl => {
+                    sinks.push(Arc::new(JsonlRequestTraceSink::from_policy(policy).await?))
+                }
+                RequestTraceFileFormat::JsonlGz => sinks.push(Arc::new(
+                    JsonlGzipRequestTraceSink::from_policy(policy).await?,
+                )),
             },
         }
     }

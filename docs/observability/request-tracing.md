@@ -41,9 +41,8 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 | `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. |
 | `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` when `DYN_REQUEST_TRACE=1`; unset otherwise | `request_end`, `request_payload`, `tool` | Comma-separated record types to emit. Setting this variable enables only the listed records. |
 | `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel` | Comma-separated record sinks. |
-| `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | File path or segment prefix | Literal path when compression is `none`; gzip segment prefix when compression is `gzip`. |
-| `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl` | `jsonl` | File record format. |
-| `DYN_REQUEST_TRACE_FILE_COMPRESSION` | `gzip` | `gzip`, `none` | File compression. `gzip` writes `<prefix>.<index>.jsonl.gz`; `none` writes a literal JSONL path. |
+| `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | File path or segment prefix | Literal path when `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl`; gzip segment prefix when `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl_gz`. |
+| `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl_gz` | `jsonl`, `jsonl_gz` | File record format. `jsonl_gz` writes `<prefix>.<index>.jsonl.gz`; `jsonl` writes a literal JSONL path. |
 | `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Positive integer | Best-effort in-process broadcast capacity. |
 | `DYN_REQUEST_TRACE_NATS_SUBJECT` | `dynamo.request_trace.v1` | NATS subject | Subject used when `DYN_REQUEST_TRACE_SINKS` includes `nats`. |
 | `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | `4194304` | Positive integer bytes | Max serialized OTEL payload attribute size. Oversized `request_payload` rows emit a marker with `payload_complete=false` and `payload_drop_reason`. |
@@ -59,8 +58,8 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 > `DYN_REQUEST_TRACE_SINKS`, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
 > `DYN_REQUEST_TRACE_JSONL_*` aliases remain accepted for compatibility.
 > `DYN_REQUEST_TRACE_SINKS=jsonl` maps to the `file` sink with
-> `DYN_REQUEST_TRACE_FILE_COMPRESSION=none`; `jsonl_gz` maps to the `file` sink
-> with `DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip`. The legacy audit variables
+> `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl`; `jsonl_gz` maps to the `file` sink
+> with `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl_gz`. The legacy audit variables
 > `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`, `DYN_AUDIT_OUTPUT_PATH`,
 > `DYN_AUDIT_NATS_SUBJECT`, `DYN_AUDIT_JSONL_*`, and
 > `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are accepted as migration shims, not
