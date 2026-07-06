@@ -1686,19 +1686,38 @@ func applyCompilationCache(container *corev1.Container, component *v1beta1.Dynam
 	if component.CompilationCache == nil {
 		return nil
 	}
-	if component.CompilationCache.PVCName == "" {
+	compilationCache := component.CompilationCache
+	if compilationCache.PVCName == "" {
 		return fmt.Errorf("compilationCache.pvcName is required when compilationCache is set")
 	}
-	mountPath := component.CompilationCache.MountPath
+	mountPath := compilationCache.MountPath
 	if mountPath == "" {
 		mountPath = getDefaultCompilationCacheMountPoint(backendFramework)
 		if mountPath == "" {
 			return fmt.Errorf("compilationCache.mountPath is required for backend framework %s (no default available)", backendFramework)
 		}
-		component.CompilationCache.MountPath = mountPath
+		compilationCache.MountPath = mountPath
 	}
+
+	alreadyMounted := false
+	for _, mount := range container.VolumeMounts {
+		if mount.MountPath != mountPath {
+			continue
+		}
+		if mount.Name != compilationCache.PVCName {
+			return fmt.Errorf("compilationCache.mountPath %q is already used by volume %q", mountPath, mount.Name)
+		}
+		if mount.ReadOnly {
+			return fmt.Errorf("compilation cache volume %q at %q must be writable", compilationCache.PVCName, mountPath)
+		}
+		alreadyMounted = true
+	}
+	if alreadyMounted {
+		return nil
+	}
+
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      component.CompilationCache.PVCName,
+		Name:      compilationCache.PVCName,
 		MountPath: mountPath,
 	})
 	return nil

@@ -7035,6 +7035,132 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 	}
 }
 
+func TestGenerateBasePodSpec_ConvertedCompilationCacheMountIsNotDuplicated(t *testing.T) {
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeFrontend,
+		VolumeMounts: []v1alpha1.VolumeMount{
+			{Name: "model-cache", MountPoint: "/models"},
+			{
+				Name:                  "compilation-cache",
+				MountPoint:            "/home/dynamo/.cache/vllm",
+				UseAsCompilationCache: true,
+			},
+		},
+	}
+
+	for _, deploymentType := range []commonconsts.MultinodeDeploymentType{
+		commonconsts.MultinodeDeploymentTypeGrove,
+		commonconsts.MultinodeDeploymentTypeLWS,
+	} {
+		t.Run(string(deploymentType), func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				betaComponent(t, component),
+				BackendFrameworkVLLM,
+				nil,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				&configv1alpha1.OperatorConfiguration{},
+				deploymentType,
+				"test-service",
+				nil,
+				nil,
+			)
+			require.NoError(t, err)
+			require.NotEmpty(t, podSpec.Containers)
+
+			var compilationCacheMounts []corev1.VolumeMount
+			for _, mount := range podSpec.Containers[0].VolumeMounts {
+				if mount.MountPath == "/home/dynamo/.cache/vllm" {
+					compilationCacheMounts = append(compilationCacheMounts, mount)
+				}
+			}
+			require.Equal(t, []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: "/home/dynamo/.cache/vllm",
+			}}, compilationCacheMounts)
+		})
+	}
+}
+
+func TestApplyCompilationCacheExistingMount(t *testing.T) {
+	const mountPath = "/home/dynamo/.cache/vllm"
+
+	tests := []struct {
+		name           string
+		mounts         []corev1.VolumeMount
+		expectedMounts []corev1.VolumeMount
+		expectedError  string
+	}{
+		{
+			name: "matching writable mount is preserved",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				SubPath:   "model",
+			}},
+			expectedMounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				SubPath:   "model",
+			}},
+		},
+		{
+			name: "different volume at mount path is rejected",
+			mounts: []corev1.VolumeMount{{
+				Name:      "other-volume",
+				MountPath: mountPath,
+			}},
+			expectedError: `compilationCache.mountPath "/home/dynamo/.cache/vllm" is already used by volume "other-volume"`,
+		},
+		{
+			name: "read-only cache mount is rejected",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				ReadOnly:  true,
+			}},
+			expectedError: `compilation cache volume "compilation-cache" at "/home/dynamo/.cache/vllm" must be writable`,
+		},
+		{
+			name: "same volume at another path does not satisfy cache mount",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: "/other-path",
+			}},
+			expectedMounts: []corev1.VolumeMount{
+				{Name: "compilation-cache", MountPath: "/other-path"},
+				{Name: "compilation-cache", MountPath: mountPath},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{
+				VolumeMounts: append([]corev1.VolumeMount(nil), tt.mounts...),
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   "compilation-cache",
+					MountPath: mountPath,
+				},
+			}
+
+			err := applyCompilationCache(container, component, BackendFrameworkVLLM)
+			if tt.expectedError != "" {
+				require.EqualError(t, err, tt.expectedError)
+				assert.Equal(t, tt.mounts, container.VolumeMounts)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedMounts, container.VolumeMounts)
+		})
+	}
+}
+
 func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{}
