@@ -514,7 +514,7 @@ class SglangLLMEngine(LLMEngine):
                     "total_tokens": prompt_tokens + completion_tokens,
                     "prompt_tokens_details": (
                         {"cached_tokens": meta_info["cached_tokens"]}
-                        if meta_info.get("cached_tokens")
+                        if meta_info.get("cached_tokens") is not None
                         else None
                     ),
                 }
