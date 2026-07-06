@@ -5,10 +5,13 @@
 
 This module provides the CLI runner for the GPU Memory Service server,
 which manages GPU memory allocations with connection-based RW/RO locking.
+Passing --tag more than once serves multiple independent GMS instances from
+one process; they share only process-wide CUDA initialization.
 
 Usage:
     python -m gpu_memory_service --device 0
     python -m gpu_memory_service --device 0 --socket-path /tmp/gpu_memory_service_{device}.sock
+    python -m gpu_memory_service --device 0 --tag weights --tag kv_cache
 """
 
 from __future__ import annotations
@@ -31,12 +34,12 @@ logger = logging.getLogger(__name__)
 
 async def serve_configs(configs: Sequence[Config]) -> None:
     """Construct and serve independent GMS instances in one process."""
+    if any(config.verbose for config in configs):
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
+
     servers = []
     for config in configs:
-        if config.verbose:
-            logging.getLogger().setLevel(logging.DEBUG)
-            logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
-
         logger.info("Starting GPU Memory Service Server for device %d", config.device)
         logger.info("GMS tag: %s", config.tag)
         logger.info("Socket path: %s", config.socket_path)
@@ -70,22 +73,10 @@ async def serve_configs(configs: Sequence[Config]) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def worker() -> None:
-    """Main async worker function."""
-    config = parse_args()
-    await serve_configs([config])
-
-
-def run(configs: Sequence[Config]) -> None:
-    """Run one or more independent GMS instances on a shared event loop."""
-    uvloop.install()
-    asyncio.run(serve_configs(configs))
-
-
 def main() -> None:
     """Entry point for GPU Memory Service server."""
     uvloop.install()
-    asyncio.run(worker())
+    asyncio.run(serve_configs(parse_args()))
 
 
 if __name__ == "__main__":

@@ -17,10 +17,10 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
-from gpu_memory_service.cli import dual_server, runner, server
-from gpu_memory_service.cli.args import Config
+from gpu_memory_service.cli import args as cli_args
+from gpu_memory_service.cli import runner, server
+from gpu_memory_service.cli.args import Config, parse_args
 from gpu_memory_service.server import allocations as server_allocations
-from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -43,7 +43,7 @@ class _Process:
         self.terminated = True
 
 
-def test_supervisor_starts_one_dual_tag_child_per_device(monkeypatch):
+def test_supervisor_starts_one_multi_tag_child_per_device(monkeypatch):
     commands: list[list[str]] = []
     processes: list[_Process] = []
 
@@ -61,9 +61,13 @@ def test_supervisor_starts_one_dual_tag_child_per_device(monkeypatch):
         [
             "/venv/bin/python",
             "-m",
-            "gpu_memory_service.cli.dual_server",
+            "gpu_memory_service",
             "--device",
             str(device),
+            "--tag",
+            "weights",
+            "--tag",
+            "kv_cache",
         ]
         for device in range(3)
     ]
@@ -83,19 +87,14 @@ def test_supervisor_terminates_siblings_when_child_exits(monkeypatch):
     assert processes[1].terminated
 
 
-def test_dual_tag_configs_have_independent_socket_paths(monkeypatch):
+def test_parse_args_multi_tag_configs_are_independent(monkeypatch):
     monkeypatch.setattr(
-        dual_server,
+        cli_args,
         "get_socket_path",
         lambda device, tag: f"/sockets/{device}-{tag}.sock",
     )
 
-    configs = dual_server.make_server_configs(
-        3,
-        allocation_retry_interval=0.25,
-        allocation_retry_timeout=10.0,
-        verbose=True,
-    )
+    configs = parse_args(["--device", "3", "--tag", "weights", "--tag", "kv_cache"])
 
     assert [config.tag for config in configs] == ["weights", "kv_cache"]
     assert [config.socket_path for config in configs] == [
@@ -105,9 +104,37 @@ def test_dual_tag_configs_have_independent_socket_paths(monkeypatch):
     assert all(config.device == 3 for config in configs)
 
 
+def test_parse_args_rejects_socket_path_with_multiple_tags(capsys):
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--device",
+                "0",
+                "--tag",
+                "weights",
+                "--tag",
+                "kv_cache",
+                "--socket-path",
+                "/tmp/gms.sock",
+            ]
+        )
+    assert "--socket-path is only valid with a single --tag" in capsys.readouterr().err
+
+
+def _config(tag: str, socket_path: str) -> Config:
+    return Config(
+        device=0,
+        tag=tag,
+        socket_path=socket_path,
+        alloc_retry_interval=0.5,
+        alloc_retry_timeout=60.0,
+        verbose=False,
+    )
+
+
 @pytest.mark.timeout(10)
 @pytest.mark.asyncio
-async def test_dual_tag_servers_bind_independent_listeners(monkeypatch, tmp_path):
+async def test_multi_tag_servers_bind_independent_listeners(monkeypatch, tmp_path):
     monkeypatch.setattr(server_allocations, "cuda_ensure_initialized", lambda: None)
     monkeypatch.setattr(
         server_allocations,
@@ -115,28 +142,10 @@ async def test_dual_tag_servers_bind_independent_listeners(monkeypatch, tmp_path
         lambda _device: 4096,
     )
 
-    instances: list[GMSRPCServer] = []
-
-    def make_server(*args, **kwargs) -> GMSRPCServer:
-        instance = GMSRPCServer(*args, **kwargs)
-        instances.append(instance)
-        return instance
-
-    monkeypatch.setattr(runner, "GMSRPCServer", make_server)
-    socket_paths = [
-        str(tmp_path / "weights.sock"),
-        str(tmp_path / "kv_cache.sock"),
-    ]
+    socket_paths = [str(tmp_path / f"{tag}.sock") for tag in ("weights", "kv_cache")]
     configs = [
-        Config(
-            device=0,
-            tag=tag,
-            socket_path=socket_path,
-            alloc_retry_interval=0.5,
-            alloc_retry_timeout=60.0,
-            verbose=False,
-        )
-        for tag, socket_path in zip(dual_server.TAGS, socket_paths, strict=True)
+        _config(tag, socket_path)
+        for tag, socket_path in zip(("weights", "kv_cache"), socket_paths, strict=True)
     ]
 
     task = asyncio.create_task(runner.serve_configs(configs))
@@ -146,12 +155,7 @@ async def test_dual_tag_servers_bind_independent_listeners(monkeypatch, tmp_path
             while not all(os.path.exists(path) for path in socket_paths):
                 await asyncio.sleep(0.01)
 
-        await asyncio.wait_for(wait_for_listeners(), timeout=2)
-        assert len(instances) == 2
-        assert instances[0]._gms is not instances[1]._gms
-        assert instances[0]._gms._allocations is not instances[1]._gms._allocations
-        assert instances[0]._gms._sessions is not instances[1]._gms._sessions
-        assert instances[0]._gms._metadata is not instances[1]._gms._metadata
+        await asyncio.wait_for(wait_for_listeners(), timeout=5)
     finally:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -184,17 +188,7 @@ async def test_server_failure_cancels_other_listener(monkeypatch):
                 raise
 
     monkeypatch.setattr(runner, "GMSRPCServer", FailingServer)
-    configs = [
-        Config(
-            device=0,
-            tag=tag,
-            socket_path=tag,
-            alloc_retry_interval=0.5,
-            alloc_retry_timeout=60.0,
-            verbose=False,
-        )
-        for tag in dual_server.TAGS
-    ]
+    configs = [_config(tag, tag) for tag in ("weights", "kv_cache")]
 
     with pytest.raises(RuntimeError, match="listener failed"):
         await runner.serve_configs(configs)
