@@ -17,6 +17,7 @@
 
 import logging
 import os
+from itertools import chain
 
 import pandas as pd
 import yaml
@@ -37,7 +38,10 @@ from dynamo.profiler.utils.aiperf import (
     get_prefill_ttft,
 )
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-from dynamo.profiler.utils.dgd_override import apply_dgd_overrides
+from dynamo.profiler.utils.dgd_materialization import (
+    DGDMaterializationPurpose,
+    materialize_dgd,
+)
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,
@@ -47,7 +51,6 @@ from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_backend_image,
     get_profiling_job_tolerations,
-    inject_tolerations_into_dgd,
     pick_decode_component,
     resolve_model_path,
 )
@@ -394,56 +397,23 @@ async def run_thorough(
         len(decode_candidates),
     )
 
-    if dgdr.overrides and dgdr.overrides.dgd:
-        for candidate in prefill_candidates:
-            candidate.dgd_config = apply_dgd_overrides(
-                candidate.dgd_config, dgdr.overrides.dgd
-            )
-        for candidate in decode_candidates:
-            candidate.dgd_config = apply_dgd_overrides(
-                candidate.dgd_config, dgdr.overrides.dgd
-            )
-        logger.info(
-            "Applied DGD overrides to %d prefill + %d decode candidates.",
-            len(prefill_candidates),
-            len(decode_candidates),
-        )
-
     config_modifier = CONFIG_MODIFIERS[backend]
-    if backend == "vllm" and hasattr(
-        config_modifier, "apply_model_runtime_constraints"
-    ):
-        for candidate in prefill_candidates:
-            candidate.dgd_config = config_modifier.apply_model_runtime_constraints(
-                candidate.dgd_config, local_or_hf_model
-            )
-        for candidate in decode_candidates:
-            candidate.dgd_config = config_modifier.apply_model_runtime_constraints(
-                candidate.dgd_config, local_or_hf_model
-            )
-        logger.info(
-            "Applied vLLM model runtime constraints to %d prefill + %d decode candidates.",
-            len(prefill_candidates),
-            len(decode_candidates),
-        )
-
-    # Propagate profiling-job tolerations to candidate DGDs
+    dgd_override = dgdr.overrides.dgd if dgdr.overrides else None
     job_tolerations = get_profiling_job_tolerations(dgdr)
-    if job_tolerations:
-        for candidate in prefill_candidates:
-            candidate.dgd_config = inject_tolerations_into_dgd(
-                candidate.dgd_config, job_tolerations
-            )
-        for candidate in decode_candidates:
-            candidate.dgd_config = inject_tolerations_into_dgd(
-                candidate.dgd_config, job_tolerations
-            )
-        logger.debug(
-            "Propagated %d profiling-job toleration(s) to %d prefill + %d decode candidates.",
-            len(job_tolerations),
-            len(prefill_candidates),
-            len(decode_candidates),
+    for candidate in chain(prefill_candidates, decode_candidates):
+        candidate.dgd_config = materialize_dgd(
+            candidate.dgd_config,
+            purpose=DGDMaterializationPurpose.BENCHMARK_CANDIDATE,
+            override=dgd_override,
+            tolerations=job_tolerations,
+            runtime_backend=backend,
+            model_name_or_path=local_or_hf_model,
         )
+    logger.info(
+        "Materialized %d prefill + %d decode benchmark candidates.",
+        len(prefill_candidates),
+        len(decode_candidates),
+    )
 
     # --- Stage 2: Benchmarking ---
     ops.current_phase = ProfilingPhase.SweepingPrefill

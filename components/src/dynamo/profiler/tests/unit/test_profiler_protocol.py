@@ -21,9 +21,7 @@ try:
     from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
         PickedParallelConfig,
     )
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        BaseConfigModifier,
-    )
+    from dynamo.profiler.utils.config_modifiers.protocol import BaseConfigModifier
     from dynamo.profiler.utils.defaults import EngineType, SearchStrategy
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
@@ -385,9 +383,9 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
             services[name].setdefault("extraPodSpec", {}).update(
                 service_override["extraPodSpec"]
             )
-        services["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
-            "args"
-        ].append("--override-applied")
+        services["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"]["args"].append(
+            "--override-applied"
+        )
         return result
 
     dgdr = DynamoGraphDeploymentRequestSpec(
@@ -451,7 +449,7 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
             new=_fake_interpolation,
         ),
         patch(
-            "dynamo.profiler.profile_sla.apply_dgd_overrides",
+            "dynamo.profiler.utils.dgd_materialization.apply_dgd_overrides",
             side_effect=_fake_apply_dgd_overrides,
         ),
         patch(
@@ -487,15 +485,15 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
     assert assemble_final.call_args.args[2] == base_dgd
     assert len(override_inputs) == 2
     for override_input in override_inputs:
-        args = override_input["spec"]["services"]["VllmDecodeWorker"][
-            "extraPodSpec"
-        ]["mainContainer"]["args"]
+        args = override_input["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+            "mainContainer"
+        ]["args"]
         assert "--override-applied" not in args
 
     final_config = write_final.call_args.args[1]
-    final_args = final_config["spec"]["services"]["VllmDecodeWorker"][
-        "extraPodSpec"
-    ]["mainContainer"]["args"]
+    final_args = final_config["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
     assert final_args.count("--override-applied") == 1
 
     # Neither merge mutates the clean picked DGD.

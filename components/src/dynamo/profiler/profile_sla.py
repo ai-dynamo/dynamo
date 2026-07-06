@@ -27,16 +27,18 @@ from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation
 from dynamo.profiler.rapid import run_rapid
 from dynamo.profiler.thorough import run_thorough
-from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
 from dynamo.profiler.utils.defaults import SearchStrategy
-from dynamo.profiler.utils.dgd_override import apply_dgd_overrides
 from dynamo.profiler.utils.dgd_generation import (
     assemble_final_config,
     build_aic_interpolation_spec,
     build_aic_perf_model_spec,
+)
+from dynamo.profiler.utils.dgd_materialization import (
+    DGDMaterializationPurpose,
+    materialize_dgd,
 )
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     BackendType,
@@ -51,7 +53,6 @@ from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     determine_picking_mode,
     get_profiling_job_tolerations,
-    inject_tolerations_into_dgd,
     needs_profile_data,
     picked_config_from_row,
     resolve_model_path,
@@ -63,51 +64,6 @@ from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler
 logger = logging.getLogger(__name__)
 
 _CONCRETE_BACKENDS = ["trtllm", "sglang", "vllm"]
-
-
-def _apply_tolerations_to_final_config(final_config: Any, tolerations: list) -> Any:
-    """Apply tolerations to a final DGD config (dict or multi-doc list)."""
-    if not tolerations or not final_config:
-        return final_config
-    if isinstance(final_config, list):
-        result = list(final_config)
-        result[-1] = inject_tolerations_into_dgd(result[-1], tolerations)
-        return result
-    return inject_tolerations_into_dgd(final_config, tolerations)
-
-
-def _apply_dgd_override_to_final_config(final_config: Any, override: dict) -> Any:
-    """Apply an override to the DGD document in the final profiler output."""
-    if isinstance(final_config, list):
-        result = list(final_config)
-        result[-1] = apply_dgd_overrides(result[-1], override)
-        return result
-    if isinstance(final_config, dict):
-        return apply_dgd_overrides(final_config, override)
-    return final_config
-
-
-def _apply_model_runtime_constraints_to_final_config(
-    final_config: Any,
-    backend: str,
-    model_name_or_path: str,
-) -> Any:
-    if backend != "vllm" or not final_config:
-        return final_config
-
-    config_modifier = CONFIG_MODIFIERS[backend]
-    if not hasattr(config_modifier, "apply_model_runtime_constraints"):
-        return final_config
-
-    if isinstance(final_config, list):
-        final_config[-1] = config_modifier.apply_model_runtime_constraints(
-            final_config[-1], model_name_or_path
-        )
-    elif isinstance(final_config, dict):
-        final_config = config_modifier.apply_model_runtime_constraints(
-            final_config, model_name_or_path
-        )
-    return final_config
 
 
 def _check_auto_backend_support(model: str, system: str) -> bool:
@@ -448,25 +404,8 @@ async def run_profile(
         base_dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
         resolved_backend = pick_result.get("resolved_backend", backend)
 
-        # Keep the picked DGD clean for final assembly. v1alpha1 worker args use
-        # append semantics, so applying the same override twice is not idempotent.
-        interpolation_dgd_config = base_dgd_config
-        if interpolation_dgd_config and dgdr.overrides and dgdr.overrides.dgd:
-            interpolation_dgd_config = apply_dgd_overrides(
-                interpolation_dgd_config,
-                dgdr.overrides.dgd,
-            )
-            logger.info("Applied DGD overrides to the interpolation DGD config.")
+        dgd_override = dgdr.overrides.dgd if dgdr.overrides else None
         job_tolerations = get_profiling_job_tolerations(dgdr)
-        if job_tolerations and interpolation_dgd_config:
-            interpolation_dgd_config = inject_tolerations_into_dgd(
-                interpolation_dgd_config,
-                job_tolerations,
-            )
-            logger.debug(
-                "Propagated %d profiling-job toleration(s) to the picked DGD config.",
-                len(job_tolerations),
-            )
 
         # ---------------------------------------------------------------
         # Interpolation curves — only needed when something consumes the
@@ -488,11 +427,7 @@ async def run_profile(
         if not sweep_max_context_length:
             sweep_max_context_length = isl * 2 if isl > 0 else 8192
 
-        if (
-            not ops.dry_run
-            and interpolation_dgd_config
-            and needs_profile_data(dgdr)
-        ):
+        if not ops.dry_run and base_dgd_config and needs_profile_data(dgdr):
             ops.current_phase = ProfilingPhase.BuildingCurves
             write_profiler_status(
                 ops.output_dir,
@@ -515,6 +450,15 @@ async def run_profile(
                     chosen_exp,
                 )
             else:
+                # Materialize an independent interpolation input while preserving
+                # the clean picked blueprint for final assembly. Overrides can
+                # append worker arguments, so repeated application is not safe.
+                interpolation_dgd_config = materialize_dgd(
+                    base_dgd_config,
+                    purpose=DGDMaterializationPurpose.INTERPOLATION,
+                    override=dgd_override,
+                    tolerations=job_tolerations,
+                )
                 await run_interpolation(
                     dgdr,
                     ops,
@@ -575,29 +519,14 @@ async def run_profile(
             resolved_backend=resolved_backend,
         )
 
-        if final_config and dgdr.overrides and dgdr.overrides.dgd:
-            final_config = _apply_dgd_override_to_final_config(
-                final_config,
-                dgdr.overrides.dgd,
-            )
-            logger.info("Applied DGD overrides to the final config.")
-
-        final_config = _apply_model_runtime_constraints_to_final_config(
+        final_config = materialize_dgd(
             final_config,
-            resolved_backend,
-            resolve_model_path(dgdr),
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            override=dgd_override,
+            tolerations=job_tolerations,
+            runtime_backend=resolved_backend,
+            model_name_or_path=resolve_model_path(dgdr),
         )
-
-        # Propagate profiling-job tolerations to the final DGD (covers any
-        # services added by assemble_final_config, e.g. Planner).
-        if job_tolerations and final_config:
-            final_config = _apply_tolerations_to_final_config(
-                final_config, job_tolerations
-            )
-            logger.debug(
-                "Propagated %d profiling-job toleration(s) to the final DGD config.",
-                len(job_tolerations),
-            )
 
         if final_config:
             _validate_dgd_service_name_lengths(dgdr, final_config)

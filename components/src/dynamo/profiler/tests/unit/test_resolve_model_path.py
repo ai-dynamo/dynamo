@@ -23,6 +23,7 @@ try:
         _run_default_sim,
     )
     from dynamo.profiler.thorough import run_thorough
+    from dynamo.profiler.utils.dgd_materialization import DGDMaterializationPurpose
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
@@ -400,6 +401,69 @@ class TestThoroughResolvesModelPath:
         mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
 
         assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+
+    async def test_materializes_each_candidate_once_with_resolved_model_path(
+        self, tmp_path
+    ):
+        dgdr = _make_dgdr()
+        prefill = MagicMock(dgd_config={"candidate": "prefill"})
+        decode = MagicMock(dgd_config={"candidate": "decode"})
+
+        def _materialize(config, **_kwargs):
+            return {"materialized": config["candidate"]}
+
+        with (
+            patch(
+                "dynamo.profiler.thorough.enumerate_profiling_configs",
+                return_value=([prefill], [decode]),
+            ),
+            patch(
+                "dynamo.profiler.thorough.materialize_dgd",
+                side_effect=_materialize,
+            ) as materialize,
+            patch(
+                "dynamo.profiler.thorough._benchmark_prefill_candidates",
+                new=AsyncMock(return_value=pd.DataFrame()),
+            ),
+            patch(
+                "dynamo.profiler.thorough._benchmark_decode_candidates",
+                new=AsyncMock(return_value=pd.DataFrame()),
+            ),
+        ):
+            await run_thorough(
+                dgdr,
+                ProfilerOperationalConfig(output_dir=str(tmp_path)),
+                "default",
+                _HF_ID,
+                "h200_sxm",
+                "trtllm",
+                8,
+                4000,
+                1000,
+                2000.0,
+                50.0,
+                None,
+                [],
+            )
+
+        assert materialize.call_count == 2
+        assert [call.args[0] for call in materialize.call_args_list] == [
+            {"candidate": "prefill"},
+            {"candidate": "decode"},
+        ]
+        assert all(
+            call.kwargs
+            == {
+                "purpose": DGDMaterializationPurpose.BENCHMARK_CANDIDATE,
+                "override": None,
+                "tolerations": [],
+                "runtime_backend": "trtllm",
+                "model_name_or_path": _HF_ID,
+            }
+            for call in materialize.call_args_list
+        )
+        assert prefill.dgd_config == {"materialized": "prefill"}
+        assert decode.dgd_config == {"materialized": "decode"}
 
     async def _capture_task_config(self, dgdr, output_dir) -> MagicMock:
         """The benchmark stages return non-empty DataFrames so run_thorough gets
