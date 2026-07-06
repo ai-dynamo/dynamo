@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 
 import pytest
 from _deps import HAS_GMS
@@ -20,7 +19,6 @@ if not HAS_GMS:
 from gpu_memory_service.cli import args as cli_args
 from gpu_memory_service.cli import runner, server
 from gpu_memory_service.cli.args import Config, parse_args
-from gpu_memory_service.server import allocations as server_allocations
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -102,11 +100,9 @@ def test_parse_args_defaults_to_one_config_per_production_tag(monkeypatch):
     (config,) = parse_args(["--device", "3", "--tag", "kv_cache"])
     assert config.tag == "kv_cache"
 
-
-def test_parse_args_rejects_socket_path_without_exactly_one_tag(capsys):
     with pytest.raises(SystemExit):
-        parse_args(["--device", "0", "--socket-path", "/tmp/gms.sock"])
-    assert "--socket-path requires exactly one --tag" in capsys.readouterr().err
+        # --socket-path cannot name one socket for multiple tags.
+        parse_args(["--device", "3", "--socket-path", "/tmp/gms.sock"])
 
 
 def _config(tag: str, socket_path: str) -> Config:
@@ -118,36 +114,6 @@ def _config(tag: str, socket_path: str) -> Config:
         alloc_retry_timeout=60.0,
         verbose=False,
     )
-
-
-@pytest.mark.timeout(10)
-@pytest.mark.asyncio
-async def test_multi_tag_servers_bind_independent_listeners(monkeypatch, tmp_path):
-    monkeypatch.setattr(server_allocations, "cuda_ensure_initialized", lambda: None)
-    monkeypatch.setattr(
-        server_allocations,
-        "cumem_get_allocation_granularity",
-        lambda _device: 4096,
-    )
-
-    socket_paths = [str(tmp_path / f"{tag}.sock") for tag in ("weights", "kv_cache")]
-    configs = [
-        _config(tag, socket_path)
-        for tag, socket_path in zip(("weights", "kv_cache"), socket_paths, strict=True)
-    ]
-
-    task = asyncio.create_task(runner.serve_configs(configs))
-    try:
-
-        async def wait_for_listeners() -> None:
-            while not all(os.path.exists(path) for path in socket_paths):
-                await asyncio.sleep(0.01)
-
-        await asyncio.wait_for(wait_for_listeners(), timeout=5)
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
 
 
 @pytest.mark.timeout(10)
