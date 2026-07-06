@@ -64,6 +64,8 @@ def write_json(path: Path, value: object) -> None:
 def summary_template() -> dict:
     summary = json.loads(DEFAULT_INPUT.read_text())
     summary["campaign"]["source_commit"] = "1" * 40
+    summary["results"] = []
+    summary["paired_disagreements"] = []
     return summary
 
 

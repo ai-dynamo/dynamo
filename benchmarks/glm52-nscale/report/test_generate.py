@@ -25,6 +25,8 @@ from generate import (
 def load_summary() -> dict:
     data = json.loads(Path(DEFAULT_INPUT).read_text())
     data["campaign"]["source_commit"] = "1" * 40
+    data["results"] = []
+    data["paired_disagreements"] = []
     return data
 
 

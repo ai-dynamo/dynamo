@@ -99,13 +99,37 @@
       "generation_units": 5217,
       "attempts": 1,
       "primary_metric": "overall_accuracy",
-      "comparison_metrics": ["overall_accuracy"],
-      "required_metrics": ["overall_accuracy", "correct_cases", "failed_cases", "inference_errors"],
+      "comparison_metrics": [
+        "overall_accuracy"
+      ],
+      "required_metrics": [
+        "overall_accuracy",
+        "correct_cases",
+        "failed_cases",
+        "inference_errors"
+      ],
       "metrics": [
-        {"id": "overall_accuracy", "label": "Official overall accuracy", "format": "percent", "direction": "higher"},
-        {"id": "correct_cases", "label": "Correct cases", "format": "integer"},
-        {"id": "failed_cases", "label": "Failed cases", "format": "integer"},
-        {"id": "inference_errors", "label": "Inference errors", "format": "integer"}
+        {
+          "id": "overall_accuracy",
+          "label": "Official overall accuracy",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "correct_cases",
+          "label": "Correct cases",
+          "format": "integer"
+        },
+        {
+          "id": "failed_cases",
+          "label": "Failed cases",
+          "format": "integer"
+        },
+        {
+          "id": "inference_errors",
+          "label": "Inference errors",
+          "format": "integer"
+        }
       ]
     },
     {
@@ -116,14 +140,44 @@
       "units": 500,
       "attempts": 1,
       "primary_metric": "benchmark_score",
-      "comparison_metrics": ["benchmark_score"],
-      "required_metrics": ["benchmark_score", "score_on_submitted", "passed_instances", "failed_instances", "missing_instances"],
+      "comparison_metrics": [
+        "benchmark_score"
+      ],
+      "required_metrics": [
+        "benchmark_score",
+        "score_on_submitted",
+        "passed_instances",
+        "failed_instances",
+        "missing_instances"
+      ],
       "metrics": [
-        {"id": "benchmark_score", "label": "Resolved / full dataset", "format": "percent", "direction": "higher"},
-        {"id": "score_on_submitted", "label": "Resolved / submitted", "format": "percent", "direction": "higher"},
-        {"id": "passed_instances", "label": "Resolved instances", "format": "integer"},
-        {"id": "failed_instances", "label": "Failed instances", "format": "integer"},
-        {"id": "missing_instances", "label": "Missing predictions", "format": "integer"}
+        {
+          "id": "benchmark_score",
+          "label": "Resolved / full dataset",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "score_on_submitted",
+          "label": "Resolved / submitted",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "passed_instances",
+          "label": "Resolved instances",
+          "format": "integer"
+        },
+        {
+          "id": "failed_instances",
+          "label": "Failed instances",
+          "format": "integer"
+        },
+        {
+          "id": "missing_instances",
+          "label": "Missing predictions",
+          "format": "integer"
+        }
       ]
     },
     {
@@ -134,14 +188,44 @@
       "units": 731,
       "attempts": 1,
       "primary_metric": "benchmark_score",
-      "comparison_metrics": ["benchmark_score"],
-      "required_metrics": ["benchmark_score", "score_on_submitted", "passed_instances", "failed_instances", "missing_instances"],
+      "comparison_metrics": [
+        "benchmark_score"
+      ],
+      "required_metrics": [
+        "benchmark_score",
+        "score_on_submitted",
+        "passed_instances",
+        "failed_instances",
+        "missing_instances"
+      ],
       "metrics": [
-        {"id": "benchmark_score", "label": "Resolved / full dataset", "format": "percent", "direction": "higher"},
-        {"id": "score_on_submitted", "label": "Resolved / submitted", "format": "percent", "direction": "higher"},
-        {"id": "passed_instances", "label": "Resolved instances", "format": "integer"},
-        {"id": "failed_instances", "label": "Failed instances", "format": "integer"},
-        {"id": "missing_instances", "label": "Missing predictions", "format": "integer"}
+        {
+          "id": "benchmark_score",
+          "label": "Resolved / full dataset",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "score_on_submitted",
+          "label": "Resolved / submitted",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "passed_instances",
+          "label": "Resolved instances",
+          "format": "integer"
+        },
+        {
+          "id": "failed_instances",
+          "label": "Failed instances",
+          "format": "integer"
+        },
+        {
+          "id": "missing_instances",
+          "label": "Missing predictions",
+          "format": "integer"
+        }
       ]
     },
     {
@@ -152,14 +236,44 @@
       "units": 300,
       "attempts": 1,
       "primary_metric": "benchmark_score",
-      "comparison_metrics": ["benchmark_score"],
-      "required_metrics": ["benchmark_score", "score_on_submitted", "passed_instances", "failed_instances", "missing_instances"],
+      "comparison_metrics": [
+        "benchmark_score"
+      ],
+      "required_metrics": [
+        "benchmark_score",
+        "score_on_submitted",
+        "passed_instances",
+        "failed_instances",
+        "missing_instances"
+      ],
       "metrics": [
-        {"id": "benchmark_score", "label": "Resolved / full dataset", "format": "percent", "direction": "higher"},
-        {"id": "score_on_submitted", "label": "Resolved / submitted", "format": "percent", "direction": "higher"},
-        {"id": "passed_instances", "label": "Resolved instances", "format": "integer"},
-        {"id": "failed_instances", "label": "Failed instances", "format": "integer"},
-        {"id": "missing_instances", "label": "Missing predictions", "format": "integer"}
+        {
+          "id": "benchmark_score",
+          "label": "Resolved / full dataset",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "score_on_submitted",
+          "label": "Resolved / submitted",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "passed_instances",
+          "label": "Resolved instances",
+          "format": "integer"
+        },
+        {
+          "id": "failed_instances",
+          "label": "Failed instances",
+          "format": "integer"
+        },
+        {
+          "id": "missing_instances",
+          "label": "Missing predictions",
+          "format": "integer"
+        }
       ]
     },
     {
@@ -170,34 +284,236 @@
       "units": 89,
       "attempts": 5,
       "primary_metric": "pass_at_1",
-      "comparison_metrics": ["pass_at_1", "pass_at_2", "pass_at_3", "pass_at_4", "pass_at_5"],
-      "required_metrics": ["pass_at_1", "pass_at_2", "pass_at_3", "pass_at_4", "pass_at_5", "passed_attempts", "failed_attempts", "errored_attempts", "no_reward_attempts"],
+      "comparison_metrics": [
+        "pass_at_1",
+        "pass_at_2",
+        "pass_at_3",
+        "pass_at_4",
+        "pass_at_5"
+      ],
+      "required_metrics": [
+        "pass_at_1",
+        "pass_at_2",
+        "pass_at_3",
+        "pass_at_4",
+        "pass_at_5",
+        "passed_attempts",
+        "failed_attempts",
+        "errored_attempts",
+        "no_reward_attempts"
+      ],
       "metrics": [
-        {"id": "pass_at_1", "label": "pass@1", "format": "percent", "direction": "higher"},
-        {"id": "pass_at_2", "label": "pass@2", "format": "percent", "direction": "higher"},
-        {"id": "pass_at_3", "label": "pass@3", "format": "percent", "direction": "higher"},
-        {"id": "pass_at_4", "label": "pass@4", "format": "percent", "direction": "higher"},
-        {"id": "pass_at_5", "label": "pass@5", "format": "percent", "direction": "higher"},
-        {"id": "mean_reward_all_trials", "label": "Mean reward (all trials)", "format": "number", "direction": "higher"},
-        {"id": "passed_attempts", "label": "Passed attempts", "format": "integer"},
-        {"id": "failed_attempts", "label": "Failed attempts", "format": "integer"},
-        {"id": "errored_attempts", "label": "Errored attempts", "format": "integer"},
-        {"id": "no_reward_attempts", "label": "No-reward attempts", "format": "integer"}
+        {
+          "id": "pass_at_1",
+          "label": "pass@1",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "pass_at_2",
+          "label": "pass@2",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "pass_at_3",
+          "label": "pass@3",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "pass_at_4",
+          "label": "pass@4",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "pass_at_5",
+          "label": "pass@5",
+          "format": "percent",
+          "direction": "higher"
+        },
+        {
+          "id": "mean_reward_all_trials",
+          "label": "Mean reward (all trials)",
+          "format": "number",
+          "direction": "higher"
+        },
+        {
+          "id": "passed_attempts",
+          "label": "Passed attempts",
+          "format": "integer"
+        },
+        {
+          "id": "failed_attempts",
+          "label": "Failed attempts",
+          "format": "integer"
+        },
+        {
+          "id": "errored_attempts",
+          "label": "Errored attempts",
+          "format": "integer"
+        },
+        {
+          "id": "no_reward_attempts",
+          "label": "No-reward attempts",
+          "format": "integer"
+        }
       ]
     }
   ],
-  "results": [],
+  "results": [
+    {
+      "variant": "dynamo-vllm",
+      "suite": "swebench-verified",
+      "phase": "ab",
+      "run_type": "full",
+      "status": "complete",
+      "completeness": {
+        "generated_units": 500,
+        "evaluated_units": 500,
+        "completed_trials": 500
+      },
+      "metrics": {
+        "benchmark_score": 0.872,
+        "score_on_submitted": 0.872,
+        "passed_instances": 436,
+        "failed_instances": 64,
+        "missing_instances": 0
+      },
+      "runtime_identity": {
+        "deployment_sha256": "75b9c8afa9e75f8bb74c6debdafc90f38a84345ff8f3a2d8662320002bd8bc1b",
+        "content_sha256": "6f0635b8b8556dcbea2096d177e76a4e062320ad55df771f9ab2370c0308a65a",
+        "captured_at": "2026-07-05T22:34:07.183643Z",
+        "controller_uid_sha256": "ae756ee8e9f9d5930f14bd3d8fa26b5279060c0a470df1fbd9721f2f295b3369",
+        "pod_uid_sha256_by_role": {
+          "frontend": "dfa48391fd635d30c388557fb945e2114392debb40fa085f3fcbc515fe06c353",
+          "worker": "50ed2416ebc79a5143d7893e366292e692edd20832e87443801d37cc352682b9"
+        },
+        "capture_sha256": "00b44de017bb9f98cb957017b747c4c09cc2a7c00f632965bc7a1ae39419b29b",
+        "recipe": {
+          "rendered_manifest_sha256": "c8343bf7000a589b9741f6d3f740f8c43bdb54142c0e84615221a88de294211e",
+          "source_commit": "71df933dd01394bf54e1d5cc25a0f666bd91dd9e",
+          "template_sha256": "756b94c382cb1b34432df3cbf71763c5c5cafb7cd1de976c95a550ed2f136d0a"
+        },
+        "hardware": {
+          "container_runtime_version": "containerd://2.2.1",
+          "driver_version": "595.58.03",
+          "gpu_count": 4,
+          "gpu_memory_total_mib": [
+            183359
+          ],
+          "gpu_model": "NVIDIA B200",
+          "gpu_uuid_set_sha256": "e97ff2c427efab4c111bcbbdd3bf632cd02f6e2f7126ea702054210da52f2a57",
+          "kernel_version": "6.8.0-100-generic",
+          "kubelet_version": "v1.34.4"
+        },
+        "control_plane": {
+          "dynamo_operator_image_digests": [
+            "sha256:35b5000305a4f613ffc683f3f67440861f78dfad111ef6c93f2469cf5dc1d742"
+          ],
+          "grove_operator_image_digests": [
+            "sha256:322e85e0ccc64e90aa1dcf8fc660a679cc6f71fb95702ddf8ea09ca1149ab861"
+          ]
+        }
+      },
+      "campaign_source": {
+        "schema_version": 1,
+        "source_commit": "71df933dd01394bf54e1d5cc25a0f666bd91dd9e",
+        "source_clean": true,
+        "source_changed_path_count": 0,
+        "bundle_sha256": "8a7d79eeb1b53cf085a174714564398e53dabdff3dcbd234cc3d68b3c50eb28c",
+        "source_tree_sha256": "890f535817756cab6bd06669505899a8f37eb70a059a16d62159623ab51b72b9",
+        "eval_tree_sha256": "39a30735a26b3f5d52847db1f55f7bd574ae2ca4ffafe1c880231d9679795ca5",
+        "campaign_env_sha256": "5dff26dec77a367369d4441a9ac3db69ea52326453c92182f24adb95ee906f36",
+        "source_file_count": 85,
+        "eval_file_count": 84
+      },
+      "evidence": {
+        "importer": "glm52-result-import/v1",
+        "sources": [
+          {
+            "role": "swe-score",
+            "path": "artifact://swebench-verified/ab/dynamo-vllm/swe-score/score.json",
+            "sha256": "a092be91f2e573b5a9b80c5b1597f1396fce672a7d9f017796f730e6e14198db"
+          },
+          {
+            "role": "swe-generation-validation",
+            "path": "artifact://swebench-verified/ab/dynamo-vllm/swe-generation-validation/generation-summary.json",
+            "sha256": "0d7f0502560edce7f6995ced3814e50c7aef620d8952c511e5ca14f9388b0ef3"
+          },
+          {
+            "role": "swe-run-metadata",
+            "path": "artifact://swebench-verified/ab/dynamo-vllm/swe-run-metadata/run-metadata.json",
+            "sha256": "da89a1924af197c8c91a48f4035fbc7c966dae2eb377a6a7a55fd8fd8e344980"
+          },
+          {
+            "role": "swe-run-scope",
+            "path": "artifact://swebench-verified/ab/dynamo-vllm/swe-run-scope/run-scope.json",
+            "sha256": "0bfa14d71aca1c18f5a944323225f9ad449cecccb7c136a019dc90cff9109c5e"
+          },
+          {
+            "role": "runtime-continuity",
+            "path": "artifact://swebench-verified/ab/dynamo-vllm/runtime-continuity/runtime-continuity.json",
+            "sha256": "278a5e68aff6d6bed5a22436ac57f88ef97f8b33107084494b5670e285a18c45"
+          },
+          {
+            "role": "swe-environment-freeze",
+            "path": "artifact://swebench-verified/ab/dynamo-vllm/swe-environment-freeze/environment.freeze.txt",
+            "sha256": "d497a1bc31b44c644f0cd83a35079cdce2bb386a8e2c78d28f00d93c86bf048d"
+          },
+          {
+            "role": "swe-environment-normalized-freeze",
+            "path": "artifact://swebench-verified/ab/dynamo-vllm/swe-environment-normalized-freeze/environment.normalized.freeze.txt",
+            "sha256": "224ccfacf94f8b60a2473f5eafaffcc3da76940c179c2c8b81c5392ac3df9aa6"
+          }
+        ]
+      },
+      "suite_identity": {
+        "python_environment": {
+          "constraints_lock_sha256": "f3af163e40ef54b172c1436e79da7effa72a28ec0f8336243804c6604611e3c1",
+          "freeze_sha256": "d497a1bc31b44c644f0cd83a35079cdce2bb386a8e2c78d28f00d93c86bf048d",
+          "normalized_freeze_sha256": "224ccfacf94f8b60a2473f5eafaffcc3da76940c179c2c8b81c5392ac3df9aa6",
+          "normalized_requirement_count": 101
+        },
+        "effective_config_file_sha256": "191014a1674f7d7dec2f9c76675236a215147a4b733cadece0c46b7154899a28",
+        "effective_config_content_sha256": "aa2b60952bf6a891bf6b0067c528ac3ea7b2ddff49bcd0e60924b449601b2aa5",
+        "fairness_config_sha256": "ff869a571f14c9a48076a0b4e53ac51de31903be47919d6be3b731084959ae44",
+        "task_image_evidence_sha256": "77cc39a36ae2a0a53493cc1e43b1316794e1c4027986926007dfbc218eb51251",
+        "task_image_map_sha256": "7001ea4fa01112c963c6fa663ddbddfc42fe2be592d3f5b31c29291df4073859",
+        "generation": {
+          "workers": 16,
+          "batch_size": 8
+        },
+        "evaluation": {
+          "workers": 8,
+          "timeout_seconds": 3600,
+          "backend": "official-swebench-docker",
+          "docker_platform": null
+        },
+        "runtime_source_revision": "5245c0fa6a2b0e11456e7a990836756233d8b011",
+        "runtime_family": "vllm",
+        "runtime_deployment_sha256": "75b9c8afa9e75f8bb74c6debdafc90f38a84345ff8f3a2d8662320002bd8bc1b",
+        "runtime_content_sha256": "6f0635b8b8556dcbea2096d177e76a4e062320ad55df771f9ab2370c0308a65a"
+      },
+      "task_level": {
+        "path": "results/task-level/swebench-verified/ab/dynamo-vllm.jsonl",
+        "sha256": "4963b04df68c00e13529bb9955312f0a4747477931eb5af04829d5e27e61725d",
+        "records": 500
+      }
+    }
+  ],
   "paired_disagreements": [],
   "issues": [
     {
       "id": "swebench-dockerhub-pull-rate-limit",
-      "variant": "all SWE-bench variants",
+      "variant": "dynamo-vllm / swebench-verified / ab",
       "severity": "high",
-      "status": "blocked",
-      "error": "The first full Dynamo + vLLM A/B Verified evaluation reached Docker Hub's anonymous pull limit after 189 valid evaluator reports. All 311 remaining instances failed before patch application with the same toomanyrequests image-pull error.",
-      "impact": "The 500 generated patches are valid, but the evaluation is infrastructure-invalid: 159 resolved plus 30 unresolved outcomes are order-biased diagnostics, benchmark_score is null, and no official result can be imported or compared.",
-      "fix": "Provision authenticated Docker Hub capacity or an approved pull-through cache, then resume only the evaluate phase with the unchanged prediction-digest run ID so the pinned evaluator reuses 189 reports and retries 311 missing reports.",
-      "verification": "Generation completed 500/500 with 500 nonempty patches, 23,639 API calls, and zero generation infrastructure errors. The strict score gate rejected all 311/311 identical pull-limit errors; serving continuity stayed stable with zero restarts, and no result was imported or torn down."
+      "status": "fixed",
+      "error": "The initial full Dynamo + vLLM A/B Verified evaluation reached Docker Hub's anonymous pull limit after 189 valid reports; a first same-run resume recovered 294 more reports before 17 remaining image pulls hit the same limit.",
+      "impact": "Both partial attempts failed closed with benchmark_score null and were excluded from official results; generation remained complete and the 483 valid evaluator reports were preserved.",
+      "fix": "After quota replenished, the 17 missing task images were staged serially into the existing Docker daemon and each image ID and RepoDigest was matched to generation-time task-images.json evidence. The unchanged prediction-digest run then reused 483 reports and evaluated only the remaining 17 instances.",
+      "verification": "The final guarded resume completed 500/500 reports with zero evaluator errors and stable serving continuity. The strict artifact reports 436 resolved, 64 unresolved, benchmark_score 0.872, and was accepted by the immutable importer."
     },
     {
       "id": "setup-dynamo-vllm-tool-routing",
@@ -247,7 +563,7 @@
       "error": "A long foreground kubectl exec lost its Teleport transport and left an orphaned evaluator process without a valid continuity attestation.",
       "impact": "The interrupted partial result was invalid and could not be imported; another disconnect could have wasted a multi-hour full cell.",
       "fix": "Moved evaluator ownership to a detached runner-side supervisor with atomic locking and state publication, bounded reconnectable control calls, explicit cancellation, process-group cleanup, and fail-closed postflight attestation.",
-      "verification": "All 166 campaign tests pass, including disconnect/start-race/cancellation coverage; the replacement full cell crossed the prior failure boundary and has accepted multiple exact batches without a transport retry."
+      "verification": "All 166 campaign tests pass, including disconnect/start-race/cancellation coverage; the replacement full cell completed, passed continuity validation, and was imported without a transport retry."
     },
     {
       "id": "setup-vllm-omni-plugin-import",
@@ -263,7 +579,7 @@
   "notes": [
     "No benchmark scores are published until the corresponding full run and official evaluator complete.",
     "Validation-only smoke matrix: Dynamo + vLLM passed BFCL 5/5, SWE-bench Verified 1/1, Pro 0/1, Multilingual 0/1, and Terminal-Bench 3/3; native vLLM, Dynamo + SGLang, and native SGLang each passed BFCL 5/5, all three single-instance SWE-bench checks 1/1, and Terminal-Bench 3/3. The SWE checks are stochastic single-instance diagnostics; a 0/1 model outcome is not a harness failure.",
-    "Interim full-run evidence, not an official score: Dynamo + vLLM A/B Verified generated all 500 predictions with no empty patches or generation infrastructure errors. Only 189 instances received valid evaluator reports before 311 anonymous Docker Hub pull failures; the strict artifact remains complete=false with benchmark_score=null and is excluded from the official 0/40 result matrix.",
+    "First official full result: Dynamo + vLLM A/B Verified completed all 500 predictions and evaluator reports with zero infrastructure errors, resolving 436/500 instances for an official benchmark score of 87.2%. Two earlier partial evaluation attempts were rejected by the strict gate after anonymous Docker Hub pull limits; preserved reports plus identity-verified local image staging allowed the unchanged run to complete.",
     "The BFCL web-search category requires an external SERPAPI_API_KEY; none is available, so the full official BFCL run remains blocked."
   ]
 }
