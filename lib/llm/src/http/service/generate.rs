@@ -20,7 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
-use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
+use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
 use serde::Serialize;
 use tracing::Instrument;
 
@@ -120,6 +120,29 @@ fn dynamo_routing_priority(vllm_priority: i32) -> i32 {
 
 fn generate_dispatch_span(request_id: &str) -> tracing::Span {
     tracing::info_span!(target: "request_span", "generate", request_id = %request_id)
+}
+
+async fn run_until_killed<T>(
+    context: &dyn AsyncEngineContext,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+
+        // Preserve an ownership-bearing result if it completes concurrently;
+        // callers re-check the context before using it.
+        result = &mut operation => Some(result),
+        _ = context.killed() => None,
+    }
+}
+
+fn generate_cancelled_response() -> Response {
+    generate_error_response(
+        StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+        "request_cancelled",
+        "request was cancelled".to_string(),
+    )
 }
 
 /// Project routing controls while retaining the complete client request in
@@ -263,7 +286,8 @@ async fn handler_generate(
 
     let dispatch_span = generate_dispatch_span(&request_id);
     // Unary work must outlive the Axum handler so dropping the handler can signal
-    // the armed connection monitor, which kills the shared engine context.
+    // the armed connection monitor. The detached dispatch observes that kill at
+    // each backend await point and then exits promptly.
     let response = match tokio::spawn(
         generate_dispatch(
             engine,
@@ -304,7 +328,19 @@ async fn generate_dispatch(
         &request_id,
     );
     let request_context = context.context();
-    let stream = match engine.generate(context).await {
+    let generate_result =
+        match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
+            Some(result) => result,
+            None => {
+                inflight_guard.mark_error(ErrorType::Cancelled);
+                return generate_cancelled_response();
+            }
+        };
+    if request_context.is_killed() {
+        inflight_guard.mark_error(ErrorType::Cancelled);
+        return generate_cancelled_response();
+    }
+    let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
@@ -334,21 +370,27 @@ async fn generate_dispatch(
     };
 
     let engine_context = stream.context();
-    match GenerateResponse::from_annotated_stream_with_options(
-        stream,
-        request_id.clone(),
-        response_options,
+    let response_result = match run_until_killed(
+        request_context.as_ref(),
+        GenerateResponse::from_annotated_stream_with_options(
+            stream,
+            request_id.clone(),
+            response_options,
+        ),
     )
     .await
     {
+        Some(result) => result,
+        None => {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+            return generate_cancelled_response();
+        }
+    };
+    match response_result {
         Ok(response) => {
-            if engine_context.is_killed() {
+            if request_context.is_killed() || engine_context.is_killed() {
                 inflight_guard.mark_error(ErrorType::Cancelled);
-                return generate_error_response(
-                    StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
-                    "request_cancelled",
-                    "request was cancelled".to_string(),
-                );
+                return generate_cancelled_response();
             }
             if !response.is_complete_unary() {
                 inflight_guard.mark_error(ErrorType::Internal);
@@ -363,11 +405,11 @@ async fn generate_dispatch(
             Json(response).into_response()
         }
         Err(error) => {
-            inflight_guard.mark_error(if engine_context.is_killed() {
-                ErrorType::Cancelled
-            } else {
-                ErrorType::Internal
-            });
+            if request_context.is_killed() || engine_context.is_killed() {
+                inflight_guard.mark_error(ErrorType::Cancelled);
+                return generate_cancelled_response();
+            }
+            inflight_guard.mark_error(ErrorType::Internal);
             tracing::error!(%request_id, %error, "failed to fold generate stream");
             generate_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -380,15 +422,111 @@ async fn generate_dispatch(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        task::{Context as TaskContext, Poll},
+    };
 
     use super::service_v2::{HttpService, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV};
     use super::*;
+    use crate::http::service::metrics::{Endpoint, RequestType, Status};
+    use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
+    use dynamo_runtime::{
+        engine::{AsyncEngine, ResponseStream},
+        pipeline::{Error, ManyOut, SingleIn},
+    };
+    use futures::Stream;
+    use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
     use tracing::field::{Field, Visit};
     use tracing::{Subscriber, span};
     use tracing_subscriber::Layer;
     use tracing_subscriber::prelude::*;
+
+    #[derive(Clone, Copy)]
+    enum PendingPhase {
+        Generate,
+        Stream,
+    }
+
+    struct PendingOperation {
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+        polled: bool,
+    }
+
+    impl PendingOperation {
+        fn new(started: Arc<Notify>, dropped: Arc<AtomicBool>) -> Self {
+            Self {
+                started,
+                dropped,
+                polled: false,
+            }
+        }
+
+        fn mark_started(&mut self) {
+            if !self.polled {
+                self.polled = true;
+                self.started.notify_one();
+            }
+        }
+    }
+
+    impl Future for PendingOperation {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+            self.get_mut().mark_started();
+            Poll::Pending
+        }
+    }
+
+    impl Stream for PendingOperation {
+        type Item = Annotated<LLMEngineOutput>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+            self.get_mut().mark_started();
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingOperation {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct PendingEngine {
+        phase: PendingPhase,
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for PendingEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let operation = PendingOperation::new(self.started.clone(), self.dropped.clone());
+            match self.phase {
+                PendingPhase::Generate => {
+                    operation.await;
+                    unreachable!("pending generate operation completed")
+                }
+                PendingPhase::Stream => {
+                    Ok(ResponseStream::new(Box::pin(operation), request.context()))
+                }
+            }
+        }
+    }
 
     #[derive(Clone)]
     struct RequestIdCaptureLayer(Arc<Mutex<Option<String>>>);
@@ -702,6 +840,93 @@ mod tests {
             captured_request_id.lock().unwrap().as_deref(),
             Some("header-request")
         );
+    }
+
+    fn dispatch_test_context() -> Context<PreprocessedRequest> {
+        Context::new(
+            PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .expect("build dispatch test request"),
+        )
+    }
+
+    fn assert_cancelled_dispatch_metrics(state: &service_v2::State) {
+        let metric_model = state.manager().metric_model_for("test-model");
+        let metrics = state.metrics_clone();
+        assert_eq!(metrics.get_inflight_count(metric_model), 0);
+        assert_eq!(
+            metrics.get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Cancelled,
+            ),
+            1
+        );
+    }
+
+    async fn await_cancelled_dispatch(
+        task: tokio::task::JoinHandle<Response>,
+        dropped: &AtomicBool,
+        state: &service_v2::State,
+    ) {
+        let response = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("dispatch did not stop promptly after request kill")
+            .expect("dispatch task panicked");
+        assert_eq!(response.status().as_u16(), 499);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_cancelled_dispatch_metrics(state);
+    }
+
+    async fn assert_request_kill_interrupts_pending(phase: PendingPhase) {
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(PendingEngine {
+                phase,
+                started: started.clone(),
+                dropped: dropped.clone(),
+            });
+        let context = dispatch_test_context();
+        let request_context = context.context();
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let task = tokio::spawn(generate_dispatch(
+            engine,
+            context,
+            "req-pending-dispatch".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        ));
+
+        started.notified().await;
+        assert_eq!(
+            state
+                .metrics_clone()
+                .get_inflight_count(state.manager().metric_model_for("test-model")),
+            1
+        );
+        request_context.kill();
+
+        await_cancelled_dispatch(task, dropped.as_ref(), state.as_ref()).await;
+    }
+
+    #[tokio::test]
+    async fn request_kill_interrupts_pending_engine_generate() {
+        assert_request_kill_interrupts_pending(PendingPhase::Generate).await;
+    }
+
+    #[tokio::test]
+    async fn request_kill_interrupts_pending_response_stream() {
+        assert_request_kill_interrupts_pending(PendingPhase::Stream).await;
     }
 
     #[test]
