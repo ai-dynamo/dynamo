@@ -33,6 +33,30 @@ Dynamo TensorRT-LLM integrates [TensorRT-LLM](https://github.com/NVIDIA/TensorRT
 | **DP Rank Routing**| ✅           |                                                                 |
 | **GB200 Support**  | ✅           |                                                                 |
 
+## Feature Interactions
+
+TensorRT-LLM delivers maximum inference performance and optimization, with full KVBM integration and robust disaggregated serving support. The matrix below shows which feature pairs are validated to work together.
+
+**Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
+
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
+| **KV Block Manager** | ✅ | ✅ | ✅ | — | | | | | | |
+| **Multimodal** | ✅<sup>1</sup> | ✅<sup>2</sup> | — | ✅ | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | ✅ | 🚧 | — | | | | |
+| **Request Cancellation** | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | ✅<sup>3</sup> | — | | | |
+| **LoRA** | | | | | | | | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | | — | |
+| **Speculative Decoding** | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | | ✅ | — |
+
+> **Notes:**
+> 1. **Multimodal Disaggregation**: Supports **EP/D** (Traditional) and **E/P/D** (Full Disaggregation) image flows, including image URLs and pre-computed embeddings. ([Source](../../features/multimodal/multimodal-trtllm.md))
+> 2. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported through the dedicated TRT-LLM MM Router Worker. It requires KV event publishing on the TRT-LLM workers. ([Source](../../features/multimodal/multimodal-kv-routing.md))
+> 3. **Request Cancellation**: Due to known issues, the TensorRT-LLM engine is temporarily not notified of request cancellations, meaning allocated resources for cancelled requests are not freed.
+
 ## Prerequisites
 
 - **`yq`** for in-place YAML edits. Install with `wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq` or `pip install yq` (the latter is a different tool with the same name but similar syntax). If neither is available, a `sed` fallback is shown inline where `yq` is used.
@@ -47,7 +71,7 @@ Dynamo TensorRT-LLM integrates [TensorRT-LLM](https://github.com/NVIDIA/TensorRT
 | `sglang-runtime:1.0.2` | SGLang `v0.5.9` | `v12.9` | `575+` |
 | `sglang-runtime:1.0.2-cuda13` | SGLang `v0.5.9` | `v13.0` | `580+` |
 
-Source of truth: [`docs/reference/support-matrix.md`](../../reference/support-matrix.md#cuda-and-driver-requirements) and [`docs/reference/release-artifacts.md`](../../reference/release-artifacts.md). If those differ from the values above, the source-of-truth files win.
+Source of truth: [`docs/reference/support-matrix.md`](../../reference/support-matrix.md#cuda-and-driver-requirements) and [`docs/reference/release-artifacts.mdx`](../../reference/release-artifacts.mdx). If those differ from the values above, the source-of-truth files win.
 
 ## Quick Start
 

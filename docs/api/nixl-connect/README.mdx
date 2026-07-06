@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: NIXL Connect API
+subtitle: Python library for dynamic, RDMA-accelerated data transfers between workers in a Dynamo graph.
 ---
 
 Dynamo NIXL Connect specializes in moving data between models/workers in a Dynamo Graph, and for the use cases where registration and memory regions need to be dynamic.
@@ -10,22 +11,23 @@ The relaxed registration comes with some performance overheads, but simplifies t
 Especially for larger data transfer operations, such as between models in a multi-model graph, the overhead would be marginal.
 The `dynamo.nixl_connect` library can be imported by any Dynamo container hosted application.
 
-> [!Note]
-> Dynamo NIXL Connect will pick the best available method of data transfer available to it.
-> The available methods depend on the hardware and software configuration of the machines and network running the graph.
-> GPU Direct RDMA operations require that both ends of the operation have:
-> - NIC and GPU capable of performing RDMA operations
-> - Device drivers that support GPU-NIC direct interactions (aka "zero copy") and RDMA operations
-> - Network that supports InfiniBand or RoCE
->
-> With any of the above not satisfied, GPU Direct RDMA will not be available to the graph's workers, and less-optimal methods will be utilized to ensure basic functionality.
-> For additional information, please read this [GPUDirect RDMA](https://docs.nvidia.com/cuda/pdf/GPUDirect_RDMA.pdf) document.
+<Note>
+  Dynamo NIXL Connect will pick the best available method of data transfer available to it.
+  The available methods depend on the hardware and software configuration of the machines and network running the graph.
+  GPU Direct RDMA operations require that both ends of the operation have:
+  - NIC and GPU capable of performing RDMA operations
+  - Device drivers that support GPU-NIC direct interactions (aka "zero copy") and RDMA operations
+  - Network that supports InfiniBand or RoCE
+
+  With any of the above not satisfied, GPU Direct RDMA will not be available to the graph's workers, and less-optimal methods will be utilized to ensure basic functionality.
+  For additional information, please read this [GPUDirect RDMA](https://docs.nvidia.com/cuda/pdf/GPUDirect_RDMA.pdf) document.
+</Note>
 
 ```python
 import dynamo.nixl_connect
 ```
 
-All operations using the NIXL Connect library begin with the [`Connector`](connector.md) class and the type of operation required.
+All operations using the NIXL Connect library begin with the [`Connector`](connector.mdx) class and the type of operation required.
 There are four types of supported operations:
 
  1. **Register local readable memory**:
@@ -68,9 +70,9 @@ sequenceDiagram
 
 ### Generic Example
 
-In the diagram below, Local creates a [`WritableOperation`](writable-operation.md) intended to receive data from Remote.
+In the diagram below, Local creates a [`WritableOperation`](writable-operation.mdx) intended to receive data from Remote.
 Local then sends metadata about the requested operation to Remote.
-Remote then uses the metadata to create a [`WriteOperation`](write-operation.md) which will perform the GPU Direct RDMA memory transfer, when available, from Remote's GPU memory to Local's GPU memory.
+Remote then uses the metadata to create a [`WriteOperation`](write-operation.mdx) which will perform the GPU Direct RDMA memory transfer, when available, from Remote's GPU memory to Local's GPU memory.
 
 ```mermaid
 ---
@@ -85,8 +87,9 @@ flowchart LR
   e2@{ animate: true; }
 ```
 
-> [!Note]
-> When RDMA isn't available, the NIXL data transfer will still complete using non-accelerated methods.
+<Note>
+  When RDMA isn't available, the NIXL data transfer will still complete using non-accelerated methods.
+</Note>
 
 ### Multimodal Example
 
@@ -134,31 +137,32 @@ flowchart LR
   o2@{ animate: true; }
 ```
 
-> [!Note]
-> In this example, it is the data transfer between the Prefill Worker and the Encode Worker that utilizes the Dynamo NIXL Connect library.
-> The KV Cache transfer between Decode Worker and Prefill Worker utilizes a different connector that also uses the NIXL-based I/O subsystem underneath.
+<Note>
+  In this example, it is the data transfer between the Prefill Worker and the Encode Worker that utilizes the Dynamo NIXL Connect library.
+  The KV Cache transfer between Decode Worker and Prefill Worker utilizes a different connector that also uses the NIXL-based I/O subsystem underneath.
+</Note>
 
 #### Code Examples
 
 See [NixlReadEmbeddingSender](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py),
-for how they coordinate directly with the Encode Worker by creating a [`ReadableOperation`](readable-operation.md),
+for how they coordinate directly with the Encode Worker by creating a [`ReadableOperation`](readable-operation.mdx),
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
 See [NixlReadEmbeddingReceiver](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/embedding_transfer.py),
-for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor.md),
-a [`ReadOperation`](read-operation.md) is created using the metadata provided by the requesting worker,
+for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor.mdx),
+a [`ReadOperation`](read-operation.mdx) is created using the metadata provided by the requesting worker,
 and the worker awaits for the data transfer to complete for yielding a response.
 
 
 ## Python Classes
 
-  - [Connector](connector.md)
-  - [Descriptor](descriptor.md)
-  - [Device](device.md)
-  - [ReadOperation](read-operation.md)
-  - [ReadableOperation](readable-operation.md)
-  - [WritableOperation](writable-operation.md)
-  - [WriteOperation](write-operation.md)
+  - [Connector](connector.mdx)
+  - [Descriptor](descriptor.mdx)
+  - [Device](device.mdx)
+  - [ReadOperation](read-operation.mdx)
+  - [ReadableOperation](readable-operation.mdx)
+  - [WritableOperation](writable-operation.mdx)
+  - [WriteOperation](write-operation.mdx)
 
 
 ## References

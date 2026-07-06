@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Read Operation
+subtitle: Transfers data from a remote worker's ReadableOperation into local buffers.
 ---
 
 An operation which transfers data from a remote worker to the local worker.
 
-To create the operation, NIXL metadata ([RdmaMetadata](rdma-metadata.md)) from a remote worker's [`ReadableOperation`](readable-operation.md)
-along with a matching set of local [`Descriptor`](descriptor.md) objects which reference memory intended to receive data from the remote worker must be provided.
+To create the operation, NIXL metadata ([RdmaMetadata](rdma-metadata.mdx)) from a remote worker's [`ReadableOperation`](readable-operation.mdx)
+along with a matching set of local [`Descriptor`](descriptor.mdx) objects which reference memory intended to receive data from the remote worker must be provided.
 The NIXL metadata must be transferred from the remote to the local worker via a secondary channel, most likely HTTP or TCP+NATS.
 
 Once created, data transfer will begin immediately.
@@ -33,19 +34,19 @@ therefore the operation should be awaited until completed unless cancellation is
 
 ## Methods
 
-### `cancel`
+### cancel
 
 ```python
-def cancel(self) -> None:
+def cancel(self) -> None
 ```
 
 Instructs the NIXL subsystem to cancel the operation.
 Completed operations cannot be cancelled.
 
-### `wait_for_completion`
+### wait_for_completion
 
 ```python
-async def wait_for_completion(self) -> None:
+async def wait_for_completion(self) -> None
 ```
 
 Blocks the caller until the memory from the remote worker has been transferred to the provided buffers.
@@ -53,23 +54,18 @@ Blocks the caller until the memory from the remote worker has been transferred t
 
 ## Properties
 
-### `status`
-
-```python
-@property
-def status(self) -> OperationStatus:
-```
-
-Returns [`OperationStatus`](operation-status.md) which provides the current state (aka. status) of the operation.
+<ParamField path="status" type="OperationStatus">
+  The current state (aka. status) of the operation. See [`OperationStatus`](operation-status.mdx).
+</ParamField>
 
 
 ## Related Classes
 
-  - [Connector](connector.md)
-  - [Descriptor](descriptor.md)
-  - [Device](device.md)
-  - [OperationStatus](operation-status.md)
-  - [RdmaMetadata](rdma-metadata.md)
-  - [ReadableOperation](readable-operation.md)
-  - [WritableOperation](writable-operation.md)
-  - [WriteOperation](write-operation.md)
+  - [Connector](connector.mdx)
+  - [Descriptor](descriptor.mdx)
+  - [Device](device.mdx)
+  - [OperationStatus](operation-status.mdx)
+  - [RdmaMetadata](rdma-metadata.mdx)
+  - [ReadableOperation](readable-operation.mdx)
+  - [WritableOperation](writable-operation.mdx)
+  - [WriteOperation](write-operation.mdx)

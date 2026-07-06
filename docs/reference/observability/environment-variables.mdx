@@ -1,0 +1,249 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Environment Variables
+subtitle: Every environment variable that controls Dynamo metrics, tracing, logging, health checks, and request capture.
+---
+
+This page catalogs the environment variables that govern Dynamo observability. Set them on **every** Dynamo process (frontend, router, workers) that you want to emit signals — a variable set on workers alone does not configure the frontend. For how-to walkthroughs, see the observability guides on [Metrics](../../observability/metrics.md), [Tracing](../../observability/tracing.md), [Logging](../../observability/logging.md), and [Health Checks](../../observability/health-checks.md).
+
+The canonical list of variable names lives in [`lib/runtime/src/config/environment_names.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/config/environment_names.rs), which groups them by area (logging, OTLP, system server, canary, request trace). The logging and OTLP variables are read in [`lib/runtime/src/logging.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/logging.rs) `setup_logging()`; the `DYN_SYSTEM_*` and health variables are read by the system-status server. The backend log-level variables (`VLLM_LOGGING_LEVEL`, `TLLM_LOG_LEVEL`) are read by the respective engines, not the Dynamo runtime.
+
+Every variable on this page is set the same way whether you run locally or on Kubernetes — the same name, only the value or convention differs. A few fields note an **Operator preset**: the value the Dynamo operator injects on Kubernetes, which your own configuration overrides. Kubernetes-only *metrics enablement* is controlled by CRD annotations and Helm values rather than environment variables — see [Operator Metrics](operator-metrics.mdx#kubernetes-enablement-knobs).
+
+<Info>
+  Prometheus metric families in Dynamo are registered lazily: each label set is created the first time it fires, so a freshly-started process shows empty metric families until the first relevant request. An idle cluster does not mean scraping is broken.
+</Info>
+
+## Setting these variables
+
+Every Dynamo process reads its own environment at startup, so set these on each process you want to emit signals — the frontend, the router, and each worker. The tabs below cover the two ways to do that; everything inside applies to whichever environment you pick.
+
+<Card>
+<Tabs>
+  <Tab title="Local">
+    Export the variables in the shell before launching each process, then start the frontend and one or more workers:
+
+    ```bash
+    export DYN_SYSTEM_PORT=8081
+    export DYN_LOGGING_JSONL=true
+    export DYN_LOG=info
+
+    # Frontend (serves dynamo_frontend_* on DYN_HTTP_PORT, default 8000)
+    python -m dynamo.frontend &
+
+    # vLLM worker (serves dynamo_component_* on DYN_SYSTEM_PORT)
+    python -m dynamo.vllm --model Qwen/Qwen3-0.6B &
+    ```
+
+    Use `python -m dynamo.sglang` or `python -m dynamo.trtllm` for the other backends, and `python -m dynamo.router` for a standalone router.
+  </Tab>
+  <Tab title="Kubernetes">
+    Set the variables on the [`DynamoGraphDeployment`](../../kubernetes/dgd-reference.mdx) (DGD) — at graph level in `spec.envs` (prepended to every component) or per-component under `services.<name>.extraPodSpec.mainContainer.env`. A component-level entry overrides a graph-level one of the same name.
+
+    ```yaml
+    apiVersion: nvidia.com/v1alpha1
+    kind: DynamoGraphDeployment
+    metadata:
+      name: vllm-agg-tracing
+    spec:
+      envs:                              # applied to every component
+        - name: DYN_LOGGING_JSONL
+          value: "true"
+        - name: OTEL_EXPORT_ENABLED
+          value: "true"
+        - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          value: "http://tempo.observability.svc.cluster.local:4317"
+      services:
+        Frontend:
+          componentType: frontend
+          extraPodSpec:
+            mainContainer:
+              env:                       # applied to this component only
+                - name: OTEL_SERVICE_NAME
+                  value: "dynamo-frontend"
+    ```
+
+    <Note>
+      A [`DynamoGraphDeploymentRequest`](../../kubernetes/dgdr-reference.mdx) (DGDR) has no environment-variable fields of its own. To set these under a DGDR, put them in the embedded DGD it produces via `spec.overrides.dgd`. You never set these on the operator deployment itself — the operator only writes them into the workload pods it creates; it never reads them from its own environment.
+    </Note>
+  </Tab>
+</Tabs>
+</Card>
+
+## System and metrics
+
+<ParamField path="DYN_SYSTEM_PORT" type="integer" default="-1 (disabled)">
+  Port for the backend component's system-status server, which serves `/metrics` and the health endpoints. Disabled by default; local examples use `8081`. Must be set explicitly for backend workers and the standalone router to expose metrics.
+
+  **Operator preset:** `9090` on worker, prefill, decode, and planner pods.
+</ParamField>
+
+<ParamField path="DYN_HTTP_PORT" type="integer" default="8000">
+  Frontend HTTP port, where `dynamo_frontend_*` metrics are served at `/metrics`. Also configurable via the `--http-port` flag.
+
+  **Operator preset:** `8000` on frontend pods.
+</ParamField>
+
+<ParamField path="NIXL_TELEMETRY_ENABLE" type="string" default="n">
+  Enables [NIXL](https://github.com/ai-dynamo/nixl) telemetry. NIXL metrics track KV cache and embedding data transfers and are populated only during disaggregated serving or multimodal embedding transfers.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>y</Badge> <Badge intent="note" minimal>n</Badge></span>
+
+  **Operator preset:** `n` on worker, prefill, and decode pods.
+</ParamField>
+
+<ParamField path="NIXL_TELEMETRY_EXPORTER" type="string">
+  NIXL telemetry exporter to use, e.g. `prometheus`.
+
+  **Operator preset:** `prometheus` on worker, prefill, and decode pods.
+</ParamField>
+
+<ParamField path="NIXL_TELEMETRY_PROMETHEUS_PORT" type="integer" default="19090">
+  Port for NIXL's Prometheus exporter — a separate port from the Dynamo metrics port. Use distinct values per worker (e.g. `19090` prefill, `19091` decode) to avoid collisions.
+
+  **Operator preset:** `19090` on worker, prefill, and decode pods.
+</ParamField>
+
+## OpenTelemetry (traces and logs)
+
+<ParamField path="OTEL_EXPORT_ENABLED" type="boolean" default="false">
+  Master switch for OTLP export. Gates **both** traces and logs. Without it, traces and logs never leave the process — Tempo and Loki stay empty even when healthy.
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" type="string" default="http://localhost:4317">
+  OTLP gRPC endpoint for traces. Must be a gRPC listener — Dynamo's exporter does not speak OTLP/HTTP, even though the OTel Collector also listens on `:4318`.
+</ParamField>
+
+<ParamField path="OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" type="string" default="same as traces endpoint">
+  OTLP gRPC endpoint for logs. Defaults to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` when unset. Same gRPC-only constraint as the traces endpoint.
+</ParamField>
+
+<ParamField path="OTEL_SERVICE_NAME" type="string" default="dynamo">
+  Service name attached to traces and spans. Set a per-component value (e.g. `dynamo-frontend`) so services are distinguishable in Tempo.
+</ParamField>
+
+## Logging
+
+<ParamField path="DYN_LOGGING_JSONL" type="boolean" default="false">
+  Emit logs as JSONL. When enabled, logs include `trace_id` and `span_id` fields and spans are created per request. Recommended for Loki.
+</ParamField>
+
+<ParamField path="DYN_LOGGING_SPAN_EVENTS" type="boolean" default="false">
+  Emit span entry/close events (`SPAN_FIRST_ENTRY`, `SPAN_CLOSED` messages).
+</ParamField>
+
+<ParamField path="DYN_LOG" type="string" default="info">
+  Log level, optionally per target: `<default_level>,<module_path>=<level>,...`. Example: `info,dynamo_runtime::system_status_server:trace`.
+</ParamField>
+
+<ParamField path="DYN_LOG_USE_LOCAL_TZ" type="boolean" default="false">
+  Use the local timezone for log timestamps. Default is UTC.
+</ParamField>
+
+<ParamField path="DYN_LOGGING_CONFIG_PATH" type="string">
+  Path to a custom TOML logging configuration. Unset by default.
+</ParamField>
+
+<ParamField path="VLLM_LOGGING_LEVEL" type="string" default="INFO">
+  vLLM backend log level. Completely independent of `DYN_LOG`.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>DEBUG</Badge> <Badge intent="note" minimal>INFO</Badge> <Badge intent="note" minimal>WARNING</Badge> <Badge intent="note" minimal>ERROR</Badge> <Badge intent="note" minimal>CRITICAL</Badge></span>
+</ParamField>
+
+<ParamField path="TLLM_LOG_LEVEL" type="string" default="INFO">
+  TensorRT-LLM backend log level. Independent of `DYN_LOG` and read **once at import time** — it must be set before the process starts.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>TRACE</Badge> <Badge intent="note" minimal>DEBUG</Badge> <Badge intent="note" minimal>INFO</Badge> <Badge intent="note" minimal>WARNING</Badge> <Badge intent="note" minimal>ERROR</Badge> <Badge intent="note" minimal>INTERNAL_ERROR</Badge></span>
+</ParamField>
+
+<ParamField path="DYN_SKIP_SGLANG_LOG_FORMATTING" type="boolean" default="false">
+  Disable Dynamo's SGLang log configuration so you can manage the SGLang engine's logging independently (e.g. via the worker's `--log-level` flag).
+</ParamField>
+
+## Health checks
+
+<ParamField path="DYN_SYSTEM_STARTING_HEALTH_STATUS" type="string" default="notready">
+  Initial health status a component reports before its required endpoints are served.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ready</Badge> <Badge intent="note" minimal>notready</Badge></span>
+</ParamField>
+
+<ParamField path="DYN_SYSTEM_HEALTH_PATH" type="string" default="/health">
+  Path of the health endpoint on the system-status server.
+</ParamField>
+
+<ParamField path="DYN_SYSTEM_LIVE_PATH" type="string" default="/live">
+  Path of the liveness endpoint on the system-status server.
+</ParamField>
+
+<ParamField path="DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS" type="string">
+  JSON array of endpoints that must be served before the component reports `ready`, e.g. `["generate"]`. Unset by default. Marked deprecated in the runtime source (`environment_names.rs`) — verify current behavior against your release before relying on it.
+
+  **Operator preset:** `["generate"]` on worker, prefill, and decode pods.
+</ParamField>
+
+<ParamField path="DYN_HEALTH_CHECK_ENABLED" type="boolean" default="false">
+  Enables canary health checks, which actively probe worker endpoints during idle periods. Defaults to `false`. The shadow-engine failover path may re-enable it per engine. (The health-check *guide* describes canary checks as "automatically enabled" in Kubernetes — that reflects the intended failover behavior, not the base value the operator injects.)
+
+  **Operator preset:** `false` on worker, prefill, and decode pods.
+</ParamField>
+
+<ParamField path="DYN_CANARY_WAIT_TIME" type="integer" default="10">
+  Seconds of endpoint idle time before a canary health check is sent. Lower values check more frequently.
+</ParamField>
+
+<ParamField path="DYN_HEALTH_CHECK_REQUEST_TIMEOUT" type="integer" default="3">
+  Maximum seconds to wait for a canary health-check response before marking the endpoint unhealthy.
+</ParamField>
+
+## Request replay tracing
+
+Per-request JSONL capture for [Mooncake replay](../../observability/request-tracing.md). Primarily a local-development workflow.
+
+<ParamField path="DYN_REQUEST_TRACE" type="boolean">
+  Truthy master switch that enables request-replay capture. Unset by default.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="jsonl_gz">
+  Comma-separated sinks: `jsonl`, `jsonl_gz`, or `stderr`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_OUTPUT_PATH" type="string" default="/tmp/dynamo-request-trace">
+  Literal JSONL path or gzip segment prefix for captured rows.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_CAPACITY" type="integer" default="1024">
+  Best-effort in-process broadcast capacity.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES" type="integer" default="1048576">
+  JSONL or gzip batching threshold in bytes.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS" type="integer" default="1000">
+  Periodic flush interval in milliseconds.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES" type="integer" default="268435456">
+  Gzip roll threshold in uncompressed bytes.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES" type="integer">
+  Optional gzip roll threshold in records. Unset by default.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT" type="string">
+  Optional ZMQ PULL bind address for harness tool events. Set on the process that should own tool-event ingress, usually the frontend. Unset by default.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC" type="string" default="agent-tool-events">
+  First-frame ZMQ topic filter, used when the ZMQ endpoint is configured.
+</ParamField>
+
+## Related
+
+- [Metrics Catalog](metrics-catalog.mdx) — the `dynamo_*` metrics these variables expose.
+- [Metric Labels](metric-labels.mdx) — the dimensions attached to those metrics.
+- [Operator Metrics](operator-metrics.mdx) — Kubernetes-only metrics enablement knobs.
+- [Local Resource Monitor (Local)](local-resource-monitor.mdx) — host-side per-process exporter.

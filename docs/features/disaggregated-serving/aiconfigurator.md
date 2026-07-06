@@ -1,19 +1,33 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Sizing with AIConfigurator
+title: AIConfigurator Reference
 subtitle: Compare aggregated and disaggregated layouts before deployment
 ---
 
-This page focuses on using
-[AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/tree/main) to size
-aggregated and disaggregated Dynamo deployments. For the serving architecture
-and deployment-path overview, start with [Disaggregated Serving](README.md).
+This page is the full AIConfigurator reference: sizing
+[AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/tree/main) for
+aggregated and disaggregated Dynamo deployments, generating deployment
+artifacts, and validating them. If you only need a parallelism layout for a DGD
+you are already authoring, use the shorter [Size with AIConfigurator](../../kubernetes/dgd-aiconfigurator.md)
+tutorial. For the serving architecture and deployment-path overview, start with
+[Disaggregated Serving](README.md).
 
 AIConfigurator is a performance optimization tool that helps you find a strong
 starting configuration for deploying LLMs with Dynamo. Given a supported model,
 GPU system, backend, and SLA target, it searches aggregated and disaggregated
 layouts and can generate deployment artifacts for the selected target.
+
+> [!IMPORTANT]
+> **Check support first.** AIConfigurator only produces reliable estimates for
+> model + system + backend + version combinations in its
+> [support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/).
+> Confirm yours is covered before sweeping configurations with
+> `aiconfigurator cli support --model-path <model> --system <sku> --backend <backend>`.
+> If the combination is not supported, AIConfigurator falls back to weaker
+> modeling and the output may not reflect real performance — see
+> [Supported Configurations](#supported-configurations) for the full matrix and
+> alternatives.
 
 ## When to Use AIConfigurator
 
@@ -27,7 +41,7 @@ AIConfigurator is useful when you want:
 - candidate configurations that are filtered against your SLA requirements
 - generated Dynamo configuration files and Kubernetes manifests
 - performance comparisons between aggregated and disaggregated strategies
-- a support check for a model/system/backend combination before you tune by hand
+- a support check for a model/system/backend combination before you tune by hand (see the support-first callout above)
 
 Exact runtime and throughput gains depend on the model, hardware, backend,
 traffic shape, and available performance data. Treat AIConfigurator output as a

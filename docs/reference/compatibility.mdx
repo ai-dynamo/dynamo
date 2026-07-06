@@ -1,0 +1,138 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Compatibility
+---
+
+## Supported Platforms (At a Glance)
+
+**Latest stable release:** [v1.2.0](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.0) -- SGLang `0.5.11` (NIXL `1.0.1`) | TensorRT-LLM `1.3.0rc14` (NIXL `0.10.1`) | vLLM `0.20.1` (NIXL `0.10.1`)
+
+**Experimental release:** [v1.3.0-dev.1](https://github.com/ai-dynamo/dynamo/tree/release/1.3.0-dev.1) *(full-platform preview of v1.3.0 -- all runtime + component containers, wheels, crates, Helm)* -- SGLang `0.5.12.post1` | TensorRT-LLM `1.3.0rc17` | vLLM `0.22.0` | NIXL `1.1.0` (vLLM); `1.0.1` (SGLang); `0.10.1` (TRT-LLM)
+
+| Requirement | Supported |
+| :--- | :--- |
+| **GPU** | <span className="dynamo-chip dynamo-chip-gpu">Ampere</span> <span className="dynamo-chip dynamo-chip-gpu">Ada Lovelace</span> <span className="dynamo-chip dynamo-chip-gpu">Hopper</span> <span className="dynamo-chip dynamo-chip-gpu">Blackwell</span> |
+| **OS** | <span className="dynamo-chip dynamo-chip-ubuntu">Ubuntu 24.04</span> <br /> <span className="dynamo-chip dynamo-chip-ubuntu">Ubuntu 22.04</span> <br /> <span className="dynamo-chip dynamo-chip-centos">CentOS Stream 9 (experimental)</span>
+| **Arch** | <span className="dynamo-chip dynamo-chip-arch">x86_64</span> <span className="dynamo-chip dynamo-chip-arch">ARM64 (Ubuntu 24.04 only)</span>
+| **SGLang** | <span className="dynamo-chip dynamo-chip-cuda">CUDA 12.9</span> <span className="dynamo-chip dynamo-chip-cuda">CUDA 13.0</span> |
+| **TensorRT-LLM** | <span className="dynamo-chip dynamo-chip-cuda">CUDA 13.1</span> |
+| **vLLM** | <span className="dynamo-chip dynamo-chip-cuda">CUDA 12.9</span> <span className="dynamo-chip dynamo-chip-cuda">CUDA 13.0</span> |
+
+Dynamo ships multi-arch (x86_64 + ARM64) container images. For the full per-version artifact history — container images, wheels, Helm charts, and crates — see [Release Artifacts](release-artifacts.mdx).
+
+### Backend Dependencies
+
+The backend framework versions included with the current Dynamo releases:
+
+| **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
+| :--- | :--- | :--- | :--- | :--- |
+| **v1.2.0** | `0.5.11` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
+| **v1.3.0-dev.1** *(experimental)* | `0.5.12.post1` | `1.3.0rc17` | `0.22.0` | `1.1.0` (vLLM); `1.0.1` (SGLang); `0.10.1` (TRT-LLM) |
+
+`v1.3.0-dev.1` is a full-platform experimental preview; not every backend ships a runtime container for every dev tag. See [Release Artifacts](release-artifacts.mdx) for the published images, wheels, charts, and crates. Backend versions listed are the only versions tested and supported for each release. TensorRT-LLM does not support Python 3.11.
+
+### CUDA & Driver Requirements
+
+Dynamo container images include CUDA toolkit libraries; the host must have a compatible NVIDIA GPU driver.
+
+| Backend | CUDA Toolkit | Min Driver |
+| :--- | :--- | :--- |
+| **SGLang** | 12.9 | 575.xx+ |
+| | 13.0 | 580.xx+ |
+| **TensorRT-LLM** | 13.1 | 580.xx+ |
+| **vLLM** | 12.9 | 575.xx+ |
+| | 13.0 | 580.xx+ |
+
+The table above is for **v1.2.0**; `v1.3.0-dev.1` follows the same CUDA matrix. For extended driver compatibility beyond these minimums (forward compatibility, `cuda-compat` packages, troubleshooting), see the [CUDA Compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/).
+
+## Feature Quick Comparison
+
+**Legend:**
+*   ✅ : Supported
+*   ⚠️ : Supported, with a caveat
+*   🚧 : Work in Progress / Experimental
+*   ✗ : Not Supported
+
+| Feature | SGLang | TensorRT-LLM | vLLM | Learn More |
+| :--- | :---: | :---: | :---: | :--- |
+| **Disaggregated Serving** | ✅ | ✅ | ✅ | [Design Doc][disagg] |
+| **KV-Aware Routing** | ✅ | ✅ | ✅ | [Router Doc][kv-routing] |
+| **SLA-Based Planner** | ✅ | ✅ | ✅ | [Planner Doc][planner] |
+| **KV Block Manager** | 🚧 | ✅ | ✅ | [KVBM Doc][kvbm] |
+| **Multimodal (Image)** | ✅ | ✅ | ✅ | [Multimodal Doc][mm] |
+| **Multimodal (Video)** | ✅ | | ✅ | [Multimodal Doc][mm] |
+| **Multimodal (Audio)** | | | 🚧 | [Multimodal Doc][mm] |
+| **Request Migration** | ✅ | 🚧 | ✅ | [Migration Doc][migration] |
+| **Request Cancellation** | 🚧 | ✅ | ✅ | Backend pages |
+| **LoRA** | | | ✅ | [LoRA Doc][lora] |
+| **Tool Calling** | ✅ | ✅ | ✅ | [Tool Calling Doc][tools] |
+| **Speculative Decoding** | 🚧 | ✅ | ✅ | Backend pages |
+| **Dynamo Snapshot** | ✅ | | ✅ | [Snapshot Docs][snapshot] |
+
+## 1. vLLM Backend
+
+vLLM offers the broadest feature coverage in Dynamo, with full support for disaggregated serving, KV-aware routing, KV block management, LoRA adapters, and multimodal inference including video and audio.
+
+*Source: [docs/backends/vllm/README.md][vllm-readme]*
+
+| Feature                   | Supported? | Notes                                                                                                                                        |
+| :------------------------ | :--------: | :------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Disaggregated Serving** |     ✅      | Prefill/decode separation with NIXL KV transfer                                                                                              |
+| **KV-Aware Routing**      |     ✅      |                                                                                                                                              |
+| **SLA-Based Planner**     |     ✅      |                                                                                                                                              |
+| **KV Block Manager**      |     ✅      |                                                                                                                                              |
+| **Multimodal**            |     ✅      | Image + video; audio 🚧 (Qwen2-Audio, experimental). With KV-aware routing, image-aware routing on documented paths ([Source][mm-kv-routing]) |
+| **Request Migration**     |     ✅      |                                                                                                                                              |
+| **Request Cancellation**  |     ✅      |                                                                                                                                              |
+| **LoRA**                  |     ✅      | Dynamic load/unload; KV-aware routing supports adapter affinity                                                                              |
+| **Tool Calling**          |     ✅      |                                                                                                                                              |
+| **Speculative Decoding**  |     ✅      | Eagle3 ([Source][vllm-spec])                                                                                                                 |
+
+## 2. SGLang Backend
+
+SGLang is optimized for high-throughput serving with fast primitives, providing robust support for disaggregated serving, KV-aware routing, and request migration.
+
+*Source: [docs/backends/sglang/README.md][sglang-readme]*
+
+| Feature                   | Supported? | Notes                                                                                                                                 |
+| :------------------------ | :--------: | :------------------------------------------------------------------------------------------------------------------------------------ |
+| **Disaggregated Serving** |     ✅      |                                                                                                                                       |
+| **KV-Aware Routing**      |     ✅      |                                                                                                                                       |
+| **SLA-Based Planner**     |     ✅      |                                                                                                                                       |
+| **KV Block Manager**      |     🚧      | Work in progress across all combinations                                                                                              |
+| **Multimodal**            |     ✅      | Image + video. ✗ Not compatible with KV-aware routing. Disagg patterns: EPD, E/PD, E/P/D (not traditional EP/D) ([Source][mm-sglang]) |
+| **Request Migration**     |     ✅      |                                                                                                                                       |
+| **Request Cancellation**  |     🚧      | Remote-prefill-phase cancellation not supported in disaggregated mode ([Source][sglang-readme])                                       |
+| **LoRA**                  |     ✗      | Not supported                                                                                                                         |
+| **Tool Calling**          |     ✅      |                                                                                                                                       |
+| **Speculative Decoding**  |     🚧      | Code hooks exist; no examples or docs yet                                                                                             |
+
+## 3. TensorRT-LLM Backend
+
+TensorRT-LLM delivers maximum inference performance and optimization, with full KVBM integration and robust disaggregated serving support.
+
+*Source: [docs/backends/trtllm/README.md][trtllm-readme]*
+
+| Feature                   | Supported? | Notes                                                                                                                                                                         |
+| :------------------------ | :--------: | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Disaggregated Serving** |     ✅      |                                                                                                                                                                               |
+| **KV-Aware Routing**      |     ✅      |                                                                                                                                                                               |
+| **SLA-Based Planner**     |     ✅      |                                                                                                                                                                               |
+| **KV Block Manager**      |     ✅      |                                                                                                                                                                               |
+| **Multimodal**            |     ✅      | Image only (URLs + pre-computed embeddings). Disagg: EP/D + E/P/D. With KV-aware routing, via dedicated MM Router Worker (requires KV event publishing) ([Source][mm-trtllm]) |
+| **Request Migration**     |     ✅      | 🚧 With multimodal                                                                                                                                                             |
+| **Request Cancellation**  |     ⚠️      | Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)                                                               |
+| **LoRA**                  |     ✗      | Not supported                                                                                                                                                                 |
+| **Tool Calling**          |     ✅      |                                                                                                                                                                               |
+| **Speculative Decoding**  |     ✅      |                                                                                                                                                                               |
+
+[disagg]: ../design-docs/disagg-serving.md
+[kv-routing]: ../components/router/README.md
+[planner]: ../components/planner/planner-guide.md
+[kvbm]: ../components/kvbm/README.md
+[mm]: ../features/multimodal/README.md
+[migration]: ../fault-tolerance/request-migration.md
+[lora]: ../features/lora/README.md
+[tools]: ../tool-calling/README.md
+[snapshot]: ../kubernetes/snapshot.md

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Descriptor
+subtitle: Registers a local memory buffer with the NIXL I/O subsystem for transfer.
 ---
 
 Memory descriptor that ensures memory is registered with the NIXL-base I/O subsystem.
@@ -23,13 +24,17 @@ There are four ways to create a descriptor:
 
 ## Methods
 
-### `register_memory`
+### register_memory
 
 ```python
-def register_memory(self, connector: Connector) -> None:
+def register_memory(self, connector: Connector) -> None
 ```
 
 Instructs the descriptor to register its memory buffer with the NIXL-based I/O subsystem.
+
+<ParamField path="connector" type="Connector" required={true}>
+  The [`Connector`](connector.mdx) whose NIXL subsystem the descriptor's memory buffer is registered with.
+</ParamField>
 
 Calling this method more than once on the same descriptor has no effect.
 
@@ -38,31 +43,22 @@ When the descriptor is assigned to a NIXL operation, it will be automatically re
 
 ## Properties
 
-### `device`
+<ParamField path="device" type="Device">
+  A reference to the [`Device`](device.mdx) that contains the buffer the descriptor represents.
+</ParamField>
 
-```python
-@property
-def device(self) -> Device:
-```
+<ParamField path="size" type="int">
+  The size of the memory allocation the descriptor represents.
+</ParamField>
 
-Gets a reference to the [`Device`](device.md) that contains the buffer the descriptor represents.
-
-### `size`
-
-```python
-@property
-def size(self) -> int:
-```
-
-Gets the size of the memory allocation the descriptor represents.
 
 ## Related Classes
 
-  - [Connector](connector.md)
-  - [Device](device.md)
-  - [OperationStatus](operation-status.md)
-  - [RdmaMetadata](rdma-metadata.md)
-  - [ReadOperation](read-operation.md)
-  - [ReadableOperation](readable-operation.md)
-  - [WritableOperation](writable-operation.md)
-  - [WriteOperation](write-operation.md)
+  - [Connector](connector.mdx)
+  - [Device](device.mdx)
+  - [OperationStatus](operation-status.mdx)
+  - [RdmaMetadata](rdma-metadata.mdx)
+  - [ReadOperation](read-operation.mdx)
+  - [ReadableOperation](readable-operation.mdx)
+  - [WritableOperation](writable-operation.mdx)
+  - [WriteOperation](write-operation.mdx)

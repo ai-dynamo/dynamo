@@ -62,7 +62,7 @@ Two paths are supported. Pick the one that matches how you plan to develop.
 
 #### Pre-built Dynamo SGLang container (recommended)
 
-Pull and launch the published `sglang-runtime` image from NGC. See [release artifacts](../../reference/release-artifacts.md) for the current tag and CUDA variants.
+Pull and launch the published `sglang-runtime` image from NGC. See [release artifacts](../../reference/release-artifacts.mdx) for the current tag and CUDA variants.
 
 ```bash
 docker run --gpus all -it --rm \
@@ -128,6 +128,31 @@ pip install -e .
 | [**Request Cancellation**](../../fault-tolerance/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**Graceful Shutdown**](../../fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
 | [**Observability**](sglang-observability.md) | ✅ | Metrics, tracing, and Grafana dashboards |
+
+## Feature Interactions
+
+SGLang is optimized for high-throughput serving with fast primitives, providing robust support for disaggregated serving, KV-aware routing, and request migration. The matrix below shows which feature pairs are validated to work together.
+
+**Legend:** ✅ Supported &nbsp;|&nbsp; 🚧 Work in Progress / Experimental / Limited
+
+| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Disaggregated Serving** | — | | | | | | | | | |
+| **KV-Aware Routing** | ✅ | — | | | | | | | | |
+| **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
+| **KV Block Manager** | 🚧 | 🚧 | 🚧 | — | | | | | | |
+| **Multimodal** | ✅<sup>2</sup> | <sup>1</sup> | — | 🚧 | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | 🚧 | ✅ | — | | | | |
+| **Request Cancellation** | 🚧<sup>3</sup> | ✅ | ✅ | 🚧 | 🚧 | ✅ | — | | | |
+| **LoRA** | | | | 🚧 | | | | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | 🚧 | ✅ | ✅ | ✅ | | — | |
+| **Speculative Decoding** | 🚧 | 🚧 | — | 🚧 | — | 🚧 | — | | 🚧 | — |
+
+> **Notes:**
+> 1. **Multimodal + KV-Aware Routing**: Not supported. ([Source](../../components/router/README.md))
+> 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source](../../features/multimodal/multimodal-sglang.md))
+> 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source](../../fault-tolerance/request-cancellation.md))
+> 4. **Speculative Decoding**: Code hooks exist (`spec_decode_stats` in publisher), but no examples or documentation yet.
 
 ## Quick Start
 

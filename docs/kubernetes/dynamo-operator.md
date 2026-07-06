@@ -137,7 +137,7 @@ For the complete technical API reference for Dynamo Custom Resource Definitions,
 For user-focused workflows, see:
 
 - **[Deployment Overview](./model-deployment-guide.md)** for DGD, DCD, DGDR, and recipes
-- **[DGDR Reference](./dgdr.md)** for deploy-by-intent generated deployments
+- **[DGDR Reference](./dgdr-reference.mdx)** for deploy-by-intent generated deployments
 - **[Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
 - **[Snapshotting GPU Workers](./snapshot.md)** for `DynamoCheckpoint`
 

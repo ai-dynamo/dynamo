@@ -5,7 +5,7 @@ sidebar-title: 简介
 ---
 
 <p align="left">
-  <a href="./introduction.md" hreflang="en">English</a> | <strong>简体中文</strong>
+  <a href="./about.md" hreflang="en">English</a> | <strong>简体中文</strong>
 </p>
 
 # Dynamo 简介
@@ -48,7 +48,7 @@ pip install nixl
 ```
 
 > [!NOTE]
-> 也提供包含所有依赖项的预构建容器。请参阅 [Release Artifacts](../reference/release-artifacts.md) 了解容器镜像。
+> 也提供包含所有依赖项的预构建容器。请参阅 [Release Artifacts](../reference/release-artifacts.mdx) 了解容器镜像。
 
 Dynamo 生态系统包含以下额外的模块化组件，并会随着时间继续增长：
 

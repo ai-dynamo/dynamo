@@ -259,7 +259,7 @@ Choose the path that matches how much control you need:
 |---|---|
 | [Dynamo Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) | A recipe matches your model, backend, hardware, and serving mode. Start here for validated baselines and `perf.yaml` benchmarks. |
 | Direct `DynamoGraphDeployment` | You already know the prefill/decode layout, images, parallelism, and KV transfer settings. |
-| [DGDR](../../kubernetes/dgdr.md) | You want Dynamo to generate a DGD from model, backend, hardware, workload, and SLA intent. |
+| [DGDR](../../kubernetes/dgdr-reference.mdx) | You want Dynamo to generate a DGD from model, backend, hardware, workload, and SLA intent. |
 | [Sizing with AIConfigurator](aiconfigurator.md) | You want to compare aggregated vs. disaggregated layouts and estimate prefill/decode sizing before deployment. |
 
 Good recipe starting points include:

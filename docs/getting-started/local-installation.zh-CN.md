@@ -52,7 +52,7 @@ docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runt
 - 使用 `&` 在后台运行进程（请参阅下方“运行 Dynamo”部分），或
 - 打开第二个终端并使用 `docker exec -it <container_id> bash`
 
-如需查看可用版本，请参阅[发布产物](../reference/release-artifacts.md#container-images)；
+如需查看可用版本，请参阅[发布产物](../reference/release-artifacts.mdx#container-images)；
 如需运行说明，请参阅各后端指南：[SGLang](../backends/sglang/README.md) |
 [TensorRT-LLM](../backends/trtllm/README.md) | [vLLM](../backends/vllm/README.md)
 

@@ -1,8 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Introduction to Dynamo
-sidebar-title: Introduction
+title: About Dynamo
 ---
 
 <p align="left">
@@ -55,7 +54,7 @@ pip install nixl
 ```
 
 > [!NOTE]
-> Pre-built containers with all dependencies are also available. See [Release Artifacts](../reference/release-artifacts.md) for container images.
+> Pre-built containers with all dependencies are also available. See [Release Artifacts](../reference/release-artifacts.mdx) for container images.
 
 The Dynamo ecosystem includes these additional modular components, and will continue to grow over time:
 

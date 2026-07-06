@@ -514,6 +514,140 @@ svg.card-icon{
 .fern-docs-badge{
     border-radius: var(--rounded);
 }
+/* Enum "Allowed values" chips: match Fern's Schema renderer, which builds each
+   chip as <Badge size="sm"> with the default subtle variant. We can't invoke
+   that renderer (it needs an OpenAPI-backed <Schema>), so we restyle the MDX
+   <Badge> to the same tokens Fern uses: label in shrink-0 text-sm grayscale-a11,
+   chips as .subtle.small (grayscale-a3 fill, grayscale-a11 text, radius-1). The
+   forced background/color neutralize whatever intent the MDX <Badge> requires.
+   Scoped to .enum-values so the pill <Badge> used elsewhere is unaffected. */
+.enum-values {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem;
+}
+.enum-values .enum-label {
+    flex-shrink: 0;
+    color: var(--grayscale-a11);
+    font-size: var(--text-sm);
+}
+.enum-values .fern-docs-badge {
+    border-radius: var(--radius-1) !important;
+    height: 1.25rem;
+    padding: 0 0.375rem;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    background-color: var(--grayscale-a3) !important;
+    color: var(--grayscale-a11) !important;
+    text-transform: none;
+}
+
+/* ============================================================
+   Compatibility page: category chips for the Requirement table.
+   Splits comma-separated OS / Arch / GPU / CUDA values into
+   color-coded chips so supported platforms read at a glance.
+   Colored by category (distro brand, CPU arch, GPU generation,
+   CUDA toolkit); arch is always blue across rows so x86_64 /
+   ARM64 stay visually consistent wherever they appear. Tints
+   are rgba so they hold up in both light and dark themes.
+   Scoped to .dynamo-chip; nothing else is affected.
+   ============================================================ */
+.dynamo-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3em;
+    margin: 0.15rem 0.1rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 6px;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.5;
+    white-space: nowrap;
+    border: 1px solid transparent;
+    vertical-align: middle;
+}
+
+/* Ubuntu — brand orange */
+.dynamo-chip-ubuntu {
+    background-color: rgba(233, 84, 32, 0.12);
+    color: #C7401C;
+    border-color: rgba(233, 84, 32, 0.3);
+}
+.dark .dynamo-chip-ubuntu {
+    background-color: rgba(233, 84, 32, 0.2);
+    color: #FF9068;
+    border-color: rgba(233, 84, 32, 0.42);
+}
+
+/* CentOS — violet */
+.dynamo-chip-centos {
+    background-color: rgba(124, 58, 237, 0.12);
+    color: #6D28D9;
+    border-color: rgba(124, 58, 237, 0.3);
+}
+.dark .dynamo-chip-centos {
+    background-color: rgba(139, 92, 246, 0.2);
+    color: #C4B5FD;
+    border-color: rgba(139, 92, 246, 0.42);
+}
+
+/* CPU architecture — blue (consistent across every row) */
+.dynamo-chip-arch {
+    background-color: rgba(37, 99, 235, 0.1);
+    color: #1D4ED8;
+    border-color: rgba(37, 99, 235, 0.28);
+}
+.dark .dynamo-chip-arch {
+    background-color: rgba(59, 130, 246, 0.18);
+    color: #93C5FD;
+    border-color: rgba(59, 130, 246, 0.42);
+}
+
+/* GPU generation — NVIDIA green */
+.dynamo-chip-gpu {
+    background-color: rgba(118, 185, 0, 0.16);
+    color: #4D7C0F;
+    border-color: rgba(118, 185, 0, 0.38);
+}
+.dark .dynamo-chip-gpu {
+    background-color: rgba(118, 185, 0, 0.22);
+    color: #A3E635;
+    border-color: rgba(118, 185, 0, 0.46);
+}
+
+/* CUDA toolkit — teal */
+.dynamo-chip-cuda {
+    background-color: rgba(8, 145, 178, 0.12);
+    color: #0E7490;
+    border-color: rgba(8, 145, 178, 0.3);
+}
+.dark .dynamo-chip-cuda {
+    background-color: rgba(34, 211, 238, 0.16);
+    color: #67E8F9;
+    border-color: rgba(34, 211, 238, 0.4);
+}
+
+/* Caveat qualifier (e.g. "experimental") — amber */
+.dynamo-chip-note {
+    background-color: rgba(217, 119, 6, 0.12);
+    color: #B45309;
+    border-color: rgba(217, 119, 6, 0.3);
+    font-weight: 500;
+}
+.dark .dynamo-chip-note {
+    background-color: rgba(245, 158, 11, 0.16);
+    color: #FCD34D;
+    border-color: rgba(245, 158, 11, 0.4);
+}
+
+/* Neutral qualifier — subtle grey */
+.dynamo-chip-neutral {
+    background-color: var(--grayscale-a3);
+    color: var(--grayscale-a11);
+    border-color: var(--grayscale-a3);
+    font-weight: 500;
+}
 .fern-page-actions button:hover{
     background-color: transparent !important;
 }
@@ -811,5 +945,63 @@ svg.card-icon{
     text-decoration-color: var(--accent) !important;
     text-underline-offset: 1px !important;
     text-decoration-style: underline !important;
+}
+
+/* ===================== Welcome (Home) landing page ===================== */
+
+/* GitHub Star/Fork buttons: rendered as ghbtns.com iframes (immune to Fern's
+   SPA link rewriting). Lay them out in a row with a little breathing room. */
+.github-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    margin: 0.5rem 0 1.5rem;
+}
+.github-buttons iframe {
+    border: 0;
+    overflow: hidden;
+    /* iframes are inline by default; keep them aligned to the text baseline row */
+    display: inline-block;
+    vertical-align: middle;
+}
+
+/* Brand gradient wash anchored to the top of the page content, echoing the
+   SGLang landing hero. Scoped to the Welcome page via the .welcome-gradient
+   marker div so it never bleeds onto other docs pages. Sits behind content. */
+.welcome-gradient {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 480px;
+    pointer-events: none;
+    z-index: 0;
+    background: radial-gradient(ellipse 120% 80% at 50% 0%,
+        rgba(118, 185, 0, 0.18) 0%,
+        rgba(118, 185, 0, 0.10) 28%,
+        rgba(118, 185, 0, 0.04) 55%,
+        transparent 80%);
+}
+.dark .welcome-gradient {
+    background: radial-gradient(ellipse 120% 80% at 50% 0%,
+        rgba(118, 185, 0, 0.22) 0%,
+        rgba(118, 185, 0, 0.12) 28%,
+        rgba(118, 185, 0, 0.05) 55%,
+        transparent 80%);
+}
+/* Keep page content above the gradient wash. */
+.welcome-gradient ~ * {
+    position: relative;
+    z-index: 1;
+}
+
+/* Widen the Welcome page beyond the default 812px content width so the cards use
+   the horizontal space freed by hide-toc. Scoped via :has() to the article that
+   contains the .welcome-gradient marker, so other docs pages keep their reading
+   width. The article is normally `w-content-width mx-auto` (812px, centered). */
+article:has(.welcome-gradient) {
+    width: 100% !important;
+    max-width: 1200px !important;
 }
 

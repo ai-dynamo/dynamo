@@ -1,0 +1,136 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Operator Metrics
+subtitle: Kubernetes-only dynamo_operator_* metrics and the annotations and Helm values that enable metrics collection.
+---
+
+The Dynamo Operator exposes its own Prometheus metrics for controller reconciliation, webhook validation, and resource inventory. These are **Kubernetes-scoped** — they exist only where the operator runs, and are separate from the application metrics emitted by frontends and workers (see [Metrics Catalog](metrics-catalog.mdx)). For setup and dashboards, see the [Operator Metrics guide](../../kubernetes/observability/operator-metrics.md).
+
+All operator metrics use the `dynamo_operator` prefix. Unlike application metrics (which use a PodMonitor), the operator is scraped via a ServiceMonitor created by the Helm chart.
+
+## Reconciliation metrics
+
+Track how efficiently controllers process `DynamoGraphDeployment`, `DynamoComponentDeployment`, `DynamoModel`, `DynamoGraphDeploymentRequest`, and `DynamoGraphDeploymentScalingAdapter` resources.
+
+<ParamField path="dynamo_operator_reconcile_duration_seconds" type="histogram">
+  Duration of reconciliation loops. Labeled by `resource_type`, `namespace`, and `result`.
+</ParamField>
+
+<ParamField path="dynamo_operator_reconcile_total" type="counter">
+  Total number of reconciliations. Labeled by `resource_type`, `namespace`, and `result`.
+</ParamField>
+
+<ParamField path="dynamo_operator_reconcile_errors_total" type="counter">
+  Total reconciliation errors by type. Labeled by `resource_type`, `namespace`, and `error_type`.
+</ParamField>
+
+## Webhook metrics
+
+Track performance and outcomes of admission webhook requests.
+
+<ParamField path="dynamo_operator_webhook_duration_seconds" type="histogram">
+  Duration of webhook validation requests. Labeled by `resource_type` and `operation`.
+</ParamField>
+
+<ParamField path="dynamo_operator_webhook_requests_total" type="counter">
+  Total webhook admission requests. Labeled by `resource_type`, `operation`, and `result`.
+</ParamField>
+
+<ParamField path="dynamo_operator_webhook_denials_total" type="counter">
+  Total webhook denials with reasons. Labeled by `resource_type`, `operation`, and `reason`.
+</ParamField>
+
+## Resource inventory metrics
+
+<ParamField path="dynamo_operator_resources_total" type="gauge">
+  Current count of managed resources by state. Labeled by `resource_type`, `namespace`, and `status`.
+</ParamField>
+
+## Operator metric labels
+
+These labels are specific to operator metrics and are distinct from the application [Metric Labels](metric-labels.mdx).
+
+<ParamField path="resource_type" type="string">
+  The managed CRD: `DynamoGraphDeployment`, `DynamoComponentDeployment`, `DynamoModel`, `DynamoGraphDeploymentRequest`, or `DynamoGraphDeploymentScalingAdapter`.
+</ParamField>
+
+<ParamField path="namespace" type="string">
+  Target Kubernetes namespace of the resource.
+</ParamField>
+
+<ParamField path="result" type="string">
+  Outcome of the operation. On reconcile metrics: `success`, `error`, `requeue`. On webhook metrics: `allowed`, `denied`.
+</ParamField>
+
+<ParamField path="error_type" type="string">
+  On `dynamo_operator_reconcile_errors_total` — the failure category.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>not_found</Badge> <Badge intent="note" minimal>already_exists</Badge> <Badge intent="note" minimal>conflict</Badge> <Badge intent="note" minimal>validation</Badge> <Badge intent="note" minimal>bad_request</Badge> <Badge intent="note" minimal>unauthorized</Badge> <Badge intent="note" minimal>forbidden</Badge> <Badge intent="note" minimal>timeout</Badge> <Badge intent="note" minimal>server_timeout</Badge> <Badge intent="note" minimal>unavailable</Badge> <Badge intent="note" minimal>rate_limited</Badge> <Badge intent="note" minimal>internal</Badge></span>
+</ParamField>
+
+<ParamField path="operation" type="string">
+  On webhook metrics — the admission operation.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>CREATE</Badge> <Badge intent="note" minimal>UPDATE</Badge> <Badge intent="note" minimal>DELETE</Badge></span>
+</ParamField>
+
+<ParamField path="reason" type="string">
+  On `dynamo_operator_webhook_denials_total` — the validation failure reason, e.g. `immutable_field_changed`, `invalid_config`.
+</ParamField>
+
+<ParamField path="status" type="string">
+  On `dynamo_operator_resources_total` — resource state derived from each CRD's status. Common values: `ready`, `not_ready`, `unknown` (DCD, DM, DGDSA). DGD uses `pending`, `successful`, `failed` from `.status.state`. DGDR uses `Pending`, `Profiling`, `Ready`, `Deploying`, `Deployed`, `Failed` from `.status.phase`.
+</ParamField>
+
+## Kubernetes enablement knobs
+
+Metrics collection on Kubernetes is controlled by CRD annotations and Helm values — **not** environment variables. These knobs govern whether application and operator metrics are scraped at all.
+
+<Note>
+  These fields also appear in the CRD and Helm references. They are reproduced here so the observability enablement path is documented in one place. For the operator's full Helm value set, see the [Dynamo Operator guide](../../kubernetes/dynamo-operator.md).
+</Note>
+
+<ParamField path="nvidia.com/metrics-enabled" type="boolean (pod label)" default="true">
+  Pod label the operator adds to every managed pod so the PodMonitor discovers and scrapes it. Present automatically; you do not set it by hand.
+</ParamField>
+
+<ParamField path="nvidia.com/enable-metrics" type="boolean (DGD annotation)" default="true">
+  Annotation on a `DynamoGraphDeployment` to opt a deployment **out** of metrics collection. Set to `false` to disable scraping for that deployment.
+</ParamField>
+
+<ParamField path="dynamo-operator.metricsService.enabled" type="boolean (Helm value)" default="true">
+  Helm value controlling whether the operator's metrics Service and ServiceMonitor are created. Set to `false` to disable operator metrics collection.
+</ParamField>
+
+<ParamField path="dynamo-operator.dynamo.metrics.prometheusEndpoint" type="string (Helm value)">
+  Helm value pointing the operator at your Prometheus endpoint, e.g. `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090`.
+</ParamField>
+
+To disable operator metrics collection:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace dynamo-system \
+  --set dynamo-operator.metricsService.enabled=false
+```
+
+To opt a single deployment out of application metrics:
+
+```yaml
+apiVersion: nvidia.com/v1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-deployment
+  annotations:
+    nvidia.com/enable-metrics: "false"
+spec:
+  # …
+```
+
+## Related
+
+- [Operator Metrics guide](../../kubernetes/observability/operator-metrics.md) — setup, example queries, and the operator Grafana dashboard.
+- [Kubernetes Metrics guide](../../kubernetes/observability/metrics.md) — PodMonitor and Prometheus walkthrough for application metrics.
+- [Metrics Catalog](metrics-catalog.mdx) — application `dynamo_*` metrics.
+- [Metric Labels](metric-labels.mdx) — application metric label dimensions.

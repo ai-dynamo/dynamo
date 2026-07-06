@@ -44,7 +44,7 @@ On AWS, UCX uses the **SRD (Scalable Reliable Datagram)** transport over EFA dev
 nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1-efa-amd64
 ```
 
-See [Release Artifacts](../../reference/release-artifacts.md) for all available EFA images.
+See [Release Artifacts](../../reference/release-artifacts.mdx) for all available EFA images.
 
 - **Host-mount approach (ARM64 / GB200):** No pre-built EFA ARM64 image is published. Use the standard `tensorrtllm-runtime` image and mount the EFA SDK from the host node. This is what we tested on GB200 NVL72:
 

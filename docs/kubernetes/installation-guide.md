@@ -45,7 +45,9 @@ Every Dynamo deployment requires two Helm charts: the **GPU Operator** (Step 1) 
 
 **Shared storage** — Prevents each pod from downloading model weights independently. Without it, large models (>70B) take hours to download per pod, and many replicas will hit HuggingFace rate limits. Not enforced by the operator — this is an operational concern. See [Model Caching](model-caching.md) for the full walkthrough.
 
-## Step 1: Install the GPU Operator
+<Steps toc={true} tocDepth={2}>
+
+<Step title="Install the GPU Operator">
 
 The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) automates deployment of all NVIDIA software components needed to provision GPUs — drivers, container toolkit, device plugin, and monitoring.
 
@@ -57,6 +59,7 @@ helm repo update
 ```bash
 helm install gpu-operator nvidia/gpu-operator \
   --namespace gpu-operator --create-namespace
+  # Note: add \ to --create-namespace above when uncommenting the flag below
   # Uncomment if your nodes already have provider-managed GPU drivers installed:
   # --set driver.enabled=false
 ```
@@ -73,10 +76,14 @@ Verify the GPU Operator is running:
 
 ```bash
 kubectl get pods -n gpu-operator
-# Expected: gpu-operator, nvidia-driver-daemonset, nvidia-device-plugin-daemonset, etc. all Running
+# Expected: gpu-operator, nvidia-device-plugin-daemonset, etc. all Running
+# Note: nvidia-driver-daemonset appears only when the operator manages the driver;
+# with provider-managed drivers (--set driver.enabled=false) it is not present.
 ```
 
-## Step 2: Install the Dynamo Platform
+</Step>
+
+<Step title="Install the Dynamo Platform">
 
 Set your environment variables:
 
@@ -127,10 +134,12 @@ kubectl get crd | grep dynamo
 
 # Check operator and platform pods
 kubectl get pods -n $NAMESPACE
-# Expected: dynamo-operator-*, etcd-*, nats-* pods all Running
+# Expected: dynamo-operator-* and nats-* pods all Running
 ```
 
-## Step 3: Install Optional Components
+</Step>
+
+<Step title="Install Optional Components">
 
 The Dynamo install command above includes commented flags for each optional component. Install the component first, then uncomment the corresponding flag before running `helm install` in Step 2 (or run `helm upgrade --reuse-values` with the flag if you've already installed Dynamo).
 
@@ -216,7 +225,9 @@ Set up a `ReadWriteMany` PVC so all pods share downloaded model weights instead 
 
 For large clusters with frequent model updates, consider [ModelExpress](model-caching.md#option-2-modelexpress-p2p-distribution) for P2P model distribution and ModelStreamer for direct streaming from object storage. See [Model Caching](model-caching.md) for the full walkthrough including the download Job, mount configuration, and ModelExpress setup.
 
-## Step 4: Pre-Deployment Check
+</Step>
+
+<Step title="Pre-Deployment Check">
 
 Run the pre-deployment check script to validate your cluster is ready for deployments:
 
@@ -225,6 +236,64 @@ Run the pre-deployment check script to validate your cluster is ready for deploy
 ```
 
 This checks kubectl connectivity, default StorageClass configuration, GPU node availability, and GPU Operator status. See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.
+
+</Step>
+
+</Steps>
+
+
+## Alternative: Install with AICR
+
+Steps 1–3 install each component — GPU Operator, Dynamo Platform, Grove, RDMA — with its own Helm command. [NVIDIA AI Cluster Runtime (AICR)](https://github.com/NVIDIA/aicr) is an alternative that generates one version-locked **recipe** for the whole stack, then renders it into deployment-ready bundles for Helm, Argo CD, Flux, or Helmfile. For a supported environment, the `aicr` CLI drives the entire installation flow from a single recipe: GPU Operator, NVIDIA DRA driver, Network Operator (RDMA), Grove, KAI Scheduler, cert-manager, kube-prometheus-stack, and the Dynamo Platform.
+
+> [!NOTE]
+> AICR is a new, separately maintained project. It validates **specific combinations** of cloud, GPU, and OS, so it fits a cluster that matches a validated Dynamo recipe rather than an arbitrary environment. You still bring your own Kubernetes cluster — AICR generates and validates the runtime configuration, it does not provision clusters. See the [AICR documentation](https://docs.nvidia.com/aicr) for the authoritative support matrix.
+
+AICR validates recipes across these dimensions; not every combination has a Dynamo recipe, so check the AICR docs for the validated set:
+
+| Dimension | Supported values |
+|-----------|------------------|
+| Cloud / service | AKS, BCM, EKS, GKE, Kind, LKE, OKE |
+| GPU | A100, B200, GB200, H100, H200, L40, RTX PRO 6000 |
+| Operating system | Amazon Linux, COS, RHEL, Talos, Ubuntu |
+
+Dynamo recipes use Dynamic Resource Allocation (DRA) for GPUs, which requires **Kubernetes 1.34+**.
+
+### Install Dynamo with the AICR CLI
+
+1. Install the CLI with Homebrew:
+
+```bash
+brew tap NVIDIA/aicr
+brew install aicr
+```
+
+Or use the install script:
+
+```bash
+curl -sfL https://raw.githubusercontent.com/NVIDIA/aicr/main/install | bash -s --
+```
+
+2. Generate a recipe for your environment. Set `--platform dynamo` and match `--service`, `--accelerator`, and `--os` to your cluster:
+
+```bash
+aicr recipe --service eks --accelerator h100 --os ubuntu \
+  --intent inference --platform dynamo -o recipe.yaml
+```
+
+3. Render the recipe into deployment bundles. Choose the deployer that matches your workflow (`helm`, `argocd`, `flux`, or `helmfile`):
+
+```bash
+aicr bundle --recipe recipe.yaml --deployer helm --output ./bundles
+```
+
+4. Deploy the generated bundles to your cluster, then validate the running cluster against the recipe:
+
+```bash
+aicr validate --recipe recipe.yaml
+```
+
+For manual installation, the full command reference, and the supported environment matrix, see the [AICR documentation](https://docs.nvidia.com/aicr). Once AICR has installed the Dynamo Platform, continue with the verification steps above and Next Steps below.
 
 ## Next Steps
 
@@ -278,41 +347,6 @@ kubectl get crd | grep "dynamo.*nvidia.com"
 # Delete each CRD
 kubectl delete crd <crd-name>
 ```
-
-## Advanced: Build from Source
-
-If you need to contribute to Dynamo or use the latest unreleased features from the main branch:
-
-```bash
-# 1. Set registry environment
-export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo/  # or your registry
-export DOCKER_USERNAME='$oauthtoken'
-export DOCKER_PASSWORD=<YOUR_NGC_CLI_API_KEY>
-export IMAGE_TAG=$RELEASE_VERSION
-
-# 2. Build and push operator image
-cd deploy/operator
-docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG . && docker push $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG
-cd -
-
-# 3. Create namespace and image pull secret (only if using a private registry)
-kubectl create namespace $NAMESPACE
-kubectl create secret docker-registry docker-imagepullsecret \
-  --docker-server=$DOCKER_SERVER \
-  --docker-username=$DOCKER_USERNAME \
-  --docker-password=$DOCKER_PASSWORD \
-  --namespace=$NAMESPACE
-
-# 4. Install from local chart
-cd deploy/helm/charts
-helm dep build ./platform/
-helm install dynamo-platform ./platform/ \
-  --namespace "$NAMESPACE" \
-  --set "dynamo-operator.controllerManager.manager.image.repository=$DOCKER_SERVER/kubernetes-operator" \
-  --set "dynamo-operator.controllerManager.manager.image.tag=$IMAGE_TAG" \
-  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
-```
-
 ## Reference
 
 - [Helm Chart Configuration](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md)

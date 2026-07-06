@@ -15,6 +15,18 @@ path for shared GPU clusters and multi-node serving.
 > [!NOTE]
 > **Deployment modes.** Dynamo supports two deployment modes on Kubernetes. This quickstart uses **standalone mode**, where the Dynamo Frontend serves requests and the integrated Dynamo Router does KV-aware routing. Dynamo can also run in **gateway mode** behind a [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway, where KV-aware routing happens in the Dynamo Endpoint Picker Plugin (EPP) at the gateway layer and the Frontend runs as a sidecar in `--router-mode direct`. See the [Inference Gateway (GAIE) guide](inference-gateway.md) to set up gateway mode.
 
+## Supported Platforms (At a Glance)
+
+| Requirement | Supported |
+| :--- | :--- |
+| **GPU** | NVIDIA Ampere, Ada Lovelace, Hopper, Blackwell |
+| **OS** | Ubuntu 24.04 (x86_64, ARM64), Ubuntu 22.04 (x86_64), CentOS Stream 9 (x86_64, experimental) |
+| **Arch** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
+| **CUDA 12** | Container images for SGLang and vLLM (CUDA 12.9) |
+| **CUDA 13** | Container images for TensorRT-LLM (CUDA 13.1), SGLang and vLLM (CUDA 13.0) |
+
+For backend framework versions, the feature matrix, and CUDA/driver requirements, see [Compatibility](../reference/compatibility.mdx). For the full artifact inventory — container images, wheels, Helm charts, and crates — see [Release Artifacts](../reference/release-artifacts.mdx).
+
 ## Prerequisites
 
 - Kubernetes cluster (v1.24+) with GPU nodes
@@ -29,8 +41,12 @@ Create a HuggingFace token secret for model downloads. If you don't have a token
 
 ```bash
 export HF_TOKEN=<your-hf-token>
+export NAMESPACE=dynamo-system
 
+# The secret must be created in the same namespace you deploy the model to.
+kubectl create namespace $NAMESPACE
 kubectl create secret generic hf-token-secret \
+  -n $NAMESPACE \
   --from-literal=HF_TOKEN="$HF_TOKEN"
 ```
 
@@ -49,8 +65,9 @@ helm install gpu-operator nvidia/gpu-operator \
 > [!TIP]
 > If your cluster already provides GPU drivers (e.g., GKE with `gpu-driver-version=latest`, or AKS), add:
 > ```bash
-> --set driver.enabled=false --set toolkit.enabled=false
+> --set driver.enabled=false
 > ```
+> Add `--set toolkit.enabled=false` only if your provider also configures the GPU container runtime, not just the driver. If it installs the driver only (e.g., AKS driver-only node pools), keep the toolkit enabled.
 
 ### Detailed installation
 
@@ -82,7 +99,7 @@ Wait for the platform pods:
 
 ```bash
 kubectl get pods -n $NAMESPACE
-# Expected: dynamo-operator-*, etcd-*, nats-* pods all Running
+# Expected: dynamo-operator-* and nats-* pods all Running
 ```
 
 ## Understand Dynamo Deployment Resources
@@ -248,5 +265,5 @@ kubectl delete dynamographdeployment qwen3-quickstart qwen3-direct \
 
 - **[Installation Guide](installation-guide.md)** — Cloud provider setup, GPU Operator details, optional components (Grove, RDMA, model caching, Prometheus)
 - **[Deployment Overview](model-deployment-guide.md)** — DGD, DCD, DGDR, recipes, strategy selection, and common pitfalls
-- **[DGDR Reference](dgdr.md)** — Spec reference, lifecycle phases, monitoring commands, and generated DGD behavior
+- **[DGDR Reference](dgdr-reference.mdx)** — Spec reference, lifecycle phases, monitoring commands, and generated DGD behavior
 - **[Creating Deployments](deployment/create-deployment.md)** — Hand-craft a DGD spec for full control

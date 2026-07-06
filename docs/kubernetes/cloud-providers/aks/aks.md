@@ -39,7 +39,7 @@ az aks get-credentials \
 
 ## Step 2: Add a GPU Node Pool
 
-Add a GPU-enabled node pool with driver installation skipped. The `--skip-gpu-driver-install` flag prevents AKS from managing GPU drivers — the NVIDIA GPU Operator (Step 3) will handle that instead.
+Add a GPU-enabled node pool with driver installation skipped. The `--gpu-driver None` flag prevents AKS from managing GPU drivers — the NVIDIA GPU Operator (Step 3) will handle that instead.
 
 ```bash
 az aks nodepool add \
@@ -48,7 +48,7 @@ az aks nodepool add \
   --name gpunp \
   --node-count 2 \
   --node-vm-size Standard_NC24ads_A100_v4 \
-  --skip-gpu-driver-install
+  --gpu-driver None
 ```
 
 For RDMA-capable workloads (disaggregated inference), use ND-series VMs such as `Standard_ND96asr_v4` or `Standard_ND96isr_H100_v5`. See the [RDMA / InfiniBand guide](rdma-infiniband.md) for the additional setup required on those nodes.

@@ -1,0 +1,47 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Operation Status
+subtitle: Enumerates the current state of a NIXL Connect operation.
+---
+
+Represents the current state or status of an operation.
+
+
+## Values
+
+<ParamField path="CANCELLED" type="OperationStatus">
+  The operation has been cancelled by the user or system.
+</ParamField>
+
+<ParamField path="COMPLETE" type="OperationStatus">
+  The operation has been completed successfully.
+</ParamField>
+
+<ParamField path="ERRORED" type="OperationStatus">
+  The operation has encountered an error and cannot be completed.
+</ParamField>
+
+<ParamField path="IN_PROGRESS" type="OperationStatus">
+  The operation has been initialized and is in-progress (not completed, errored, or cancelled).
+</ParamField>
+
+<ParamField path="INITIALIZED" type="OperationStatus">
+  The operation has been initialized and is ready to be processed.
+</ParamField>
+
+<ParamField path="UNINITIALIZED" type="OperationStatus">
+  The operation has not been initialized yet and is not in a valid state.
+</ParamField>
+
+
+## Related Classes
+
+  - [Connector](connector.mdx)
+  - [Descriptor](descriptor.mdx)
+  - [Device](device.mdx)
+  - [RdmaMetadata](rdma-metadata.mdx)
+  - [ReadOperation](read-operation.mdx)
+  - [ReadableOperation](readable-operation.mdx)
+  - [WritableOperation](writable-operation.mdx)
+  - [WriteOperation](write-operation.mdx)

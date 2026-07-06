@@ -1,0 +1,54 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: SGLang Deployment Templates
+subtitle: Ready-to-apply DynamoGraphDeployment manifests for serving SGLang with Dynamo on Kubernetes.
+---
+
+Copy-paste `DynamoGraphDeployment` (`nvidia.com/v1alpha1`) manifests for the SGLang backend, grouped by
+topology. Each manifest is embedded from
+[`examples/backends/sglang/deploy/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy)
+— open an entry, use the copy button, then set your image tag and `hf-token-secret` before applying.
+
+Apply any template with:
+
+```bash
+kubectl apply -f agg.yaml
+```
+
+## Aggregated
+
+<AccordionGroup>
+<Accordion title="agg.yaml · Baseline aggregated serving">
+<Code src="../../examples/backends/sglang/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="agg_router.yaml · Aggregated with KV-aware routing">
+<Code src="../../examples/backends/sglang/deploy/agg_router.yaml" title="agg_router.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="agg_gms.yaml · Aggregated with GPU Memory Service sidecar">
+<Code src="../../examples/backends/sglang/deploy/agg_gms.yaml" title="agg_gms.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="agg_logging.yaml · Aggregated with structured logging">
+<Code src="../../examples/backends/sglang/deploy/agg_logging.yaml" title="agg_logging.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+## Disaggregated
+
+<AccordionGroup>
+<Accordion title="disagg.yaml · Baseline disaggregated prefill/decode">
+<Code src="../../examples/backends/sglang/deploy/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="disagg_planner.yaml · Disaggregated with Dynamo Planner autoscaling">
+<Code src="../../examples/backends/sglang/deploy/disagg_planner.yaml" title="disagg_planner.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="disagg-multinode.yaml · Disaggregated across multiple nodes">
+<Code src="../../examples/backends/sglang/deploy/disagg-multinode.yaml" title="disagg-multinode.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+## Source
+
+All templates live in
+[`examples/backends/sglang/deploy/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy).
+For guided walkthroughs, see [SGLang Deployments](../backends/sglang/sglang-examples.md).

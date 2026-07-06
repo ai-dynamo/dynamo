@@ -1,0 +1,85 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Release Artifacts
+subtitle: Container images, Python wheels, Helm charts, and Rust crates published for the current Dynamo release.
+---
+
+This page lists the published NVIDIA Dynamo release artifacts for the current stable release and where to find each one. Container images are on NVIDIA NGC under `nvcr.io/nvidia/ai-dynamo/`; each image name links to its NGC listing, where you can browse all published tags. For wheels, Helm charts, and crates, click a command in the **Install** column to copy the exact version-pinned command.
+
+<Note>
+See [Compatibility](compatibility.mdx) for hardware, platform, and backend feature support.
+</Note>
+
+## Current Release: Dynamo v1.2.1
+
+- **GitHub Release:** [v1.2.1](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.1)
+- **Docs:** [v1.2.1](https://docs.nvidia.com/dynamo)
+- **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
+
+## Container Images
+
+Dynamo publishes seven container images on NVIDIA NGC under `nvcr.io/nvidia/ai-dynamo/` — three backend runtimes and four platform components. Each name links to its full NGC tag listing; the **Tags** column shows the tags published for v1.2.1 — click a tag to copy its `docker pull` command.
+
+### Runtime Containers
+
+| Image | What it is | Tags |
+|-------|------------|------|
+| [`vllm-runtime`](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/vllm-runtime/tags) | vLLM backend runtime | <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1"><Badge intent="info">1.2.1</Badge></Copy> <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-cuda13"><Badge intent="info" minimal>1.2.1-cuda13</Badge></Copy> <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-efa-amd64"><Badge intent="info" minimal>1.2.1-efa-amd64</Badge></Copy> |
+| [`sglang-runtime`](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/sglang-runtime/tags) | SGLang backend runtime | <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1"><Badge intent="info">1.2.1</Badge></Copy> <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1-cuda13"><Badge intent="info" minimal>1.2.1-cuda13</Badge></Copy> <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1-efa-amd64"><Badge intent="info" minimal>1.2.1-efa-amd64</Badge></Copy> |
+| [`tensorrtllm-runtime`](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/tensorrtllm-runtime/tags) | TensorRT-LLM backend runtime | <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1"><Badge intent="info">1.2.1</Badge></Copy> <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1-efa-amd64"><Badge intent="info" minimal>1.2.1-efa-amd64</Badge></Copy> |
+
+### Component Containers
+
+| Image | What it is | Tags |
+|-------|------------|------|
+| [`dynamo-frontend`](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/dynamo-frontend/tags) | OpenAI-compatible API gateway with Endpoint Prediction Protocol (EPP) | <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1"><Badge intent="info">1.2.1</Badge></Copy> |
+| [`dynamo-planner`](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/dynamo-planner/tags) | Standalone Planner used by Profiler jobs and Planner pods | <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"><Badge intent="info">1.2.1</Badge></Copy> |
+| [`kubernetes-operator`](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/kubernetes-operator/tags) | Operator that manages Dynamo deployments and CRDs | <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator:1.2.1"><Badge intent="info">1.2.1</Badge></Copy> |
+| [`snapshot-agent`](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/snapshot-agent/tags) <Badge intent="note" minimal>Preview</Badge> | Fast GPU worker recovery via CRIU | <Copy clipboard="docker pull nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.2.1"><Badge intent="info">1.2.1</Badge></Copy> |
+
+## Python Wheels
+
+Dynamo publishes three wheels on PyPI. All are at `1.2.1`, Python `3.10`–`3.12`, Linux (glibc `v2.28+`).
+
+| Package | What it is | Install |
+|---------|------------|---------|
+| [`ai-dynamo`](https://pypi.org/project/ai-dynamo/1.2.1/) | Main package with backend integrations (vLLM, SGLang, TensorRT-LLM) | <Copy clipboard="uv pip install ai-dynamo==1.2.1"><Icon icon="copy" /></Copy> |
+| [`ai-dynamo-runtime`](https://pypi.org/project/ai-dynamo-runtime/1.2.1/) | Core Python bindings for the Dynamo runtime | <Copy clipboard="uv pip install ai-dynamo-runtime==1.2.1"><Icon icon="copy" /></Copy> |
+| [`kvbm`](https://pypi.org/project/kvbm/1.2.1/) | KV Block Manager for disaggregated KV cache | <Copy clipboard="uv pip install kvbm==1.2.1"><Icon icon="copy" /></Copy> |
+
+For TensorRT-LLM, use the NGC container instead of the `ai-dynamo[trtllm]` wheel.
+
+## Helm Charts
+
+Dynamo publishes two Helm charts, both at `1.2.1` on NGC (OCI).
+
+| Chart | What it is | Install |
+|-------|------------|---------|
+| [`dynamo-platform`](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.2.1.tgz) | Platform services (etcd, NATS) and the Dynamo Operator for a Dynamo cluster | <Copy clipboard="helm install dynamo-platform oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform --version 1.2.1"><Icon icon="copy" /></Copy> |
+| [`snapshot`](https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot-1.2.1.tgz) | Snapshot DaemonSet for fast GPU worker recovery | <Copy clipboard="helm install snapshot oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/snapshot --version 1.2.1"><Icon icon="copy" /></Copy> |
+
+<Note>
+The `dynamo-crds` Helm chart is deprecated as of v1.0.0; CRDs are now managed by the Dynamo Operator. The `dynamo-graph` Helm chart is deprecated as of v0.9.0.
+</Note>
+
+## Rust Crates
+
+Dynamo publishes its runtime as a set of crates on crates.io. All are at `1.2.1` with MSRV Rust `v1.82`, except `dynamo-async-openai` at `1.0.2`.
+
+| Crate | What it is | Install |
+|-------|------------|---------|
+| [`dynamo-runtime`](https://crates.io/crates/dynamo-runtime/1.2.1) | Core distributed runtime library | <Copy clipboard="cargo add dynamo-runtime@1.2.1"><Icon icon="copy" /></Copy> |
+| [`dynamo-llm`](https://crates.io/crates/dynamo-llm/1.2.1) | LLM inference engine | <Copy clipboard="cargo add dynamo-llm@1.2.1"><Icon icon="copy" /></Copy> |
+| [`dynamo-protocols`](https://crates.io/crates/dynamo-protocols/1.2.1) | Async OpenAI-compatible API client | <Copy clipboard="cargo add dynamo-protocols@1.2.1"><Icon icon="copy" /></Copy> |
+| [`dynamo-async-openai`](https://crates.io/crates/dynamo-async-openai/1.0.2) <Badge intent="error" minimal>Deprecated</Badge> | Legacy OpenAI client; use `dynamo-protocols` | <Copy clipboard="cargo add dynamo-async-openai@1.0.2"><Icon icon="copy" /></Copy> |
+| [`dynamo-parsers`](https://crates.io/crates/dynamo-parsers/1.2.1) | Protocol parsers (SSE, JSON streaming) | <Copy clipboard="cargo add dynamo-parsers@1.2.1"><Icon icon="copy" /></Copy> |
+| [`dynamo-memory`](https://crates.io/crates/dynamo-memory/1.2.1) | Memory management utilities | <Copy clipboard="cargo add dynamo-memory@1.2.1"><Icon icon="copy" /></Copy> |
+| [`dynamo-config`](https://crates.io/crates/dynamo-config/1.2.1) | Configuration management | <Copy clipboard="cargo add dynamo-config@1.2.1"><Icon icon="copy" /></Copy> |
+| [`dynamo-tokens`](https://crates.io/crates/dynamo-tokens/1.2.1) | Tokenizer bindings for LLM inference | <Copy clipboard="cargo add dynamo-tokens@1.2.1"><Icon icon="copy" /></Copy> |
+| [`dynamo-tokenizers`](https://crates.io/crates/dynamo-tokenizers/1.2.1) | Tokenizer library for LLM inference | <Copy clipboard="cargo add dynamo-tokenizers@1.2.1"><Icon icon="copy" /></Copy> |
+| [`dynamo-mocker`](https://crates.io/crates/dynamo-mocker/1.2.1) | Inference engine simulator for benchmarking | <Copy clipboard="cargo add dynamo-mocker@1.2.1"><Icon icon="copy" /></Copy> |
+| [`dynamo-kv-router`](https://crates.io/crates/dynamo-kv-router/1.2.1) | KV-aware request routing library | <Copy clipboard="cargo add dynamo-kv-router@1.2.1"><Icon icon="copy" /></Copy> |
+| [`kvbm-logical`](https://crates.io/crates/kvbm-logical/1.2.1) | Logical layer for the KV Block Manager | <Copy clipboard="cargo add kvbm-logical@1.2.1"><Icon icon="copy" /></Copy> |
+
+**CUDA and driver requirements:** for the CUDA toolkit versions and minimum drivers for each container image, see [Compatibility](compatibility.mdx#cuda--driver-requirements).

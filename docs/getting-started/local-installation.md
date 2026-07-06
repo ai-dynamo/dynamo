@@ -51,7 +51,7 @@ To run frontend and worker in the same container, either:
 - Run processes in background with `&` (see Run Dynamo section below), or
 - Open a second terminal and use `docker exec -it <container_id> bash`
 
-See [Release Artifacts](../reference/release-artifacts.md#container-images) for available
+See [Release Artifacts](../reference/release-artifacts.mdx#container-images) for available
 versions and backend guides for run instructions: [SGLang](../backends/sglang/README.md) |
 [TensorRT-LLM](../backends/trtllm/README.md) | [vLLM](../backends/vllm/README.md)
 

@@ -1,0 +1,212 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Metric Labels
+subtitle: Every label dimension attached to Dynamo metric series — where each one comes from and the values it can take.
+---
+
+Labels are the **dimensions** attached to Dynamo metric series, not metrics in their own right. A single metric such as `dynamo_component_requests_total` becomes many Prometheus time series once it is split by `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and the labels the scraper adds. This page catalogs those dimensions; for the metrics themselves see the [Metrics Catalog](metrics-catalog.mdx).
+
+A label reaches a series through one of four origins:
+
+- **Auto-injected by the Dynamo runtime** — added to every metric registered through the namespace/component/endpoint hierarchy.
+- **Added at registration time by backend code** — passed by the worker when it registers an endpoint, so presence depends on the backend.
+- **Added by the metric itself** — specific to one metric family.
+- **Injected by Prometheus/Kubernetes** — attached by the scraper, not present in the exposition text the process emits.
+
+## Scope legend
+
+Each label is tagged with the scope in which it appears:
+
+- `[Shared]` — emitted by the Dynamo process itself; present whether you run locally or on Kubernetes.
+- `[Kubernetes]` — attached by the Prometheus scraper in a Kubernetes deployment; absent when you scrape a process directly.
+
+## Runtime-injected labels
+
+Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric registered through the namespace/component/endpoint hierarchy.
+
+<ParamField path="dynamo_namespace" type="string">
+  `[Shared]` The Dynamo runtime namespace — the logical scope shared by every component (router / prefill / decode / encode) in one deployment. **Not** the Kubernetes namespace. Example: `dynamo_cloud_vllm_v1_disagg_router_071de157`.
+</ParamField>
+
+<ParamField path="dynamo_component" type="string">
+  `[Shared]` Service role of the emitting component. See [Component names](#component-names) for the enumeration of values. Example: `backend`, `prefill`, `router`.
+</ParamField>
+
+<ParamField path="dynamo_endpoint" type="string">
+  `[Shared]` The RPC within that component. See [Endpoint names](#endpoint-names) for the enumeration of values. Example: `generate`, `clear_kv_blocks`, `worker_kv_indexer_query_dp0`.
+</ParamField>
+
+<ParamField path="worker_id" type="string">
+  `[Shared]` Hex-encoded discovery instance ID of the endpoint, providing a stable per-worker identity that does not depend on Kubernetes. Injected only when the endpoint hierarchy has a connection ID. Example: `1a2b3c4d`.
+
+  On the per-worker frontend gauges (`dynamo_frontend_worker_*`) this label carries the worker's etcd lease ID instead. Example: `7890`.
+</ParamField>
+
+## Registration-time labels
+
+Passed via `metrics_labels=` when the worker calls `serve_endpoint()`. Not auto-injected, so presence depends on the backend.
+
+<ParamField path="model" type="string">
+  `[Shared]` The model being served (OpenAI-style label). Added by vLLM, SGLang, and TRT-LLM workers on inference endpoints; absent on internal endpoints like `worker_kv_indexer_query_dp{N}`. Example: `Qwen/Qwen3-0.6B`.
+</ParamField>
+
+<ParamField path="model_name" type="string">
+  `[Shared]` Same model identifier under a second label name, retained for engine-native and dashboard back-compat. Added by vLLM and TRT-LLM workers; **not** added by SGLang. Example: `Qwen/Qwen3-0.6B`.
+</ParamField>
+
+## Metric-specific labels
+
+Added by an individual metric family. Each label appears only on the metrics noted.
+
+<ParamField path="error_type" type="string">
+  `[Shared]` On `dynamo_component_errors_total` — the stage of request handling that failed. See [Component error types](#component-error-types) for the enumeration. On `dynamo_operator_reconcile_errors_total` the value set is different; see [Operator Metrics](operator-metrics.mdx).
+</ParamField>
+
+<ParamField path="stage" type="string">
+  `[Shared]` On `dynamo_frontend_stage_requests` — the frontend pipeline stage a request currently occupies. See [Stage values](#stage-values).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>preprocess</Badge> <Badge intent="note" minimal>route</Badge> <Badge intent="note" minimal>dispatch</Badge></span>
+</ParamField>
+
+<ParamField path="phase" type="string">
+  `[Shared]` On `dynamo_frontend_stage_requests` — the serving phase. See [Phase values](#phase-values). The empty value is used when the stage does not distinguish phases (e.g. `preprocess`).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>aggregated</Badge> <Badge intent="note" minimal>"" (empty)</Badge></span>
+</ParamField>
+
+<ParamField path="worker_type" type="string">
+  `[Shared]` On `dynamo_frontend_worker_*` and `dynamo_frontend_router_queue_*` — the worker role. In disaggregated mode both values appear; in aggregated mode all workers report as `decode`.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge></span>
+</ParamField>
+
+<ParamField path="dp_rank" type="integer">
+  `[Shared]` On `dynamo_frontend_worker_*` — the data-parallel rank of the worker. Example: `0`.
+</ParamField>
+
+<ParamField path="migration_type" type="string">
+  `[Shared]` On `dynamo_frontend_model_migration_total` — the category of request migration triggered by worker unavailability.
+</ParamField>
+
+<ParamField path="status" type="string">
+  `[Shared]` On `dynamo_component_kv_cache_events_applied` — the outcome of applying a KV cache event to the router's radix-tree index.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>ok</Badge> <Badge intent="note" minimal>parent_block_not_found</Badge> <Badge intent="note" minimal>block_not_found</Badge> <Badge intent="note" minimal>invalid_block</Badge></span>
+</ParamField>
+
+<ParamField path="event_type" type="string">
+  `[Shared]` On `dynamo_component_kv_cache_events_applied` — the kind of KV cache event.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>stored</Badge> <Badge intent="note" minimal>removed</Badge> <Badge intent="note" minimal>cleared</Badge></span>
+</ParamField>
+
+## Scraper-injected labels (Kubernetes)
+
+Attached by the Prometheus scraper, not present in the exposition text the process emits. These appear only when Prometheus scrapes the pod in a Kubernetes deployment.
+
+<ParamField path="instance" type="string">
+  `[Kubernetes]` Scrape target as `<podIP>:<metricsPort>`. Example: `192.168.133.236:9090`.
+</ParamField>
+
+<ParamField path="pod" type="string">
+  `[Kubernetes]` Kubernetes pod name; the per-replica disambiguator. Example: `vllm-v1-disagg-router-vllmdecodeworker-...`.
+</ParamField>
+
+<ParamField path="container" type="string">
+  `[Kubernetes]` Container name inside the pod (usually `main`). Example: `main`.
+</ParamField>
+
+<ParamField path="namespace" type="string">
+  `[Kubernetes]` Kubernetes namespace the pod runs in. **Not** the same as `dynamo_namespace`. Example: `dynamo-cloud`.
+</ParamField>
+
+<ParamField path="job" type="string">
+  `[Kubernetes]` Prometheus scrape-job name, `<k8s-namespace>/<service-name>`. Example: `dynamo-cloud/dynamo-worker`.
+</ParamField>
+
+<ParamField path="endpoint" type="string">
+  `[Kubernetes]` Named port on the Kubernetes Service that Prometheus scraped. **Not** the same as `dynamo_endpoint`. Example: `system`.
+</ParamField>
+
+## Label collisions
+
+<Warning>
+  Two pairs of labels share a name but mean different things depending on origin:
+
+  - `dynamo_namespace` (Dynamo deployment scope, runtime-injected) vs. `namespace` (Kubernetes namespace, scraper-injected).
+  - `dynamo_endpoint` (Dynamo RPC, runtime-injected) vs. `endpoint` (Kubernetes Service port name, scraper-injected).
+
+  Always qualify with the `dynamo_` prefix when you mean the runtime dimension.
+</Warning>
+
+## Enumerations
+
+### Component names
+
+Values you will see in the `dynamo_component` label on `dynamo_component_*` series. The HTTP frontend (`python -m dynamo.frontend`) is **not** in this list — it exposes its own `dynamo_frontend_*` metric family, not `dynamo_component_*`.
+
+| Value | Meaning |
+|-------|---------|
+| `router` | The standalone KV router (`python -m dynamo.router`). |
+| `Planner` | The planner component (`python -m dynamo.planner`). Note the capital `P`. |
+| `prefill` | The prefill worker in disaggregated serving (all backends). |
+| `backend` | The decode worker in disaggregated serving for all backends, **and** the combined worker for vLLM in aggregated mode. |
+| `encode` | The encode worker for vLLM, SGLang, and TRT-LLM. |
+| `diffusion` | The diffusion worker for TRT-LLM. |
+
+Internal subsystems (e.g. `kvbm` from the block manager, `sequences` from the KV router) also create components and may appear in `dynamo_component_*` series. The default for vLLM/SGLang can be overridden by passing `--endpoint dyn://<ns>.<component>.<endpoint>` on the worker command line.
+
+<Note>
+  The name `backend` for the decode worker is historical. The runtime has a TODO to introduce a `decode` constant and migrate to it (see `lib/runtime/src/metrics/prometheus_names.rs::component_names`).
+</Note>
+
+### Endpoint names
+
+Values you will see in the `dynamo_endpoint` label on backend workers.
+
+| Value | Meaning |
+|-------|---------|
+| `generate` | Main inference RPC; one increment per request received. On a prefill worker this counts prefill-stage `generate` calls; on a decode worker this counts decode-stage `generate` calls. |
+| `clear_kv_blocks` | Admin RPC to flush the worker's KV cache. Registered on both prefill and decode workers. |
+| `worker_kv_indexer_query_dp{N}` | KV-router queries to the worker's local KV indexer about its cached prefix blocks. One endpoint per data-parallel rank (`_dp0`, `_dp1`, …). Appears on the worker that owns the prefix caches the router consults — in disaggregated serving that is the prefill worker. |
+
+### Component error types
+
+The `dynamo_component_errors_total` counter is labeled with `error_type`, identifying which stage of request handling failed.
+
+| `error_type` | Stage | Meaning |
+|--------------|-------|---------|
+| `deserialization` | Ingress | Could not parse the incoming request payload. |
+| `invalid_message` | Ingress | Wire-format violation in the incoming message. |
+| `response_stream` | Pre-generate | The worker received the request but could not open the response stream back to the frontend (transport problem before `generate` was called). |
+| `generate` | Engine | The engine's `generate()` itself returned an error. This is the counter that reflects engine/inference failures. |
+| `publish_response` | Streaming | The engine produced response chunks but the worker could not push one back to the frontend. **Also fires on client cancellation** — the frontend disconnecting before the stream finishes — so this counter can be inflated by user-aborted requests. |
+| `publish_final` | Teardown | All response chunks were sent, but the worker could not deliver the final stream-complete marker. The connection died right at the end. |
+
+### Stage values
+
+`dynamo_frontend_stage_requests` decomposes the lifetime of an active frontend request into three sequential pipeline stages. A request is counted in exactly one stage at a time.
+
+| Stage | What it covers | Enters when | Exits when |
+|-------|----------------|-------------|------------|
+| `preprocess` | Tokenization and chat-template application | The frontend enters `preprocess_request` | Preprocessing returns |
+| `route` | Worker selection (including parking in the KV-router queue while waiting for a worker) | The router's `generate()` is called | A worker is selected or the request is queued for one |
+| `dispatch` | Serialization, transport to the chosen worker, and waiting for the backend's first response (includes backend prefill time) | `generate()` is called in `AddressedPushRouter` | The first response is received from the backend |
+
+### Phase values
+
+The `phase` label on `dynamo_frontend_stage_requests`.
+
+| Phase | Meaning |
+|-------|---------|
+| `prefill` | The request is being handled by a prefill worker in disaggregated serving. |
+| `decode` | The request is being handled by a decode worker in disaggregated serving. |
+| `aggregated` | Aggregated (non-disaggregated) serving — a single worker handles both prefill and decode. |
+| `""` (empty) | The stage does not distinguish phases (used by `preprocess`). |
+
+## Related
+
+- [Metrics Catalog](metrics-catalog.mdx) — the `dynamo_*` metrics these labels attach to.
+- [Operator Metrics](operator-metrics.mdx) — Kubernetes operator metrics and their distinct label sets.
+- [Environment Variables](environment-variables.mdx) — variables that enable and configure metric emission.

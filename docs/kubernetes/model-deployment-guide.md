@@ -20,7 +20,7 @@ local development or incremental adoption, you can still run the same frontend,
 router, and worker components outside Kubernetes.
 
 You can create a DGD directly from a known-good manifest, or you can use a
-[`DynamoGraphDeploymentRequest`](dgdr.md) (DGDR) to profile your model and
+[`DynamoGraphDeploymentRequest`](dgdr-reference.mdx) (DGDR) to profile your model and
 generate a DGD for you.
 
 Most users only need three ideas before they deploy:
@@ -54,7 +54,7 @@ flowchart LR
 |---|---|---|---|
 | `DynamoGraphDeployment` (DGD) | The canonical live deployment for a Dynamo inference graph. | You have a known-good configuration or tuned YAML. | [Creating Deployments](deployment/create-deployment.md), [DGD API](api-reference.md#dynamographdeployment) |
 | `DynamoComponentDeployment` (DCD) | The per-component deployment objects created from a DGD. | Usually not authored directly; inspect them to debug frontend/router/worker rollout. | [DCD API](api-reference.md#dynamocomponentdeployment) |
-| `DynamoGraphDeploymentRequest` (DGDR) | A deploy-by-intent request that profiles your model/hardware and generates a DGD. | You want Dynamo to size the deployment, choose parallelism, configure supported generated-deployment features such as Planner, or produce DGD YAML. | [DGDR Reference](dgdr.md) |
+| `DynamoGraphDeploymentRequest` (DGDR) | A deploy-by-intent request that profiles your model/hardware and generates a DGD. | You want Dynamo to size the deployment, choose parallelism, configure supported generated-deployment features such as Planner, or produce DGD YAML. | [DGDR Reference](dgdr-reference.mdx) |
 | Recipes | Curated `deploy.yaml` manifests that are already DGD specs. | A recipe matches your model, backend, hardware, and serving mode. | [Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) |
 | `DynamoModel` | Model and adapter lifecycle management layered onto an existing DGD or DCD. | You need declarative model operations such as LoRA adapter loading. | [Managing Models with DynamoModel](deployment/dynamomodel-guide.md) |
 
@@ -135,7 +135,7 @@ details.
 ```
 
 For the DGDR spec reference, field descriptions, and lifecycle phases, see the
-[DGDR Reference](dgdr.md).
+[DGDR Reference](dgdr-reference.mdx).
 
 ## DGDR Detail: Choose a Search Strategy
 
@@ -213,7 +213,7 @@ The rapid strategy relies on AIC performance models. AIC currently supports:
 
 When specifying GPU SKUs manually, use lowercase underscore format (e.g.,
 `h100_sxm`, not `H100-SXM5-80GB`). See the
-[DGDR Reference — SKU Format](dgdr.md#sku-format) for the full list.
+[DGDR Reference — SKU Format](dgdr-reference.mdx#sku-format) for the full list.
 
 ### Backends
 
@@ -576,7 +576,7 @@ spec:
 
 ## Further Reading
 
-- [DGDR Reference](dgdr.md) — Spec reference, lifecycle phases, monitoring commands
+- [DGDR Reference](dgdr-reference.mdx) — Spec reference, lifecycle phases, monitoring commands
 - [DGDR Examples](../components/profiler/profiler-examples.md) — Ready-to-use YAML for various scenarios
 - [Profiler Guide](../components/profiler/profiler-guide.md) — Profiling algorithms, picking modes, gate checks
 - [Planner Guide](../components/planner/planner-guide.md) — Scaling modes, PlannerConfig reference

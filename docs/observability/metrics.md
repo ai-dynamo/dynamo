@@ -12,6 +12,9 @@ Dynamo provides built-in metrics capabilities through the Dynamo metrics API, wh
 
 **For creating custom metrics**, see the [Metrics Developer Guide](metrics-developer-guide.md).
 
+> [!NOTE]
+> **In a DynamoGraphDeployment**, metrics are on by default — the operator adds a `PodMonitor` and labels every pod `nvidia.com/metrics-enabled: "true"`, so no DGD field is required to opt in. To opt out, set the `nvidia.com/enable-metrics: "false"` annotation on the deployment. See [Metrics on Kubernetes](../kubernetes/observability/metrics.md) for the PodMonitor and Prometheus walkthrough.
+
 ## Environment Variables
 
 | Variable | Description | Default | Example |

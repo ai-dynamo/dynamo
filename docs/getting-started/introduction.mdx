@@ -1,0 +1,161 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Introduction to Dynamo
+sidebar-title: Introduction
+---
+
+Dynamo is an open-source, high-throughput, low-latency inference framework for serving generative AI workloads in distributed environments. It is Kubernetes-native for production while still supporting local containers, Python workers, and standalone components for development or incremental adoption.
+
+New here? Pick an install path below. For the full story on Dynamo's design principles, performance techniques, and production-grade features, see [About Dynamo](about.md).
+
+## Get Started
+
+Dynamo is **Kubernetes-native, but not Kubernetes-only**. The full feature set — operator, CRDs, autoscaling, inference gateway, and multinode scheduling — runs on Kubernetes, while the same frontend/router/worker stack also runs locally for evaluation or incremental adoption. This user guide assumes you're running on a Kubernetes cluster, if you want to build from source or run in your local environment, see the developer's guide.
+
+<CardGroup cols={3}>
+  <Card title="Kubernetes Quickstart" icon="regular cubes" href="/dynamo/dev/kubernetes">
+    Cluster fast path — the full production stack.
+  </Card>
+  <Card title="Local Quickstart" icon="regular laptop-code" href="/dynamo/dev/getting-started/quickstart">
+    Container fast path — running in about five minutes.
+  </Card>
+  <Card title="Build from Source" icon="regular hammer" href="/dynamo/dev/getting-started/building-from-source">
+    Build Dynamo against `main`.
+  </Card>
+  <Card title="Compatibility" icon="regular table-list" href="/dynamo/dev/reference/compatibility">
+    Supported platforms and a feature-by-backend comparison.
+  </Card>
+</CardGroup>
+
+## Installation
+
+Install Dynamo for your target environment.
+
+<CardGroup cols={3}>
+  <Card title="Kubernetes Installation" icon="regular gears" href="/dynamo/dev/kubernetes/installation-guide">
+    Operator, CRDs, and Helm install.
+  </Card>
+  <Card title="Local Installation" icon="regular box" href="/dynamo/dev/getting-started/local-installation">
+    PyPI packages and local configuration.
+  </Card>
+  <Card title="Build from Source" icon="regular hammer" href="/dynamo/dev/getting-started/building-from-source">
+    Build Dynamo against `main`.
+  </Card>
+</CardGroup>
+
+Running on a managed Kubernetes service? Each provider has its own setup steps for clusters, networking, storage, and RDMA fabrics.
+
+<AccordionGroup>
+  <Accordion title="Amazon Web Services (EKS)">
+    <CardGroup cols={2}>
+      <Card title="EKS Setup" icon="regular cubes" href="/dynamo/dev/kubernetes/cloud-providers/eks/eks">
+        Stand up an EKS cluster for Dynamo.
+      </Card>
+      <Card title="EFA (RDMA over AWS Fabric)" icon="regular network-wired" href="/dynamo/dev/kubernetes/cloud-providers/eks/efa">
+        Elastic Fabric Adapter for high-speed KV transfer.
+      </Card>
+      <Card title="EFS" icon="regular hard-drive" href="/dynamo/dev/kubernetes/cloud-providers/eks/efs">
+        Shared model storage with Elastic File System.
+      </Card>
+      <Card title="ECS" icon="regular box" href="/dynamo/dev/kubernetes/cloud-providers/ecs/ecs">
+        Run Dynamo on Elastic Container Service.
+      </Card>
+    </CardGroup>
+  </Accordion>
+  <Accordion title="Microsoft Azure (AKS)">
+    <CardGroup cols={2}>
+      <Card title="AKS Setup" icon="regular cubes" href="/dynamo/dev/kubernetes/cloud-providers/aks/aks">
+        Stand up an AKS cluster for Dynamo.
+      </Card>
+      <Card title="RDMA / InfiniBand" icon="regular network-wired" href="/dynamo/dev/kubernetes/cloud-providers/aks/rdma-infiniband">
+        Low-latency interconnect for multinode serving.
+      </Card>
+      <Card title="AKS Storage" icon="regular hard-drive" href="/dynamo/dev/kubernetes/cloud-providers/aks/storage">
+        Persistent volumes and model caching.
+      </Card>
+      <Card title="Azure Lustre CSI Driver" icon="regular database" href="/dynamo/dev/kubernetes/cloud-providers/aks/azure-lustre-csi">
+        High-throughput parallel filesystem for weights.
+      </Card>
+      <Card title="Spot VMs" icon="regular bolt" href="/dynamo/dev/kubernetes/cloud-providers/aks/spot-vms">
+        Cost-optimized capacity for interruptible workloads.
+      </Card>
+    </CardGroup>
+  </Accordion>
+  <Accordion title="Google Cloud (GKE)">
+    <CardGroup cols={2}>
+      <Card title="GKE Setup" icon="regular cubes" href="/dynamo/dev/kubernetes/cloud-providers/gke/gke">
+        Stand up a GKE cluster for Dynamo.
+      </Card>
+    </CardGroup>
+  </Accordion>
+</AccordionGroup>
+
+## Deploy & Operate
+
+Take Dynamo to production and keep it healthy.
+
+<CardGroup cols={3}>
+  <Card title="Kubernetes Deployment" icon="regular cloud-arrow-up" href="/dynamo/dev/getting-started/kubernetes-deployment">
+    Operator, CRDs, autoscaling, multinode, and cloud providers.
+  </Card>
+  <Card title="Disaggregated Serving" icon="regular diagram-project" href="/dynamo/dev/features/disaggregated-serving">
+    Separate prefill and decode, and size each independently.
+  </Card>
+  <Card title="Performance Tuning" icon="regular gauge-high" href="/dynamo/dev/performance/tuning">
+    Squeeze throughput and latency out of a deployment.
+  </Card>
+  <Card title="Fault Tolerance" icon="regular shield-halved" href="/dynamo/dev/fault-tolerance">
+    Request migration, cancellation, rejection, and graceful shutdown.
+  </Card>
+  <Card title="Observability" icon="regular chart-line" href="/dynamo/dev/observability">
+    Metrics, logging, tracing, and health checks.
+  </Card>
+  <Card title="Benchmarking" icon="regular stopwatch" href="/dynamo/dev/benchmarks/benchmarking">
+    Measure performance and replay traces.
+  </Card>
+</CardGroup>
+
+## Build with Dynamo
+
+Capabilities and use cases you can turn on.
+
+<CardGroup cols={3}>
+  <Card title="Agents" icon="regular robot" href="/dynamo/dev/agents">
+    Agent-aware serving — tracing, hints, and program scheduling.
+  </Card>
+  <Card title="Tool Calling & Reasoning" icon="regular wrench" href="/dynamo/dev/parsing">
+    Parse tool calls and reasoning into OpenAI-compatible output.
+  </Card>
+  <Card title="LoRA Adapters" icon="regular sliders" href="/dynamo/dev/features/lora">
+    Serve fine-tuned adapters with dynamic loading.
+  </Card>
+  <Card title="Multimodal" icon="regular photo-film" href="/dynamo/dev/features/multimodal">
+    Image, video, and audio model serving.
+  </Card>
+  <Card title="Diffusion" icon="regular wand-magic-sparkles" href="/dynamo/dev/diffusion">
+    Text-to-image and text-to-video generation (preview).
+  </Card>
+  <Card title="Inference Simulation" icon="regular flask" href="/dynamo/dev/dynosim">
+    Model deployment choices with DynoSim before using GPUs.
+  </Card>
+</CardGroup>
+
+## Extend & Reference
+
+Connect external systems, contribute, and look up the facts.
+
+<CardGroup cols={3}>
+  <Card title="Integrations" icon="regular plug" href="/dynamo/dev/integrations/lmcache-integration">
+    LMCache, FlexKV, and KV events for custom engines.
+  </Card>
+  <Card title="Developer's Guide" icon="regular code" href="/dynamo/dev/contribution-guide">
+    Custom backends, the docs site, and development setup.
+  </Card>
+  <Card title="Reference" icon="regular table-cells" href="/dynamo/dev/reference/support-matrix">
+    Support and feature matrices, release artifacts, and glossary.
+  </Card>
+  <Card title="Blog" icon="regular newspaper" href="/dynamo/dev/digest">
+    Technical deep dives, announcements, and updates.
+  </Card>
+</CardGroup>
