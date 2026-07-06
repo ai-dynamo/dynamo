@@ -24,6 +24,32 @@ NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 
 
+def prometheus_metric_value(
+    metrics_text: str,
+    metric_name: str,
+    labels: Optional[Dict[str, str]] = None,
+) -> float:
+    """Return the sum of exact matching Prometheus samples, or zero when absent."""
+    total = 0.0
+    for line in metrics_text.splitlines():
+        if not (
+            line.startswith(f"{metric_name} ") or line.startswith(f"{metric_name}{{")
+        ):
+            continue
+        sample, _, raw_value = line.rpartition(" ")
+        if not sample or not raw_value:
+            continue
+        if labels and not all(
+            f'{key}="{value}"' in sample for key, value in labels.items()
+        ):
+            continue
+        try:
+            total += float(raw_value)
+        except ValueError:
+            continue
+    return total
+
+
 def _nats_server() -> str:
     # Prefer dynamically-started NATS from per-test fixtures when present.
     return os.environ.get("NATS_SERVER", "nats://localhost:4222")

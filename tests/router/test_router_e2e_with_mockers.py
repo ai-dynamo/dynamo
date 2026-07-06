@@ -16,10 +16,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import aiohttp
 import pytest
 
 from tests.router.common import (
+    _test_bootstrap_prefill_rejection_gates_decode,
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
     _test_disagg_router_overload_529,
@@ -196,30 +196,6 @@ SOAK_TEST_PAYLOAD: Dict[str, Any] = {
     "stream": False,
     "max_tokens": 1,
 }
-
-
-def _prometheus_metric_value(
-    metrics_text: str,
-    metric_name: str,
-    labels: Optional[Dict[str, str]] = None,
-) -> float:
-    """Return the sum of matching Prometheus samples, or zero when absent."""
-    total = 0.0
-    for line in metrics_text.splitlines():
-        if not line.startswith(metric_name):
-            continue
-        sample, _, raw_value = line.rpartition(" ")
-        if not sample or not raw_value:
-            continue
-        if labels and not all(
-            f'{key}="{value}"' in sample for key, value in labels.items()
-        ):
-            continue
-        try:
-            total += float(raw_value)
-        except ValueError:
-            continue
-    return total
 
 
 class CounterWorkerProcess:
@@ -1060,194 +1036,6 @@ def test_bootstrap_prefill_rejection_gates_decode(
     }
     decode_env = {"DYN_SYSTEM_PORT": str(decode_system_port)}
 
-    def request_payload(tag: str) -> Dict[str, Any]:
-        return {
-            **TEST_PAYLOAD,
-            "messages": [
-                {
-                    **TEST_PAYLOAD["messages"][0],
-                    "content": f'{TEST_PAYLOAD["messages"][0]["content"]} {tag}',
-                }
-            ],
-            "max_tokens": 1,
-            "stream": True,
-        }
-
-    async def exercise_gate() -> None:
-        frontend_url = f"http://localhost:{frontend_port}"
-        chat_url = f"{frontend_url}/v1/chat/completions"
-        frontend_metrics_url = f"{frontend_url}/metrics"
-        prefill_metrics_url = f"http://localhost:{prefill_system_port}/metrics"
-
-        async with aiohttp.ClientSession() as session:
-
-            async def wait_for_model() -> None:
-                deadline = asyncio.get_running_loop().time() + 60
-                last_error: Optional[Exception] = None
-                while asyncio.get_running_loop().time() < deadline:
-                    try:
-                        async with session.get(f"{frontend_url}/v1/models") as response:
-                            if response.status == 200:
-                                models = (await response.json()).get("data", [])
-                                if models:
-                                    return
-                            last_error = RuntimeError(
-                                f"/v1/models returned HTTP {response.status}"
-                            )
-                    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-                        last_error = error
-                    await asyncio.sleep(0.05)
-                raise AssertionError(
-                    f"Timed out waiting for frontend model; last_error={last_error}"
-                )
-
-            async def metric(
-                url: str,
-                name: str,
-                labels: Optional[Dict[str, str]] = None,
-            ) -> float:
-                async with session.get(url) as response:
-                    response.raise_for_status()
-                    return _prometheus_metric_value(await response.text(), name, labels)
-
-            async def wait_for_metric(
-                url: str,
-                name: str,
-                predicate,
-                *,
-                labels: Optional[Dict[str, str]] = None,
-                timeout: float = 10.0,
-            ) -> float:
-                deadline = asyncio.get_running_loop().time() + timeout
-                last_value = 0.0
-                last_error: Optional[Exception] = None
-                while asyncio.get_running_loop().time() < deadline:
-                    try:
-                        last_value = await metric(url, name, labels)
-                        last_error = None
-                        if predicate(last_value):
-                            return last_value
-                    except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-                        last_error = error
-                    await asyncio.sleep(0.05)
-                raise AssertionError(
-                    f"Timed out waiting for {name}; "
-                    f"last_value={last_value}, last_error={last_error}"
-                )
-
-            first_response: Optional[aiohttp.ClientResponse] = None
-            filler_tasks: list[asyncio.Task] = []
-            try:
-                await wait_for_model()
-                frontend_send_baseline = await metric(
-                    frontend_metrics_url,
-                    "dynamo_request_plane_send_seconds_count",
-                )
-
-                first_response = await asyncio.wait_for(
-                    session.post(chat_url, json=request_payload("active")),
-                    timeout=15,
-                )
-                if first_response.status != 200:
-                    body = await first_response.text()
-                    raise AssertionError(
-                        f"Active bootstrap request returned "
-                        f"{first_response.status}: {body}"
-                    )
-
-                await wait_for_metric(
-                    prefill_metrics_url,
-                    "dynamo_work_handler_pool_active_tasks",
-                    lambda value: value >= 1,
-                )
-                frontend_send_after_first = await wait_for_metric(
-                    frontend_metrics_url,
-                    "dynamo_request_plane_send_seconds_count",
-                    lambda value: value >= frontend_send_baseline + 2,
-                )
-
-                # The HTTP 200/decode ingress arrives while prefill is still
-                # active, preserving the bootstrap overlap optimization.
-                assert frontend_send_after_first >= frontend_send_baseline + 2
-
-                frontend_ack_baseline = await metric(
-                    frontend_metrics_url,
-                    "dynamo_request_plane_send_seconds_count",
-                )
-
-                dispatcher_task = asyncio.create_task(
-                    session.post(chat_url, json=request_payload("dispatcher-held"))
-                )
-                filler_tasks.append(dispatcher_task)
-                await wait_for_metric(
-                    frontend_metrics_url,
-                    "dynamo_request_plane_send_seconds_count",
-                    lambda value: value >= frontend_ack_baseline + 1,
-                )
-                if dispatcher_task.done():
-                    raise AssertionError(
-                        "dispatcher-held request unexpectedly established a response stream"
-                    )
-
-                queued_task = asyncio.create_task(
-                    session.post(chat_url, json=request_payload("queued"))
-                )
-                filler_tasks.append(queued_task)
-                await wait_for_metric(
-                    frontend_metrics_url,
-                    "dynamo_request_plane_send_seconds_count",
-                    lambda value: value >= frontend_ack_baseline + 2,
-                )
-                await wait_for_metric(
-                    prefill_metrics_url,
-                    "dynamo_work_handler_queue_depth",
-                    lambda value: value >= 1,
-                )
-                if queued_task.done():
-                    raise AssertionError(
-                        "queued request unexpectedly established a response stream"
-                    )
-
-                frontend_send_before_probe = await metric(
-                    frontend_metrics_url,
-                    "dynamo_request_plane_send_seconds_count",
-                )
-                probe_response = await asyncio.wait_for(
-                    session.post(chat_url, json=request_payload("probe")),
-                    timeout=5,
-                )
-                probe_body = await probe_response.text()
-                probe_status = probe_response.status
-                probe_response.release()
-
-                assert probe_status == 529, (
-                    f"Expected prefill admission rejection (529), got "
-                    f"{probe_status}: {probe_body}"
-                )
-
-                # Give any wrongly-detached decode dispatch time to add a
-                # second request-plane send, then prove only prefill was attempted.
-                await asyncio.sleep(0.25)
-                frontend_send_after_probe = await metric(
-                    frontend_metrics_url,
-                    "dynamo_request_plane_send_seconds_count",
-                )
-                assert frontend_send_after_probe == frontend_send_before_probe + 1, (
-                    "rejected prefill dispatched an extra request-plane send: "
-                    f"before={frontend_send_before_probe}, "
-                    f"after={frontend_send_after_probe}"
-                )
-            finally:
-                if first_response is not None:
-                    first_response.close()
-                for task in filler_tasks:
-                    if not task.done():
-                        task.cancel()
-                results = await asyncio.gather(*filler_tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, aiohttp.ClientResponse):
-                        result.close()
-
     with launch_disagg_workers(
         request,
         shared_namespace,
@@ -1261,7 +1049,7 @@ def test_bootstrap_prefill_rejection_gates_decode(
         event_plane="nats",
         prefill_env_overrides=prefill_env,
         decode_env_overrides=decode_env,
-    ) as (prefill_workers, decode_workers):
+    ) as (_prefill_workers, _decode_workers):
         with FrontendRouterProcess(
             request=request,
             block_size=1,
@@ -1271,7 +1059,11 @@ def test_bootstrap_prefill_rejection_gates_decode(
             request_plane=request_plane,
             min_initial_workers=1,
         ):
-            asyncio.run(exercise_gate())
+            _test_bootstrap_prefill_rejection_gates_decode(
+                frontend_port=frontend_port,
+                prefill_system_port=prefill_system_port,
+                test_payload=TEST_PAYLOAD,
+            )
 
 
 @pytest.mark.parametrize(
