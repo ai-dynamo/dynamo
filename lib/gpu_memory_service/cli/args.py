@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.utils import GMS_TAGS, get_socket_path
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +41,15 @@ def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
         "--tag",
         type=str,
         action="append",
-        help="Logical GMS tag for this server (default: weights). "
-        "Repeat to serve multiple independent tags from one process.",
+        help="Logical GMS tag to serve; may be repeated. Defaults to all "
+        f"production tags ({', '.join(GMS_TAGS)}), each on its own socket.",
     )
     parser.add_argument(
         "--socket-path",
         type=str,
         default=None,
         help="Path for Unix domain socket. Default uses GPU UUID for stability. "
-        "Only valid with a single tag.",
+        "Requires exactly one --tag.",
     )
     parser.add_argument(
         "--verbose",
@@ -73,11 +73,11 @@ def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
 
     args = parser.parse_args(argv)
 
-    tags = args.tag or ["weights"]
+    tags = args.tag or list(GMS_TAGS)
     if len(tags) != len(set(tags)):
         parser.error("--tag values must be unique")
-    if args.socket_path is not None and len(tags) > 1:
-        parser.error("--socket-path is only valid with a single --tag")
+    if args.socket_path is not None and len(tags) != 1:
+        parser.error("--socket-path requires exactly one --tag")
     if args.alloc_retry_interval <= 0:
         parser.error("--alloc-retry-interval must be > 0")
     if args.alloc_retry_timeout is not None and args.alloc_retry_timeout <= 0:
