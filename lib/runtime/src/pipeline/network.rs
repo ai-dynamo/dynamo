@@ -56,53 +56,57 @@ pub(crate) fn get_tcp_max_message_size() -> usize {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RequestPlanePayloadCodec {
-    // TODO(jthomson04): Migrate the default to Msgpack after the 1.3 release.
+pub enum RequestPlanePayloadCodec {
+    /// The serde default deliberately remains JSON for wire compatibility with
+    /// control messages produced before the payload codec field existed.
     #[default]
     Json,
     Msgpack,
 }
 
 impl RequestPlanePayloadCodec {
-    pub(crate) fn configured() -> Self {
+    pub fn configured() -> Self {
         *REQUEST_PLANE_PAYLOAD_CODEC.get_or_init(Self::from_env)
     }
 
     fn from_env() -> Self {
-        match std::env::var(
-            crate::config::environment_names::request_plane::DYN_REQUEST_PLANE_CODEC,
-        )
-        .as_deref()
-        {
-            Err(_) | Ok("") | Ok("json") => Self::Json,
-            Ok("msgpack") => Self::Msgpack,
-            Ok(other) => {
+        let value =
+            std::env::var(crate::config::environment_names::request_plane::DYN_REQUEST_PLANE_CODEC)
+                .ok();
+        Self::from_config_value(value.as_deref())
+    }
+
+    fn from_config_value(value: Option<&str>) -> Self {
+        match value {
+            None | Some("") | Some("msgpack") => Self::Msgpack,
+            Some("json") => Self::Json,
+            Some(other) => {
                 tracing::warn!(
                     env_var =
                         crate::config::environment_names::request_plane::DYN_REQUEST_PLANE_CODEC,
                     value = other,
-                    "invalid request plane payload codec, defaulting to json"
+                    "invalid request plane payload codec, defaulting to msgpack"
                 );
-                Self::Json
+                Self::Msgpack
             }
         }
     }
 
-    pub(crate) fn name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::Json => "json",
             Self::Msgpack => "msgpack",
         }
     }
 
-    pub(crate) fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>> {
+    pub fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>> {
         match self {
             Self::Json => Ok(serde_json::to_vec(value)?),
             Self::Msgpack => Ok(rmp_serde::to_vec_named(value)?),
         }
     }
 
-    pub(crate) fn decode<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T> {
+    pub fn decode<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T> {
         match self {
             Self::Json => Ok(serde_json::from_slice(bytes)?),
             Self::Msgpack => Ok(rmp_serde::from_slice(bytes)?),
@@ -516,6 +520,34 @@ mod tests {
     }
 
     #[test]
+    fn request_plane_payload_codec_configuration_defaults_to_msgpack() {
+        assert_eq!(
+            RequestPlanePayloadCodec::from_config_value(None),
+            RequestPlanePayloadCodec::Msgpack
+        );
+        assert_eq!(
+            RequestPlanePayloadCodec::from_config_value(Some("")),
+            RequestPlanePayloadCodec::Msgpack
+        );
+        assert_eq!(
+            RequestPlanePayloadCodec::from_config_value(Some("invalid")),
+            RequestPlanePayloadCodec::Msgpack
+        );
+    }
+
+    #[test]
+    fn request_plane_payload_codec_configuration_honors_explicit_overrides() {
+        assert_eq!(
+            RequestPlanePayloadCodec::from_config_value(Some("json")),
+            RequestPlanePayloadCodec::Json
+        );
+        assert_eq!(
+            RequestPlanePayloadCodec::from_config_value(Some("msgpack")),
+            RequestPlanePayloadCodec::Msgpack
+        );
+    }
+
+    #[test]
     fn request_plane_payload_codec_round_trips_response_wrapper_json_and_msgpack() {
         let wrapper = NetworkStreamWrapper {
             data: Some(TestPayload {
@@ -550,19 +582,158 @@ where
     }
 }
 
-pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
+/// Result of encoding one response item for the request plane.
+pub struct EncodedResponseFrame {
+    pub bytes: Bytes,
+    pub is_error: bool,
+    /// Stop consuming the engine stream after publishing this frame. The
+    /// normal complete-final frame is still sent.
+    pub stop_stream: bool,
+}
+
+/// Converts request-plane bytes into the item consumed by an ingress engine.
+pub trait IngressRequestDecoder<T>: Send + Sync + 'static
+where
+    T: Data,
+{
+    fn decode_request(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        bytes: Bytes,
+    ) -> impl std::future::Future<Output = std::result::Result<T, PipelineError>> + Send;
+}
+
+/// Converts an ingress engine response into its complete on-wire frame.
+pub trait IngressResponseEncoder<U>: Send + Sync + 'static
+where
+    U: Data,
+{
+    fn encode_response(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+    ) -> impl std::future::Future<Output = std::result::Result<EncodedResponseFrame, PipelineError>> + Send;
+}
+
+/// Complete request/response payload adapter for an ingress engine.
+pub trait IngressPayloadAdapter<T, U>:
+    IngressRequestDecoder<T> + IngressResponseEncoder<U>
+where
+    T: Data,
+    U: Data,
+{
+}
+
+impl<T, U, Adapter> IngressPayloadAdapter<T, U> for Adapter
+where
+    T: Data,
+    U: Data,
+    Adapter: IngressRequestDecoder<T> + IngressResponseEncoder<U>,
+{
+}
+
+/// Default adapter for ordinary Rust request and response types.
+#[derive(Debug, Default)]
+pub struct SerdeIngressPayloadAdapter;
+
+impl<T> IngressRequestDecoder<T> for SerdeIngressPayloadAdapter
+where
+    T: Data + DeserializeOwned,
+{
+    #[inline]
+    fn decode_request(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        bytes: Bytes,
+    ) -> impl std::future::Future<Output = std::result::Result<T, PipelineError>> + Send {
+        let decoded = payload_codec.decode(&bytes).map_err(|err| {
+            PipelineError::DeserializationError(format!(
+                "Failed deserializing {} request payload: {}",
+                payload_codec.name(),
+                err
+            ))
+        });
+        std::future::ready(decoded)
+    }
+}
+
+impl<U> IngressResponseEncoder<U> for SerdeIngressPayloadAdapter
+where
+    U: Data + Serialize + MaybeError,
+{
+    #[inline]
+    fn encode_response(
+        &self,
+        payload_codec: RequestPlanePayloadCodec,
+        response: Option<U>,
+        complete_final: bool,
+    ) -> impl std::future::Future<Output = std::result::Result<EncodedResponseFrame, PipelineError>> + Send
+    {
+        let is_error = response
+            .as_ref()
+            .is_some_and(|response| response.err().is_some());
+        let wrapper = NetworkStreamWrapper {
+            data: response,
+            complete_final,
+        };
+        let encoded = payload_codec.encode(&wrapper).map_err(|err| {
+            PipelineError::SerializationError(format!(
+                "Failed serializing {} request-plane response: {}",
+                payload_codec.name(),
+                err
+            ))
+        });
+        std::future::ready(encoded.map(|bytes| EncodedResponseFrame {
+            bytes: bytes.into(),
+            is_error,
+            stop_stream: false,
+        }))
+    }
+}
+
+pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayloadAdapter> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    payload_adapter: Arc<Adapter>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     pub fn new() -> Arc<Self> {
+        Ingress::new_with_adapter(SerdeIngressPayloadAdapter)
+    }
+
+    pub fn link(segment: Arc<SegmentSource<Req, Resp>>) -> Result<Arc<Self>> {
+        let ingress = Ingress::new();
+        ingress.attach(segment)?;
+        Ok(ingress)
+    }
+
+    pub fn for_pipeline(segment: Arc<SegmentSource<Req, Resp>>) -> Result<Arc<Self>> {
+        let ingress = Ingress::new();
+        ingress.attach(segment)?;
+        Ok(ingress)
+    }
+
+    pub fn for_engine(engine: ServiceEngine<Req, Resp>) -> Result<Arc<Self>> {
+        Self::for_engine_with_adapter(engine, SerdeIngressPayloadAdapter)
+    }
+}
+
+impl<Req, Resp, Adapter> Ingress<Req, Resp, Adapter>
+where
+    Req: PipelineIO + Sync,
+    Resp: PipelineIO,
+    Adapter: Send + Sync + 'static,
+{
+    pub fn new_with_adapter(payload_adapter: Adapter) -> Arc<Self> {
         Arc::new(Self {
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
+            payload_adapter: Arc::new(payload_adapter),
         })
     }
 
@@ -597,26 +768,17 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
             .map_err(|_| anyhow::anyhow!("Metrics already set"))
     }
 
-    pub fn link(segment: Arc<SegmentSource<Req, Resp>>) -> Result<Arc<Self>> {
-        let ingress = Ingress::new();
-        ingress.attach(segment)?;
-        Ok(ingress)
-    }
-
-    pub fn for_pipeline(segment: Arc<SegmentSource<Req, Resp>>) -> Result<Arc<Self>> {
-        let ingress = Ingress::new();
-        ingress.attach(segment)?;
-        Ok(ingress)
-    }
-
-    pub fn for_engine(engine: ServiceEngine<Req, Resp>) -> Result<Arc<Self>> {
+    pub fn for_engine_with_adapter(
+        engine: ServiceEngine<Req, Resp>,
+        payload_adapter: Adapter,
+    ) -> Result<Arc<Self>> {
         let frontend = SegmentSource::<Req, Resp>::new();
         let backend = ServiceBackend::from_engine(engine);
 
         // create the pipeline
         let pipeline = frontend.link(backend)?.link(frontend)?;
 
-        let ingress = Ingress::new();
+        let ingress = Ingress::new_with_adapter(payload_adapter);
         ingress.attach(pipeline)?;
 
         Ok(ingress)
