@@ -46,7 +46,7 @@ _COLOR_PROMPT_FILLER = (
 
 
 def make_image_payload(
-    expected_response: list[str], *, max_attempts: int = 1
+    expected_response: list[str], *, max_attempts: int = 1, repeat_count: int = 1
 ) -> ChatPayload:
     """Standard image color-identification payload using MULTIMODAL_IMG_URL.
 
@@ -54,6 +54,8 @@ def make_image_payload(
     ``run_serve_deployment`` — set >1 only for known-flaky multimodal
     smoke checks (see tests/README.md "Flaky Tests"). The server stays
     up across attempts; only the request/response is re-issued.
+    ``repeat_count`` sends the same image request repeatedly, which is useful
+    for cache smoke coverage.
     """
     return chat_payload(
         [
@@ -63,7 +65,7 @@ def make_image_payload(
                 "image_url": {"url": MULTIMODAL_IMG_URL},
             },
         ],
-        repeat_count=1,
+        repeat_count=repeat_count,
         expected_response=expected_response,
         temperature=0.0,
         max_tokens=100,

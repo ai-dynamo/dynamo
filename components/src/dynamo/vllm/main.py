@@ -62,6 +62,7 @@ from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
+from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
 
@@ -549,31 +550,14 @@ def setup_vllm_engine(
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
 
-    # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
-    # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
-    if (
-        not config.route_to_encoder
-        and config.multimodal_embedding_cache_capacity_gb > 0
-    ):
-        from vllm.config import ECTransferConfig
-
-        logger.info(
-            "Configuring ec_both mode with DynamoMultimodalEmbeddingCacheConnector "
-            "(capacity=%.2f GB)",
-            config.multimodal_embedding_cache_capacity_gb,
-        )
-        instance_id = 0
-        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
-        engine_args.ec_transfer_config = ECTransferConfig(
-            engine_id=engine_id,
-            ec_role="ec_both",
-            ec_connector="DynamoMultimodalEmbeddingCacheConnector",
-            ec_connector_module_path="dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
-            ec_connector_extra_config={
-                "multimodal_embedding_cache_capacity_gb": config.multimodal_embedding_cache_capacity_gb,
-            },
-        )
-        logger.info("Configured ec_both with engine_id=%s", engine_id)
+    # Must happen before create_engine_config() so vLLM sees ec_transfer_config.
+    configure_multimodal_embedding_cache(
+        engine_args,
+        route_to_encoder=config.route_to_encoder,
+        capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+        namespace=config.namespace,
+        component=config.component,
+    )
 
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER

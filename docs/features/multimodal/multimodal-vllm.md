@@ -246,11 +246,14 @@ flowchart LR
 
 ```bash
 bash examples/backends/vllm/launch/agg_multimodal.sh \
+    --unified \
     --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
     --multimodal-embedding-cache-capacity-gb 10
 ```
 
-`dynamo.vllm` automatically configures `ec_both` mode with the `DynamoMultimodalEmbeddingCacheConnector` when the capacity is > 0.
+Both `dynamo.vllm` and the unified vLLM entry point automatically configure
+`ec_both` mode with the `DynamoMultimodalEmbeddingCacheConnector` when the
+capacity is greater than zero.
 
 **Launch with `vllm serve` (standalone, no Dynamo):**
 

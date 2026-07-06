@@ -171,6 +171,7 @@ async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
         namespace="deployment",
         enable_rl=False,
         enable_multimodal=True,
+        multimodal_embedding_cache_capacity_gb=2.5,
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
         engine_args=SimpleNamespace(
@@ -194,4 +195,6 @@ async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
 
     assert actual_worker_config is worker_config
     assert engine.enable_multimodal is True
+    assert engine.multimodal_embedding_cache_capacity_gb == 2.5
+    assert engine._namespace == "deployment"
     assert from_runtime_config.call_args.kwargs["model_input"] is mod.ModelInput.Tokens

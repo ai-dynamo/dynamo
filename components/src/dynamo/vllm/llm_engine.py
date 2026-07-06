@@ -79,6 +79,7 @@ from .logits_processing import (
     activate_logits_processors,
     register_dynamo_logits_processor,
 )
+from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.request_processor import VllmMultimodalRequestProcessor
 
 if TYPE_CHECKING:
@@ -175,6 +176,8 @@ class VllmLLMEngine(LLMEngine):
         dyn_reasoning_parser: Optional[str] = None,
         enable_rl: bool = False,
         enable_multimodal: bool = False,
+        multimodal_embedding_cache_capacity_gb: float = 0.0,
+        namespace: str = "dynamo",
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
@@ -184,6 +187,10 @@ class VllmLLMEngine(LLMEngine):
         self._dyn_reasoning_parser = dyn_reasoning_parser
         self.enable_rl = enable_rl
         self.enable_multimodal = enable_multimodal
+        self.multimodal_embedding_cache_capacity_gb = (
+            multimodal_embedding_cache_capacity_gb
+        )
+        self._namespace = namespace
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -293,6 +300,10 @@ class VllmLLMEngine(LLMEngine):
             dyn_reasoning_parser=config.dyn_reasoning_parser,
             enable_rl=config.enable_rl,
             enable_multimodal=config.enable_multimodal,
+            multimodal_embedding_cache_capacity_gb=(
+                config.multimodal_embedding_cache_capacity_gb
+            ),
+            namespace=config.namespace,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -321,6 +332,14 @@ class VllmLLMEngine(LLMEngine):
             register_dynamo_logits_processor(self.engine_args)
 
         self._prometheus_temp_dir = ensure_prometheus_multiproc_dir("vllm_prometheus_")
+
+        configure_multimodal_embedding_cache(
+            self.engine_args,
+            route_to_encoder=False,
+            capacity_gb=self.multimodal_embedding_cache_capacity_gb,
+            namespace=self._namespace,
+            component=self._component,
+        )
 
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER

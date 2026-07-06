@@ -362,8 +362,10 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
         headless=False,
         component="backend",
+        namespace="dynamo",
         route_to_encoder=False,
         enable_multimodal=False,
+        multimodal_embedding_cache_capacity_gb=0.0,
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
     )
@@ -603,6 +605,7 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
 
     config = SimpleNamespace(
         component="backend",
+        namespace="dynamo",
         engine_args=FakeEngineArgs(),
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,
