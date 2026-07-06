@@ -741,6 +741,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 
 	profilingResults, dgdName, err := r.generateDGDSpec(ctx, dgdr)
 	if err != nil {
+		if apierrors.IsConflict(err) {
+			logger.Info("DGDR changed while persisting generated spec; retrying", "name", dgdr.Name)
+			return ctrl.Result{}, err
+		}
 		dgdr.ClearProfilingPhase()
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageGenerationFailed, err.Error())
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed, nvidiacomv1beta1.ConditionTypeSpecGenerated, metav1.ConditionFalse, MessageGenerationFailed, err.Error())
@@ -1054,6 +1058,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			if getErr := r.authoritativeReader().Get(ctx, types.NamespacedName{Name: dgdName, Namespace: dgdNamespace}, existingDGD); getErr != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to get existing DGD %s: %w", dgdName, getErr)
 			}
+			if updateErr := r.persistDGDName(ctx, dgdr, dgdName); updateErr != nil {
+				return ctrl.Result{}, updateErr
+			}
 			if updateErr := r.removeGeneratedSpecAnnotation(ctx, dgdr); updateErr != nil {
 				logger.Error(updateErr, "Failed to remove generated-dgd-spec annotation on IsAlreadyExists path")
 				return ctrl.Result{}, updateErr
@@ -1061,8 +1068,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			if adoptErr := r.adoptAdditionalResources(ctx, dgdr, existingDGD); adoptErr != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for existing DGD %s: %w", dgdName, adoptErr)
 			}
-			dgdr.Status.DGDName = dgdName
-			return ctrl.Result{}, r.Status().Update(ctx, dgdr)
+			return ctrl.Result{}, nil
 		}
 		r.Recorder.Event(dgdr, corev1.EventTypeWarning, MessageDeploymentCreationFailed, err.Error())
 		// Admission webhook denials and other permanent API rejections (400/403/422)
@@ -1077,6 +1083,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 		return ctrl.Result{}, err
 	}
 
+	if err := r.persistDGDName(ctx, dgdr, dgdName); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.removeGeneratedSpecAnnotation(ctx, dgdr); err != nil {
 		// Return the error to force a retry. The DGD was created successfully, so a
 		// retry will hit the IsAlreadyExists path above and attempt cleanup again.
@@ -1085,9 +1094,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to adopt additional resources for DGD %s: %w", dgdName, err)
 	}
-
-	// Update status
-	dgdr.Status.DGDName = dgdName
 
 	r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonDeploymentCreated,
 		fmt.Sprintf(MessageDeploymentCreated, dgdName))
@@ -1102,6 +1108,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	logger.Info("DynamoGraphDeployment created successfully", "name", dgdName)
 
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
+}
+
+// persistDGDName records the DGD identity before the generated-spec transaction
+// marker is removed, so retries can recover even if later cleanup or adoption fails.
+func (r *DynamoGraphDeploymentRequestReconciler) persistDGDName(
+	ctx context.Context,
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	dgdName string,
+) error {
+	if dgdr.Status.DGDName == dgdName {
+		return nil
+	}
+	dgdr.Status.DGDName = dgdName
+	if err := r.Status().Update(ctx, dgdr); err != nil {
+		return fmt.Errorf("failed to persist DGD name %s before committing creation: %w", dgdName, err)
+	}
+	return nil
 }
 
 // removeGeneratedSpecAnnotation commits the creation transaction after a DGD

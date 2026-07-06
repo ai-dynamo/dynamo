@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -91,6 +92,42 @@ func (c *laggingReadClient) Get(ctx context.Context, key client.ObjectKey, obj c
 		return nil
 	}
 	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// writeFaultClient injects one-shot DGDR write failures while delegating all
+// other operations to the envtest client.
+type writeFaultClient struct {
+	client.Client
+	patchConflictOnce   bool
+	statusUpdateErrOnce error
+}
+
+func (c *writeFaultClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if _, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeploymentRequest); ok && c.patchConflictOnce {
+		c.patchConflictOnce = false
+		return apierrors.NewConflict(schema.GroupResource{
+			Group: nvidiacomv1beta1.GroupVersion.Group, Resource: "dynamographdeploymentrequests",
+		}, obj.GetName(), errors.New("injected optimistic-lock conflict"))
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+func (c *writeFaultClient) Status() client.SubResourceWriter {
+	return &writeFaultStatusWriter{SubResourceWriter: c.Client.Status(), client: c}
+}
+
+type writeFaultStatusWriter struct {
+	client.SubResourceWriter
+	client *writeFaultClient
+}
+
+func (w *writeFaultStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if _, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeploymentRequest); ok && w.client.statusUpdateErrOnce != nil {
+		err := w.client.statusUpdateErrOnce
+		w.client.statusUpdateErrOnce = nil
+		return err
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
 var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
@@ -656,6 +693,60 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 			Expect(completed).Should(BeTrue())
 		})
+
+		It("Should retry generated-annotation conflicts without failing profiling", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-generated-annotation-conflict"
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: dgdrName, Namespace: defaultNamespace},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model: "test-model", Backend: "vllm", AutoApply: ptr.To(false),
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+			dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
+			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
+
+			job := &batchv1.Job{
+				ObjectMeta: metav1.ObjectMeta{Name: getProfilingJobName(dgdr), Namespace: defaultNamespace},
+				Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "test", Image: "test"}}, RestartPolicy: corev1.RestartPolicyNever,
+				}}},
+			}
+			Expect(k8sClient.Create(ctx, job)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, job) }()
+			job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+			Expect(k8sClient.Status().Update(ctx, job)).Should(Succeed())
+
+			outputCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: getOutputConfigMapName(dgdr), Namespace: defaultNamespace},
+				Data: map[string]string{ProfilingOutputFile: `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated-name
+spec:
+  services: {}`},
+			}
+			Expect(k8sClient.Create(ctx, outputCM)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, outputCM) }()
+
+			reconciler.Client = &writeFaultClient{Client: k8sClient, patchConflictOnce: true}
+			reconciler.APIReader = k8sClient
+			_, err := reconciler.handleProfilingPhase(ctx, dgdr)
+			Expect(apierrors.IsConflict(err)).Should(BeTrue())
+
+			var persisted nvidiacomv1beta1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: defaultNamespace}, &persisted)).Should(Succeed())
+			Expect(persisted.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseProfiling))
+			Expect(persisted.Annotations).NotTo(HaveKey(AnnotationGeneratedDGDSpec))
+
+			_, err = reconciler.handleProfilingPhase(ctx, &persisted)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: defaultNamespace}, &persisted)).Should(Succeed())
+			Expect(persisted.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseReady))
+			Expect(persisted.Annotations).To(HaveKey(AnnotationGeneratedDGDSpec))
+		})
 	})
 
 	Context("When autoApply is enabled", func() {
@@ -793,6 +884,50 @@ spec:
 			// Clean up DGD
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: expectedDGDName, Namespace: namespace}, dgd)).Should(Succeed())
 			_ = k8sClient.Delete(ctx, dgd)
+		})
+
+		It("Should retain the generated spec when persisting DGD identity fails", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-dgd-name-write-failure"
+			dgdName := dgdrName + "-dgd"
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: dgdrName, Namespace: defaultNamespace,
+					Annotations: map[string]string{AnnotationGeneratedDGDSpec: `apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-dgdr-dgd-name-write-failure-dgd
+spec:
+  services: {}
+`},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{Model: "test-model"},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			injectedErr := errors.New("injected DGD name status failure")
+			reconciler.Client = &writeFaultClient{Client: k8sClient, statusUpdateErrOnce: injectedErr}
+			reconciler.APIReader = k8sClient
+			_, err := reconciler.createDGD(ctx, dgdr)
+			Expect(err).To(MatchError(ContainSubstring(injectedErr.Error())))
+
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: defaultNamespace}, dgd)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
+			var persisted nvidiacomv1beta1.DynamoGraphDeploymentRequest
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: defaultNamespace}, &persisted)).Should(Succeed())
+			Expect(persisted.Status.DGDName).Should(BeEmpty())
+			Expect(persisted.Annotations).To(HaveKey(AnnotationGeneratedDGDSpec))
+
+			// Retry through the AlreadyExists path. The retained marker supplies the
+			// manifest until DGD identity is durably recorded.
+			reconciler.Client = k8sClient
+			_, err = reconciler.createDGD(ctx, &persisted)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: defaultNamespace}, &persisted)).Should(Succeed())
+			Expect(persisted.Status.DGDName).Should(Equal(dgdName))
+			Expect(persisted.Annotations).NotTo(HaveKey(AnnotationGeneratedDGDSpec))
 		})
 
 		It("Should create additional ConfigMaps without DGDR ownership and adopt them after DGD creation", func() {
