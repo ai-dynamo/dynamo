@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::source::EventSource;
-use crate::tracker::Tracker;
+use crate::tracker::{StoreInput, Tracker};
 use crate::wire::vllm_in::{KvEventBatch, RawKvEvent};
 use crate::zmq_util::{connect_sub_socket, multipart_message};
 
@@ -156,7 +156,7 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
 
             for (i, block_hash) in block_hashes.into_iter().enumerate() {
                 let hash_str = block_hash.into_u64().to_string();
-                tracker.handle_store_with_cache_namespace(
+                tracker.handle_store_input(StoreInput::new(
                     engine_source,
                     hash_str.clone(),
                     current_parent.clone(),
@@ -164,7 +164,7 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
                     block_size,
                     lora_name.clone(),
                     cache_namespace.clone(),
-                );
+                ));
                 current_parent = Some(hash_str);
             }
         }

@@ -49,6 +49,39 @@ pub enum ConsolidatedEvent {
     ClearAll,
 }
 
+/// Inputs for a STORE event received from a string-hashed source.
+pub(crate) struct StoreInput {
+    source: EventSource,
+    external_hash: String,
+    parent_external_hash: Option<String>,
+    token_ids: Vec<u32>,
+    block_size: usize,
+    lora_name: Option<String>,
+    cache_namespace: Option<Arc<str>>,
+}
+
+impl StoreInput {
+    pub(crate) fn new(
+        source: EventSource,
+        external_hash: String,
+        parent_external_hash: Option<String>,
+        token_ids: Vec<u32>,
+        block_size: usize,
+        lora_name: Option<String>,
+        cache_namespace: Option<Arc<str>>,
+    ) -> Self {
+        Self {
+            source,
+            external_hash,
+            parent_external_hash,
+            token_ids,
+            block_size,
+            lora_name,
+            cache_namespace,
+        }
+    }
+}
+
 /// Per-block state: which sources have it, an optional registry handle keeping the
 /// block present in kvbm-logical's shared radix tree, and whether a publishable
 /// `ConsolidatedEvent::Store` has been emitted downstream.
@@ -134,7 +167,7 @@ impl Tracker {
         block_size: usize,
         lora_name: Option<String>,
     ) -> bool {
-        self.handle_store_with_cache_namespace(
+        self.handle_store_input(StoreInput::new(
             source,
             external_hash,
             parent_external_hash,
@@ -142,20 +175,20 @@ impl Tracker {
             block_size,
             lora_name,
             None,
-        )
+        ))
     }
 
     /// Handle a STORE event with an optional cache namespace.
-    pub fn handle_store_with_cache_namespace(
-        &mut self,
-        source: EventSource,
-        external_hash: String,
-        parent_external_hash: Option<String>,
-        token_ids: Vec<u32>,
-        block_size: usize,
-        lora_name: Option<String>,
-        cache_namespace: Option<Arc<str>>,
-    ) -> bool {
+    pub(crate) fn handle_store_input(&mut self, input: StoreInput) -> bool {
+        let StoreInput {
+            source,
+            external_hash,
+            parent_external_hash,
+            token_ids,
+            block_size,
+            lora_name,
+            cache_namespace,
+        } = input;
         let parent_key = parent_external_hash
             .as_ref()
             .map(|external_hash| (source, external_hash.clone()));
@@ -849,7 +882,7 @@ mod tests {
         let mut t = tracker();
         let tokens = vec![10, 20, 30, 40];
 
-        t.handle_store_with_cache_namespace(
+        t.handle_store_input(StoreInput::new(
             EventSource::Vllm,
             "tenant-a-block".into(),
             None,
@@ -857,8 +890,8 @@ mod tests {
             4,
             None,
             Some(Arc::from("tenant-a")),
-        );
-        t.handle_store_with_cache_namespace(
+        ));
+        t.handle_store_input(StoreInput::new(
             EventSource::Vllm,
             "tenant-b-block".into(),
             None,
@@ -866,7 +899,7 @@ mod tests {
             4,
             None,
             Some(Arc::from("tenant-b")),
-        );
+        ));
 
         let events = t.drain_events();
         assert_eq!(events.len(), 2);
@@ -903,7 +936,7 @@ mod tests {
         let mut t = tracker();
         let namespace = Arc::<str>::from("tenant-a");
 
-        t.handle_store_with_cache_namespace(
+        t.handle_store_input(StoreInput::new(
             EventSource::Vllm,
             "parent".into(),
             None,
@@ -911,8 +944,8 @@ mod tests {
             4,
             None,
             Some(Arc::clone(&namespace)),
-        );
-        t.handle_store_with_cache_namespace(
+        ));
+        t.handle_store_input(StoreInput::new(
             EventSource::Vllm,
             "child".into(),
             Some("parent".into()),
@@ -920,7 +953,7 @@ mod tests {
             4,
             None,
             None,
-        );
+        ));
 
         let events = t.drain_events();
         let namespaces = events
