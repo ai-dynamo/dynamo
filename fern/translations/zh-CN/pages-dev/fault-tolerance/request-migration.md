@@ -4,10 +4,6 @@
 title: 请求迁移
 ---
 
-<p align="left">
-  <a href="./request-migration.md" hreflang="en">English</a> | <strong>简体中文</strong>
-</p>
-
 本文档介绍 Dynamo 如何实现请求迁移，以便在 LLM 文本生成期间优雅地处理 worker 故障。请求迁移允许正在处理的请求在原始 worker 不可用时继续在其他 worker 上执行，从而提供故障容错能力并改善用户体验。
 
 ## 概述
@@ -149,7 +145,7 @@ dynamo_frontend_model_migration_max_seq_len_exceeded_total{model="Qwen/Qwen3-0.6
 - 跟踪故障容错机制的有效性
 - 监控 `--migration-max-seq-len` 达到限制的频率，这可能表示需要调整该限制
 
-有关 Dynamo 指标的更多信息，请参阅[指标文档](../observability/metrics.md)。
+有关 Dynamo 指标的更多信息，请参阅[指标文档](../../../../../docs/observability/metrics.md)。
 
 ## 已知限制
 

@@ -458,6 +458,9 @@ pub mod work_handler {
         /// Generation error
         pub const GENERATE: &str = "generate";
 
+        /// Response serialization error
+        pub const SERIALIZATION: &str = "serialization";
+
         /// Response publishing error
         pub const PUBLISH_RESPONSE: &str = "publish_response";
 

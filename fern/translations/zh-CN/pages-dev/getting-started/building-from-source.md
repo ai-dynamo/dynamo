@@ -6,11 +6,7 @@ sidebar-title: 从源代码构建
 description: 从源代码构建 Dynamo，用于开发和贡献
 ---
 
-<p align="left">
-  <a href="./building-from-source.md" hreflang="en">English</a> | <strong>简体中文</strong>
-</p>
-
-当你想贡献代码、测试开发分支上的功能，或自定义构建时，可以从源代码构建 Dynamo。如果你只是想运行 Dynamo，[本地安装](local-installation.zh-CN.md)指南会更快。
+当你想贡献代码、测试开发分支上的功能，或自定义构建时，可以从源代码构建 Dynamo。如果你只是想运行 Dynamo，[本地安装](local-installation.md)指南会更快。
 
 本指南涵盖 Ubuntu 和 macOS。如需一个能自动处理所有这些步骤的容器化开发环境，请参阅 [DevContainer](#devcontainer)。
 
@@ -89,7 +85,7 @@ uv pip install -e .
 ```
 
 > [!NOTE]
-> 仅执行基础的 `uv pip install -e .` 只会安装 Dynamo 运行时和前端。后端附加依赖（`[vllm]` 或 `[sglang]`）会安装运行推理 worker 所需的相应框架依赖。对于 TensorRT-LLM 后端，请改用 `tensorrtllm-runtime` 容器，而不是通过 `uv pip` 安装，以确保安装正确的依赖。更多详情请参阅[本地安装](local-installation.zh-CN.md)。
+> 仅执行基础的 `uv pip install -e .` 只会安装 Dynamo 运行时和前端。后端附加依赖（`[vllm]` 或 `[sglang]`）会安装运行推理 worker 所需的相应框架依赖。对于 TensorRT-LLM 后端，请改用 `tensorrtllm-runtime` 容器，而不是通过 `uv pip` 安装，以确保安装正确的依赖。更多详情请参阅[本地安装](local-installation.md)。
 
 ## 8. 验证构建
 
@@ -166,6 +162,6 @@ export VLLM_USE_FLASHINFER_SAMPLER=0
 
 ## 后续步骤
 
-- [贡献指南](../contribution-guide.zh-CN.md) -- 贡献代码的工作流
+- [贡献指南](../contribution-guide.md) -- 贡献代码的工作流
 - [示例](https://github.com/ai-dynamo/dynamo/tree/main/examples) -- 探索代码库
 - [Good First Issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue) -- 查找可以着手处理的任务
