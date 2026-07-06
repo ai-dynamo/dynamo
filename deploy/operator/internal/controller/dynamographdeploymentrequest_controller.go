@@ -114,6 +114,7 @@ const (
 	ArgConfig  = "--config"
 
 	// Messages
+	MessageValidationPassed          = "DGDR spec validation passed"
 	MessageInitialized               = "DGDR initialized successfully"
 	MessageDiscoveringHardware       = "Discovering GPU hardware and preparing profiling job"
 	MessageProfilingJobCreated       = "Profiling job created"
@@ -538,6 +539,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: dgdr.Generation,
 			Reason:             "ValidationPassed",
+			Message:            MessageValidationPassed,
 		})
 
 		// Initialize status — next reconcile will discover hardware and create the profiling job.

@@ -66,6 +66,48 @@ class Config:
             return DisaggregationMode.AGGREGATED
 
 
+def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
+    """Return the worker role when the selected path does not create an FPM relay."""
+    if is_snapshot_enabled():
+        return "snapshot"
+    if dynamo_config.embedding_worker:
+        return "embedding"
+    if (
+        dynamo_config.multimodal_encode_worker
+        or dynamo_config.multimodal_worker
+        or dynamo_config.dedicated_mm_encoder
+    ):
+        return "dedicated multimodal"
+    if dynamo_config.image_diffusion_worker:
+        return "image diffusion"
+    if dynamo_config.video_generation_worker:
+        return "video generation"
+    return None
+
+
+def _forward_pass_metrics_source(
+    dynamo_config: DynamoConfig, *, fpm_trace_relay_supported: bool = True
+) -> Optional[str]:
+    """Resolve the FPM opt-in source while preserving the legacy port switch."""
+    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT"):
+        return "DYN_FORWARDPASS_METRIC_PORT"
+    if not dynamo_config.fpm_trace:
+        return None
+
+    unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
+    if unsupported_role is None and not fpm_trace_relay_supported:
+        unsupported_role = "unified backend"
+    if unsupported_role is None:
+        return "--fpm-trace/DYN_FPM_TRACE"
+
+    logging.warning(
+        "--fpm-trace/DYN_FPM_TRACE is enabled, but SGLang %s workers do not create a Dynamo "
+        "FPM relay. Trace-based FPM activation is disabled for this worker.",
+        unsupported_role,
+    )
+    return None
+
+
 def use_modelexpress_remote_instance(args: Any) -> bool:
     return (
         getattr(args, "load_format", None) == "remote_instance"
@@ -264,12 +306,16 @@ def _dump_disagg_config_section(disagg_config: dict[str, Any]) -> str:
     return temp_path
 
 
-async def parse_args(args: list[str]) -> Config:
+async def parse_args(
+    args: list[str], *, fpm_trace_relay_supported: bool = True
+) -> Config:
     """Parse CLI arguments and return combined configuration.
     Download the model if necessary.
 
     Args:
         args: Command-line argument strings.
+        fpm_trace_relay_supported: Whether this entry point constructs the
+            Dynamo relay required for trace-based FPM activation.
 
     Returns:
         Config object with server_args and dynamo_args.
@@ -526,11 +572,13 @@ async def parse_args(args: list[str]) -> Config:
     )
 
     # Enable forward pass metrics from dynamo env var if configured
-    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT") and not getattr(
-        server_args, "enable_forward_pass_metrics", False
-    ):
+    fpm_source = _forward_pass_metrics_source(
+        dynamo_config,
+        fpm_trace_relay_supported=fpm_trace_relay_supported,
+    )
+    if fpm_source and not getattr(server_args, "enable_forward_pass_metrics", False):
         server_args.enable_forward_pass_metrics = True
-        logging.info("Enabled forward_pass_metrics from DYN_FORWARDPASS_METRIC_PORT")
+        logging.info("Enabled forward_pass_metrics from %s", fpm_source)
 
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None
