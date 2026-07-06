@@ -91,9 +91,11 @@ flowchart LR
 The router maintains two indexes:
 
 - Its own radix tree, built from worker KV events (per-tier).
-- A set of Mooncake object keys, built from the Mooncake master's event stream.
+- A set of Mooncake object keys and verified logical groups, built from the Mooncake master's event stream.
 
-Request routing checks both indexes locally. If the event stream starts after Mooncake already contains objects, the shared-pool index starts empty and learns about subsequent events. A sequence gap clears the shared-pool index to avoid stale hits.
+Request routing checks both indexes locally. When an event includes SGLang's `group_id`, the first lookup verifies every physical object in the group and caches the result. Later requests use one group lookup per page; any event for that group invalidates the cached result. Events without `group_id` use exact object-key checks.
+
+If the event stream starts after Mooncake already contains objects, the shared-pool index starts empty and learns about subsequent events. A sequence gap clears the shared-pool index to avoid stale hits.
 
 ### Scoring
 
@@ -163,7 +165,7 @@ python -m dynamo.sglang \
   --hicache-ratio 2 \
   --hicache-write-policy write_through \
   --hicache-storage-backend mooncake \
-  --hicache-storage-backend-extra-config '{"master_server_address": "mooncake-master.internal:50051"}' \
+  --hicache-storage-backend-extra-config '{"master_server_address": "mooncake-master.internal:50051", "enable_group_semantics": true}' \
   --skip-tokenizer-init
 ```
 
@@ -189,6 +191,8 @@ python -m dynamo.frontend \
 Per-request overrides are available via `RouterConfigOverride.shared_cache_multiplier` for A/B experimentation without restarting the router.
 
 Set `DYN_MOONCAKE_KV_EVENTS_ENDPOINT` on the worker to the Mooncake PUB endpoint, such as `tcp://mooncake-master.internal:5557`. The endpoint must be reachable from the frontend. When `--hicache-storage-backend mooncake` is set, Dynamo publishes the endpoint and required layout metadata through the worker's `ModelRuntimeConfig.engine_specific` blob under the key `sglang_hicache_mooncake`.
+
+Set `enable_group_semantics` to `true` in `--hicache-storage-backend-extra-config` to include SGLang logical group IDs in Mooncake metadata. Dynamo falls back to exact physical-key checks when group metadata is unavailable.
 
 ## Verification
 
