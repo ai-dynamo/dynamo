@@ -59,7 +59,9 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 | [Health Checks](health-checks.md) | Component health monitoring and readiness probes | `DYN_SYSTEM_PORT`†, `DYN_SYSTEM_STARTING_HEALTH_STATUS`, `DYN_SYSTEM_HEALTH_PATH`, `DYN_SYSTEM_LIVE_PATH`, `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` |
 | [Tracing](tracing.md) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
 | [Request Replay Tracing](request-tracing.md) | Per-request JSONL capture for direct DynoSim replay | `DYN_REQUEST_TRACE`, `DYN_REQUEST_TRACE_OUTPUT_PATH` |
+| [Forward Pass Metrics Tracing](forward-pass-metrics-tracing.md) | Best-effort rotating gzip JSONL capture of backend forward pass metrics | `DYN_FPM_TRACE`, `DYN_FPM_OUTPUT_PATH`, `DYN_FPM_MODE`, `DYN_FPM_SAMPLE_INTERVAL_MS`, `DYN_FPM_JSONL_GZ_ROLL_BYTES`, `DYN_FPM_MAX_SEGMENTS` |
 | [Logging](logging.md) | Structured logging and OTLP log export to Loki | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`† |
+| [Audit Payload Logging](logging.md#audit-payload-logging-otlp) | Per-request chat-completion payload capture exported over OTLP logs | `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`, `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`†, `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`† |
 
 **Variables marked with † are shared across multiple observability systems.**
 

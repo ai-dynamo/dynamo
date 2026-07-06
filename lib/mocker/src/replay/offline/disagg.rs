@@ -782,11 +782,12 @@ impl DisaggRuntime {
         }
         let request = self.state(uuid)?.build_prefill_request()?;
         let replay_hashes = self.state_mut(uuid)?.take_replay_hashes();
+        let session_id = self.state(uuid)?.session_id().map(str::to_owned);
         let admissions = self
             .prefill_router
             .as_mut()
             .expect("prefill router presence checked above")
-            .on_request_arrival(&request, replay_hashes, self.now_ms)?
+            .on_request_arrival_for_session(&request, replay_hashes, session_id, self.now_ms)?
             .admissions;
         self.record_router_pending();
         self.dispatch_prefill_admissions(admissions)
@@ -805,11 +806,12 @@ impl DisaggRuntime {
             state.destination_routed = true;
         }
         let request = self.state(uuid)?.original_request()?.clone();
+        let session_id = self.state(uuid)?.session_id().map(str::to_owned);
         let admissions = self
             .decode_router
             .as_mut()
             .expect("decode router presence checked above")
-            .on_request_arrival(&request, None, self.now_ms)?
+            .on_request_arrival_for_session(&request, None, session_id, self.now_ms)?
             .admissions;
         self.record_router_pending();
         self.dispatch_decode_admissions(admissions)?;
@@ -1235,6 +1237,7 @@ impl DisaggRuntime {
         mut request: DirectRequest,
         arrival_time_ms: f64,
         replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
     ) -> Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
@@ -1256,6 +1259,7 @@ impl DisaggRuntime {
             handoff_id,
             self.handoff_order,
             replay_hashes,
+            session_id,
         );
         let actions = state.coordinator.start()?;
         self.requests.insert(uuid, state);
@@ -1420,13 +1424,21 @@ impl DisaggRuntime {
         // latency — keep it out of the planner-facing traffic deltas (mirror the
         // aggregated path). It still frees its slot, advances, and is marked done.
         if !signal.rejected {
-            let state = self.state(signal.uuid)?;
-            let original = state.original_request()?;
-            let input_tokens = original.tokens.len();
-            let output_tokens = original.max_output_tokens;
+            let (input_tokens, requested_output_tokens) = {
+                let state = self.state(signal.uuid)?;
+                let original = state.original_request()?;
+                (original.tokens.len(), original.max_output_tokens)
+            };
+            let actual_output_tokens = self
+                .collector
+                .actual_output_length(signal.uuid)
+                .ok_or_else(|| {
+                    anyhow!("offline replay missing collector state for {}", signal.uuid)
+                })?;
+            debug_assert!(actual_output_tokens <= requested_output_tokens);
             let latencies = self.collector.request_latencies(signal.uuid);
             self.traffic
-                .on_request(input_tokens, output_tokens, latencies);
+                .on_request(input_tokens, actual_output_tokens, latencies);
         }
         let terminal_status = if signal.rejected {
             ReplayTerminalStatus::Rejected
@@ -1550,8 +1562,9 @@ impl DisaggRuntime {
                 session_id,
                 turn_index,
             } = ready;
-            let session_metadata = session_id.zip(turn_index);
-            let uuid = self.on_external_arrival(request, arrival_time_ms, replay_hashes)?;
+            let session_metadata = session_id.clone().zip(turn_index);
+            let uuid =
+                self.on_external_arrival(request, arrival_time_ms, replay_hashes, session_id)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);

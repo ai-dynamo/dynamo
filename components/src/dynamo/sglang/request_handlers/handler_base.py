@@ -421,6 +421,12 @@ class LoraMixin:
                                 base_model_path=self.config.server_args.model_path,
                                 worker_type=lora_worker_type,
                                 needs=lora_needs,
+                                # Publish the worker's per-worker LoRA slot budget so the frontend
+                                # allocator sizes placement against real capacity instead of the
+                                # hard-coded default.
+                                max_gpu_lora_count=getattr(
+                                    self.config.server_args, "max_loras_per_batch", None
+                                ),
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
@@ -663,9 +669,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         self.serving_mode = config.serving_mode
         self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
         self.enable_trace = getattr(config.server_args, "enable_trace", False)
-        self.enable_session_radix_cache = getattr(
-            config.server_args, "enable_session_radix_cache", False
-        )
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
@@ -815,6 +818,57 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 logging.error(f"Failed to resume memory occupation: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
+        """Flush SGLang's local cache when no requests are active."""
+        tokenizer_manager = (
+            getattr(self.engine, "tokenizer_manager", None)
+            if self.engine is not None
+            else None
+        )
+        if tokenizer_manager is None:
+            yield {
+                "status": "error",
+                "message": "KV cache clear not supported on this worker",
+            }
+            return
+
+        try:
+            async with self._pause_lock:
+                if getattr(tokenizer_manager, "rid_to_state", None):
+                    yield {
+                        "status": "error",
+                        "message": "Cannot clear KV cache while requests are active",
+                    }
+                    return
+
+                if hasattr(tokenizer_manager, "auto_create_handle_loop"):
+                    tokenizer_manager.auto_create_handle_loop()
+                result = await tokenizer_manager.flush_cache()
+
+                if not result.success:
+                    yield {
+                        "status": "error",
+                        "message": getattr(result, "message", None)
+                        or "KV cache clear failed",
+                    }
+                    return
+
+                backend = tokenizer_manager.server_args.hicache_storage_backend
+                if backend and backend != "none":
+                    result = await tokenizer_manager.clear_hicache_storage()
+                    if not result.success:
+                        yield {
+                            "status": "error",
+                            "message": getattr(result, "message", None)
+                            or "External KV cache clear failed",
+                        }
+                        return
+
+                yield {"status": "success", "message": "KV cache cleared"}
+        except Exception as e:
+            logging.error("Failed to clear KV cache: %s", e)
+            yield {"status": "error", "message": str(e)}
+
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.
 
@@ -961,16 +1015,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
-
-    def _session_id(self, request: Dict[str, Any]) -> Optional[str]:
-        if not self.enable_session_radix_cache:
-            return None
-        session_id = (request.get("agent_context") or {}).get("session_id")
-        return session_id if isinstance(session_id, str) and session_id else None
-
-    def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        session_id = self._session_id(request)
-        return {"session_params": {"id": session_id}} if session_id else {}
 
     @staticmethod
     def _get_guided_decoding_params(

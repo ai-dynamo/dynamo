@@ -6,9 +6,7 @@ subtitle: Overview of Dynamo's design principles, performance techniques, and pr
 sidebar-title: Introduction
 ---
 
-<p align="left">
-  <a href="./introduction.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
+[简体中文](./introduction.zh-CN.md)
 
 Dynamo is an open-source, high-throughput, low-latency inference framework,
 designed to serve generative AI workloads in distributed environments. It is
@@ -106,17 +104,17 @@ Kubernetes cluster:
 | Local or container | You are evaluating, developing, or adopting one component at a time. | OpenAI-compatible frontend, router, workers, file or etcd discovery, Python/Rust APIs, and installable packages. |
 | Kubernetes | You are deploying shared GPU capacity, multi-node serving, autoscaling, or platform-integrated inference. | Helm install, Dynamo operator, DGD/DCD/DGDR CRDs, Kubernetes-native discovery, Gateway API Inference Extension, Grove/LWS scheduling, ModelExpress, observability, and lifecycle management. |
 
-## Request Routing Modes
+## Request Routing Topologies
 
-Dynamo supports two request-routing modes. Both expose the same
-OpenAI-compatible API and the same backends; they differ in *where* request
-routing happens.
+Dynamo supports two Kubernetes request routing topologies. Both expose the same
+OpenAI-compatible API and the same backends; they differ in where the request
+enters the system and where worker selection is integrated.
 
-- **Standalone mode** (default) -- The Dynamo Frontend serves HTTP requests directly, and the integrated Dynamo Router makes KV-aware routing decisions before dispatching to workers. No external gateway is required. This is the mode used by all local installs and the default Kubernetes deployment. Request flow: `client -> Frontend -> Router -> workers`.
+- **Dynamo-native Frontend routing** -- The Dynamo Frontend serves HTTP requests directly, and the integrated Dynamo Router makes KV-aware routing decisions before dispatching to workers. No external gateway is required. Request flow: `client -> Frontend -> Router -> workers`.
 
-- **Gateway mode (GAIE)** -- Dynamo runs behind a Kubernetes [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway. KV-aware routing is performed at the gateway layer by the Dynamo Endpoint Picker Plugin (EPP); the Frontend runs as a sidecar in `--router-mode direct` and forwards requests to the worker the EPP selected. Use this mode when your platform standardizes on the Inference Gateway, or when you want gateway-level policy (auth, rate limiting, observability) co-located with KV-aware routing. Request flow: `client -> Inference Gateway -> EPP (KV-aware) -> Frontend sidecar (direct) -> workers`.
+- **Gateway API routing with GAIE** -- A Kubernetes [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) gateway calls the Dynamo Endpoint Picker Plugin (EPP) before forwarding to the selected worker's Frontend sidecar in `--router-mode direct`. Use this topology when your platform standardizes on Gateway API, or when you want gateway-level policy, auth, rate limiting, and observability at the cluster edge. Request flow: `client -> Gateway -> EPP -> Frontend sidecar (direct) -> workers`.
 
-Both modes support disaggregated serving, multimodal, and the same set of backends (vLLM, SGLang, TensorRT-LLM). For full setup, supported features, and configuration of gateway mode, see the [Inference Gateway (GAIE) guide](../kubernetes/inference-gateway.md).
+Both topologies support disaggregated serving, multimodal, and the same set of backends (vLLM, SGLang, TensorRT-LLM). For setup and configuration of the Gateway API path, see the [Gateway API Inference Extension (GAIE) guide](../kubernetes/gateway-api/README.mdx).
 
 ## Performance
 
@@ -192,7 +190,7 @@ Explore the following resources to go deeper:
 - [KV Cache Offloading](../components/kvbm/kvbm-guide.md) -- Set up multi-tier memory management
 - [Planner](../components/planner/planner-guide.md) -- Configure SLA-based autoscaling
 - [Kubernetes Deployment](../kubernetes/README.md) -- Deploy at scale with Grove
-- [Inference Gateway (GAIE)](../kubernetes/inference-gateway.md) -- Run Dynamo in gateway mode behind the K8s Inference Gateway
+- [Gateway API Inference Extension (GAIE)](../kubernetes/gateway-api/README.mdx) -- Run Dynamo behind Kubernetes Gateway API with Dynamo EPP routing
 - [Overall Architecture](../design-docs/architecture.md) -- Full technical design
 - [Support Matrix](../reference/support-matrix.md) -- Check hardware and engine compatibility
 

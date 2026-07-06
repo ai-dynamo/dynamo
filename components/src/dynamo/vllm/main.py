@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import asyncio
 import json
 import logging
@@ -15,6 +14,8 @@ if TYPE_CHECKING:
     from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
+from huggingface_hub import try_to_load_from_cache
+from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -59,6 +60,7 @@ from .capacity import (
 )
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
+from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
@@ -105,54 +107,6 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     if getattr(vllm_config.model_config, "model_weights", ""):
         return vllm_config.model_config.model
     return config.model
-
-
-def build_headless_namespace(config: Config) -> argparse.Namespace:
-    """Build an argparse Namespace from engine_args for vLLM's run_headless().
-
-    run_headless() expects the raw CLI namespace. We reconstruct it from
-    the already-parsed AsyncEngineArgs so parse_args() doesn't need to
-    leak transport details.
-    """
-    ns = argparse.Namespace(**vars(config.engine_args))
-    # run_headless() reads api_server_count; default to 0 (no API server)
-    if not hasattr(ns, "api_server_count"):
-        ns.api_server_count = 0
-    return ns
-
-
-def run_dynamo_headless(config: Config) -> None:
-    """Run in headless mode for multi-node TP/PP.
-
-    Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
-    no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
-    """
-    # Propagate worker_cls for custom load formats so headless workers use
-    # the same model loader settings as the leader node.
-    if config.engine_args.load_format == "gms":
-        config.engine_args.worker_cls = (
-            "gpu_memory_service.integrations.vllm.worker.GMSWorker"
-        )
-
-        if config.gms_shadow_mode:
-            from gpu_memory_service.integrations.vllm.utils import (
-                configure_gms_lock_mode,
-                configure_mx_ports,
-            )
-
-            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
-            configure_gms_lock_mode(config.engine_args)
-            configure_mx_ports(config.engine_args)
-
-    # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
-    # Dynamo does not set a custom worker class here.
-
-    # Keep the upstream CLI import local so tests that only exercise
-    # build_headless_namespace() do not pull in vLLM's full CLI import graph.
-    from vllm.entrypoints.cli.serve import run_headless
-
-    args = build_headless_namespace(config)
-    run_headless(args)
 
 
 async def worker(argv: list[str] | None = None) -> None:
@@ -358,9 +312,32 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
     except ImportError:
         return None
 
-    # vLLM has already resolved the model to a local dir (config.json +
-    # tokenizer.json on disk) during engine init; read from there.
-    return resolve_routing_image_token_id(config.model, vllm_config.model_config.model)
+    # `model_config.model` is the user-supplied `--model` argument verbatim, so
+    # for HF ids ("Qwen/Qwen3.5-0.8B") it points nowhere on disk. Resolve via
+    # huggingface_hub's public cache lookup with vLLM's revision so we pick
+    # the same snapshot vLLM is using; fall through to the raw path for
+    # local-path users (where the lookup raises HFValidationError).
+    model_dir = None
+    try:
+        revision = vllm_config.model_config.revision
+        cfg = try_to_load_from_cache(
+            repo_id=config.model, filename="config.json", revision=revision
+        )
+        if cfg and isinstance(cfg, str):
+            model_dir = os.path.dirname(cfg)
+    except (HFValidationError, OSError) as exc:
+        logger.debug(
+            "HF cache lookup for %s failed (%s); falling back to raw model arg",
+            config.model,
+            exc,
+        )
+    if model_dir is None:
+        logger.debug(
+            "Resolved model_dir via raw arg fallback: %s",
+            vllm_config.model_config.model,
+        )
+        model_dir = vllm_config.model_config.model
+    return resolve_routing_image_token_id(config.model, model_dir)
 
 
 def setup_kv_event_publisher(
@@ -450,6 +427,7 @@ def setup_kv_event_publisher(
 
 
 def setup_fpm_relay(
+    config: Config,
     generate_endpoint: Endpoint,
     vllm_config: VllmConfig,
 ) -> Optional[list]:
@@ -464,7 +442,7 @@ def setup_fpm_relay(
     Returns:
         List of FpmEventRelay instances, or None if FPM is not enabled.
     """
-    if not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+    if not (envs.is_set("DYN_FORWARDPASS_METRIC_PORT") or config.fpm_trace):
         return None
 
     try:
@@ -800,6 +778,21 @@ async def register_vllm_model(
         worker_type=worker_type,
         needs=needs,
         ignore_weights=should_register_model_ignore_weights(config),
+        # Advertise the worker's LoRA slot budget on the BASE registration so the frontend
+        # allocator can place adapters onto idle-but-LoRA-capable workers before any adapter is
+        # loaded here. Only generative decode/aggregated workers serve the LoRA load endpoints
+        # (load_lora/unload_lora). Prefill and embedding workers register through this same path
+        # but do NOT serve them, so they must not advertise capacity they cannot fulfill — gate on
+        # the model type rather than worker_type (vLLM embedding registers as Aggregated). None
+        # (no capacity) for non-LoRA, prefill, or embedding workers.
+        max_gpu_lora_count=(
+            config.engine_args.max_loras
+            if (
+                getattr(config.engine_args, "enable_lora", False)
+                and model_type not in (ModelType.Prefill, ModelType.Embedding)
+            )
+            else None
+        ),
     )
 
 

@@ -15,7 +15,7 @@ use dynamo_runtime::{
     },
 };
 use prometheus::{
-    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 use serde::Serialize;
 use std::{
@@ -125,6 +125,110 @@ pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometh
     registry.register(Box::new(WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.clone()))?;
     registry.register(Box::new(WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.clone()))?;
     registry.register(Box::new(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.clone()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// LoRA allocation metrics (updated by LoraController each tick)
+// ---------------------------------------------------------------------------
+
+pub static LORA_REPLICA_FACTOR_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_REPLICA_FACTOR),
+            "Number of replicas allocated for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_replica_factor gauge")
+});
+
+pub static LORA_IS_ACTIVE_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_IS_ACTIVE),
+            "Whether a LoRA adapter is active (1) or inactive (0)",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_is_active gauge")
+});
+
+pub static LORA_RAW_ARRIVAL_COUNT_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::LORA_RAW_ARRIVAL_COUNT
+            ),
+            "Raw arrival count (windowed rate counter) for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_raw_arrival_count gauge")
+});
+
+pub static LORA_ESTIMATED_LOAD_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_ESTIMATED_LOAD),
+            "Estimated load (windowed request count) for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_estimated_load gauge")
+});
+
+pub static LORA_ACTIVE_REQUESTS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_ACTIVE_REQUESTS),
+            "Number of in-flight requests for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_active_requests gauge")
+});
+
+pub static LORA_CHURN_LOADS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        format!(
+            "dynamo_frontend_{}",
+            frontend_service::LORA_CHURN_LOADS_TOTAL
+        ),
+        "Total LoRA loads (new placements) this tick",
+    )
+    .expect("Failed to create lora_churn_loads gauge")
+});
+
+pub static LORA_CHURN_UNLOADS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        format!(
+            "dynamo_frontend_{}",
+            frontend_service::LORA_CHURN_UNLOADS_TOTAL
+        ),
+        "Total LoRA unloads (removed placements) this tick",
+    )
+    .expect("Failed to create lora_churn_unloads gauge")
+});
+
+pub static LORA_OVERFLOW_COUNT_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        format!("dynamo_frontend_{}", frontend_service::LORA_OVERFLOW_COUNT),
+        "MCF solver overflow count (unplaceable replicas)",
+    )
+    .expect("Failed to create lora_overflow_count gauge")
+});
+
+pub fn register_lora_allocation_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(LORA_REPLICA_FACTOR_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_IS_ACTIVE_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_RAW_ARRIVAL_COUNT_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_ESTIMATED_LOAD_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_ACTIVE_REQUESTS_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_CHURN_LOADS_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_CHURN_UNLOADS_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_OVERFLOW_COUNT_GAUGE.clone()))?;
     Ok(())
 }
 
@@ -355,6 +459,9 @@ pub enum Endpoint {
 
     /// Tensor
     Tensor,
+
+    /// Generate (token-in/token-out)
+    Generate,
 }
 
 /// Metrics for the HTTP service
@@ -1308,6 +1415,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
+            Endpoint::Generate => write!(f, "generate"),
         }
     }
 }
@@ -1324,6 +1432,7 @@ impl Endpoint {
             Endpoint::Responses => "responses",
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
+            Endpoint::Generate => "generate",
         }
     }
 }
@@ -1794,6 +1903,14 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
         }
     }
 
+    // ANNOTATION_AUDIT_USAGE is audit-only and must never reach the client SSE
+    // stream (the audit DeltaAggregator consumed its usage upstream).
+    if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_AUDIT_USAGE) {
+        annotated.event = None;
+        annotated.comment = None;
+        annotated.data = None;
+    }
+
     annotated_to_sse_event(annotated)
 }
 
@@ -1821,6 +1938,15 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
         // client-visible SSE payloads after metrics collection.
         annotated.event = None;
         annotated.comment = None;
+    }
+
+    // ANNOTATION_AUDIT_USAGE is audit-only: the audit DeltaAggregator already
+    // consumed its usage upstream, so strip the whole chunk — it must never
+    // reach the client SSE stream.
+    if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_AUDIT_USAGE) {
+        annotated.event = None;
+        annotated.comment = None;
+        annotated.data = None;
     }
 
     annotated_to_sse_event(annotated)
@@ -2449,6 +2575,113 @@ mod tests {
             (detokenize_metric.get_histogram().get_sample_sum() - 0.05).abs() < 0.001,
             "detokenize average latency should be 0.05ms, got {}",
             detokenize_metric.get_histogram().get_sample_sum()
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_annotations_stripped_from_client_sse() {
+        // PR #9390: two metric annotations must never leak to the client SSE.
+        // (1) Per-chunk `llm_metrics` rides on a content chunk: the content delta
+        //     must reach the client, but the metrics event/comment must be stripped.
+        // (2) The audit-only `audit_usage` chunk must be dropped entirely (the audit
+        //     DeltaAggregator already consumed its usage upstream).
+        use crate::preprocessor::{ANNOTATION_AUDIT_USAGE, LLMMetricAnnotation};
+        use crate::types::Annotated;
+        use axum::response::IntoResponse;
+        use axum::response::sse::Sse;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let mut collector = metrics.clone().create_response_collector("test-model");
+
+        let llm_metrics = LLMMetricAnnotation {
+            input_tokens: 7,
+            output_tokens: 3,
+            chunk_tokens: 1,
+            cached_tokens: Some(2),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: None,
+            detokenize_total_latency: None,
+            detokenize_count: None,
+        };
+        let metrics_comment = llm_metrics.to_annotation::<()>().unwrap().comment;
+        let metrics_json = metrics_comment.as_ref().expect("metrics comment present")[0].clone();
+
+        // (1) Per-chunk metrics on a content chunk (event = llm_metrics).
+        let content: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model",
+                "choices": [{"index": 0, "delta": {"content": "hello"}}]
+            }))
+            .unwrap();
+        let per_chunk = Annotated {
+            id: None,
+            data: Some(content),
+            event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
+            comment: metrics_comment.clone(),
+            error: None,
+        };
+
+        let mut http_queue_guard = None;
+        let event = process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(per_chunk),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+        .expect("conversion ok")
+        .expect("content chunk should yield a client event");
+
+        let sse = Sse::new(futures::stream::once(async move {
+            Ok::<_, std::convert::Infallible>(event)
+        }));
+        let body = sse.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let wire = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            wire.contains("hello"),
+            "content delta should reach the client: {wire}"
+        );
+        assert!(
+            !wire.contains(&metrics_json)
+                && !wire.contains("chunk_tokens")
+                && !wire.contains("input_tokens"),
+            "internal metrics leaked to client SSE: {wire}"
+        );
+
+        // (2) Audit-only usage chunk (event = audit_usage, carries usage data).
+        let usage: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model", "choices": [],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+            }))
+            .unwrap();
+        let audit_usage = Annotated {
+            id: None,
+            data: Some(usage),
+            event: Some(ANNOTATION_AUDIT_USAGE.to_string()),
+            comment: metrics_comment,
+            error: None,
+        };
+
+        let mut http_queue_guard = None;
+        let result = process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(audit_usage),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+        .expect("conversion ok");
+        assert!(
+            result.is_none(),
+            "audit_usage chunk must not be forwarded to the client SSE stream"
         );
     }
 

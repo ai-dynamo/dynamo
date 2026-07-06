@@ -125,7 +125,12 @@ option to keep affinity disabled.
 
 If the bound worker disappears, Dynamo invalidates the binding so a subsequent
 selection can bind an available worker. Router restart clears all bindings. Bindings
-are not shared between frontend replicas.
+are not shared between frontend replicas. In a multi-frontend deployment, configure
+the ingress or load balancer to consistently route a session to one frontend. Hash
+the raw session header received at ingress, not Dynamo's normalized internal
+`session_id`: canonical clients send `X-Dynamo-Session-ID`, while agent-native
+clients use the corresponding header listed in [Session IDs](../../agents/session-ids.md).
+Agent-native identity is normalized only after the request reaches the frontend.
 
 Direct mode still requires the phase-appropriate explicit worker ID on every
 affinity request. The stored binding validates that target but does not supply a

@@ -18,7 +18,9 @@ use dynamo_kv_router::{
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::routing_constraints_to_kv;
+use dynamo_llm::protocols::common::extensions::{NvExt, routing_constraints_to_kv};
+use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
 
@@ -579,34 +581,33 @@ impl RouterHandles {
     }
 }
 
-/// Extract the router queue `priority_jump` from a chat completion request's
+/// Extract the router queue `priority_jump` from an OpenAI request's
 /// `nvext.agent_hints.priority`.
 ///
 /// Negative values from either `priority` or the deprecated
 /// `latency_sensitivity` alias are clamped to `0.0` so a low-priority hint
 /// never pushes a request behind FCFS arrivals. Returns `0.0` when `nvext`
 /// or `agent_hints` is absent.
-fn extract_priority_jump(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> f64 {
-    request
-        .nvext
-        .as_ref()
+fn extract_priority_jump(nvext: Option<&NvExt>) -> f64 {
+    nvext
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.priority.map(|p| p as f64).or(h.latency_sensitivity))
         .map(|v| v.max(0.0))
         .unwrap_or(0.0)
 }
 
-fn extract_strict_priority(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> u32 {
-    request
-        .nvext
-        .as_ref()
+fn extract_strict_priority(nvext: Option<&NvExt>) -> u32 {
+    nvext
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.strict_priority)
         .unwrap_or(0)
+}
+
+fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
+    nvext
+        .and_then(|nvext| nvext.routing_constraints.clone())
+        .map(routing_constraints_to_kv)
+        .unwrap_or_default()
 }
 
 /// Opaque handle for the router pair
@@ -640,7 +641,7 @@ pub enum QueryRouterResult {
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `enforce_disagg`: If true, requires prefill workers to be present at init time
+/// - `enforce_disagg`: Deprecated compatibility parameter. The value is ignored.
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -654,6 +655,12 @@ pub unsafe extern "C" fn create_routers(
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     initialize_tracing();
+
+    if enforce_disagg {
+        tracing::warn!(
+            "enforce_disagg is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+        );
+    }
 
     if namespace.is_null() || out_handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
@@ -812,7 +819,6 @@ pub unsafe extern "C" fn create_routers(
             block_size,
             Some(prefill_config),
             None,
-            enforce_disagg,
             None,
             model_name.clone(),
             actual_namespace.clone(),
@@ -1105,8 +1111,9 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
     }
 }
 
-/// Parse a JSON request string, apply the chat template, tokenize, and lift
-/// router queue priorities out of `nvext.agent_hints`.
+/// Parse a JSON request string, collect completion prompts directly or apply
+/// the chat template and tokenize, then lift router queue priorities
+/// out of `nvext.agent_hints`.
 ///
 /// Returns `(token_ids, priority_jump, strict_priority, routing_constraints)` on success,
 /// or a `QueryRouterResult` error code. Queue priorities default to zero when
@@ -1130,23 +1137,60 @@ unsafe fn preprocess_request(
         Err(_) => return Err(QueryRouterResult::ErrInvalidParam),
     };
 
-    let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-        match serde_json::from_str(json_str) {
+    let request_json: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to parse request JSON");
+            return Err(QueryRouterResult::ErrInvalidParam);
+        }
+    };
+
+    if request_json.get("prompt").is_some() {
+        let request: NvCreateCompletionRequest = match serde_json::from_value(request_json) {
             Ok(req) => req,
             Err(e) => {
-                tracing::error!(error = ?e, "Failed to parse request JSON");
+                tracing::error!(error = ?e, "Failed to parse completion request JSON");
                 return Err(QueryRouterResult::ErrInvalidParam);
             }
         };
+        let priority_jump = extract_priority_jump(request.nvext.as_ref());
+        let strict_priority = extract_strict_priority(request.nvext.as_ref());
+        let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
+        let (token_ids, _) = match preprocessor.gather_tokens(&request, None, None) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to collect completion prompt tokens");
+                return Err(QueryRouterResult::ErrQueryFailed);
+            }
+        };
 
-    let priority_jump = extract_priority_jump(&request);
-    let strict_priority = extract_strict_priority(&request);
-    let routing_constraints = request
-        .nvext
-        .as_ref()
-        .and_then(|nvext| nvext.routing_constraints.clone())
-        .map(routing_constraints_to_kv)
-        .unwrap_or_default();
+        tracing::debug!(
+            token_count = token_ids.len(),
+            first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
+            priority_jump,
+            strict_priority,
+            "[EPP-TOKENIZE] Collected completion prompt tokens in C bindings"
+        );
+
+        return Ok((
+            token_ids,
+            priority_jump,
+            strict_priority,
+            routing_constraints,
+        ));
+    }
+
+    let request: NvCreateChatCompletionRequest = match serde_json::from_value(request_json) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to parse chat completion request JSON");
+            return Err(QueryRouterResult::ErrInvalidParam);
+        }
+    };
+
+    let priority_jump = extract_priority_jump(request.nvext.as_ref());
+    let strict_priority = extract_strict_priority(request.nvext.as_ref());
+    let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
 
     let formatted_prompt = match preprocessor.apply_template(&request) {
         Ok(Some(prompt)) => prompt,
@@ -1602,7 +1646,7 @@ mod tests {
             }"#,
             )
             .expect("test request must parse as chat completion");
-        assert_eq!(extract_priority_jump(&req), 5.0);
+        assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
     }
 
     #[test]
@@ -1616,7 +1660,7 @@ mod tests {
             }"#,
             )
             .expect("test request must parse as chat completion");
-        assert_eq!(extract_strict_priority(&req), 7);
+        assert_eq!(extract_strict_priority(req.nvext.as_ref()), 7);
 
         let default_req: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(
@@ -1626,6 +1670,20 @@ mod tests {
             }"#,
             )
             .expect("test request must parse as chat completion");
-        assert_eq!(extract_strict_priority(&default_req), 0);
+        assert_eq!(extract_strict_priority(default_req.nvext.as_ref()), 0);
+    }
+
+    #[test]
+    fn priority_jump_lifted_from_completion_agent_hints_priority() {
+        let req: dynamo_llm::types::openai::completions::NvCreateCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "prompt": [101, 102, 103],
+                "nvext": {"agent_hints": {"priority": 5}}
+            }"#,
+            )
+            .expect("test request must parse as completion");
+        assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
     }
 }
