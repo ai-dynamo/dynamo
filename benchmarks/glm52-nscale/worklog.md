@@ -98,3 +98,22 @@ SPDX-License-Identifier: Apache-2.0
   now recomputes the pinned v4 weighted headline from category counts instead of trusting the
   aggregate CSV value, and report freshness includes every task-level and disagreement
   sidecar.
+
+## 2026-07-06 validation closure and first full cell
+
+- Validated all four 409,600-token serving stacks on the same four B200s. Every stack passed
+  the fail-closed BFCL five-case smoke and strict three-task Terminal-Bench run. Native vLLM,
+  Dynamo + SGLang, and native SGLang resolved each single-instance SWE-bench Verified, Pro,
+  and Multilingual check; Dynamo + vLLM resolved Verified while its Pro and Multilingual
+  checks produced valid unresolved model outcomes. These are validation diagnostics only.
+- The first official cell, Dynamo + vLLM A/B SWE-bench Verified, generated all 500 predictions
+  in 63 batches: 500 nonempty patches, 23,639 model API calls, no missing predictions, and no
+  generation infrastructure errors.
+- The official evaluator produced 189 valid reports (159 resolved and 30 unresolved), then
+  Docker Hub rejected all 311 remaining image pulls at its anonymous rate limit. Every error
+  has the same `toomanyrequests` signature and occurred before patch application or testing;
+  no timeout, disk, identity, model-serving, or continuity failure was found.
+- The strict gate correctly retained `complete=false` and `benchmark_score=null`. The attempt
+  was not imported, the deployment was not torn down, and no next cell was launched. Recovery
+  requires authenticated Docker Hub capacity or an approved pull-through cache followed by an
+  evaluation-only resume against the unchanged prediction digest.

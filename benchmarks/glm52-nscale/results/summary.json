@@ -24,7 +24,7 @@
       "framework": "vLLM",
       "dynamo": true,
       "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260701-5245c0f@sha256:c3336583c830ea5c3cf4bd5cc92cb57200b8f558398a18c3ac0f473f9b74dd1d",
-      "status": "starting"
+      "status": "ready"
     },
     {
       "id": "vllm-serve",
@@ -32,7 +32,7 @@
       "framework": "vLLM",
       "dynamo": false,
       "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260701-5245c0f@sha256:c3336583c830ea5c3cf4bd5cc92cb57200b8f558398a18c3ac0f473f9b74dd1d",
-      "status": "pending"
+      "status": "ready"
     },
     {
       "id": "dynamo-sglang",
@@ -40,7 +40,7 @@
       "framework": "SGLang",
       "dynamo": true,
       "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f@sha256:a60e09976d7bc26812fca94c24df0f76cb579f218bc2e2e689c717a784a1d5e5",
-      "status": "pending"
+      "status": "ready"
     },
     {
       "id": "sglang-serve",
@@ -48,7 +48,7 @@
       "framework": "SGLang",
       "dynamo": false,
       "image": "nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f@sha256:a60e09976d7bc26812fca94c24df0f76cb579f218bc2e2e689c717a784a1d5e5",
-      "status": "pending"
+      "status": "ready"
     }
   ],
   "pairs": [
@@ -190,6 +190,16 @@
   "paired_disagreements": [],
   "issues": [
     {
+      "id": "swebench-dockerhub-pull-rate-limit",
+      "variant": "all SWE-bench variants",
+      "severity": "high",
+      "status": "blocked",
+      "error": "The first full Dynamo + vLLM A/B Verified evaluation reached Docker Hub's anonymous pull limit after 189 valid evaluator reports. All 311 remaining instances failed before patch application with the same toomanyrequests image-pull error.",
+      "impact": "The 500 generated patches are valid, but the evaluation is infrastructure-invalid: 159 resolved plus 30 unresolved outcomes are order-biased diagnostics, benchmark_score is null, and no official result can be imported or compared.",
+      "fix": "Provision authenticated Docker Hub capacity or an approved pull-through cache, then resume only the evaluate phase with the unchanged prediction-digest run ID so the pinned evaluator reuses 189 reports and retries 311 missing reports.",
+      "verification": "Generation completed 500/500 with 500 nonempty patches, 23,639 API calls, and zero generation infrastructure errors. The strict score gate rejected all 311/311 identical pull-limit errors; serving continuity stayed stable with zero restarts, and no result was imported or torn down."
+    },
+    {
       "id": "setup-dynamo-vllm-tool-routing",
       "variant": "dynamo-vllm",
       "severity": "medium",
@@ -252,6 +262,8 @@
   ],
   "notes": [
     "No benchmark scores are published until the corresponding full run and official evaluator complete.",
+    "Validation-only smoke matrix: Dynamo + vLLM passed BFCL 5/5, SWE-bench Verified 1/1, Pro 0/1, Multilingual 0/1, and Terminal-Bench 3/3; native vLLM, Dynamo + SGLang, and native SGLang each passed BFCL 5/5, all three single-instance SWE-bench checks 1/1, and Terminal-Bench 3/3. The SWE checks are stochastic single-instance diagnostics; a 0/1 model outcome is not a harness failure.",
+    "Interim full-run evidence, not an official score: Dynamo + vLLM A/B Verified generated all 500 predictions with no empty patches or generation infrastructure errors. Only 189 instances received valid evaluator reports before 311 anonymous Docker Hub pull failures; the strict artifact remains complete=false with benchmark_score=null and is excluded from the official 0/40 result matrix.",
     "The BFCL web-search category requires an external SERPAPI_API_KEY; none is available, so the full official BFCL run remains blocked."
   ]
 }
