@@ -66,6 +66,10 @@ pub struct PickResult {
     /// routing tokens do not exactly match the original request's execution
     /// prompt, such as batch completions collapsed for routing.
     pub token_ids: Option<Vec<u32>>,
+    /// Remove caller-provided `nvext.token_data` from the forwarded body.
+    /// Used when flat token data would be unsafe or ignored for the request
+    /// shape, such as batch completions, token prompts, or prompt embeddings.
+    pub strip_token_data: bool,
 }
 
 /// EndpointPicker is the central abstraction for endpoint selection.

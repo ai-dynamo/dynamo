@@ -308,8 +308,9 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.headers,
         ));
 
-        // Inject nvext.token_data into the request body JSON so the backend
-        // skips redundant tokenization. Mirrors Go EPP's setTokenizedPrompt.
+        // Mutate nvext.token_data only when the picker says the request shape
+        // is safe for backend token reuse. Some completion shapes must strip
+        // caller-provided flat token_data to avoid corrupting batch execution.
         let forwarded_body = if let Some(ref token_ids) = result.token_ids {
             match inject_token_data(raw_body, token_ids) {
                 Ok(modified) => {
@@ -323,6 +324,22 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to inject token_data, forwarding original body");
+                    raw_body.to_vec()
+                }
+            }
+        } else if result.strip_token_data {
+            match strip_token_data(raw_body) {
+                Ok(Some(modified)) => {
+                    tracing::debug!(
+                        body_size_before = raw_body.len(),
+                        body_size_after = modified.len(),
+                        "Stripped nvext.token_data from request body"
+                    );
+                    modified
+                }
+                Ok(None) => raw_body.to_vec(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to strip token_data, forwarding original body");
                     raw_body.to_vec()
                 }
             }
@@ -657,6 +674,29 @@ fn inject_token_data(body: &[u8], token_ids: &[u32]) -> anyhow::Result<Vec<u8>> 
     Ok(serde_json::to_vec(&parsed)?)
 }
 
+/// Remove existing `nvext.token_data` from a JSON request body.
+fn strip_token_data(body: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    let mut parsed: serde_json::Value = serde_json::from_slice(body)?;
+
+    let obj = parsed
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("body is not a JSON object"))?;
+
+    let Some(nvext) = obj.get_mut("nvext") else {
+        return Ok(None);
+    };
+
+    let nvext_obj = nvext
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("nvext is not a JSON object"))?;
+
+    if nvext_obj.remove("token_data").is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(serde_json::to_vec(&parsed)?))
+}
+
 /// Extract the "model" field from a JSON request body.
 /// Mirrors Go LW-EPP `extractModelFromBody`.
 fn extract_model_from_body(body: &[u8]) -> String {
@@ -753,6 +793,38 @@ mod tests {
         HttpBody, HttpHeaders, ProcessingRequest,
         external_processor_client::ExternalProcessorClient, processing_request::Request as ProcReq,
     };
+
+    #[test]
+    fn strip_token_data_removes_existing_nvext_token_data() {
+        let body = br#"{
+            "model": "test",
+            "prompt": ["a", "b"],
+            "nvext": {
+                "token_data": [1, 2, 3],
+                "agent_hints": {"priority": 5}
+            }
+        }"#;
+
+        let stripped = strip_token_data(body)
+            .expect("strip should parse")
+            .expect("token_data should be removed");
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&stripped).expect("stripped body should parse");
+
+        assert!(parsed["nvext"].get("token_data").is_none());
+        assert_eq!(parsed["nvext"]["agent_hints"]["priority"], 5);
+    }
+
+    #[test]
+    fn strip_token_data_is_noop_when_absent() {
+        let body = br#"{"model":"test","prompt":"hello","nvext":{"agent_hints":{"priority":5}}}"#;
+
+        assert!(
+            strip_token_data(body)
+                .expect("strip should parse")
+                .is_none()
+        );
+    }
 
     struct Tracker {
         add: AtomicU32,

@@ -222,7 +222,7 @@ impl Router {
         let mut request_json: serde_json::Value = serde_json::from_str(request_json)?;
 
         if request_json.get("prompt").is_some() || request_json.get("prompt_embeds").is_some() {
-            let inject_token_data = prepare_completion_prompt_for_routing(&mut request_json);
+            let token_data_policy = prepare_completion_prompt_for_routing(&mut request_json);
             let request: NvCreateCompletionRequest = serde_json::from_value(request_json)?;
             let nvext = request.nvext.as_ref();
             let priority_jump = extract_priority_jump(nvext);
@@ -237,7 +237,7 @@ impl Router {
                     priority_jump,
                     strict_priority,
                     routing_constraints,
-                    inject_token_data: false,
+                    token_data_policy: TokenDataPolicy::Strip,
                 });
             }
 
@@ -249,7 +249,7 @@ impl Router {
                 priority_jump,
                 strict_priority,
                 routing_constraints,
-                inject_token_data,
+                token_data_policy,
             });
         }
 
@@ -272,7 +272,7 @@ impl Router {
             priority_jump,
             strict_priority,
             routing_constraints,
-            inject_token_data: true,
+            token_data_policy: TokenDataPolicy::Inject,
         })
     }
 
@@ -527,48 +527,71 @@ struct TokenizeResult {
     priority_jump: f64,
     strict_priority: u32,
     routing_constraints: RoutingConstraints,
-    inject_token_data: bool,
+    token_data_policy: TokenDataPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenDataPolicy {
+    Inject,
+    Strip,
+}
+
+impl TokenDataPolicy {
+    fn injects(self) -> bool {
+        matches!(self, Self::Inject)
+    }
+
+    fn strips(self) -> bool {
+        matches!(self, Self::Strip)
+    }
 }
 
 /// Pick a single completion prompt shape the router can score today.
 ///
-/// Returns whether the resulting tokens may be injected into the original
-/// forwarded request as `nvext.token_data`. Batch and prompt-embeds completions
-/// must not receive synthetic token data because the backend preprocesses them
-/// per subrequest or from embeddings.
-fn prepare_completion_prompt_for_routing(request_json: &mut serde_json::Value) -> bool {
+/// Returns how the forwarded request's `nvext.token_data` should be handled.
+/// Only scalar text completion prompts consume injected token data correctly.
+/// Other completion shapes either already carry tokens, are batch-shaped, or
+/// use embeddings, so stale flat token data must be stripped.
+fn prepare_completion_prompt_for_routing(request_json: &mut serde_json::Value) -> TokenDataPolicy {
     if request_json.get("prompt_embeds").is_some() {
-        return false;
+        return TokenDataPolicy::Strip;
     }
 
     let Some(prompt) = request_json.get_mut("prompt") else {
-        return true;
+        return TokenDataPolicy::Strip;
     };
+    if prompt.is_string() {
+        return TokenDataPolicy::Inject;
+    }
     let Some(items) = prompt.as_array() else {
-        return true;
+        return TokenDataPolicy::Strip;
     };
-    if items.len() <= 1 {
-        return true;
+    if items.is_empty() {
+        return TokenDataPolicy::Strip;
     }
 
     if items.iter().all(|item| item.is_string()) {
-        let first = items
-            .first()
-            .and_then(|item| item.as_str())
-            .map(str::to_string);
-        if let Some(first) = first {
-            *prompt = serde_json::Value::String(first);
+        if items.len() > 1 {
+            let first = items
+                .first()
+                .and_then(|item| item.as_str())
+                .map(str::to_string);
+            if let Some(first) = first {
+                *prompt = serde_json::Value::String(first);
+            }
         }
-        return false;
+        return TokenDataPolicy::Strip;
     } else if items.iter().all(|item| item.is_array()) {
-        let first = items.first().cloned();
-        if let Some(first) = first {
-            *prompt = first;
+        if items.len() > 1 {
+            let first = items.first().cloned();
+            if let Some(first) = first {
+                *prompt = first;
+            }
         }
-        return false;
+        return TokenDataPolicy::Strip;
     }
 
-    true
+    TokenDataPolicy::Strip
 }
 
 /// Extract the router queue `priority_jump` from an OpenAI request's
@@ -1024,7 +1047,7 @@ impl EndpointPicker for Router {
             priority_jump,
             strict_priority,
             routing_constraints,
-            inject_token_data,
+            token_data_policy,
         } = self
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
@@ -1160,7 +1183,7 @@ impl EndpointPicker for Router {
             is_disaggregated,
             endpoint = %endpoint,
             token_count = tokens.len(),
-            inject_token_data,
+            ?token_data_policy,
             priority_jump,
             model = %req.model,
             header_count = headers.len(),
@@ -1174,7 +1197,8 @@ impl EndpointPicker for Router {
             endpoint,
             fallbacks: vec![],
             headers,
-            token_ids: inject_token_data.then_some(tokens),
+            strip_token_data: token_data_policy.strips(),
+            token_ids: token_data_policy.injects().then_some(tokens),
         })
     }
 
@@ -1318,9 +1342,9 @@ mod tests {
             "prompt": ["hello", "world"]
         });
 
-        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
 
-        assert!(!inject_token_data);
+        assert_eq!(token_data_policy, TokenDataPolicy::Strip);
         assert_eq!(request["prompt"], "hello");
     }
 
@@ -1331,35 +1355,35 @@ mod tests {
             "prompt": "hello"
         });
 
-        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
 
-        assert!(inject_token_data);
+        assert_eq!(token_data_policy, TokenDataPolicy::Inject);
         assert_eq!(request["prompt"], "hello");
     }
 
     #[test]
-    fn completion_single_string_array_prompt_keeps_token_injection() {
+    fn completion_single_string_array_prompt_strips_token_data() {
         let mut request = serde_json::json!({
             "model": "test",
             "prompt": ["hello"]
         });
 
-        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
 
-        assert!(inject_token_data);
+        assert_eq!(token_data_policy, TokenDataPolicy::Strip);
         assert_eq!(request["prompt"], serde_json::json!(["hello"]));
     }
 
     #[test]
-    fn completion_token_array_prompt_stays_token_array() {
+    fn completion_token_array_prompt_strips_token_data() {
         let mut request = serde_json::json!({
             "model": "test",
             "prompt": [101, 102, 103]
         });
 
-        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
 
-        assert!(inject_token_data);
+        assert_eq!(token_data_policy, TokenDataPolicy::Strip);
         assert_eq!(request["prompt"], serde_json::json!([101, 102, 103]));
     }
 
@@ -1370,9 +1394,9 @@ mod tests {
             "prompt": [[101, 102], [201, 202]]
         });
 
-        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
 
-        assert!(!inject_token_data);
+        assert_eq!(token_data_policy, TokenDataPolicy::Strip);
         assert_eq!(request["prompt"], serde_json::json!([101, 102]));
     }
 
@@ -1384,9 +1408,9 @@ mod tests {
             "prompt_embeds": "encoded"
         });
 
-        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
+        let token_data_policy = prepare_completion_prompt_for_routing(&mut request);
 
-        assert!(!inject_token_data);
+        assert_eq!(token_data_policy, TokenDataPolicy::Strip);
         assert_eq!(request["prompt"], "placeholder");
     }
 
