@@ -119,6 +119,7 @@ struct SchedulerQueueActor<
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     /// "prefill" or "decode" — labels scheduling metrics by worker pool; carries no scheduling behavior.
+    #[cfg_attr(not(feature = "metrics"), allow(dead_code))]
     worker_type: &'static str,
 }
 
@@ -667,6 +668,7 @@ impl<
             worker_type: self.worker_type,
         };
 
+        #[cfg(feature = "metrics")]
         let op_start = Instant::now();
         request.worker_loads = self
             .slots

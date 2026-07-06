@@ -61,9 +61,10 @@ pub struct SchedulingMetrics {
     /// waiting for the actor to be scheduled). Complements `queue_wait_ms`, which only
     /// observes the terminal wait once a request is finally admitted.
     pub pending_queue_age_ms: HistogramVec,
-    /// Time for a worker state change (prefill-complete / free) to propagate through
-    /// `LocalScheduler::mark_prefill_completed`/`free` into a completed `queue.update()`
-    /// round trip, labeled by event ("prefill_completed"/"free").
+    /// Time for `queue.update()` to complete after a worker state change
+    /// (prefill-complete / free), labeled by event ("prefill_completed"/"free").
+    /// Measures the async scheduler actor round-trip only; the synchronous slots
+    /// call that precedes it is not included.
     pub worker_state_update_to_scheduler_ms: HistogramVec,
 }
 
@@ -125,7 +126,7 @@ impl SchedulingMetrics {
             worker_state_update_to_scheduler_ms: HistogramVec::new(
                 HistogramOpts::new(
                     "dynamo_worker_state_update_to_scheduler_ms",
-                    "Time for a worker state change (prefill-complete/free) to propagate through a completed queue.update() round trip, in milliseconds",
+                    "Time for queue.update() to complete after a worker state change (prefill-complete/free), in milliseconds. Measures async actor round-trip only.",
                 )
                 .buckets(actor_timing_buckets()),
                 &["event"],
