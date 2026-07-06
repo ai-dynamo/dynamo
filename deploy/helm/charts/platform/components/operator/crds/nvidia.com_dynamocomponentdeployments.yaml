@@ -11655,6 +11655,15 @@ spec:
                       format: int32
                       minimum: 0
                       type: integer
+                    scheduledReplicas:
+                      description: |-
+                        ScheduledReplicas is the number of replicas the backend scheduler has
+                        scheduled, in Dynamo component-replica units. Optional; omitted (nil)
+                        when the backend cannot derive it reliably. A nil value means "not
+                        reported", never "zero scheduled".
+                      format: int32
+                      minimum: 0
+                      type: integer
                     updatedReplicas:
                       description: |-
                         UpdatedReplicas is the number of replicas at the current/desired revision.
@@ -20478,6 +20487,22 @@ spec:
                       type: integer
                     replicas:
                       description: replicas is the total number of non-terminated replicas.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    scheduledReplicas:
+                      description: |-
+                        scheduledReplicas is the number of replicas the backend scheduler has
+                        scheduled, expressed strictly in Dynamo component-replica units (not
+                        raw backend pod counts). It is a diagnostic aid for distinguishing
+                        capacity/scheduling shortfalls from runtime readiness.
+
+                        It is optional and omitted (nil) when the active backend cannot derive
+                        it reliably in component-replica units — for example before the backing
+                        resource's status has been observed, or for backends that do not report
+                        a scheduling count. A nil value therefore means "not reported", never
+                        "zero scheduled"; consumers must not treat absence as a scheduling
+                        failure.
                       format: int32
                       minimum: 0
                       type: integer

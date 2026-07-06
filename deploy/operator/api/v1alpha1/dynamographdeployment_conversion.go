@@ -778,6 +778,9 @@ func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.Com
 	if src.AvailableReplicas != nil {
 		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
 	}
+	if src.ScheduledReplicas != nil {
+		dst.ScheduledReplicas = ptr.To(*src.ScheduledReplicas)
+	}
 }
 
 // ConvertToServiceReplicaStatus converts replica status from v1beta1 to
@@ -799,5 +802,8 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 	}
 	if src.AvailableReplicas != nil {
 		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
+	}
+	if src.ScheduledReplicas != nil {
+		dst.ScheduledReplicas = ptr.To(*src.ScheduledReplicas)
 	}
 }

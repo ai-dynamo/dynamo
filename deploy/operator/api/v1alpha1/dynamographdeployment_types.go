@@ -285,6 +285,14 @@ type ServiceReplicaStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
+
+	// ScheduledReplicas is the number of replicas the backend scheduler has
+	// scheduled, in Dynamo component-replica units. Optional; omitted (nil)
+	// when the backend cannot derive it reliably. A nil value means "not
+	// reported", never "zero scheduled".
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ScheduledReplicas *int32 `json:"scheduledReplicas,omitempty"`
 }
 
 // +kubebuilder:object:root=true
