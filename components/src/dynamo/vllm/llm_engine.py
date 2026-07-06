@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
-from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -80,6 +79,7 @@ from .logits_processing import (
     activate_logits_processors,
     register_dynamo_logits_processor,
 )
+from .multimodal_utils.request_processor import VllmMultimodalRequestProcessor
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -174,6 +174,7 @@ class VllmLLMEngine(LLMEngine):
         dyn_tool_call_parser: Optional[str] = None,
         dyn_reasoning_parser: Optional[str] = None,
         enable_rl: bool = False,
+        enable_multimodal: bool = False,
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
@@ -182,6 +183,7 @@ class VllmLLMEngine(LLMEngine):
         self._dyn_tool_call_parser = dyn_tool_call_parser
         self._dyn_reasoning_parser = dyn_reasoning_parser
         self.enable_rl = enable_rl
+        self.enable_multimodal = enable_multimodal
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -201,6 +203,7 @@ class VllmLLMEngine(LLMEngine):
         self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
         self._logits_processor_spec: LogitsProcessorSpec | None = None
         self._pause_controller: VllmEnginePauseController | None = None
+        self._multimodal_request_processor: VllmMultimodalRequestProcessor | None = None
         self._pause_lock = asyncio.Lock()
         self._scale_ep_lock = asyncio.Lock()
         self._scale_ep_in_progress = False
@@ -252,6 +255,23 @@ class VllmLLMEngine(LLMEngine):
                 "driving the unified Worker directly"
             )
 
+        if config.route_to_encoder:
+            raise NotImplementedError(
+                "--route-to-encoder is not supported by the unified vLLM entry "
+                "point yet; use `python -m dynamo.vllm` until the separate "
+                "unified encode worker is available"
+            )
+
+        if config.enable_multimodal and config.disaggregation_mode in (
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+        ):
+            raise NotImplementedError(
+                "multimodal P/D is not supported by the unified vLLM entry "
+                "point yet; use aggregated unified serving or `python -m "
+                "dynamo.vllm`"
+            )
+
         if not config.served_model_name:
             config.served_model_name = (
                 config.engine_args.served_model_name
@@ -272,6 +292,7 @@ class VllmLLMEngine(LLMEngine):
             dyn_tool_call_parser=config.dyn_tool_call_parser,
             dyn_reasoning_parser=config.dyn_reasoning_parser,
             enable_rl=config.enable_rl,
+            enable_multimodal=config.enable_multimodal,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -316,6 +337,11 @@ class VllmLLMEngine(LLMEngine):
             vllm_config=vllm_config,
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[self._stat_logger_factory],
+        )
+        self._multimodal_request_processor = VllmMultimodalRequestProcessor(
+            model=self.engine_args.model,
+            engine_client=self.engine_client,
+            enable_multimodal=self.enable_multimodal,
         )
         # Resolve once the tokenizer is available (see logits_processor_spec()).
         self._logits_processor_spec = await self.logits_processor_spec()
@@ -364,12 +390,21 @@ class VllmLLMEngine(LLMEngine):
 
         request_id = context.id()
 
-        token_ids = request.get("token_ids", [])
-        prompt = TokensPrompt(prompt_token_ids=token_ids)
-
-        # TODO: remove dict() once build_sampling_params accepts GenerateRequest
-        sampling_params = build_sampling_params(
+        multimodal_processor = self._multimodal_request_processor
+        if multimodal_processor is None:
+            raise RuntimeError("VllmLLMEngine.start() must complete before generate()")
+        prepared_prompt = await multimodal_processor.prepare_prompt(
             dict(request),
+            request_id,
+            context,
+            self.disaggregation_mode,
+        )
+        prompt = prepared_prompt.prompt
+
+        # Multimodal decode may replace token_ids with the expanded prefill
+        # sequence. Sampling limits must use that same effective request.
+        sampling_params = build_sampling_params(
+            prepared_prompt.request,
             self._default_sampling_params,
             self._model_max_len,
             enable_rl=self.enable_rl,
@@ -1314,6 +1349,7 @@ class VllmLLMEngine(LLMEngine):
         finally:
             self.engine_client = None
             self._pause_controller = None
+            self._multimodal_request_processor = None
             # Drop the serving endpoint and dynamic-LoRA bookkeeping so a
             # shut-down engine holds no dangling endpoint reference and no
             # stale adapter state. Discovery cards published for the worker are
