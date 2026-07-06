@@ -854,6 +854,28 @@ impl HostPool {
         healthy.iter().all(|c| c.available_capacity() == 0)
     }
 
+    /// Select any healthy connection, including a saturated one.
+    ///
+    /// Used when optional pool growth fails: an existing connection can still
+    /// provide backpressure instead of turning a capacity miss into a worker fault.
+    fn select_any_healthy(&self) -> Option<Arc<TcpConnection>> {
+        let guard = self.snapshot.load();
+        let conns = &**guard;
+        let len = conns.len();
+        if len == 0 {
+            return None;
+        }
+
+        let start = self.counter.fetch_add(1, Ordering::Relaxed) as usize;
+        for i in 0..len {
+            let idx = (start + i) % len;
+            if conns[idx].is_healthy() {
+                return Some(conns[idx].clone());
+            }
+        }
+        None
+    }
+
     /// Cold path: prune unhealthy connections, optionally grow, rebuild snapshot.
     async fn ensure_capacity_or_heal(
         &self,
@@ -970,6 +992,14 @@ impl HostPool {
                     }
                     Err(e) => {
                         self.connect_notify.notify_waiters();
+                        if let Some(conn) = self.select_any_healthy() {
+                            tracing::debug!(
+                                addr = %self.addr,
+                                error = %e,
+                                "TCP pool growth failed; using existing healthy connection"
+                            );
+                            return Ok(conn);
+                        }
                         return Err(e);
                     }
                 }
@@ -1014,19 +1044,8 @@ impl HostPool {
         // All connect attempts failed. Fall back to any healthy connection
         // (even if saturated) rather than dropping the request — SegQueue
         // backpressure handles overload gracefully.
-        {
-            let guard = self.snapshot.load();
-            let conns = &**guard;
-            let len = conns.len();
-            if len > 0 {
-                let start = self.counter.fetch_add(1, Ordering::Relaxed) as usize;
-                for i in 0..len {
-                    let idx = (start + i) % len;
-                    if conns[idx].is_healthy() {
-                        return Ok(conns[idx].clone());
-                    }
-                }
-            }
+        if let Some(conn) = self.select_any_healthy() {
+            return Ok(conn);
         }
 
         anyhow::bail!(
@@ -1383,8 +1402,24 @@ impl RequestPlaneClient for TcpRequestClient {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
 
-        // Get shared connection from pool (Arc, not exclusive borrow)
-        let conn = self.pool.get_connection(addr).await?;
+        // Get shared connection from pool (Arc, not exclusive borrow). Classify every
+        // cold-path acquisition failure at the RequestPlaneClient boundary so routing
+        // fault detection and request migration can react to it consistently with
+        // established-connection send failures below.
+        let conn = self.pool.get_connection(addr).await.map_err(|e| {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            TCP_ERRORS_TOTAL.inc();
+            tracing::warn!(%addr, error = %e, "TCP connection acquisition failed");
+            let message = format!("TCP connection to {addr} failed: {e}");
+            let cause = crate::error::DynamoError::from(e.as_ref());
+            anyhow::anyhow!(
+                crate::error::DynamoError::builder()
+                    .error_type(crate::error::ErrorType::CannotConnect)
+                    .message(message)
+                    .cause(cause)
+                    .build()
+            )
+        })?;
 
         let result = tokio::time::timeout(
             self.config.request_timeout,
@@ -1524,6 +1559,93 @@ mod tests {
         let client = client.unwrap();
         assert_eq!(client.transport_name(), "tcp");
         assert!(client.is_healthy());
+    }
+
+    #[tokio::test]
+    async fn test_cold_connection_failure_is_typed_cannot_connect() {
+        use crate::error::{DynamoError, ErrorType, match_error_chain};
+
+        // Keep an ephemeral TCP port bound but not listening. This reserves the port
+        // while ensuring the first connection attempt takes the cold-pool failure path.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = socket.local_addr().unwrap();
+
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_millis(250),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+
+        let err = client
+            .send_request(
+                addr.to_string(),
+                Bytes::from_static(b"test"),
+                Headers::new(),
+            )
+            .await
+            .expect_err("connection to a non-listening port should fail");
+
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("top-level error should be a DynamoError");
+        assert_eq!(dynamo_err.error_type(), ErrorType::CannotConnect);
+
+        assert!(
+            match_error_chain(err.as_ref(), &[ErrorType::CannotConnect], &[]),
+            "cold connection failure must be typed CannotConnect: {err:#}"
+        );
+        assert!(
+            err.chain().nth(1).is_some(),
+            "original connection failure must be preserved: {err:#}"
+        );
+
+        let stats = client.stats();
+        assert_eq!(stats.requests_sent, 1);
+        assert_eq!(stats.responses_received, 0);
+        assert_eq!(stats.errors, 1);
+    }
+
+    #[tokio::test]
+    async fn test_failed_pool_growth_falls_back_to_saturated_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(listener);
+            accepted_tx.send(()).unwrap();
+            let _ = release_rx.await;
+            drop(stream);
+        });
+
+        let config = TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_millis(250),
+            pool_size: 2,
+            channel_buffer: 1,
+        };
+        let pool = TcpConnectionPool::new(config);
+        let first = pool.get_connection(addr).await.unwrap();
+        accepted_rx.await.unwrap();
+
+        // Simulate a saturated but otherwise healthy connection. Pool growth now
+        // fails because the server stopped listening after accepting `first`.
+        first.inflight.store(1, Ordering::Release);
+        let fallback = pool
+            .get_connection(addr)
+            .await
+            .expect("failed optional growth should fall back to a healthy connection");
+
+        assert!(Arc::ptr_eq(&first, &fallback));
+
+        first.inflight.store(0, Ordering::Release);
+        let _ = release_tx.send(());
+        server.await.unwrap();
     }
 
     /// Helper: spawn a mock TCP server that echoes requests.
@@ -2170,6 +2292,17 @@ mod tests {
 
         // All should succeed (one connects, others retry via hot path)
         assert!(ok > 0, "At least some tasks should get connections");
+
+        // A successful TCP connect only guarantees that the connection reached the
+        // kernel accept queue; the spawned server task may not have observed it yet.
+        // Wait for that observation before asserting the server-side count.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while conn_count.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("server should accept the established connection");
         assert_eq!(
             conn_count.load(Ordering::SeqCst),
             1,
