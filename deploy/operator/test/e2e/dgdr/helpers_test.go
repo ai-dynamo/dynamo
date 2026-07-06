@@ -18,6 +18,7 @@
 package dgdr
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -296,6 +297,9 @@ func createAndCleanup(dgdr *v1beta1.DynamoGraphDeploymentRequest) {
 			Name:      dgdr.Name,
 		}, &current); err == nil && current.Status.DGDName != "" {
 			dgdName := current.Status.DGDName
+			if CurrentSpecReport().Failed() {
+				writeDGDRFailureDiagnostics(&current)
+			}
 
 			// Delete the DGD (it is not owned by the DGDR, so it won't be
 			// garbage-collected automatically).
@@ -337,6 +341,86 @@ func createAndCleanup(dgdr *v1beta1.DynamoGraphDeploymentRequest) {
 		// Delete the DGDR itself.
 		_ = k8sClient.Delete(ctx, dgdr)
 	})
+}
+
+// writeDGDRFailureDiagnostics captures resources and component logs before
+// DeferCleanup removes them, so CI artifacts retain the cause of pod failures.
+func writeDGDRFailureDiagnostics(dgdr *v1beta1.DynamoGraphDeploymentRequest) {
+	_, _ = fmt.Fprintf(GinkgoWriter, "\n=== failure diagnostics for DGDR %s/%s ===\n", dgdr.Namespace, dgdr.Name)
+	writeJSONDiagnostic("DGDR", dgdr)
+
+	dgd := &v1alpha1.DynamoGraphDeployment{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{
+		Namespace: dgdr.Namespace,
+		Name:      dgdr.Status.DGDName,
+	}, dgd); err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "failed to get DGD %s: %v\n", dgdr.Status.DGDName, err)
+	} else {
+		writeJSONDiagnostic("DGD", dgd)
+	}
+
+	dgdLabel := labels.SelectorFromSet(labels.Set{
+		"nvidia.com/dynamo-graph-deployment-name": dgdr.Status.DGDName,
+	})
+	var pods corev1.PodList
+	if err := k8sClient.List(ctx, &pods,
+		client.InNamespace(dgdr.Namespace),
+		client.MatchingLabelsSelector{Selector: dgdLabel},
+	); err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "failed to list DGD pods: %v\n", err)
+		return
+	}
+
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		writeJSONDiagnostic("Pod "+pod.Name, pod)
+		writePodLogs(pod)
+	}
+}
+
+func writeJSONDiagnostic(name string, value interface{}) {
+	raw, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "failed to marshal %s: %v\n", name, err)
+		return
+	}
+	_, _ = fmt.Fprintf(GinkgoWriter, "\n=== %s ===\n%s\n", name, raw)
+}
+
+func writePodLogs(pod *corev1.Pod) {
+	restarts := make(map[string]int32)
+	for _, status := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
+		restarts[status.Name] = status.RestartCount
+	}
+
+	containers := append([]corev1.Container{}, pod.Spec.InitContainers...)
+	containers = append(containers, pod.Spec.Containers...)
+	for _, container := range containers {
+		writePodLog(pod, container.Name, false)
+		if restarts[container.Name] > 0 {
+			writePodLog(pod, container.Name, true)
+		}
+	}
+}
+
+func writePodLog(pod *corev1.Pod, container string, previous bool) {
+	logCtx, cancelLog := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelLog()
+	tailLines := int64(300)
+	raw, err := typedClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		Container: container,
+		Previous:  previous,
+		TailLines: &tailLines,
+	}).DoRaw(logCtx)
+	logType := "current"
+	if previous {
+		logType = "previous"
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "failed to get %s logs for %s/%s: %v\n", logType, pod.Name, container, err)
+		return
+	}
+	_, _ = fmt.Fprintf(GinkgoWriter, "\n=== Pod %s / container %s / %s logs ===\n%s\n", pod.Name, container, logType, raw)
 }
 
 // serverDryRun attempts to create a DGDR with server-side dry-run and returns the error (if any).

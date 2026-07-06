@@ -10,6 +10,11 @@ on:
         description: 'Plain runtime image tag prefix from the build workflow'
         required: true
         type: string
+      target_image:
+        description: 'Target image repository in ACR'
+        required: false
+        type: string
+        default: 'ai-dynamo/dynamo'
       cuda_version:
         description: 'CUDA versions to copy as a JSON array'
         required: true
@@ -76,7 +81,7 @@ jobs:
           source_image: ai-dynamo/dynamo
           source_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_image: ai-dynamo/dynamo
+          target_image: ${{ inputs.target_image }}
           target_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}

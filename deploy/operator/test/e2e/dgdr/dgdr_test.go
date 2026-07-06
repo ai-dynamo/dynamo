@@ -24,6 +24,35 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+const (
+	plannerMockerModel       = "Qwen/Qwen3-32B"
+	plannerMockerProfileData = "/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
+)
+
+// staticPlannerMockerWorker replaces the generated AIC runtime arguments with
+// checked-in profile data until the planner image carries the runtime from #11779.
+func staticPlannerMockerWorker(name, mode string) map[string]interface{} {
+	return map[string]interface{}{
+		"name": name,
+		"podTemplate": map[string]interface{}{
+			"spec": map[string]interface{}{
+				"containers": []interface{}{
+					map[string]interface{}{
+						"name": "main",
+						"args": []string{
+							"--model-path", plannerMockerModel,
+							"--model-name", plannerMockerModel,
+							"--speedup-ratio", "1.0",
+							"--planner-profile-data", plannerMockerProfileData,
+							"--disaggregation-mode", mode,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 // DGDR Lifecycle Scenarios exercises the full DGDR lifecycle (create -> profile ->
 // DGD generation -> DGD readiness) across different backend, strategy, and feature
 // configurations. Modeled after the CAAPH helm_test.go pattern: each It block calls
@@ -103,14 +132,40 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("nightly", "e2e", "integratio
 			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
 				return DGDRLifecycleInput{
 					Name:           uniqueName("planner"),
+					Model:          plannerMockerModel,
 					Backend:        v1beta1.BackendTypeTrtllm,
 					SearchStrategy: v1beta1.SearchStrategyRapid,
 					AutoApply:      ptr.To(true),
+					SLA: &v1beta1.SLASpec{
+						ITL: ptr.To(50.0),
+					},
+					Hardware: &v1beta1.HardwareSpec{
+						GPUSKU:         v1beta1.GPUSKUTypeH200SXM,
+						VRAMMB:         ptr.To(141120.0),
+						NumGPUsPerNode: ptr.To(int32(8)),
+						TotalGPUs:      ptr.To(int32(8)),
+					},
 					Features: &v1beta1.FeaturesSpec{
 						Planner: plannerRawExtension(map[string]interface{}{
 							"enabled":                      true,
 							"optimization_target":          "sla",
 							"pre_deployment_sweeping_mode": "rapid",
+							"enable_throughput_scaling":    true,
+							"enable_load_scaling":          false,
+							"mode":                         "disagg",
+							"backend":                      "trtllm",
+						}),
+					},
+					Overrides: &v1beta1.OverridesSpec{
+						DGD: dgdOverrideRawExtension(map[string]interface{}{
+							"apiVersion": "nvidia.com/v1beta1",
+							"kind":       "DynamoGraphDeployment",
+							"spec": map[string]interface{}{
+								"components": []interface{}{
+									staticPlannerMockerWorker("prefill", "prefill"),
+									staticPlannerMockerWorker("decode", "decode"),
+								},
+							},
 						}),
 					},
 					ExpectDGDReady: true,

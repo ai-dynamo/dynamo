@@ -151,7 +151,7 @@ func DGDRLifecycleSpec(ctx context.Context, inputGetter func() DGDRLifecycleInpu
 	}
 
 	By("Waiting for DGDR to reach Deployed phase")
-	deployTimeout := time.Duration(flagProfilingTimeout+flagDeployTimeout) * time.Second
+	deployTimeout := time.Duration(flagDeployTimeout) * time.Second
 	dgdrResult = waitForPhase(input.Name, v1beta1.DGDRPhaseDeployed, deployTimeout)
 
 	Expect(dgdrResult.Status.Phase).To(Equal(v1beta1.DGDRPhaseDeployed))
