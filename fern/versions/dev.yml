@@ -279,6 +279,8 @@ navigation:
                 path: ../pages-dev/observability/health-checks.md
               - page: Tracing
                 path: ../pages-dev/observability/tracing.md
+              - page: Forward Pass Metrics Tracing
+                path: ../pages-dev/observability/forward-pass-metrics-tracing.md
               - page: Logging
                 path: ../pages-dev/observability/logging.md
           - section: Inference Simulation
