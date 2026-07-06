@@ -310,6 +310,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         "master_metrics_port": int(
             getattr(mooncake_config, "master_metrics_port", 9003)
         ),
+        "kv_events_endpoint": os.getenv("DYN_MOONCAKE_KV_EVENTS_ENDPOINT") or None,
     }
 
 

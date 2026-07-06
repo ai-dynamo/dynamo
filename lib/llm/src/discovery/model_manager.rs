@@ -874,9 +874,9 @@ impl ModelManager {
                     worker_component = worker_component_name,
                     "Using HiCache shared KV cache"
                 );
-                Some(Box::new(HicacheSharedKvCache::new(
-                    workers_with_configs.clone(),
-                )))
+                let cache = HicacheSharedKvCache::new(workers_with_configs.clone());
+                cache.start_subscriber(endpoint.component());
+                Some(Box::new(cache))
             }
         };
 
