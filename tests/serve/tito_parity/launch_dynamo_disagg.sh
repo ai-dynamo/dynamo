@@ -20,6 +20,9 @@ source "$SCRIPT_DIR/../../../examples/common/launch_utils.sh"
 
 rm -f "$READY_FILE"
 export DYN_REQUEST_PLANE=tcp
+# Qwen3.5 uses a hybrid Mamba architecture. vLLM's three-read NIXL transfer
+# path requires the convolution state dimension to be leading on both workers.
+export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
 python -m dynamo.frontend &
 

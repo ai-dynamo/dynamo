@@ -609,6 +609,10 @@ def main() -> int:
     request_timeout = max(180, args.startup_timeout)
 
     environment = base_environment()
+    if args.dynamo_topology == "disaggregated":
+        # Keep the Qwen3.5 hybrid Mamba state layout identical between the
+        # upstream baseline and both NIXL-connected Dynamo workers.
+        environment["VLLM_SSM_CONV_STATE_LAYOUT"] = "DS"
     with run_server(
         "upstream-vllm",
         upstream_command(args.model, args.dynamo_topology),
