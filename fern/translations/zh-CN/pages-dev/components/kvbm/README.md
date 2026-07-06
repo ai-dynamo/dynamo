@@ -4,10 +4,6 @@
 title: KVBM
 ---
 
-<p align="left">
-  <a href="./README.md" hreflang="en">English</a> | <strong>简体中文</strong>
-</p>
-
 Dynamo KV Block Manager (KVBM) 是一个可扩展的运行时组件，旨在为异构和分布式环境中的推理任务处理 Key-Value (KV) 块的内存分配、管理和远程共享。它可作为 vLLM 和 TensorRT-LLM 等框架的统一内存层和直写缓存。
 
 KVBM 提供：
@@ -15,7 +11,7 @@ KVBM 提供：
 - 支持带有基于事件状态转换的**块生命周期**（allocate → register → match）
 - 与 **[NIXL](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)** 集成；NIXL 是一个动态内存交换层，用于内存块的远程注册、共享和访问
 
-> **开始使用：** 请参阅 [KVBM 指南](kvbm-guide.md)，了解安装和部署说明。
+> **开始使用：** 请参阅 [KVBM 指南](/dynamo/dev/user-guides/kv-cache-offloading)，了解安装和部署说明。
 
 ## 何时使用 KV Cache 卸载
 
@@ -55,13 +51,13 @@ KVBM 有三个主要逻辑层：
 
 **NIXL Layer** — 底层为所有数据和存储事务提供统一支持。NIXL 支持 P2P GPU 传输、RDMA 和 NVLink 远程内存共享、动态块注册和元数据交换，并为存储后端提供插件接口，包括块内存（GPU HBM、Host DRAM、Remote DRAM、Local SSD）、本地/远程文件系统、对象存储和云存储。
 
-> **了解更多：** 请参阅 [KVBM 设计文档](../../design-docs/kvbm-design.md)，了解详细架构、组件和数据流。
+> **了解更多：** 请参阅 [KVBM 设计文档](/dynamo/dev/design-docs/component-design/kvbm-design)，了解详细架构、组件和数据流。
 
 ## 后续步骤
 
-- **[KVBM 指南](kvbm-guide.md)** — 安装、配置和部署说明
-- **[KVBM 设计](../../design-docs/kvbm-design.md)** — 架构深入解析、组件和数据流
-- **[LMCache 集成](../../integrations/lmcache-integration.md)** — 将 LMCache 与 Dynamo vLLM 后端配合使用
-- **[FlexKV 集成](../../integrations/flexkv-integration.md)** — 使用 FlexKV 进行 KV cache 管理
-- **[SGLang HiCache](../../backends/sglang/sglang-hicache.md)** — 通过 NIXL 启用 SGLang 的分层缓存
+- **[KVBM 指南](/dynamo/dev/user-guides/kv-cache-offloading)** — 安装、配置和部署说明
+- **[KVBM 设计](/dynamo/dev/design-docs/component-design/kvbm-design)** — 架构深入解析、组件和数据流
+- **[LMCache 集成](/dynamo/dev/integrations/kv-cache-integrations/lm-cache)** — 将 LMCache 与 Dynamo vLLM 后端配合使用
+- **[FlexKV 集成](/dynamo/dev/integrations/kv-cache-integrations/flex-kv)** — 使用 FlexKV 进行 KV cache 管理
+- **[SGLang HiCache](/dynamo/dev/integrations/kv-cache-integrations/hi-cache)** — 通过 NIXL 启用 SGLang 的分层缓存
 - **[NIXL Documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)** — NIXL 通信库详细信息

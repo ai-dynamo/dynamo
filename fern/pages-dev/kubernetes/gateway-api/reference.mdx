@@ -268,10 +268,11 @@ kubectl get pods -n "$NAMESPACE" \
   -o jsonpath='{.items[*].spec.containers[*].name}{"\n"}'
 ```
 
-> [!WARNING]
-> Patch the default `AgentgatewayParameters` resource in `agentgateway-system` only as a
-> cluster-wide policy decision. Gateways without `spec.infrastructure.parametersRef` inherit that
-> default.
+<Warning>
+Patch the default `AgentgatewayParameters` resource in `agentgateway-system` only as a
+cluster-wide policy decision. Gateways without `spec.infrastructure.parametersRef` inherit that
+default.
+</Warning>
 
 ## Developer References
 
