@@ -171,11 +171,6 @@ global:
     install: true   # Deploys the bundled Grove subchart (integration auto-enabled)
 ```
 
-The bundled Grove subchart defaults to the `default-scheduler` and
-`kai-scheduler` profiles only. To test Volcano, install Volcano separately,
-set `global.volcano-scheduler.enabled=true`, and add the `volcano` profile to
-`grove.config.scheduler.profiles`.
-
 Note: `global.*.install` controls whether the bundled subcharts are deployed. When set, integration is automatically enabled. `global.*.enabled` can be set independently when using externally-managed installations.
 
 ## 📚 Additional Resources
