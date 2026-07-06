@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any, Protocol, Tuple
 from uuid import uuid4
@@ -34,6 +35,76 @@ from dynamo.profiler.utils.config import (
 from dynamo.profiler.utils.defaults import EngineType
 
 logger = logging.getLogger(__name__)
+
+
+def apply_dgd_overrides(base: dict, override: dict) -> dict:
+    """Merge *override* into *base* DGD config, preserving base envelope fields.
+
+    - Top-level envelope keys (``apiVersion``, ``kind``, ``metadata``) from
+      *override* are ignored so the base identity is never clobbered.
+    - ``spec.services`` is merged service-by-service.  For each service,
+      ``envs`` lists are merged by ``name`` (override wins on collision) and
+      ``extraPodSpec.mainContainer.args`` lists are extended with override
+      values that are not already present.  All other scalar/dict fields are
+      replaced by the override value.
+    """
+    _ENVELOPE_KEYS = {"apiVersion", "kind", "metadata"}
+
+    result = copy.deepcopy(base)
+
+    for key, value in override.items():
+        if key in _ENVELOPE_KEYS:
+            continue
+        if key == "spec" and isinstance(value, dict):
+            _merge_spec(result.setdefault("spec", {}), value)
+        else:
+            result[key] = copy.deepcopy(value)
+
+    return result
+
+
+def _merge_spec(base_spec: dict, override_spec: dict) -> None:
+    for key, value in override_spec.items():
+        if key == "services" and isinstance(value, dict):
+            base_services = base_spec.setdefault("services", {})
+            for svc_name, svc_override in value.items():
+                if svc_name not in base_services:
+                    base_services[svc_name] = copy.deepcopy(svc_override)
+                else:
+                    _merge_service(base_services[svc_name], svc_override)
+        else:
+            base_spec[key] = copy.deepcopy(value)
+
+
+def _merge_service(base_svc: dict, override_svc: dict) -> None:
+    for key, value in override_svc.items():
+        if key == "envs" and isinstance(value, list):
+            existing = {e["name"]: e for e in base_svc.get("envs", []) if "name" in e}
+            for env in value:
+                existing[env["name"]] = copy.deepcopy(env)
+            base_svc["envs"] = list(existing.values())
+        elif key == "extraPodSpec" and isinstance(value, dict):
+            _merge_extra_pod_spec(base_svc.setdefault("extraPodSpec", {}), value)
+        else:
+            base_svc[key] = copy.deepcopy(value)
+
+
+def _merge_extra_pod_spec(base_eps: dict, override_eps: dict) -> None:
+    for key, value in override_eps.items():
+        if key == "mainContainer" and isinstance(value, dict):
+            _merge_main_container(base_eps.setdefault("mainContainer", {}), value)
+        else:
+            base_eps[key] = copy.deepcopy(value)
+
+
+def _merge_main_container(base_mc: dict, override_mc: dict) -> None:
+    for key, value in override_mc.items():
+        if key == "args" and isinstance(value, list):
+            existing = base_mc.get("args", [])
+            extra = [a for a in value if a not in existing]
+            base_mc["args"] = existing + extra
+        else:
+            base_mc[key] = copy.deepcopy(value)
 
 
 class ConfigModifierProtocol(Protocol):

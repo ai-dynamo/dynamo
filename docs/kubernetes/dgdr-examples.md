@@ -85,6 +85,75 @@ spec:
 `spec.overrides.dgd` is not required to enable Planner; use it only when the
 generated DGD needs additional customization.
 
+### KV-Aware Router Override
+
+DGDR-generated deployments default to `round-robin` routing. Use
+`spec.overrides.dgd` to configure the generated `Frontend` service with a
+different router mode without editing the DGD directly.
+
+**Approximate KV routing** (no worker-side event publishing required):
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-kv-router
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          Frontend:
+            envs:
+              - name: DYN_ROUTER_MODE
+                value: kv
+              - name: DYN_ROUTER_USE_KV_EVENTS
+                value: "false"
+```
+
+**Event-driven KV routing for vLLM disaggregated serving** (enable worker
+KV-event publishing on the prefill worker):
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-disagg-kv-router
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          Frontend:
+            envs:
+              - name: DYN_ROUTER_MODE
+                value: kv
+          VllmPrefillWorker:
+            extraPodSpec:
+              mainContainer:
+                args:
+                  - --enable-prefix-caching
+                  - --kv-events-config
+                  - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+```
+
+**Note**: Service names depend on the backend and topology selected by the
+profiler. Use `autoApply: false` and inspect the generated DGD before adding
+per-service overrides. For aggregated serving, override the single worker
+service (not a prefill worker). For cross-backend KV event flags, see
+[Router Operations](../components/router/router-operations.md#additional-notes)
+and the [Routing section in the DGDR Reference](dgdr.md#routing).
+
 ## Additional DGDR Patterns
 
 ### MoE Models (SGLang)
