@@ -6,7 +6,7 @@
 # This example demonstrates aggregated serving (single worker type that handles
 # both prefill and decode) with KV Router enabled.
 #
-# ⚠️ IMPORTANT LIMITATION: In Aggregated mode, VllmDecodeWorker does not generate
+# ⚠️ IMPORTANT LIMITATION: In Aggregated mode, decode does not generate
 # KV cache events (BlockStored) because these events are only produced during the
 # prefill phase in Disaggregated mode. As a result, KV Router in Aggregated mode
 # cannot perform intelligent routing based on KV cache availability.
@@ -48,7 +48,7 @@ spec:
             # Enable KV Router for intelligent worker selection
             - name: DYN_ROUTER_MODE
               value: kv
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2

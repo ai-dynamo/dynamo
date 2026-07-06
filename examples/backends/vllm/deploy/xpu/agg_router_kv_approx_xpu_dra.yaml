@@ -52,7 +52,7 @@ spec:
             - --router-mode
             - kv
             - --no-kv-events
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2
