@@ -20,9 +20,10 @@ use super::kserve;
 use super::kserve::inference;
 
 // [gluo NOTE] These are common utilities that should be shared between frontends
-use crate::http::service::{
-    disconnect::{ConnectionHandle, create_connection_monitor},
-    metrics::{CancellationLabels, Endpoint, InflightGuard, process_response_and_observe_metrics},
+use crate::http::service::metrics::process_response_and_observe_metrics;
+use dynamo_http_server::disconnect::{ConnectionHandle, create_connection_monitor};
+use dynamo_http_server::metrics::{
+    CancellationLabels, Endpoint, InflightGuard, request_was_rejected,
 };
 use dynamo_protocols::types::{CompletionFinishReason, CreateCompletionRequest, Prompt};
 
@@ -112,11 +113,10 @@ pub async fn completion_response_stream(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
-            state.metrics_clone().inc_rejection(
-                &model_name,
-                crate::http::service::metrics::Endpoint::Completions,
-            );
+        if request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, Endpoint::Completions);
             return Status::resource_exhausted(e.to_string());
         }
         Status::internal(format!("Failed to generate completions: {}", e))

@@ -20,15 +20,20 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use dynamo_http_server::{
+    disconnect::create_connection_monitor,
+    metrics::{
+        CancellationLabels, Endpoint, ErrorType, request_was_cancelled, request_was_rejected,
+    },
+    request::get_body_limit,
+};
 use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
 use serde::Serialize;
 use tracing::Instrument;
 
-use super::disconnect::create_connection_monitor;
-use super::metrics::{CancellationLabels, ErrorType};
 use super::openai::{
-    check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
-    get_or_create_request_id, smart_json_error_middleware,
+    check_model_serving_ready, check_ready, context_from_headers, get_or_create_request_id,
+    smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
 use crate::protocols::common::preprocessor::PreprocessedRequest;
@@ -349,7 +354,7 @@ async fn handler_generate(
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
-        endpoint: super::metrics::Endpoint::Generate.to_string(),
+        endpoint: Endpoint::Generate.to_string(),
         request_type: "unary".to_string(),
     };
     let (mut connection_handle, _stream_handle) = create_connection_monitor(
@@ -397,7 +402,7 @@ async fn generate_dispatch(
 ) -> Response {
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
-        super::metrics::Endpoint::Generate,
+        Endpoint::Generate,
         false,
         &request_id,
     );
@@ -417,9 +422,9 @@ async fn generate_dispatch(
     let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
-            let was_cancelled = request_context.is_killed()
-                || super::metrics::request_was_cancelled(error.as_ref());
-            let was_rejected = super::metrics::request_was_rejected(error.as_ref());
+            let was_cancelled =
+                request_context.is_killed() || request_was_cancelled(error.as_ref());
+            let was_rejected = request_was_rejected(error.as_ref());
             inflight_guard.mark_error(if was_cancelled {
                 ErrorType::Cancelled
             } else if was_rejected {
@@ -434,7 +439,7 @@ async fn generate_dispatch(
                 tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected generate request");
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Generate);
+                    .inc_rejection(&model, Endpoint::Generate);
                 return generate_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
@@ -480,7 +485,7 @@ async fn generate_dispatch(
         Err(error) => {
             if request_context.is_killed()
                 || engine_context.is_killed()
-                || super::metrics::request_was_cancelled(error.as_ref())
+                || request_was_cancelled(error.as_ref())
             {
                 inflight_guard.mark_error(ErrorType::Cancelled);
                 return generate_cancelled_response();
@@ -506,8 +511,8 @@ mod tests {
 
     use super::service_v2::{HttpService, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV};
     use super::*;
-    use crate::http::service::metrics::{Endpoint, RequestType, Status};
     use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
+    use dynamo_http_server::metrics::{Endpoint, RequestType, Status};
     use dynamo_runtime::{
         engine::{AsyncEngine, ResponseStream},
         pipeline::{Error, ManyOut, SingleIn},

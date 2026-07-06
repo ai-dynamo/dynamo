@@ -24,17 +24,20 @@ use axum::{
     },
     routing::{get, post},
 };
+use dynamo_http_server::{
+    disconnect::{ConnectionHandle, create_connection_monitor},
+    metrics::{
+        CancellationLabels, Endpoint, ErrorType, request_was_cancelled, request_was_rejected,
+        request_was_unavailable,
+    },
+};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 use tracing::Instrument;
 
 use super::{
-    RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    metrics::{
-        CancellationLabels, Endpoint,
-        process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
-    },
+    RouteDoc, disconnect::monitor_for_disconnects,
+    metrics::process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
     service_v2,
 };
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
@@ -58,7 +61,8 @@ use crate::types::Annotated;
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::SanitizedError;
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
-use super::openai::{get_body_limit, get_or_create_request_id};
+use super::openai::get_or_create_request_id;
+use dynamo_http_server::request::get_body_limit;
 
 // ---------------------------------------------------------------------------
 // Router
@@ -360,32 +364,32 @@ async fn anthropic_messages(
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
-            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
+                .inc_rejection(&model, Endpoint::AnthropicMessages);
+            inflight_guard.mark_error(ErrorType::Overload);
             return anthropic_sanitized_error_with_details(
                 SanitizedError::Overloaded,
                 format!("{e:#}"),
             );
         }
-        if super::metrics::request_was_unavailable(e.as_ref()) {
-            inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
+        if request_was_unavailable(e.as_ref()) {
+            inflight_guard.mark_error(ErrorType::Unavailable);
             return anthropic_sanitized_error_with_details(
                 SanitizedError::Unavailable,
                 format!("{e:#}"),
             );
         }
         // Check for cancelled request (client disconnected before response was sent)
-        if super::metrics::request_was_cancelled(e.as_ref()) {
-            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+        if request_was_cancelled(e.as_ref()) {
+            inflight_guard.mark_error(ErrorType::Cancelled);
             return anthropic_sanitized_error_with_details(
                 SanitizedError::Cancelled,
                 format!("{e:#}"),
             );
         }
-        inflight_guard.mark_error(super::metrics::ErrorType::Internal);
+        inflight_guard.mark_error(ErrorType::Internal);
         anthropic_sanitized_error_with_details(
             SanitizedError::Internal,
             format!("Failed to generate Anthropic completions: {e}"),

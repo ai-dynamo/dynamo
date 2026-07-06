@@ -4,12 +4,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use dynamo_http_server::metrics::Metrics;
+
 use crate::{
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
-    http::service::metrics::Metrics,
     local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
     types::openai::{

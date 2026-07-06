@@ -23,7 +23,14 @@ use axum::{
 };
 use base64::Engine as _;
 use bytes::Bytes;
-use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_http_server::{
+    disconnect::{ConnectionHandle, create_connection_monitor},
+    metrics::{
+        CancellationLabels, Endpoint, ErrorType, request_was_cancelled, request_was_rejected,
+        request_was_unavailable,
+    },
+    request::{get_body_limit, is_json_content_type},
+};
 use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -33,12 +40,11 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     RouteDoc,
-    disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
+    disconnect::monitor_for_disconnects,
     error::HttpError,
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
-        CancellationLabels, Endpoint, ErrorType, EventConverter,
-        process_chat_response_and_observe_metrics,
+        EventConverter, process_chat_response_and_observe_metrics,
         process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
@@ -89,17 +95,6 @@ pub(super) fn rl_router(
     let config = dynamo_rl::RlDiscoveryConfig::from_env(drt);
     let state = dynamo_rl::RlDiscoveryState::new(config);
     Ok(dynamo_rl::rl_router(state))
-}
-
-// Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
-/// Default body limit in bytes (45MB) to support 500k+ token payloads.
-/// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
-pub(super) fn get_body_limit() -> usize {
-    std::env::var(env_llm::DYN_HTTP_BODY_LIMIT_MB)
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|mb| mb * 1024 * 1024)
-        .unwrap_or(45 * 1024 * 1024)
 }
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
@@ -374,7 +369,7 @@ impl ErrorMessage {
         }
 
         // Check for ResourceExhausted anywhere in the error chain → HTTP 529
-        if super::metrics::request_was_rejected(err.as_ref()) {
+        if request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Overloaded,
                 format!("{err:#}"),
@@ -382,7 +377,7 @@ impl ErrorMessage {
         }
 
         // No backend workers are currently routable → HTTP 503.
-        if super::metrics::request_was_unavailable(err.as_ref()) {
+        if request_was_unavailable(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Unavailable,
                 format!("{err:#}"),
@@ -403,7 +398,7 @@ impl ErrorMessage {
         }
 
         // Check for Cancelled anywhere in the error chain → HTTP 499 (Client Closed Request)
-        if super::metrics::request_was_cancelled(err.as_ref()) {
+        if request_was_cancelled(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Cancelled,
                 format!("{err:#}"),
@@ -758,10 +753,10 @@ async fn completions_single(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Completions);
+                .inc_rejection(&model, Endpoint::Completions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -929,10 +924,10 @@ async fn completions_batch(
 
         // Generate stream for this prompt
         let stream = engine.generate(single_request_context).await.map_err(|e| {
-            if super::metrics::request_was_rejected(e.as_ref()) {
+            if request_was_rejected(e.as_ref()) {
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Completions);
+                    .inc_rejection(&model, Endpoint::Completions);
             }
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1129,10 +1124,10 @@ async fn embeddings(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model_name, super::metrics::Endpoint::Embeddings);
+                .inc_rejection(&model_name, Endpoint::Embeddings);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -1374,20 +1369,6 @@ fn unsupported_media_type_error() -> ErrorResponse {
             details: None,
         }),
     )
-}
-
-fn is_json_content_type(content_type: &str) -> bool {
-    let media_type = content_type.split(';').next().unwrap_or_default().trim();
-    let Some((media_type, subtype)) = media_type.split_once('/') else {
-        return false;
-    };
-
-    media_type.eq_ignore_ascii_case("application")
-        && (subtype.eq_ignore_ascii_case("json")
-            || subtype
-                .to_ascii_lowercase()
-                .rsplit_once('+')
-                .is_some_and(|(_, suffix)| suffix == "json"))
 }
 
 fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
@@ -1892,10 +1873,10 @@ async fn chat_completions(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
+                .inc_rejection(&model, Endpoint::ChatCompletions);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -2377,10 +2358,10 @@ async fn responses(
 
     // issue the generate call on the engine
     let engine_stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Responses);
+                .inc_rejection(&model, Endpoint::Responses);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -2961,10 +2942,10 @@ async fn images(
     // NOT for client-facing SSE streaming. The stream is immediately folded into
     // a single response below.
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Images);
+                .inc_rejection(&model, Endpoint::Images);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate images");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -3078,10 +3059,10 @@ async fn videos(
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&model, Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate videos");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -3188,10 +3169,10 @@ async fn video_stream(
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
+        if request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::Videos);
+                .inc_rejection(&model, Endpoint::Videos);
         }
         let err_response = ErrorMessage::from_anyhow(e, "Failed to start video stream");
         inflight.mark_error(extract_error_type_from_response(&err_response));
@@ -3464,17 +3445,6 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
-
-    #[test]
-    fn test_is_json_content_type() {
-        assert!(is_json_content_type("application/json"));
-        assert!(is_json_content_type("application/json; charset=utf-8"));
-        assert!(is_json_content_type("Application/JSON"));
-        assert!(is_json_content_type("application/vnd.dynamo+json"));
-        assert!(!is_json_content_type("text/plain"));
-        assert!(!is_json_content_type("application/json-patch"));
-        assert!(!is_json_content_type("application"));
-    }
 
     #[test]
     fn test_ensure_json_content_type_rejects_missing_or_non_json() {

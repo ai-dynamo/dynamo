@@ -6,10 +6,10 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 
 use anyhow::{Error, Result};
+use dynamo_http_server::metrics::Metrics;
 use futures::{stream, stream::StreamExt};
 
 use crate::{
-    http::service::metrics::Metrics,
     model_card::ModelDeploymentCard,
     protocols::{
         TokenIdType,
@@ -392,10 +392,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::service::metrics::Metrics;
     use crate::protocols::common::{
         GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
     };
+    use dynamo_http_server::metrics::Metrics;
     use dynamo_runtime::error::{DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;

@@ -4,6 +4,7 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use dynamo_http_server::metrics::Metrics;
 use dynamo_renderer::PromptFormatter;
 
 use crate::{
@@ -11,7 +12,6 @@ use crate::{
     discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
-    http::service::metrics::Metrics,
     kv_router::indexer::try_build_cache_indexer,
     kv_router::{
         EncoderRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
