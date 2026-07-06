@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dockerhub-pull-cache-data
+  labels:
+    app.kubernetes.io/name: dockerhub-pull-cache
+    app.kubernetes.io/part-of: glm52-nscale-benchmark
+  annotations:
+    benchmarks.nvidia.com/retention-policy: retain
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: cinder
+  resources:
+    requests:
+      storage: 500Gi

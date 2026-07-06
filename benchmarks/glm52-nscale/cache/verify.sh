@@ -59,7 +59,8 @@ warm_image_id="$(kubectl exec "${runner}" -n "${NAMESPACE}" -c runner -- \
 kubectl exec "${runner}" -n "${NAMESPACE}" -c runner -- \
   docker image rm "${test_ref}" >/dev/null
 quota_before="$(quota_remaining)"
-cache_bytes_before="$(kubectl exec "${runner}" -n "${NAMESPACE}" -c runner -- \
+cache_bytes_before="$(kubectl exec deployment/dockerhub-pull-cache \
+  -n "${NAMESPACE}" -c registry -- \
   du -sb /artifacts/cache/dockerhub-registry | cut -f1)"
 
 image_ids=()
@@ -75,7 +76,8 @@ kubectl exec "${runner}" -n "${NAMESPACE}" -c runner -- \
   docker image rm "${test_ref}" >/dev/null
 
 quota_after="$(quota_remaining)"
-cache_bytes_after="$(kubectl exec "${runner}" -n "${NAMESPACE}" -c runner -- \
+cache_bytes_after="$(kubectl exec deployment/dockerhub-pull-cache \
+  -n "${NAMESPACE}" -c registry -- \
   du -sb /artifacts/cache/dockerhub-registry | cut -f1)"
 [[ "${image_ids[0]}" == "${image_ids[1]}" ]]
 [[ "${warm_image_id}" == "${image_ids[0]}" ]]
@@ -89,6 +91,16 @@ registry_image="$(kubectl get deployment dockerhub-pull-cache -n "${NAMESPACE}" 
 runner_uid="$(kubectl get pod "${runner}" -n "${NAMESPACE}" \
   -o jsonpath='{.metadata.uid}')"
 runner_uid_sha256="$(printf '%s' "${runner_uid}" | sha256_text)"
+cache_pvc_uid="$(kubectl get pvc dockerhub-pull-cache-data -n "${NAMESPACE}" \
+  -o jsonpath='{.metadata.uid}')"
+cache_pvc_uid_sha256="$(printf '%s' "${cache_pvc_uid}" | sha256_text)"
+cache_storage_class="$(kubectl get pvc dockerhub-pull-cache-data \
+  -n "${NAMESPACE}" -o jsonpath='{.spec.storageClassName}')"
+cache_capacity="$(kubectl get pvc dockerhub-pull-cache-data \
+  -n "${NAMESPACE}" -o jsonpath='{.status.capacity.storage}')"
+migration_marker_sha256="$(kubectl exec deployment/dockerhub-pull-cache \
+  -n "${NAMESPACE}" -c registry -- \
+  sha256sum /artifacts/cache/.glm52-migration-v1.json | cut -d' ' -f1)"
 restart_counts="$(kubectl get pod "${runner}" -n "${NAMESPACE}" -o json \
   | jq -c '[.status.containerStatuses[] | {name, restart_count: .restartCount}] | sort_by(.name)')"
 
@@ -97,6 +109,10 @@ jq -n \
   --arg mirror "${mirror}" \
   --arg registry_image "${registry_image}" \
   --arg runner_uid_sha256 "${runner_uid_sha256}" \
+  --arg cache_pvc_uid_sha256 "${cache_pvc_uid_sha256}" \
+  --arg cache_storage_class "${cache_storage_class}" \
+  --arg cache_capacity "${cache_capacity}" \
+  --arg migration_marker_sha256 "${migration_marker_sha256}" \
   --arg test_ref "${test_ref}" \
   --arg warm_image_id "${warm_image_id}" \
   --arg image_id "${image_ids[0]}" \
@@ -106,11 +122,15 @@ jq -n \
   --argjson cache_bytes_before "${cache_bytes_before}" \
   --argjson cache_bytes_after "${cache_bytes_after}" \
   '{
-    schema_version: 1,
+    schema_version: 2,
     captured_at: $captured_at,
     mirror: $mirror,
     registry_image: $registry_image,
     runner_uid_sha256: $runner_uid_sha256,
+    cache_pvc_uid_sha256: $cache_pvc_uid_sha256,
+    cache_storage_class: $cache_storage_class,
+    cache_capacity: $cache_capacity,
+    migration_marker_sha256: $migration_marker_sha256,
     restart_counts: $restart_counts,
     cache_bytes_before: $cache_bytes_before,
     cache_bytes_after: $cache_bytes_after,

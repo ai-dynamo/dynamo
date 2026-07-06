@@ -117,3 +117,32 @@ SPDX-License-Identifier: Apache-2.0
   was not imported, the deployment was not torn down, and no next cell was launched. Recovery
   requires authenticated Docker Hub capacity or an approved pull-through cache followed by an
   evaluation-only resume against the unchanged prediction digest.
+- Serial recovery completed the unchanged Dynamo + vLLM cell at 436/500 resolved (0.872), with
+  500/500 reports, zero missing/error/incomplete trials, stable runtime continuity, and no serving
+  restart. That result is the first imported official campaign cell.
+- Deployed CNCF Distribution 3.1.1 as a Docker Hub pull-through cache and online-reloaded the
+  runner's Docker mirror without restarting either runner container. Two warm pulls preserved the
+  same image ID and did not decrement the Docker Hub allowance.
+- The first native-vLLM A/B Verified attempt reached 31/500 submitted trajectories before writes
+  returned `EDQUOT`. The 1 TiB artifact PVC was only 1% full; direct VAST API evidence identified
+  its shared ancestor as more than 99.98% utilized with about 7.4 GB headroom. The guarded attempt
+  exited 125, published stable failure continuity, and remained excluded from official results.
+- Migrated the stopped registry's exact tree offline to a dedicated 500 GiB Cinder PVC: 234 files,
+  2,785,498,578 regular-file bytes, tree SHA-256
+  `78130b5c25cd0fc2f65ae94d05634a3c24bab495c98d7e17ab0985baff4df720`. The marker SHA-256 is
+  `9594d04f85a66dfa7349b3f334905f288f9dfbe909d8f6879d549e3e571ef10e`; the Cinder PV reclaim
+  policy is `Retain`, and the former VAST tree is retained for deterministic rollback.
+- Post-migration verification again pulled the identical test image twice with Docker Hub allowance
+  unchanged at 100/100. The schema-v2 proof SHA-256 is
+  `7bed5172c289d98b23bd22409bad97500480a8cf23e62f5a9f52bbaf09ddfe0b`; runner identity and both
+  restart counts remained unchanged. Because native vLLM's `/v1/models` timestamps and permission
+  ID are response-volatile, the immutable resume gate rejected splicing the partial run. The cell
+  requires a clean replay under the original pinned evaluator.
+- Audited the migrated cache before replay: only 17/500 Verified repositories were present and a
+  real missing task image cold-filled 431,553,498 bytes onto Cinder, leaving the anonymous upstream
+  allowance at 99/100. The unused fresh native server was torn down with zero remaining GPU requests.
+  Started one idempotent runner-side prefill from the authoritative 500-image manifest (SHA-256
+  `39c96a5fdec81852fb0342556ba8c0922f1bb54854e79ed2661b6e6981bb5a21`); it validates immutable
+  image identity, paces first fills against the upstream window, persists per-image progress, and
+  blocks evaluator overlap while active. The runbook separately requires validated 500/500 prefill
+  completion before the next fresh serving deployment.

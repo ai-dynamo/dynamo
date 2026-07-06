@@ -1,0 +1,9 @@
+{
+  "bytes": 2785498578,
+  "captured_at": "2026-07-06T20:52:58.555082Z",
+  "destination": "/destination/dockerhub-registry",
+  "file_count": 234,
+  "schema_version": 1,
+  "source": "/source/cache/dockerhub-registry",
+  "tree_sha256": "78130b5c25cd0fc2f65ae94d05634a3c24bab495c98d7e17ab0985baff4df720"
+}

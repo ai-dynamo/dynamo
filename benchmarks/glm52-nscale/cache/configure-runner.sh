@@ -24,18 +24,12 @@ runner=glm52-eval-runner
 mirror=http://dockerhub-pull-cache:5000
 registry=dockerhub-pull-cache:5000
 
+"${SCRIPT_DIR}/assert-ready.sh" --skip-runner-mirror >/dev/null
 if ((allow_active == 0)); then
   "${ROOT_DIR}/eval/assert-runner-idle.sh"
 else
   echo "Explicit active-work mirror reload enabled; immutable task-image guards remain authoritative."
 fi
-
-kubectl get deployment dockerhub-pull-cache -n "${NAMESPACE}" -o json \
-  | jq -e '.status.observedGeneration == .metadata.generation
-    and .status.readyReplicas == 1
-    and .status.availableReplicas == 1' >/dev/null
-kubectl exec "${runner}" -n "${NAMESPACE}" -c runner -- \
-  curl -fsS "${mirror}/v2/" >/dev/null
 
 pod_uid_before="$(kubectl get pod "${runner}" -n "${NAMESPACE}" \
   -o jsonpath='{.metadata.uid}')"

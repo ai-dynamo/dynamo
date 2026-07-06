@@ -16,7 +16,11 @@ cp benchmarks/glm52-nscale/campaign.local.env.example \
 # Fill in the ignored local file, then provision nvcr-secret and hf-token-secret.
 
 benchmarks/glm52-nscale/eval/deploy-runner.sh
-benchmarks/glm52-nscale/cache/deploy.sh
+# Choose exactly one first-time cache command:
+benchmarks/glm52-nscale/cache/migrate.sh                    # legacy VAST cache
+# benchmarks/glm52-nscale/cache/migrate.sh --initialize-empty  # fresh namespace
+# Later reconciliations of the initialized cache use:
+# benchmarks/glm52-nscale/cache/deploy.sh
 benchmarks/glm52-nscale/cache/configure-runner.sh
 benchmarks/glm52-nscale/cache/assert-ready.sh
 benchmarks/glm52-nscale/cache/verify.sh
@@ -27,6 +31,14 @@ benchmarks/glm52-nscale/eval/exec-runner.sh \
 benchmarks/glm52-nscale/eval/exec-runner.sh \
   /workspace/eval/terminalbench/bootstrap.sh
 ```
+
+`cache/deploy.sh` is fail-closed and only starts an already initialized dedicated
+cache PVC. It never creates an empty cache implicitly. Upgrade a legacy
+artifact-PVC-backed cache with `cache/migrate.sh`, or explicitly initialize a
+fresh cache with `cache/migrate.sh --initialize-empty`. Migration preserves and
+hashes the former store, binds the marker hash to the new PVC, and retains both
+storage backends. Emergency VAST rollback uses the committed
+`cache/registry-mirror-vast-rollback.yaml` manifest.
 
 `campaign.source_commit` must name the immutable scaffold commit. Runner sync and
 deployment both refuse source drift from that commit. `deploy-runner.sh` never deletes a
@@ -116,6 +128,10 @@ benchmarks/glm52-nscale/cache/assert-ready.sh
 suite=verified
 run_name=${variant}-${phase}
 run_dir=/artifacts/glm52-nscale/swebench/results/${run_name}/${suite}
+if [[ "${suite}" == verified ]]; then
+  benchmarks/glm52-nscale/cache/require-complete.sh verified \
+    /artifacts/glm52-nscale/swebench/results/dynamo-vllm-ab/verified/task-images.json
+fi
 benchmarks/glm52-nscale/eval/run-guarded.sh "${variant}" \
   --phase "${phase}" \
   --attestation "${run_dir}/runtime-continuity.json" -- \
@@ -128,6 +144,16 @@ Full SWE runs are fixed at 16 generation workers, batches of 8, temperature/top-
 32,768 output tokens, and a 14,400-second agent wall limit. For validation, use a
 `-${phase}-` run name with `phase=validation` and prefix the remote command with
 `INSTANCE_SLICE=0:1`.
+
+For the current Verified recovery, prefill its exact image population from the
+authoritative completed `task-images.json` before another official cell.
+`cache/prefill.sh start verified` is idempotent and its named tmux session
+intentionally makes the runner-idle gate fail while work is active. Do not deploy
+the next fresh server until `cache/prefill.sh status verified` reports
+`state=complete`, `completed=total`, and `tmux_active=false`; see
+`cache_binding_matches=true`; see `cache/README.md` for the command and evidence
+paths. The implementation is Verified-only; Pro's shared multi-tag repository
+needs a separate tag-aware path.
 
 ## Guarded Terminal-Bench command
 

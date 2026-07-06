@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Deterministic emergency rollback for the retained legacy VAST cache. Normal
+# deployment uses registry-mirror.yaml and dockerhub-pull-cache-data instead.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -48,28 +50,9 @@ spec:
         app.kubernetes.io/name: dockerhub-pull-cache
         app.kubernetes.io/part-of: glm52-nscale-benchmark
       annotations:
-        benchmarks.nvidia.com/cache-config-version: "20260706-3"
+        benchmarks.nvidia.com/cache-config-version: "20260706-vast-rollback"
     spec:
       automountServiceAccountToken: false
-      initContainers:
-        - name: verify-cache-migration
-          image: registry:3.1.1@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/sh
-            - -ec
-            - |
-              test -s /artifacts/cache/.glm52-migration-v1.json
-              test -d /artifacts/cache/dockerhub-registry/docker/registry/v2
-              actual="$(sha256sum /artifacts/cache/.glm52-migration-v1.json | awk '{print $1}')"
-              expected="$(cat /expected/marker.sha256)"
-              test "${actual}" = "${expected}"
-          volumeMounts:
-            - name: cache-data
-              mountPath: /artifacts/cache
-            - name: cache-marker
-              mountPath: /expected
-              readOnly: true
       containers:
         - name: registry
           image: registry:3.1.1@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33
@@ -105,18 +88,15 @@ spec:
               mountPath: /etc/distribution/config.yml
               subPath: config.yml
               readOnly: true
-            - name: cache-data
-              mountPath: /artifacts/cache
+            - name: artifacts
+              mountPath: /artifacts
       volumes:
         - name: config
           configMap:
             name: dockerhub-pull-cache-config
-        - name: cache-marker
-          configMap:
-            name: dockerhub-pull-cache-marker
-        - name: cache-data
+        - name: artifacts
           persistentVolumeClaim:
-            claimName: dockerhub-pull-cache-data
+            claimName: glm52-benchmark-artifacts
 ---
 apiVersion: v1
 kind: Service

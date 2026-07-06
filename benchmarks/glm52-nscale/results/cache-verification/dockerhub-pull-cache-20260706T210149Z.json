@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "captured_at": "2026-07-06T21:01:05Z",
+  "mirror": "http://dockerhub-pull-cache:5000/",
+  "registry_image": "registry:3.1.1@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33",
+  "runner_uid_sha256": "66b75fab79ee71e70b3f327855b9dca3ba0d6cad21dccb79eeed2f56aa677bcc",
+  "cache_pvc_uid_sha256": "f33552e8d7627b5c8615848258ab37e12243698db79a66e1f0fa596af090e011",
+  "cache_storage_class": "cinder",
+  "cache_capacity": "500Gi",
+  "migration_marker_sha256": "9594d04f85a66dfa7349b3f334905f288f9dfbe909d8f6879d549e3e571ef10e",
+  "restart_counts": [
+    {
+      "name": "dind",
+      "restart_count": 0
+    },
+    {
+      "name": "runner",
+      "restart_count": 0
+    }
+  ],
+  "cache_bytes_before": 2787603922,
+  "cache_bytes_after": 2787603922,
+  "test_ref": "docker.io/library/hello-world:latest",
+  "warm_image_id": "sha256:e2ac70e7319a02c5a477f5825259bd118b94e8b02c279c67afa63adab6d8685b",
+  "image_id": "sha256:e2ac70e7319a02c5a477f5825259bd118b94e8b02c279c67afa63adab6d8685b",
+  "repeated_image_id_equal": true,
+  "quota_before": "100;w=3600",
+  "quota_after": "100;w=3600",
+  "quota_unchanged": true
+}
