@@ -3,9 +3,10 @@
 
 """GMS server entry point.
 
-Launches one dual-tag GMS server process per GPU, then supervises them:
-terminates the rest if any child exits, and propagates the first non-zero exit
-code. Runs until SIGTERM (pod termination kills it) or until a child exits.
+Launches one GMS server process per GPU serving both the weights and kv_cache
+tags, then supervises them: terminates the rest if any child exits, and
+propagates the first non-zero exit code. Runs until SIGTERM (pod termination
+kills it) or until a child exits.
 """
 
 from __future__ import annotations
@@ -25,19 +26,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+_TAGS = ("weights", "kv_cache")
+
+
 def _start_processes(devices: list[int]) -> list[subprocess.Popen]:
     processes = []
     for device in devices:
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "gpu_memory_service.cli.dual_server",
-                "--device",
-                str(device),
-            ]
-        )
-        logger.info("Started dual-tag GMS device=%d pid=%d", device, proc.pid)
+        command = [sys.executable, "-m", "gpu_memory_service", "--device", str(device)]
+        for tag in _TAGS:
+            command += ["--tag", tag]
+        proc = subprocess.Popen(command)
+        logger.info("Started GMS device=%d pid=%d", device, proc.pid)
         processes.append(proc)
     return processes
 
