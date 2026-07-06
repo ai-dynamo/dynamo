@@ -4014,7 +4014,9 @@ class EmbeddingWorkerHandler:
         truncate_prompt_tokens = request.get("truncate_prompt_tokens")
         tokenization_kwargs: dict[str, Any] | None = None
         if truncate_prompt_tokens is not None:
-            if not isinstance(truncate_prompt_tokens, int):
+            if not isinstance(truncate_prompt_tokens, int) or isinstance(
+                truncate_prompt_tokens, bool
+            ):
                 raise TypeError(
                     "Invalid 'truncate_prompt_tokens' type "
                     f"{type(truncate_prompt_tokens).__name__}; expected int"

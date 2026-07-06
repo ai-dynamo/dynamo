@@ -1489,6 +1489,9 @@ class TestEmbeddingWorkerHandlerCancellation:
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_raw_text_truncation_forwarded_to_vllm(self):
+        """Raw text inputs forward ``truncate_prompt_tokens`` to vLLM's
+        tokenizer path, including the ``-1`` sentinel vLLM accepts.
+        """
         handler = self._make_embedding_handler()
         context = self._make_context()
         captured: list[dict] = []
@@ -1525,9 +1528,38 @@ class TestEmbeddingWorkerHandlerCancellation:
             },
         ]
 
+    @pytest.mark.parametrize(
+        ("truncate_prompt_tokens", "error_type", "match"),
+        [
+            ("2048", TypeError, "Invalid 'truncate_prompt_tokens' type"),
+            (True, TypeError, "Invalid 'truncate_prompt_tokens' type"),
+            (-2, ValueError, "truncate_prompt_tokens must be >= -1"),
+        ],
+    )
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_truncate_prompt_tokens_rejects_invalid_values(
+        self, truncate_prompt_tokens, error_type, match
+    ):
+        """Invalid truncation values fail before the request reaches vLLM."""
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        request = {
+            "input": "hello",
+            "model": "test-model",
+            "truncate_prompt_tokens": truncate_prompt_tokens,
+        }
+        with pytest.raises(error_type, match=match):
+            async for _ in handler.generate(request, context):
+                pass
+
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_truncation_uses_default_encode_shape_when_not_tokenizing(self):
+        """Pretokenized inputs stay on the default encode path because callers
+        already control token-id truncation before reaching vLLM.
+        """
         handler = self._make_embedding_handler()
         context = self._make_context()
         prompts = []
