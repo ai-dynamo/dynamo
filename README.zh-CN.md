@@ -24,7 +24,7 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 ![Community Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
 
-| **[文档](https://docs.nvidia.com/dynamo/)** | **[路线图](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[配方](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[示例](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[预构建容器](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[摘要](docs/digest/index.mdx)** | **[设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aunder-review%22%2C%22dep%3Aimplementing%22%2C%22dep%3Adone%22)** | **[如何贡献](#社区与贡献)** |
+| **[文档](https://docs.nvidia.com/dynamo/)** | **[路线图](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[配方](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[示例](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[预构建容器](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[摘要](docs/digest/index.mdx)** | **[设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[如何贡献](#社区与贡献)** |
 
 <!-- GitHub does not support browser-language negotiation for repository README rendering; keep explicit alternate-language links in sync. -->
 <p align="right">
@@ -196,7 +196,7 @@ uv pip install -e .
 Dynamo 采用 OSS 优先的开放开发模式。我们欢迎各种形式的贡献。
 
 - **[贡献指南](docs/contribution-guide.zh-CN.md)** — 如何贡献代码、文档和配方
-- **[设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aunder-review%22%2C%22dep%3Aimplementing%22%2C%22dep%3Adone%22)** — 重大功能的 RFC，以带 `dep:*` 标签的 GitHub issue 形式跟踪
+- **[设计提案](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** — 重大功能的 RFC，以带 `dep:*` 标签的 GitHub issue 形式跟踪
 - **[Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)** — 双周会议
 - **[社区会议](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)** ([Youtube](https://www.youtube.com/@ai-dynamo-community)) – 每周（Wed 10:30 AM PT）开发者社区会议
 - **[Discord](https://discord.gg/D92uqZRjCZ)** — 与团队和社区交流

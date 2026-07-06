@@ -17,7 +17,7 @@ Join the community:
 - [CNCF Slack (`#ai-dynamo`)](https://communityinviter.com/apps/cloud-native/cncf) -- join CNCF Slack and find us in `#ai-dynamo`
 - [Discord](https://discord.gg/D92uqZRjCZ)
 - [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- [Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aunder-review%22%2C%22dep%3Aimplementing%22%2C%22dep%3Adone%22) -- RFCs for major features, tracked as `dep:*` labeled GitHub issues
+- [Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22) -- RFCs for major features, tracked as `dep:*` labeled GitHub issues
 - [Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X) -- biweekly calls
 - [Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community)) -- Weekly (Wed 10:30 AM PT) development community meetings
 - [Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday) -- deep dives from production users
@@ -214,7 +214,7 @@ The contribution process depends on the size and scope of your change. Even when
 
 **Larger changes (≥100 lines):** [Open a Contribution Request](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml) issue first and wait for the `approved-for-pr` label before submitting a PR.
 
-**Architecture changes:** Changes that affect multiple components, introduce or modify public APIs, alter communication plane architecture, or affect backend integration contracts require a Dynamo Enhancement Proposal (DEP). DEPs are tracked as [`dep:*` labeled GitHub issues](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aunder-review%22%2C%22dep%3Aimplementing%22%2C%22dep%3Adone%22) on `ai-dynamo/dynamo` -- [open a DEP issue](https://github.com/ai-dynamo/dynamo/issues/new?template=dep.yml) before starting implementation.
+**Architecture changes:** Changes that affect multiple components, introduce or modify public APIs, alter communication plane architecture, or affect backend integration contracts require a Dynamo Enhancement Proposal (DEP). DEPs are tracked as [`dep:*` labeled GitHub issues](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22) on `ai-dynamo/dynamo` -- [open a DEP issue](https://github.com/ai-dynamo/dynamo/issues/new?template=dep.yml) before starting implementation.
 
 ### Submitting a Pull Request
 
@@ -427,7 +427,7 @@ If you discover a security vulnerability, please follow the instructions in our 
 - **CNCF Slack**: [Join CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf) and find us in `#ai-dynamo`
 - **Discord**: [Join our community](https://discord.gg/D92uqZRjCZ)
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- **Design Proposals**: [RFCs for major features, tracked as `dep:*` labeled GitHub issues](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aunder-review%22%2C%22dep%3Aimplementing%22%2C%22dep%3Adone%22)
+- **Design Proposals**: [RFCs for major features, tracked as `dep:*` labeled GitHub issues](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)
 - **Office Hours**: [Biweekly calls](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
 - **Community Meetings**: [Weekly (Wed 10:30 AM PT) development community meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view) ([Youtube](https://www.youtube.com/@ai-dynamo-community))
 - **Dynamo Day Recordings**: [Deep dives from production users](https://nvevents.nvidia.com/dynamoday)
