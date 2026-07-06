@@ -42,6 +42,18 @@ const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
 /// Shared with the Python helper so a single env var controls both.
 const GRACE_PERIOD_ENV: &str = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS";
 
+/// Default drain budget: max time spent polling `is_quiescent` before cleanup.
+/// Capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
+const DEFAULT_DRAIN_TIMEOUT_S: f64 = 30.0;
+const DRAIN_TIMEOUT_ENV: &str = "DYN_PREFILL_DRAIN_TIMEOUT_S";
+/// Interval between `engine.is_quiescent()` polls during drain.
+const DRAIN_POLL_INTERVAL_S: f64 = 0.5;
+/// Cadence at which the drain loop emits a progress log.
+const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
+/// Budget reserved for `cleanup()` so the drain loop can't consume the whole
+/// graceful-shutdown deadline and trip the hard-exit that skips cleanup.
+const CLEANUP_RESERVE_S: f64 = 5.0;
+
 /// Operator override for the health-check canary, mirrors the Python helper
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
 const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
@@ -135,7 +147,7 @@ pub struct WorkerConfig {
     /// Whether this worker should keep an in-process KV indexer.
     pub enable_local_indexer: bool,
     /// Kill switch for KV-aware-routing publishers. When `false`, skip
-    /// `engine.kv_event_sources()` / `metrics_sources()` entirely.
+    /// `engine.kv_event_sources()` and `SnapshotPublisher` setup.
     pub enable_kv_routing: bool,
     /// Per-endpoint Prometheus metric labels appended to every metric.
     /// Common labels: `("model", "<served-name>")`.
@@ -148,7 +160,9 @@ pub struct WorkerConfig {
     /// and `WorkerType::Prefill`, so the frontend's prefill router targets it
     /// via `worker_type`. `Decode` keeps `endpoint_types` but force-disables the
     /// local KV indexer because decode workers do not host the indexer
-    /// endpoint.
+    /// endpoint. `Encode` registers as `WorkerType::Encode` with topology needs
+    /// `[[Prefill, Decode], [Aggregated]]`; it also force-disables the local KV
+    /// indexer.
     pub disaggregation_mode: DisaggregationMode,
     /// Operator override. `Worker` resolves precedence: this field >
     /// `DYN_HEALTH_CHECK_PAYLOAD` env > `engine.health_check_payload()`.
@@ -164,14 +178,21 @@ pub struct WorkerConfig {
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
+    /// When `true`, this worker declares an upstream `Encode` dependency in
+    /// its topology `needs`. Meaningful only for `Prefill` and `Aggregated`
+    /// roles -- setting it on `Decode` or `Encode` is rejected at
+    /// `Worker::run` validation time with `BackendError::InvalidArgument`.
+    pub route_to_encoder: bool,
 }
 
 impl WorkerConfig {
     /// Effective `enable_local_indexer`, accounting for disaggregation
-    /// mode. Decode workers force this off because they don't host the
-    /// in-process KV indexer endpoint and must not advertise it.
+    /// mode. Decode and Encode workers force this off because they don't
+    /// host the in-process KV indexer endpoint and must not advertise it.
     pub(crate) fn effective_enable_local_indexer(&self) -> bool {
-        self.enable_local_indexer && !self.disaggregation_mode.is_decode()
+        self.enable_local_indexer
+            && !self.disaggregation_mode.is_decode()
+            && !self.disaggregation_mode.is_encode()
     }
 }
 
@@ -198,6 +219,7 @@ impl Default for WorkerConfig {
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
+            route_to_encoder: false,
         }
     }
 }
@@ -244,10 +266,11 @@ impl EngineKind {
         }
     }
 
-    async fn drain(&self) -> Result<(), DynamoError> {
+    /// See [`LLMEngine::is_quiescent`].
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         match self {
-            EngineKind::Llm(e) => e.drain().await,
-            EngineKind::Raw(e) => e.drain().await,
+            EngineKind::Llm(e) => e.is_quiescent().await,
+            EngineKind::Raw(e) => e.is_quiescent().await,
         }
     }
 
@@ -384,7 +407,8 @@ impl Worker {
     ///   1. `endpoint.unregister_endpoint_instance()` — router stops routing.
     ///   2. Sleep `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (default 5s) to
     ///      let in-flight router decisions complete.
-    ///   3. `engine.drain()` — backend-side drain (e.g. NIXL prefill).
+    ///   3. Poll `engine.is_quiescent()` until it returns true or the drain
+    ///      budget (`DYN_PREFILL_DRAIN_TIMEOUT_S`, default 30s) expires.
     ///   4. `engine.cleanup()` — release engine resources while NATS / etcd
     ///      are still reachable.
     ///   5. Return — caller (`run.rs`) drives `runtime.shutdown()` for
@@ -412,6 +436,7 @@ impl Worker {
         // doesn't pay the cost of installing signal handlers and spawning
         // a listener task just to get an InvalidArgument error.
         validate_model_input(self.config.model_input, &self.engine)?;
+        validate_route_to_encoder(&self.config)?;
 
         // Install the OS signal handlers synchronously, before spawning
         // anything, so a SIGTERM delivered between this point and the
@@ -961,9 +986,10 @@ impl Worker {
         Ok(())
     }
 
-    /// Engine-facing shutdown sequence: grace period sleep → `engine.drain()`
-    /// → `cleanup_once()`. Each engine step swallows non-fatal failures so a
-    /// misbehaving engine can't block the worker from exiting.
+    /// Engine-facing shutdown sequence: grace period sleep → drain loop on
+    /// `engine.is_quiescent()` → `cleanup_once()`. Each engine step swallows
+    /// non-fatal failures so a misbehaving engine can't block the worker
+    /// from exiting.
     async fn run_engine_shutdown_steps(&mut self) {
         self.run_engine_shutdown_steps_with_grace(grace_period_secs())
             .await
@@ -980,15 +1006,111 @@ impl Worker {
         }
 
         let drain_start = std::time::Instant::now();
-        if let Err(e) = self.engine.drain().await {
-            tracing::warn!(error = %e, "engine drain failed");
-        }
+        self.drain_until_idle_or_deadline().await;
         let drain_elapsed = drain_start.elapsed().as_secs_f64();
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.observe_drain_time(drain_elapsed);
         }
 
         self.cleanup_once().await;
+    }
+
+    /// Hold a prefill worker open until its KV transfers finish, so cleanup
+    /// doesn't free GPU memory a decode peer is still pulling.
+    ///
+    /// Prefill-only: aggregated/decode workers return immediately. Otherwise
+    /// poll [`is_quiescent`](LLMEngine::is_quiescent) every
+    /// `DRAIN_POLL_INTERVAL_S`, exiting on `Some(true)` or when the budget
+    /// expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S` capped at
+    /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
+    async fn drain_until_idle_or_deadline(&self) {
+        if !self.config.disaggregation_mode.is_prefill() {
+            return;
+        }
+        let configured = drain_timeout_secs();
+        let cap = (graceful_shutdown_timeout().as_secs_f64() - CLEANUP_RESERVE_S).max(0.0);
+        let budget = configured.min(cap);
+        let deadline = std::time::Instant::now() + Duration::from_secs_f64(budget);
+        let start = std::time::Instant::now();
+        let mut last_heartbeat = start;
+        let mut announced = false;
+        loop {
+            match self.engine.is_quiescent().await {
+                // Quiescent: in-flight transfers done, safe to exit drain.
+                Ok(Some(true)) => {
+                    if announced {
+                        tracing::info!(
+                            "drain: exited (quiescent, elapsed={:.1}s)",
+                            start.elapsed().as_secs_f64()
+                        );
+                    }
+                    return;
+                }
+                // Busy (Some(false)) or no introspection (None): keep polling.
+                Ok(Some(false)) | Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(error = %e, "is_quiescent raised; treating as not quiescent")
+                }
+            }
+            if !announced {
+                // First non-quiescent poll: announce once that we're waiting.
+                tracing::info!(
+                    "drain: waiting for prefill to quiesce; polling is_quiescent (timeout={:.1}s)",
+                    budget
+                );
+                announced = true;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "drain: timed out at {:.1}s; proceeding with cleanup",
+                    start.elapsed().as_secs_f64()
+                );
+                return;
+            }
+            if last_heartbeat.elapsed().as_secs_f64() >= DRAIN_HEARTBEAT_INTERVAL_S {
+                tracing::info!(
+                    "drain: heartbeat (elapsed={:.1}s)",
+                    start.elapsed().as_secs_f64()
+                );
+                last_heartbeat = std::time::Instant::now();
+            }
+            tokio::time::sleep(Duration::from_secs_f64(DRAIN_POLL_INTERVAL_S)).await;
+        }
+    }
+}
+
+/// Drain-budget resolver: `DYN_PREFILL_DRAIN_TIMEOUT_S` with the same
+/// validation policy as `grace_period_secs` (invalid → default, negative
+/// → 0).
+fn drain_timeout_secs() -> f64 {
+    match std::env::var(DRAIN_TIMEOUT_ENV) {
+        Err(_) => DEFAULT_DRAIN_TIMEOUT_S,
+        Ok(s) if s.is_empty() => DEFAULT_DRAIN_TIMEOUT_S,
+        Ok(s) => match s.parse::<f64>() {
+            Ok(v) if !v.is_finite() => {
+                tracing::warn!(
+                    "Non-finite {}={:?}; using default {:.1}s",
+                    DRAIN_TIMEOUT_ENV,
+                    s,
+                    DEFAULT_DRAIN_TIMEOUT_S
+                );
+                DEFAULT_DRAIN_TIMEOUT_S
+            }
+            Ok(v) if v < 0.0 => {
+                tracing::warn!("Negative {}={:?}; clamping to 0", DRAIN_TIMEOUT_ENV, s);
+                0.0
+            }
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!(
+                    "Invalid {}={:?}; using default {:.1}s",
+                    DRAIN_TIMEOUT_ENV,
+                    s,
+                    DEFAULT_DRAIN_TIMEOUT_S
+                );
+                DEFAULT_DRAIN_TIMEOUT_S
+            }
+        },
     }
 }
 
@@ -1025,7 +1147,7 @@ fn graceful_shutdown_timeout_secs(value: Option<&str>, default: u64) -> u64 {
 /// timeout and the grace-period sleep that precedes them.
 ///
 /// The grace sleep is a fixed wait (not a hang risk), so reserving its
-/// duration on top of `timeout` ensures `engine.drain()` and
+/// duration on top of `timeout` ensures the drain loop and
 /// `engine.cleanup()` always get the full timeout budget regardless of
 /// how the operator configures the grace period. Without this reserve,
 /// a grace period equal to the timeout (the debug default — both 5s)
@@ -1310,23 +1432,87 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 /// no OpenAI surface. They register the legacy `ModelType::Prefill` *marker*
 /// bit (not a surface) so an OLD frontend, which detects prefill via that bit,
 /// still routes disaggregated traffic during the cross-version rollout. A new
-/// frontend ignores it and dispatches off `worker_type`. Everything else falls
-/// back to the parsed `endpoint_types`.
+/// frontend ignores it and dispatches off `worker_type`.
+///
+/// Encode workers also expose no public OpenAI surface — they are reached
+/// through encoder routing, not the frontend's public serving surface. They
+/// register surface-less
+/// (`ModelType::empty()`) so the discovery watcher registers them for
+/// serving-readiness only and hides them from `/v1/models`; the role is
+/// carried by `WorkerType::Encode`.
+///
+/// Everything else falls back to the parsed `endpoint_types`.
 fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
     if config.disaggregation_mode.is_prefill() {
         return Ok(ModelType::Prefill);
     }
+    if config.disaggregation_mode.is_encode() {
+        return Ok(ModelType::empty());
+    }
     parse_endpoint_types(&config.endpoint_types)
 }
 
-/// Derive the model-serving-readiness fields (`worker_type`, `needs`) for
-/// the worker's disaggregation role. Prefill workers need a Decode peer,
-/// Decode workers need a Prefill peer, and Aggregated workers stand alone.
+/// Derive the topology-readiness fields (`worker_type`, `needs`) for the
+/// worker's disaggregation role. Prefill workers need a Decode peer, Decode
+/// workers need a Prefill peer, Aggregated workers stand alone, and Encode
+/// workers need either a Prefill+Decode pair or a single Aggregated peer.
+///
+/// `route_to_encoder` extends the `needs` of `Prefill`/`Aggregated` to
+/// also require an `Encode` peer. Invalid combinations (`Decode` or
+/// `Encode` with `route_to_encoder=true`) are rejected upstream in
+/// `validate_route_to_encoder`; this function trusts that gate and only
+/// applies the flag when it is meaningful.
 fn resolve_worker_type_and_needs(config: &WorkerConfig) -> (WorkerType, Vec<Vec<WorkerType>>) {
     match config.disaggregation_mode {
-        DisaggregationMode::Prefill => (WorkerType::Prefill, vec![vec![WorkerType::Decode]]),
+        DisaggregationMode::Prefill => {
+            let inner = if config.route_to_encoder {
+                vec![WorkerType::Decode, WorkerType::Encode]
+            } else {
+                vec![WorkerType::Decode]
+            };
+            (WorkerType::Prefill, vec![inner])
+        }
         DisaggregationMode::Decode => (WorkerType::Decode, vec![vec![WorkerType::Prefill]]),
-        DisaggregationMode::Aggregated => (WorkerType::Aggregated, Vec::new()),
+        DisaggregationMode::Aggregated => {
+            let needs = if config.route_to_encoder {
+                vec![vec![WorkerType::Encode]]
+            } else {
+                Vec::new()
+            };
+            (WorkerType::Aggregated, needs)
+        }
+        DisaggregationMode::Encode => (
+            WorkerType::Encode,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        ),
+    }
+}
+
+/// Validate that `route_to_encoder` is meaningful for the worker's
+/// disaggregation role. Setting the flag on `Decode` or `Encode` is a
+/// configuration bug: Decode reads KV cache from a Prefill peer and never
+/// sees the encoder output (the dependency is transitive through Prefill),
+/// while Encode is the producer of the encoder result and has nothing
+/// upstream to route to.
+fn validate_route_to_encoder(config: &WorkerConfig) -> Result<(), DynamoError> {
+    if !config.route_to_encoder {
+        return Ok(());
+    }
+    match config.disaggregation_mode {
+        DisaggregationMode::Aggregated | DisaggregationMode::Prefill => Ok(()),
+        DisaggregationMode::Decode | DisaggregationMode::Encode => Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            format!(
+                "--route-to-encoder is meaningful only for --disaggregation-mode \
+                 agg|prefill; got '{}'. Decode workers consume KV cache from a \
+                 Prefill peer (encoder dependency propagates transitively through \
+                 Prefill); Encode workers are the producer of the encoder result.",
+                config.disaggregation_mode
+            ),
+        )),
     }
 }
 
@@ -1827,6 +2013,196 @@ mod tests {
         assert!(!mt.supports_completions());
     }
 
+    #[test]
+    fn resolve_model_type_encode_is_surface_less() {
+        // Encode workers expose no public OpenAI surface: they are reached
+        // through encoder routing, not the frontend. --disaggregation-mode encode
+        // forces ModelType::empty() (even when endpoint_types is left at the
+        // "chat,completions" default) so the discovery watcher registers them
+        // for serving-readiness only and hides them from /v1/models. The role
+        // is carried by WorkerType::Encode + topology needs at the discovery
+        // layer.
+        let config = WorkerConfig {
+            endpoint_types: "chat,completions".to_string(),
+            disaggregation_mode: DisaggregationMode::Encode,
+            ..WorkerConfig::default()
+        };
+        let mt = resolve_model_type(&config).unwrap();
+        assert_eq!(mt, ModelType::empty());
+        assert!(mt.is_empty());
+        assert!(!mt.supports_chat());
+        assert!(!mt.supports_completions());
+    }
+
+    // -------------------------------------------------------------------
+    // resolve_worker_type_and_needs: one test per row of the topology table
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn topology_aggregated_no_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Aggregated,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Aggregated);
+        assert!(needs.is_empty());
+    }
+
+    #[test]
+    fn topology_aggregated_with_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Aggregated,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Aggregated);
+        assert_eq!(needs, vec![vec![WorkerType::Encode]]);
+    }
+
+    #[test]
+    fn topology_prefill_no_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Prefill,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Prefill);
+        assert_eq!(needs, vec![vec![WorkerType::Decode]]);
+    }
+
+    #[test]
+    fn topology_prefill_with_route_to_encoder() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Prefill,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Prefill);
+        assert_eq!(needs, vec![vec![WorkerType::Decode, WorkerType::Encode]]);
+    }
+
+    #[test]
+    fn topology_decode_ignores_route_to_encoder_flag_in_needs() {
+        // route_to_encoder=true on Decode is rejected by
+        // validate_route_to_encoder; resolve_worker_type_and_needs only
+        // sees the flag false case in production. But sanity-check that
+        // even if it leaks through (e.g. internal callers bypassing the
+        // validator), Decode's needs don't grow an encoder leg.
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Decode,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Decode);
+        assert_eq!(needs, vec![vec![WorkerType::Prefill]]);
+    }
+
+    #[test]
+    fn topology_encode_has_two_alternative_needs() {
+        // Encode: needs `[[Prefill, Decode], [Aggregated]]` (DNF).
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Encode,
+            route_to_encoder: false,
+            ..WorkerConfig::default()
+        };
+        let (wt, needs) = resolve_worker_type_and_needs(&cfg);
+        assert_eq!(wt, WorkerType::Encode);
+        assert_eq!(
+            needs,
+            vec![
+                vec![WorkerType::Prefill, WorkerType::Decode],
+                vec![WorkerType::Aggregated],
+            ],
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // validate_route_to_encoder: one test per row of the rejection table
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn validate_route_to_encoder_accepts_aggregated_and_prefill_when_true() {
+        for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
+            let cfg = WorkerConfig {
+                disaggregation_mode: mode,
+                route_to_encoder: true,
+                ..WorkerConfig::default()
+            };
+            validate_route_to_encoder(&cfg).unwrap_or_else(|e| {
+                panic!("route_to_encoder=true should be accepted for {mode}; got {e}")
+            });
+        }
+    }
+
+    #[test]
+    fn validate_route_to_encoder_rejects_decode_when_true() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Decode,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let e = validate_route_to_encoder(&cfg).unwrap_err();
+        assert_eq!(
+            e.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(e.to_string().contains("decode"), "msg = {e}");
+    }
+
+    #[test]
+    fn validate_route_to_encoder_rejects_encode_when_true() {
+        let cfg = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Encode,
+            route_to_encoder: true,
+            ..WorkerConfig::default()
+        };
+        let e = validate_route_to_encoder(&cfg).unwrap_err();
+        assert_eq!(
+            e.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(e.to_string().contains("encode"), "msg = {e}");
+    }
+
+    #[test]
+    fn validate_route_to_encoder_accepts_any_mode_when_false() {
+        for mode in [
+            DisaggregationMode::Aggregated,
+            DisaggregationMode::Prefill,
+            DisaggregationMode::Decode,
+            DisaggregationMode::Encode,
+        ] {
+            let cfg = WorkerConfig {
+                disaggregation_mode: mode,
+                route_to_encoder: false,
+                ..WorkerConfig::default()
+            };
+            validate_route_to_encoder(&cfg).unwrap_or_else(|e| {
+                panic!("route_to_encoder=false should be accepted for {mode}; got {e}")
+            });
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // effective_enable_local_indexer: Encode must force off
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn effective_enable_local_indexer_encode_force_disabled() {
+        let cfg = WorkerConfig {
+            enable_local_indexer: true,
+            disaggregation_mode: DisaggregationMode::Encode,
+            ..WorkerConfig::default()
+        };
+        assert!(!cfg.effective_enable_local_indexer());
+    }
+
     #[tokio::test]
     async fn build_local_model_decode_disables_local_indexer() {
         let config = WorkerConfig {
@@ -1984,6 +2360,18 @@ mod tests {
         Worker::new(engine, WorkerConfig::default())
     }
 
+    /// Prefill worker — the drain loop only runs for prefill (the framework
+    /// skips aggregated/decode), so drain-ordering tests must use this.
+    fn worker_with_prefill(engine: Arc<dyn LLMEngine>) -> Worker {
+        Worker::new(
+            engine,
+            WorkerConfig {
+                disaggregation_mode: DisaggregationMode::Prefill,
+                ..WorkerConfig::default()
+            },
+        )
+    }
+
     #[tokio::test]
     async fn start_engine_init_to_running_on_success() {
         let (engine, _) = StateMockEngine::new(false);
@@ -2069,19 +2457,23 @@ mod tests {
 
     use std::sync::Mutex as StdMutex;
 
-    /// Engine that records the order of `drain` and `cleanup` calls into a
-    /// shared log so tests can assert on sequencing.
+    /// Serializes env-mutating drain tests in this module so cargo's parallel
+    /// test threads don't race on `DYN_PREFILL_DRAIN_TIMEOUT_S`.
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    /// Engine that records the order of `is_quiescent` and `cleanup` calls
+    /// into a shared log so tests can assert on sequencing.
     struct OrderingMockEngine {
         log: Arc<StdMutex<Vec<&'static str>>>,
-        drain_should_fail: bool,
+        is_quiescent_should_fail: bool,
     }
 
     impl OrderingMockEngine {
-        fn new(drain_should_fail: bool) -> (Arc<Self>, Arc<StdMutex<Vec<&'static str>>>) {
+        fn new(is_quiescent_should_fail: bool) -> (Arc<Self>, Arc<StdMutex<Vec<&'static str>>>) {
             let log = Arc::new(StdMutex::new(Vec::new()));
             let eng = Arc::new(Self {
                 log: log.clone(),
-                drain_should_fail,
+                is_quiescent_should_fail,
             });
             (eng, log)
         }
@@ -2108,15 +2500,15 @@ mod tests {
             unreachable!("not used in orchestrator tests")
         }
 
-        async fn drain(&self) -> Result<(), DynamoError> {
-            self.log.lock().unwrap().push("drain");
-            if self.drain_should_fail {
+        async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+            self.log.lock().unwrap().push("is_quiescent");
+            if self.is_quiescent_should_fail {
                 Err(err(
                     ErrorType::Backend(BackendError::Unknown),
-                    "synthetic drain failure",
+                    "synthetic is_quiescent failure",
                 ))
             } else {
-                Ok(())
+                Ok(Some(true))
             }
         }
 
@@ -2131,7 +2523,7 @@ mod tests {
         // Use the explicit-grace helper so we don't have to mutate the
         // process-global env var (which would race other parallel tests).
         let (engine, log) = OrderingMockEngine::new(false);
-        let mut worker = worker_with(engine);
+        let mut worker = worker_with_prefill(engine);
         worker.start_engine(0).await.unwrap();
 
         worker.run_engine_shutdown_steps_with_grace(0.0).await;
@@ -2139,23 +2531,64 @@ mod tests {
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
             recorded,
-            vec!["start", "drain", "cleanup"],
-            "drain must run before cleanup"
+            vec!["start", "is_quiescent", "cleanup"],
+            "is_quiescent (drain) must run before cleanup"
         );
     }
 
+    // ENV_LOCK must span the `.await` below: it serializes the env set/restore
+    // window against other env-mutating drain tests, and the value must stay
+    // pinned while the awaited drain loop reads it. No code reachable from the
+    // await re-acquires ENV_LOCK, so there's no deadlock risk.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn shutdown_steps_drain_failure_does_not_block_cleanup() {
-        let (engine, log) = OrderingMockEngine::new(true); // drain fails
-        let mut worker = worker_with(engine);
+        // is_quiescent errors are treated as "not idle"; the drain loop keeps
+        // polling until the budget expires, then cleanup still runs.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var(DRAIN_TIMEOUT_ENV).ok();
+        // SAFETY: tests in this mod serialize env access via ENV_LOCK.
+        unsafe { std::env::set_var(DRAIN_TIMEOUT_ENV, "0") };
+
+        let (engine, log) = OrderingMockEngine::new(true); // is_quiescent fails
+        let mut worker = worker_with_prefill(engine);
         worker.start_engine(0).await.unwrap();
 
         worker.run_engine_shutdown_steps_with_grace(0.0).await;
 
-        // Drain ran (and failed), but cleanup still ran exactly once.
+        // is_quiescent ran at least once (and errored), then cleanup ran.
         let recorded = log.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["start", "drain", "cleanup"]);
+        assert!(recorded.starts_with(&["start", "is_quiescent"]));
+        assert_eq!(recorded.last().copied(), Some("cleanup"));
         assert_eq!(worker.state, LifecycleState::Stopped);
+
+        // SAFETY: see above.
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var(DRAIN_TIMEOUT_ENV, v),
+                None => std::env::remove_var(DRAIN_TIMEOUT_ENV),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_steps_skip_drain_for_non_prefill() {
+        // Drain is prefill-only: an aggregated (or decode) worker must go
+        // straight to cleanup without ever polling is_quiescent, regardless of
+        // what the engine would report. Guards the mode-gate invariant that
+        // makes the `Ok(None)` default safe (only prefill workers drain).
+        let (engine, log) = OrderingMockEngine::new(false);
+        let mut worker = worker_with(engine); // WorkerConfig::default() => Aggregated
+        worker.start_engine(0).await.unwrap();
+
+        worker.run_engine_shutdown_steps_with_grace(0.0).await;
+
+        let recorded = log.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec!["start", "cleanup"],
+            "non-prefill workers must not poll is_quiescent (no drain)"
+        );
     }
 
     // The "drain skipped when engine never started" scenario isn't
@@ -2353,7 +2786,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn shutdown_deadline_reserves_grace_so_drain_cleanup_complete() {
         let (engine, log) = OrderingMockEngine::new(false);
-        let mut worker = worker_with(engine);
+        let mut worker = worker_with_prefill(engine);
         worker.start_engine(0).await.unwrap();
 
         let timeout = Duration::from_secs(5);
@@ -2369,7 +2802,7 @@ mod tests {
         );
 
         let recorded = log.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["start", "drain", "cleanup"]);
+        assert_eq!(recorded, vec!["start", "is_quiescent", "cleanup"]);
     }
 
     // -------------------------------------------------------------------

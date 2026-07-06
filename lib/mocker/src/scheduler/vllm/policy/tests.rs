@@ -13,9 +13,10 @@ use crate::common::protocols::{
 };
 use crate::common::sequence::ActiveSequence;
 use crate::kv_manager::KvManager;
+use crate::kv_manager::kvbm_backend::G1Acquire;
 use crate::scheduler::vllm::{RequestStatus, VllmCore};
 
-use super::{AdmissionDecision, decide_waiting_admission};
+use super::{AdmissionDecision, decide_waiting_admission, should_reject_for_model_len};
 
 mod vllm {
     use super::*;
@@ -47,7 +48,7 @@ mod vllm {
         let mut manager = kv_manager(4);
         let mut holder = ActiveSequence::new((100..112).collect(), 1, Some(4), false, false);
         let signal = holder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 3);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(3)));
         let sequence = ActiveSequence::new((0..8).collect(), 32, Some(4), false, false);
 
         let decision = decide_waiting_admission(
@@ -82,11 +83,157 @@ mod vllm {
     }
 
     #[test]
+    fn rejects_prompt_at_max_model_len() {
+        let sequence = ActiveSequence::new((0..8).collect(), 1, Some(4), false, false);
+
+        assert!(should_reject_for_model_len(
+            SchedulingPolicy::Vllm,
+            &sequence,
+            Some(8)
+        ));
+    }
+
+    #[test]
+    fn rejects_prompt_above_max_model_len() {
+        let sequence = ActiveSequence::new((0..9).collect(), 1, Some(4), false, false);
+
+        assert!(should_reject_for_model_len(
+            SchedulingPolicy::Vllm,
+            &sequence,
+            Some(8)
+        ));
+    }
+
+    #[test]
+    fn trtllm_does_not_apply_vllm_max_model_len() {
+        let sequence = ActiveSequence::new((0..9).collect(), 1, Some(4), false, false);
+
+        assert!(!should_reject_for_model_len(
+            SchedulingPolicy::TrtllmGuaranteedNoEvict,
+            &sequence,
+            Some(8)
+        ));
+    }
+
+    #[test]
+    fn core_rejects_prompt_above_max_model_len() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let uuid = Uuid::from_u128(1);
+        core.receive(DirectRequest {
+            tokens: (0..9).collect(),
+            max_output_tokens: 1,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert!(
+            pass.output_signals
+                .iter()
+                .any(|signal| signal.uuid == uuid && signal.completed && signal.rejected)
+        );
+        assert!(!core.state().requests.contains_key(&uuid));
+    }
+
+    #[test]
+    fn core_completes_at_max_model_len_without_rejecting() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let uuid = Uuid::from_u128(2);
+        core.receive(DirectRequest {
+            tokens: (0..7).collect(),
+            max_output_tokens: 4,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert_eq!(pass.output_signals.len(), 1);
+        let terminal = &pass.output_signals[0];
+        assert_eq!(terminal.uuid, uuid);
+        assert!(terminal.token_id.is_some());
+        assert!(terminal.completed);
+        assert!(!terminal.rejected);
+        assert!(!core.state().requests.contains_key(&uuid));
+    }
+
+    #[test]
+    fn speculative_decode_does_not_burst_past_max_model_len() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Vllm)
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("1,1".to_string()))
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let uuid = Uuid::from_u128(3);
+        core.receive(DirectRequest {
+            tokens: (0..5).collect(),
+            max_output_tokens: 8,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let pass = core.execute_pass(&mut collector, 0.0);
+
+        assert_eq!(pass.output_signals.len(), 3);
+        assert!(
+            pass.output_signals
+                .iter()
+                .take(2)
+                .all(|signal| !signal.completed)
+        );
+        let terminal = pass.output_signals.last().unwrap();
+        assert!(terminal.completed);
+        assert!(!terminal.rejected);
+        assert!(!core.state().requests.contains_key(&uuid));
+    }
+
+    #[test]
     fn discounts_active_cached_prefix() {
         let mut manager = kv_manager(3);
         let mut holder = ActiveSequence::new((0..8).collect(), 1, Some(4), true, false);
         let signal = holder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 2);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(2)));
         let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, false);
 
         let decision = decide_waiting_admission(
@@ -107,13 +254,13 @@ mod vllm {
         let mut manager = kv_manager(3);
         let mut seeder = ActiveSequence::new((0..8).collect(), 1, Some(4), true, false);
         let signal = seeder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 2);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(2)));
         for signal in seeder.free_signal() {
             manager.process(&signal);
         }
         let mut holder = ActiveSequence::new((100..104).collect(), 1, Some(4), true, false);
         let signal = holder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 1);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(1)));
         let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, false);
 
         let decision = decide_waiting_admission(
@@ -155,6 +302,7 @@ mod trtllm {
         core.receive(DirectRequest {
             tokens: tokens.collect(),
             max_output_tokens: max_output,
+            output_token_ids: None,
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,

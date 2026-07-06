@@ -23,10 +23,10 @@ the raw path alongside the LLM `chat`/`completions`/`embedding`/etc.
 ## Engine Lifecycle
 
 ```
-construct -> start(worker_id) -> setup_metrics -> generate/abort -> drain -> cleanup
-    |               |                  |                |             |        |
-parse args,    start engine,    wire Prometheus    serve requests pre-cleanup shutdown,
-return engine  return metadata  (optional)         (concurrent)   drain       release
+construct -> start(worker_id) -> setup_metrics -> generate/abort -> is_quiescent -> cleanup
+    |               |                  |                |             |         |
+parse args,    start engine,    wire Prometheus    serve requests drain-poll  shutdown,
+return engine  return metadata  (optional)         (concurrent)   predicate   release
 ```
 
 The trait has twelve methods. `from_args` is NOT on the trait — each
@@ -72,13 +72,17 @@ opt-out and lets `run.rs` stay non-generic.
   handle), put the release logic inside the `generate` stream body
   using RAII; use `abort` only for out-of-band notifications (e.g.
   telling a remote scheduler to cancel compute early).
-- `drain(&self) -> Result<(), DynamoError>` — optional, default no-op.
-  Called once during graceful shutdown after the discovery unregister
-  + grace-period sleep, but BEFORE `cleanup`. Use it for backend-side
-  draining that must complete while NATS / etcd are still alive — e.g.
-  prefill workers polling-until-idle so in-flight NIXL KV transfers
-  finish before GPU memory is released (issue #7319). Failures are
-  logged and swallowed; shutdown proceeds regardless.
+- `is_quiescent(&self) -> Result<Option<bool>, DynamoError>` — optional,
+  default `Ok(None)`. Whether in-flight KV transfers are done so GPU memory
+  can be released. Polled **only on prefill workers**, every
+  `DRAIN_POLL_INTERVAL_S` between the grace period and `cleanup`:
+  `Ok(Some(true))` exits the loop; `Ok(Some(false))`/`Ok(None)`/`Err`
+  keep polling until the budget expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S`
+  (default 30s) capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
+  The default `Ok(None)` never frees KV early — vLLM and TRT-LLM keep it (no
+  reliable idle signal); SGLang overrides it by counting in-flight prefill
+  streams. The mode-gate, poll loop, and SIGTERM/SIGINT ownership live in the
+  `Worker`.
 - `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
   Runs after `start()` returns Ok on shutdown (even if registration /
   serve fails), **and** after `start()` raises — so implementations
@@ -257,15 +261,18 @@ What the **`Worker`** does with the mode at registration time:
 - `Aggregated` → register with the parsed `endpoint_types`.
 
 What an **`LLMEngine`** does with the mode (engine-side dispatch in
-`generate` and `drain`): see `examples/mocker` for a worked reference.
-The mocker stamps a synthetic `disaggregated_params` payload on the
-prefill terminal and rejects decode requests that arrive without
-`PrefillResult`. Real engines run an analogous protocol with their
-own KV transfer transport.
+`generate`): see `examples/mocker` for a worked reference. The mocker
+stamps a synthetic `disaggregated_params` payload on the prefill terminal
+and rejects decode requests that arrive without `PrefillResult`. Real
+engines run an analogous protocol with their own KV transfer transport.
 
-`drain` is the prefill shutdown hook: poll-until-idle so in-flight
-NIXL/KV transfers finish before GPU memory is released. Aggregated and
-decode engines leave the default no-op.
+`is_quiescent` is the prefill shutdown predicate: the `Worker` drains
+**prefill workers by default** (waiting the full budget) and polls
+`is_quiescent` only to exit early — return `Some(true)` once in-flight
+NIXL/KV transfers are done, `Some(false)` while they're pulling. The
+`Worker` owns the mode-gate, the poll loop, and the timeout. Engines that
+can't introspect leave the default `Ok(None)` (wait the budget);
+aggregated/decode engines are never polled (drain is prefill-only).
 
 `PrefillResult` and `BootstrapInfo` are re-exported from
 `dynamo-backend-common` so engines don't need a separate `dynamo-llm`
@@ -503,6 +510,13 @@ async fn my_engine_satisfies_contract() {
 constructs one engine for the main lifecycle test and a second
 pristine engine for the "cleanup before start" check.
 
+Encode-role engines call `run_encode_conformance`. It sends a multimodal
+request and checks the narrower handoff response contract: one terminal `Stop`
+chunk, no generated tokens, and an object-shaped `encoder_result`. Terminal
+usage remains optional; when provided, it must report zero completion tokens
+consistently. Encode engines must also satisfy the common KV source, metrics,
+concurrency, cancellation, and cleanup lifecycle guarantees.
+
 The kit asserts:
 
 - `start()` returns a non-empty `EngineConfig.model`.
@@ -543,7 +557,7 @@ Also available: `testing::mock_context()` and
 | `adapter.rs` | `EngineAdapter` — bridges `LLMEngine` to `AsyncEngine` (token telemetry, disagg first-token, debug validator). `RawEngineAdapter` — bridges `RawEngine` to `AsyncEngine` (JSON passthrough, cancellation monitor; no token telemetry/disagg). `JsonProbeAdapter` — JSON health-check wrapper for the LLM path (the raw path is already JSON-shaped). |
 | `run.rs` | `pub fn run(engine, config)` (LLM) and `pub fn run_raw(engine, config)` (raw media) — entry points used by per-backend `main.rs`. Non-generic. |
 | `args.rs` | `CommonArgs` — shared CLI flags (`--namespace`, `--component`, `--disaggregation-mode`, etc.) that every engine's `Args` flattens in. |
-| `disagg.rs` | `DisaggregationMode` enum (`Aggregated` / `Prefill` / `Decode`) with `clap::ValueEnum` derive. |
+| `disagg.rs` | `DisaggregationMode` enum (`Aggregated` / `Prefill` / `Decode` / `Encode`) with `clap::ValueEnum` derive. |
 | `error.rs` | Re-exports `DynamoError`, `ErrorType`, `BackendError` from `dynamo-runtime`. No custom error types. |
 | `validate.rs` | Debug-build stream validator. Compiled out in release. |
 | `testing.rs` | Conformance test kit. Gated behind the `testing` feature. |

@@ -250,6 +250,116 @@ impl BlockRegistry {
         handle
     }
 
+    /// Register a batch of sequence hashes in input order.
+    pub fn register_sequence_hashes(
+        &self,
+        seq_hashes: impl IntoIterator<Item = SequenceHash>,
+    ) -> Vec<BlockRegistrationHandle> {
+        let seq_hashes: Vec<_> = seq_hashes.into_iter().collect();
+        if seq_hashes.is_empty() {
+            return Vec::new();
+        }
+
+        let positions_are_monotonic = seq_hashes.is_sorted_by_key(|seq_hash| seq_hash.position());
+        let registered = if positions_are_monotonic {
+            self.register_monotonic_sequence_hashes(&seq_hashes)
+        } else {
+            self.register_grouped_sequence_hashes(&seq_hashes)
+        };
+
+        registered
+            .into_iter()
+            .map(|(handle, is_new)| {
+                if is_new {
+                    if let Some(event_manager) = &self.event_manager
+                        && let Err(e) = event_manager.on_block_registered(&handle)
+                    {
+                        tracing::warn!("Failed to register block with event manager: {}", e);
+                    }
+                    self.touch(handle.seq_hash());
+                }
+                handle
+            })
+            .collect()
+    }
+
+    /// Fast path for the normal sequence-registration shape: non-decreasing
+    /// block positions. Equal positions are adjacent, so each position needs
+    /// only one radix-prefix guard and results can be appended in input order.
+    fn register_monotonic_sequence_hashes(
+        &self,
+        seq_hashes: &[SequenceHash],
+    ) -> Vec<(BlockRegistrationHandle, bool)> {
+        let mut registered = Vec::with_capacity(seq_hashes.len());
+        self.register_ordered_sequence_hashes(
+            seq_hashes.iter().copied().map(|seq_hash| ((), seq_hash)),
+            |(), handle, is_new| registered.push((handle, is_new)),
+        );
+        registered
+    }
+
+    /// Fallback for callers that supply positions out of order. A flat index
+    /// vector replaces the previous `BTreeMap` of per-position vectors. It is
+    /// sorted by `(position, original_index)` so registration stays grouped by
+    /// radix prefix without changing which duplicate occurrence is considered
+    /// new. Results are restored to input order before observers run.
+    fn register_grouped_sequence_hashes(
+        &self,
+        seq_hashes: &[SequenceHash],
+    ) -> Vec<(BlockRegistrationHandle, bool)> {
+        let mut ordered: Vec<_> = seq_hashes.iter().copied().enumerate().collect();
+        ordered.sort_unstable_by_key(|(index, seq_hash)| (seq_hash.position(), *index));
+
+        let mut registered = Vec::with_capacity(seq_hashes.len());
+        self.register_ordered_sequence_hashes(ordered.iter().copied(), |index, handle, is_new| {
+            registered.push((index, handle, is_new))
+        });
+
+        registered.sort_unstable_by_key(|(index, _, _)| *index);
+        registered
+            .into_iter()
+            .map(|(_, handle, is_new)| (handle, is_new))
+            .collect()
+    }
+
+    /// Register position-ordered entries, holding exactly one outer radix
+    /// guard for each adjacent same-position group. `record` only stages the
+    /// result; user-visible callbacks and frequency touches run after this
+    /// method returns and releases every guard.
+    fn register_ordered_sequence_hashes<K>(
+        &self,
+        entries: impl IntoIterator<Item = (K, SequenceHash)>,
+        mut record: impl FnMut(K, BlockRegistrationHandle, bool),
+    ) {
+        let mut entries = entries.into_iter().peekable();
+        while let Some(first) = entries.next() {
+            let position = first.1.position();
+            let map = self.prt.prefix(&first.1);
+            let mut current = first;
+
+            loop {
+                let (key, seq_hash) = current;
+                debug_assert_eq!(seq_hash.position(), position);
+                let mut weak = map.entry(seq_hash).or_default();
+                let (inner, is_new) = match weak.upgrade() {
+                    Some(inner) => (inner, false),
+                    None => {
+                        let inner = self.create_registration(seq_hash);
+                        *weak = Arc::downgrade(&inner);
+                        (inner, true)
+                    }
+                };
+                record(key, BlockRegistrationHandle::from_inner(inner), is_new);
+
+                let Some(next) = entries.next_if(|(_, seq_hash)| seq_hash.position() == position)
+                else {
+                    break;
+                };
+                current = next;
+            }
+        }
+    }
+
     /// Internal method for transferring block registration without triggering frequency tracking.
     /// Used when copying blocks between pools where we don't want to count the transfer as a new access.
     #[allow(dead_code)]

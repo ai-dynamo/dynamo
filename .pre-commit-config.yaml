@@ -65,7 +65,8 @@ repos:
   - id: mixed-line-ending
   - id: requirements-txt-fixer
   - id: trailing-whitespace
-    exclude: lib/llm/tests/data/deepseek-v3.2/.*\.txt$
+    # spdx_licenses/ holds verbatim upstream license texts — never reformat them.
+    exclude: (lib/llm/tests/data/deepseek-v3.2/.*\.txt$|^container/compliance/spdx_licenses/.*)
 
 # Fast linting
 - repo: https://github.com/astral-sh/ruff-pre-commit

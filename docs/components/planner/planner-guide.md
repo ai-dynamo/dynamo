@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner Guide
+subtitle: Configures Planner optimization targets, scaling modes, and PlannerConfig fields for production deployments.
 ---
 
-<p align="left">
-  <a href="./planner-guide.zh-CN.md" hreflang="zh-CN"><img src="../../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
+[简体中文](./planner-guide.zh-CN.md)
 
 The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance models to decide when to scale up or down.
 

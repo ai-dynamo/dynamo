@@ -157,7 +157,7 @@ impl LifecycleGauges {
     }
 
     /// Record drain latency. `Worker` calls this exactly once during
-    /// graceful shutdown after `engine.drain()` returns.
+    /// graceful shutdown after the `engine.is_quiescent()` drain loop returns.
     pub fn observe_drain_time(&self, seconds: f64) {
         self.drain_time_seconds.set(seconds);
     }

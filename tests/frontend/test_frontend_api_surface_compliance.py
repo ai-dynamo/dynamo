@@ -47,8 +47,8 @@ from filelock import FileLock
 
 from tests.frontend.agent_smoke_inputs import (
     LIST_DIRECTORY_PROMPT,
+    claude_subagent_definition,
     claude_subagent_prompt,
-    write_claude_subagent_config,
     write_codex_config,
     write_opencode_config,
 )
@@ -527,7 +527,8 @@ def test_frontend_api_surface_compliance(
         # agg.sh doesn't forward frontend args, but the frontend reads this
         # env var directly. Enables /v1/messages for the claude smoke step.
         "DYN_ENABLE_ANTHROPIC_API": "1",
-        "DYN_ENABLE_FRONTEND_NVEXT": "1",
+        # nvext is enabled by default; no env needed. (Set
+        # DYN_DISABLE_FRONTEND_NVEXT=1 to turn it off.)
         "DYN_REQUEST_TRACE": "1",
         "DYN_REQUEST_TRACE_SINKS": "jsonl",
         "DYN_REQUEST_TRACE_OUTPUT_PATH": str(request_trace_path),
@@ -567,11 +568,13 @@ def test_frontend_api_surface_compliance(
     with EngineProcess.from_script(config, request, extra_env=merged_env):
         _run_bun_compliance(_bun_binary, _openresponses_suite, frontend_port)
         _wait_for_frontend_healthy(frontend_port)
+        codex_trace_start = _request_trace_record_count(request_trace_path)
         _run_codex_exec_smoke(
             _codex_cli, _node_bin, codex_home, agent_cwd, marker_filename
         )
-        _assert_agent_context_in_trace(request_trace_path, "codex")
+        _assert_agent_context_in_trace(request_trace_path, "codex", codex_trace_start)
         _wait_for_frontend_healthy(frontend_port)
+        claude_trace_start = _request_trace_record_count(request_trace_path)
         _run_claude_exec_smoke(
             _claude_cli,
             _node_bin,
@@ -580,25 +583,34 @@ def test_frontend_api_surface_compliance(
             marker_filename,
             frontend_port,
         )
-        _assert_agent_context_in_trace(request_trace_path, "claude_code")
+        _assert_agent_context_in_trace(
+            request_trace_path, "claude_code", claude_trace_start
+        )
         _wait_for_frontend_healthy(frontend_port)
+        opencode_trace_start = _request_trace_record_count(request_trace_path)
         _run_opencode_smoke(
             _opencode_cli,
             _node_bin,
             opencode_home,
             opencode_cwd,
             request_trace_path,
+            opencode_trace_start,
         )
-        _assert_agent_context_in_trace(request_trace_path, "opencode")
-        _assert_agent_parent_context_in_trace(request_trace_path, "opencode")
+        _assert_agent_context_in_trace(
+            request_trace_path, "opencode", opencode_trace_start
+        )
+        _assert_agent_parent_context_in_trace(
+            request_trace_path, "opencode", opencode_trace_start
+        )
+        claude_subagent_trace_start = _request_trace_record_count(request_trace_path)
         _try_run_claude_subagent_smoke(
             _claude_cli,
             _node_bin,
             claude_home,
             agent_cwd,
-            marker_filename,
             frontend_port,
             request_trace_path,
+            claude_subagent_trace_start,
         )
 
 
@@ -699,14 +711,22 @@ def _read_request_trace_records(path: Path) -> list[dict]:
     return records
 
 
+def _request_trace_record_count(path: Path) -> int:
+    return len(_read_request_trace_records(path))
+
+
+def _read_request_trace_records_since(path: Path, start_index: int) -> list[dict]:
+    return _read_request_trace_records(path)[start_index:]
+
+
 def _assert_agent_context_in_trace(
-    trace_path: Path, session_type_id: str, timeout_s: float = 30.0
+    trace_path: Path, source_label: str, start_index: int, timeout_s: float = 30.0
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:
-        last_records = _read_request_trace_records(trace_path)
-        if _trace_contains_agent_context(last_records, session_type_id):
+        last_records = _read_request_trace_records_since(trace_path, start_index)
+        if _trace_contains_agent_context(last_records):
             return
         time.sleep(0.2)
 
@@ -716,19 +736,19 @@ def _assert_agent_context_in_trace(
         if record.get("agent_context")
     ]
     pytest.fail(
-        f"request trace did not contain agent_context for {session_type_id!r} "
+        f"request trace did not contain agent_context after {source_label!r} "
         f"within {timeout_s}s; saw {seen}"
     )
 
 
 def _assert_agent_parent_context_in_trace(
-    trace_path: Path, session_type_id: str, timeout_s: float = 30.0
+    trace_path: Path, source_label: str, start_index: int, timeout_s: float = 30.0
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_records: list[dict] = []
     while time.monotonic() < deadline:
-        last_records = _read_request_trace_records(trace_path)
-        if _trace_contains_agent_parent_context(last_records, session_type_id):
+        last_records = _read_request_trace_records_since(trace_path, start_index)
+        if _trace_contains_agent_parent_context(last_records):
             return
         time.sleep(0.2)
 
@@ -738,49 +758,37 @@ def _assert_agent_parent_context_in_trace(
         if record.get("agent_context")
     ]
     pytest.fail(
-        f"request trace did not contain parent agent_context for {session_type_id!r} "
+        f"request trace did not contain parent agent_context after {source_label!r} "
         f"within {timeout_s}s; saw {seen}"
     )
 
 
-def _trace_contains_agent_context(records: list[dict], session_type_id: str) -> bool:
+def _trace_contains_agent_context(records: list[dict]) -> bool:
     for record in records:
         agent_context = record.get("agent_context")
         if not agent_context:
             continue
-        if agent_context.get("session_type_id") != session_type_id:
-            continue
 
         session_id = agent_context.get("session_id")
-        trajectory_id = agent_context.get("trajectory_id")
-        if not session_id or not trajectory_id:
-            continue
-        if session_type_id != "claude_code" and session_id != trajectory_id:
+        if not session_id:
             continue
         return True
     return False
 
 
-def _trace_contains_agent_parent_context(
-    records: list[dict], session_type_id: str
-) -> bool:
+def _trace_contains_agent_parent_context(records: list[dict]) -> bool:
     for record in records:
         agent_context = record.get("agent_context")
         if not agent_context:
             continue
-        if agent_context.get("session_type_id") != session_type_id:
-            continue
-        parent_trajectory_id = agent_context.get("parent_trajectory_id")
-        if not parent_trajectory_id:
+        parent_session_id = agent_context.get("parent_session_id")
+        if not parent_session_id:
             continue
 
         session_id = agent_context.get("session_id")
-        trajectory_id = agent_context.get("trajectory_id")
-        if not session_id or not trajectory_id:
+        if not session_id:
             continue
-        if session_id != trajectory_id:
-            continue
-        if parent_trajectory_id == trajectory_id:
+        if parent_session_id == session_id:
             continue
         return True
     return False
@@ -791,17 +799,12 @@ def _trace_contains_claude_subagent_context(records: list[dict]) -> bool:
         agent_context = record.get("agent_context")
         if not agent_context:
             continue
-        if agent_context.get("session_type_id") != "claude_code":
-            continue
 
         session_id = agent_context.get("session_id")
-        trajectory_id = agent_context.get("trajectory_id")
-        parent_trajectory_id = agent_context.get("parent_trajectory_id")
-        if not session_id or not trajectory_id:
+        parent_session_id = agent_context.get("parent_session_id")
+        if not session_id or not parent_session_id:
             continue
-        if trajectory_id == session_id:
-            continue
-        if parent_trajectory_id != session_id:
+        if session_id == parent_session_id:
             continue
         return True
     return False
@@ -954,6 +957,7 @@ def _run_claude_exec_smoke(
         "HOME": str(claude_home),
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": "sk-none",
+        "ANTHROPIC_API_KEY": "sk-none",
         # Cap output so reasoning models don't blow the 180s subprocess
         # timeout. Mirrors the codex cap in `write_codex_config`.
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "4096",
@@ -964,9 +968,12 @@ def _run_claude_exec_smoke(
 
     cmd = [
         str(claude_cli),
+        "--bare",
         "--model",
         COMPLIANCE_MODEL,
         "--dangerously-skip-permissions",
+        "--tools",
+        "Bash",
         "-p",
         LIST_DIRECTORY_PROMPT,
     ]
@@ -1010,9 +1017,9 @@ def _try_run_claude_subagent_smoke(
     node_bin: Path,
     claude_home: Path,
     cwd: Path,
-    marker_filename: str,
     frontend_port: int,
     request_trace_path: Path,
+    trace_start_index: int,
 ) -> None:
     """Best-effort Claude subagent probe.
 
@@ -1021,15 +1028,14 @@ def _try_run_claude_subagent_smoke(
     so keep this as CI telemetry until it is stable enough to gate on.
     """
     try:
-        write_claude_subagent_config(cwd, CLAUDE_SUBAGENT_NAME)
         _run_claude_subagent_smoke(
             claude_cli,
             node_bin,
             claude_home,
             cwd,
-            marker_filename,
             frontend_port,
             request_trace_path,
+            trace_start_index,
         )
     except Exception:
         logger.warning("Optional Claude subagent smoke failed", exc_info=True)
@@ -1040,9 +1046,9 @@ def _run_claude_subagent_smoke(
     node_bin: Path,
     claude_home: Path,
     cwd: Path,
-    marker_filename: str,
     frontend_port: int,
     request_trace_path: Path,
+    trace_start_index: int,
 ) -> None:
     base_url = f"http://localhost:{frontend_port}"
     logger.info("Running optional Claude subagent smoke test against %s", base_url)
@@ -1051,6 +1057,7 @@ def _run_claude_subagent_smoke(
         "HOME": str(claude_home),
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": "sk-none",
+        "ANTHROPIC_API_KEY": "sk-none",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "512",
     }
     env = _agent_subprocess_env(extra_env, path_prepend=[node_bin])
@@ -1060,27 +1067,53 @@ def _run_claude_subagent_smoke(
         "--model",
         COMPLIANCE_MODEL,
         "--dangerously-skip-permissions",
+        "--agents",
+        claude_subagent_definition(CLAUDE_SUBAGENT_NAME),
+        "--tools",
+        "Agent",
         "-p",
-        claude_subagent_prompt(CLAUDE_SUBAGENT_NAME, marker_filename),
+        claude_subagent_prompt(CLAUDE_SUBAGENT_NAME),
     ]
 
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    trace_seen = False
+    last_records: list[dict] = []
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=CLAUDE_SUBAGENT_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired as exc:
-        logger.warning(
-            "Optional Claude subagent smoke timed out after %.0fs; stdout=%r stderr=%r",
-            exc.timeout,
-            exc.stdout,
-            exc.stderr,
-        )
-        return
+        deadline = time.monotonic() + CLAUDE_SUBAGENT_TIMEOUT_S
+        while time.monotonic() < deadline:
+            last_records = _read_request_trace_records_since(
+                request_trace_path, trace_start_index
+            )
+            if _trace_contains_claude_subagent_context(last_records):
+                trace_seen = True
+                break
+            if process.poll() is not None:
+                break
+            time.sleep(0.2)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+        else:
+            stdout, stderr = process.communicate()
+
+    last_records = _read_request_trace_records_since(
+        request_trace_path, trace_start_index
+    )
+    trace_seen = trace_seen or _trace_contains_claude_subagent_context(last_records)
+    result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
     _attach_subprocess_log(
         name="claude_subagent_smoke_optional.log",
@@ -1094,6 +1127,10 @@ def _run_claude_subagent_smoke(
     if result.stderr:
         logger.info("claude subagent stderr:\n%s", result.stderr)
 
+    if trace_seen:
+        logger.info("Optional Claude subagent smoke traced child agent_context")
+        return
+
     if result.returncode != 0:
         logger.warning(
             "Optional Claude subagent smoke exited with %s; stdout=%r stderr=%r",
@@ -1102,23 +1139,6 @@ def _run_claude_subagent_smoke(
             result.stderr,
         )
         return
-
-    if marker_filename not in result.stdout:
-        logger.warning(
-            "Optional Claude subagent smoke did not report marker file %r; stdout=%r",
-            marker_filename,
-            result.stdout,
-        )
-        return
-
-    deadline = time.monotonic() + 30.0
-    last_records: list[dict] = []
-    while time.monotonic() < deadline:
-        last_records = _read_request_trace_records(request_trace_path)
-        if _trace_contains_claude_subagent_context(last_records):
-            logger.info("Optional Claude subagent smoke traced child agent_context")
-            return
-        time.sleep(0.2)
 
     seen = [
         record.get("agent_context")
@@ -1137,6 +1157,7 @@ def _run_opencode_smoke(
     opencode_home: Path,
     cwd: Path,
     request_trace_path: Path,
+    trace_start_index: int,
 ) -> None:
     """Run `opencode run` until Dynamo traces its live subagent request."""
     logger.info("Running opencode smoke test against cwd=%s", cwd)
@@ -1173,7 +1194,7 @@ def _run_opencode_smoke(
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if _trace_contains_agent_parent_context(
-                _read_request_trace_records(request_trace_path), "opencode"
+                _read_request_trace_records_since(request_trace_path, trace_start_index)
             ):
                 trace_seen = True
                 break
@@ -1192,7 +1213,7 @@ def _run_opencode_smoke(
             stdout, stderr = process.communicate()
 
     trace_seen = trace_seen or _trace_contains_agent_parent_context(
-        _read_request_trace_records(request_trace_path), "opencode"
+        _read_request_trace_records_since(request_trace_path, trace_start_index)
     )
     result = subprocess.CompletedProcess(
         cmd,
@@ -1224,5 +1245,5 @@ def _run_opencode_smoke(
 
     pytest.fail(
         "opencode run exited before Dynamo traced an opencode child agent_context "
-        "with parent_trajectory_id"
+        "with parent_session_id"
     )

@@ -88,6 +88,7 @@ pub(crate) fn lower_request(
             .map(structured_outputs_from_guided_decoding),
         logprob_token_ids: None,
         skip_reading_prefix_cache: None,
+        thinking_token_budget: request.stop_conditions.max_thinking_tokens.map(u64::from),
         extra_args: extra_args_as_object(request.extra_args)?,
     };
     apply_disaggregation_mode(
@@ -180,6 +181,15 @@ fn apply_disaggregation_mode(
                 .insert("kv_transfer_params".to_string(), kv_transfer_params);
         }
         DisaggregationMode::Aggregated => {} // do nothing
+        DisaggregationMode::Encode => {
+            // The Encode role is a multimodal encoder upstream of P/D/Agg.
+            // This native backend is text-only (multimodal execution payloads
+            // are rejected in `validate_request`), so an Encode worker is never
+            // a valid configuration here.
+            return Err(invalid_arg(
+                "encode disaggregation mode is not supported by the native vLLM backend",
+            ));
+        }
     }
 
     Ok(())
@@ -373,6 +383,7 @@ mod tests {
         let mut request = sample_request();
         request.stop_conditions.max_tokens = Some(7);
         request.stop_conditions.min_tokens = Some(2);
+        request.stop_conditions.max_thinking_tokens = Some(1024);
         request.stop_conditions.stop = Some(vec!["</done>".to_string()]);
         request.stop_conditions.stop_token_ids_hidden = Some(vec![99]);
         request.eos_token_ids = vec![2, 3];
@@ -424,6 +435,7 @@ mod tests {
         let sampling = generate.sampling_params;
         assert_eq!(sampling.max_tokens, 7);
         assert_eq!(sampling.min_tokens, 2);
+        assert_eq!(sampling.thinking_token_budget, Some(1024));
         assert_eq!(sampling.top_k, 0);
         assert_eq!(sampling.logprobs, Some(5));
         assert_eq!(sampling.prompt_logprobs, Some(2));
@@ -671,6 +683,7 @@ mod tests {
                 }],
             }),
             finish_reason: Some(VllmFinishReason::Stop(Some(VllmStopReason::TokenId(42)))),
+            cached_token_count: 0,
             kv_transfer_params: Some(json!({"connector": "kv"})),
         };
 
@@ -703,6 +716,7 @@ mod tests {
                 positions: vec![PositionLogprobs { entries: vec![] }],
             }),
             finish_reason: None,
+            cached_token_count: 0,
             kv_transfer_params: None,
         };
 
@@ -778,6 +792,7 @@ mod tests {
             token_ids: vec![1, 2],
             logprobs: None,
             finish_reason: Some(reason),
+            cached_token_count: 0,
             kv_transfer_params: None,
         }
     }

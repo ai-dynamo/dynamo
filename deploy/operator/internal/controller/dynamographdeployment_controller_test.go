@@ -2597,11 +2597,13 @@ func Test_reconcileGroveResources_UsesPreservedAlphaServiceIngress(t *testing.T)
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
 			BackendFramework: "vllm",
 			Labels:           map[string]string{"graph-label": "kept"},
+			Annotations:      map[string]string{"graph-annotation": "kept"},
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"frontend": {
 					ComponentType: commonconsts.ComponentTypeFrontend,
 					Replicas:      ptr.To(int32(1)),
 					Labels:        map[string]string{"legacy-label": "kept"},
+					Annotations:   map[string]string{"legacy-annotation": "kept"},
 					Ingress: &v1alpha1.IngressSpec{
 						Enabled:                    true,
 						Host:                       "legacy-frontend",
@@ -2653,6 +2655,8 @@ func Test_reconcileGroveResources_UsesPreservedAlphaServiceIngress(t *testing.T)
 	g.Expect(fakeKubeClient.Get(ctx, types.NamespacedName{Name: "test-dgd-frontend", Namespace: "default"}, service)).NotTo(gomega.HaveOccurred())
 	g.Expect(service.Labels["graph-label"]).To(gomega.Equal("kept"))
 	g.Expect(service.Labels["legacy-label"]).To(gomega.Equal("kept"))
+	g.Expect(service.Annotations["graph-annotation"]).To(gomega.Equal("kept"))
+	g.Expect(service.Annotations["legacy-annotation"]).To(gomega.Equal("kept"))
 }
 
 func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesLegacyWorkerSelectors(t *testing.T) {
@@ -2761,6 +2765,7 @@ func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesL
 		DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decode),
 		ComponentName:   "VllmDecodeWorker",
 		Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decode),
+		Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "VllmDecodeWorker", decode),
 		IsK8sDiscovery:  true,
 	})
 	g.Expect(err).NotTo(gomega.HaveOccurred())

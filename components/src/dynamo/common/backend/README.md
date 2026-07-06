@@ -1,9 +1,10 @@
 # Dynamo Python Backend
 
-**Supported today:** aggregated and disaggregated (prefill/decode)
-inference, metrics + Prometheus bridging, KV event publishing,
-KV-aware (DP-rank) routing, health-check canaries, OpenTelemetry
-tracing, and request-side guided decoding / structural tag.
+**Supported today:** aggregated and disaggregated (prefill/decode/encode)
+inference, the shared multimodal request and encoder-handoff contract,
+metrics + Prometheus bridging, KV event publishing, KV-aware (DP-rank)
+routing, health-check canaries, OpenTelemetry tracing, and request-side
+guided decoding / structural tag.
 
 > **Work in progress.** Multimodal, diffusion (image/video/DLLM),
 > LoRA (SGLang / TRT-LLM — vLLM is supported),
@@ -28,7 +29,7 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
     |   - start(worker_id) -> EngineConfig    (start engine, return metadata)
     |   - generate(request, context)         (streaming inference)
     |   - abort(context)                     (cancel request, optional)
-    |   - drain()                            (pre-cleanup drain, optional)
+    |   - is_quiescent() -> Optional[bool]   (prefill drain early-exit, optional)
     |   - cleanup()                          (shutdown)
     |
     +-- VllmLLMEngine          <-- vllm/llm_engine.py
@@ -42,7 +43,7 @@ Worker                  <-- runtime integration (worker.py)
     - sets up endpoints, signal handlers
     - calls engine.start(worker_id), registers model
     - serves generate endpoint with cancellation monitoring
-    - calls engine.drain() then engine.cleanup() on shutdown
+    - drains prefill workers (polls engine.is_quiescent()) then calls engine.cleanup() on shutdown
 ```
 
 ## Quick Start
@@ -142,6 +143,12 @@ def main():
 ```
 
 See `sample_engine.py` for a complete, runnable reference implementation.
+The sample engine includes synthetic multimodal handling for aggregated and
+Encode/Prefill/Decode deployments. CPU-only direct worker-handoff smokes live in
+`examples/backends/sample/launch/multimodal_agg.sh` and
+`examples/backends/sample/launch/multimodal_disagg.sh`. These smokes exercise
+distinct worker processes and TCP request transport; they intentionally bypass
+the frontend and do not claim frontend routing coverage.
 
 ## Request / Response Types
 
@@ -259,7 +266,7 @@ Each backend's protocol is different:
 |---------|---------|--------|
 | **vLLM** | Sets `kv_transfer_params.do_remote_decode=True`, caps `max_tokens=1`, packs the connector's transfer handle into the response. | Pulls `kv_transfer_params` from `request.prefill_result` and feeds it back through `sampling_params.extra_args` so the `NixlConnector` imports KV. |
 | **SGLang** | Yields `{bootstrap_host, bootstrap_port, bootstrap_room}` as the first chunk, then drains the engine stream silently. Warmup happens in `start()`. | Reads bootstrap info from `request.prefill_result`, passes it to `engine.async_generate` so SGLang's NIXL transport pulls KV. |
-| **TRT-LLM** | Builds `LlmDisaggregatedParams(request_type="context_only")`, generates one token, packs the encoded handoff into the response. `drain()` polls the scheduler until idle so in-flight NIXL transfers finish before GPU memory is freed (issue #7319). | Decodes `request.prefill_result.disaggregated_params`, flips `request_type` to `generation_only`, generates normally. |
+| **TRT-LLM** | Builds `LlmDisaggregatedParams(request_type="context_only")`, generates one token, packs the encoded handoff into the response. Inherits the default `is_quiescent` (None), so the prefill drain waits the full budget for transfers to finish. | Decodes `request.prefill_result.disaggregated_params`, flips `request_type` to `generation_only`, generates normally. |
 
 ### Smoke testing without GPUs
 
@@ -319,6 +326,62 @@ Two surfaces:
 `ComponentSnapshot.kv_cache_hit_rate` is tri-state: `None` means "no data
 yet" or "no prefix cache" (gauge skipped); `0.0` is a legitimate
 zero-hit measurement.
+
+Backend shape:
+
+- **vLLM** pushes snapshots from its stat logger for each local DP rank and
+  bridges `vllm:` plus multiprocess-only `lmcache:` metrics from the global
+  registry.
+- **SGLang** pushes scheduler snapshots from the metrics leader node to avoid
+  double-counting DP ranks and bridges `sglang:` metrics from a private
+  multiprocess registry when `--enable-metrics` is set.
+- **TRT-LLM** pushes snapshots from the stats poll thread for each attention-DP
+  rank and bridges the global `trtllm_` registry.
+
+`WorkerConfig.enable_kv_routing=False` skips snapshot publisher construction,
+but the Prometheus bridge still runs. Use it when the worker should expose
+vendor metrics without feeding KV-aware routing signals.
+
+## KV Event Publishing
+
+On the unified path, `Worker` owns `KvEventPublisher` construction. Engines
+declare sources with `kv_event_sources()`; they do not instantiate
+`KvEventPublisher` directly.
+
+Use `ZmqSource` when the engine already emits Dynamo-compatible KV events on a
+ZMQ socket:
+
+```python
+from dynamo.common.backend.publisher import ZmqSource
+
+async def kv_event_sources(self):
+    return [
+        ZmqSource(endpoint="tcp://127.0.0.1:5557", dp_rank=0),
+    ]
+```
+
+Use `PushSource` when the engine needs a live publisher and drives
+`publish_stored()` / `publish_removed()` from its own thread:
+
+```python
+from dynamo.common.backend.publisher import PushSource
+
+def _on_kv_publisher_ready(self, publisher):
+    self._kv_publisher = publisher
+    self._start_kv_event_thread()
+
+async def kv_event_sources(self):
+    return [PushSource(on_ready=self._on_kv_publisher_ready, dp_rank=0)]
+```
+
+Return one source per DP rank owned by this worker, and keep that rank ownership
+stable for the engine lifetime. `EngineConfig.llm.kv_cache_block_size` must be
+set or `Worker` skips KV event publishers; snapshot publishers still work
+without a block size.
+
+For `PushSource`, cleanup is the engine's responsibility. Stop event threads in
+`cleanup()`, prevent new publishes once cleanup begins, and let any in-flight
+publish loop observe the shutdown signal before resources are released.
 
 ## Telemetry
 
@@ -437,7 +500,7 @@ Lifecycle and runtime:
 - Model registration with endpoint types
 - Request cancellation via `abort()` + `context.is_stopped()` monitoring
 - Graceful shutdown with signal handling
-- `drain()` hook for pre-cleanup work
+- `is_quiescent()` prefill-drain early-exit hook
 - `DynamoException` error chain wrapping
 - Finish reason normalization handled by the Rust layer
 - Engine control plumbing, with per-backend profiling, pause/resume, and supported weight-update controls
@@ -466,6 +529,32 @@ Lifecycle and runtime:
     unchanged.
   - Loaded adapters appear in `GET /v1/models`; inference selects an
     adapter by sending `"model": "<lora_name>"`.
+- **Sleep/wake (vLLM)** — `sleep` / `wake_up` controls via
+  `VllmEnginePauseController` (discovery unregister before sleep,
+  re-register after wake; `worker.rs` `engine_control_policy`)
+- **Elastic EP scaling (vLLM)** — `scale_elastic_ep` control at parity
+  with the legacy handler: `new_data_parallel_size` validation, a
+  single-flight lock (concurrent scales rejected, not queued), and the
+  `ray.util.state.list_nodes` → GCS shim for ray `--minimal`. Served at
+  `/engine/control/scale_elastic_ep` on the system port (the unified
+  Worker namespaces controls under `/engine/control/<name>`, matching the
+  legacy backend). Requires the Ray DP backend
+  (`--data-parallel-backend ray`, `nnodes == 1`) **and `ray` installed**
+  (the vLLM runtime image does not ship it). The single head-node backend
+  drives `add_dp_placement_groups` to place DP-worker Ray actors across
+  the Ray cluster, so multi-node is a Ray-cluster-membership concern
+  (operator-managed `ray start`), not a per-node backend concern.
+  Locally GPU-validated on H200 GPUs with vLLM 0.24.0: scale-**up** (2→4)
+  and scale-**down** (4→2) return `status:ok`, and serving continues after
+  each transition. The integration test remains skipped in CI because each
+  unquantized Qwen3-30B-A3B replica needs about 57 GiB for weights at TP=1,
+  while CI's four-GPU runner has only 24 GiB per GPU; the test requires at
+  least 80 GiB per GPU for weights and runtime headroom.
+- **Headless multi-node (vLLM)** — `--headless` secondary nodes run
+  vLLM workers only (multi-node TP/PP with `--data-parallel-backend mp`),
+  bypassing DistributedRuntime; `unified_main` routes them to
+  `run_dynamo_headless` before the Worker/engine path. Distinct from
+  elastic EP, which uses the Ray backend above.
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — KV transfer
   uses NIXL across all three engines; SGLang exchanges a Dynamo-level
   bootstrap address, vLLM and TRT-LLM use an engine-internal handshake.
@@ -522,7 +611,7 @@ Request handling:
 | Feature | Description |
 |---------|-------------|
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
-| Multimodal | Images / video / embeddings, NIXL embedding transfer, encode workers. `worker.py:_to_rust_disaggregation_mode` rejects the `ENCODE` role. |
+| Multimodal | The shared request and `encoder_result` contract, Encode role, and discovery wiring are available. Frontend Encode-to-Prefill/Aggregated request routing and backend-specific encoder implementations remain separate work. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters (SGLang / TRT-LLM) | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading. **vLLM is supported on the unified path** — see [What works today](#what-works-today); SGLang and TRT-LLM advertise no LoRA updates yet. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
@@ -531,15 +620,12 @@ Request handling:
 
 | Feature | Description |
 |---------|-------------|
-| Sleep/wake | 3-level vLLM engine lifecycle control (`VllmEnginePauseController`) with shutdown-delay tags |
-| Elastic EP scaling | `scale_elastic_ep` endpoint with Ray node management |
 | GMS shadow mode | GPU Memory Service integration with failover lock (`--gms-shadow-mode`, `configure_gms_lock_mode`) |
 | ModelExpress P2P | Distributed model loading via P2P (`--model-express-url`, `register_modelexpress_loaders`, `mx-source` / `mx-target` load formats) |
 | KV block clearing | Prefix cache reset endpoint |
 | `VllmEngineMonitor` | Background `EngineDeadError` detection task |
 | Instrumented scheduler + FPM relay | Per-forward-pass `ForwardPassMetrics` ZMQ telemetry |
 | `KvConnectorProtocol` abstraction | Legacy abstracts NIXL pull / Mooncake push; unified uses vLLM's internal connector only |
-| `--headless` multi-node mode | Secondary-node TP/PP worker mode (`run_dynamo_headless`); unified requires every node to run the backend |
 | `--benchmark-mode` family | The `--benchmark-*` flag family (mode, prefill/decode granularities, warmup, output path, timeout) injects into `vllm_config.additional_config` |
 | "Omni" alternative entry point | `dynamo.vllm.omni.*` parallel mode for alternative tensor workflows |
 | Multimodal (vLLM) | NIXL embedding transfer (`EmbeddingTransferMode`, `--embedding-transfer-mode`), embedding LRU cache (`--multimodal-embedding-cache-capacity-gb`), Qwen VL mRoPE, `EncodeWorkerHandler`, `--route-to-encoder` |
@@ -592,9 +678,10 @@ For users picking what to land next on the unified path:
    (engine updates `/engine/update/load_lora|unload_lora|list_loras` + a
    `/v1/loras` compatibility alias; see [What works today](#what-works-today)).
    Remaining: SGLang and TRT-LLM, which advertise no LoRA updates yet.
-3. **Engine routes / lifecycle endpoints** — sleep/wake, profile
-   start/stop, weight updates, KV block clearing, prefix cache
-   reset. Visible in operator workflows.
+3. **Engine routes / lifecycle endpoints** — weight updates, KV block
+   clearing, prefix cache reset. (Profiling, sleep/wake, elastic-EP
+   scaling, and headless multi-node already landed.) Visible in operator
+   workflows.
 4. **Snapshot / CRIU** — production checkpoint support.
 5. **Multimodal / diffusion / video / DLLM** — biggest functional
    gap, but largest scope. Best parallelized across modality leads.

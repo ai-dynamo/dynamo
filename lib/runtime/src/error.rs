@@ -57,6 +57,8 @@ pub enum ErrorType {
     Cancelled,
     /// The system does not have enough resources to handle the request.
     ResourceExhausted,
+    /// No backend worker is currently available to handle the request.
+    Unavailable,
     /// Error originating from a backend engine.
     Backend(BackendError),
 }
@@ -72,6 +74,7 @@ impl fmt::Display for ErrorType {
             ErrorType::ResponseTimeout => write!(f, "ResponseTimeout"),
             ErrorType::Cancelled => write!(f, "Cancelled"),
             ErrorType::ResourceExhausted => write!(f, "ResourceExhausted"),
+            ErrorType::Unavailable => write!(f, "Unavailable"),
             ErrorType::Backend(sub) => write!(f, "Backend{sub}"),
         }
     }
@@ -469,6 +472,11 @@ mod tests {
         );
         assert_eq!(ErrorType::ResponseTimeout.to_string(), "ResponseTimeout");
         assert_eq!(ErrorType::Cancelled.to_string(), "Cancelled");
+        assert_eq!(
+            ErrorType::ResourceExhausted.to_string(),
+            "ResourceExhausted"
+        );
+        assert_eq!(ErrorType::Unavailable.to_string(), "Unavailable");
         assert_eq!(
             ErrorType::Backend(BackendError::Unknown).to_string(),
             "BackendUnknown"

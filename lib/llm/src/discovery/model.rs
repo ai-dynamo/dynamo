@@ -24,7 +24,8 @@ use crate::types::{
         audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
-        images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+        generate::GenerateStreamingEngine, images::OpenAIImagesStreamingEngine,
+        videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -221,6 +222,13 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_realtime_engine())
+    }
+
+    /// Check if any WorkerSet has a generate engine.
+    pub fn has_generate_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_generate_engine())
     }
 
     // -- Model serving readiness --
@@ -485,7 +493,7 @@ impl Model {
     ///
     /// Differs from [`Self::is_displayable`] in that it does **not** fall back
     /// to prefill-only WorkerSets: requires a WorkerSet that has a serving
-    /// engine attached, workers connected, and `can_serve_requests()` true.
+    /// engine attached and workers connected.
     /// Used by KServe gRPC `model_ready` / `server_ready` to avoid the race
     /// where a `ModelDeploymentCard` is registered before its WorkerSet has
     /// been wired up.
@@ -509,7 +517,7 @@ impl Model {
 
         self.worker_sets.iter().any(|entry| {
             let ws = entry.value();
-            if ws.worker_count() == 0 || !ws.can_serve_requests() {
+            if ws.worker_count() == 0 {
                 return false;
             }
             ws.has_any_serving_engine() || (!any_set_has_engine && ws.is_prefill_set())
@@ -564,6 +572,11 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
+    pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.generate_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_engine_with_parsing(
@@ -582,6 +595,17 @@ impl Model {
                 .map(|e| (e, ws.parsing_options()))
         })
         .ok_or_else(|| self.engine_error(self.has_completions_engine()))
+    }
+
+    pub fn get_generate_engine_with_parsing(
+        &self,
+    ) -> Result<(GenerateStreamingEngine, ParsingOptions), ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.generate_engine
+                .clone()
+                .map(|e| (e, ws.parsing_options()))
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
     // -- Worker monitoring (aggregated across WorkerSets) --
@@ -671,28 +695,21 @@ impl Model {
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
         if snapshot.len() == 1 {
             let ws = &snapshot[0];
-            if ws.worker_count() == 0
-                || !ws.can_serve_requests()
-                || !ready_namespaces.contains(ws.namespace())
-            {
+            if ws.worker_count() == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
             return extract(ws);
         }
 
-        // Collect eligible sets with their worker counts, skipping sets with no workers,
-        // sets whose prefill router has died under enforce_disagg, or sets in a namespace
-        // whose worker set is incomplete.
+        // Collect eligible sets with their worker counts, skipping sets with no workers or sets in
+        // a namespace whose worker set is incomplete.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
         let eligible: Vec<(T, usize)> = snapshot
             .iter()
             .filter_map(|ws| {
                 let count = ws.worker_count();
-                if count == 0
-                    || !ws.can_serve_requests()
-                    || !ready_namespaces.contains(ws.namespace())
-                {
+                if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
                 extract(ws).map(|val| (val, count))
@@ -1006,7 +1023,7 @@ mod tests {
 
     /// Build a WorkerSet with a deactivated PrefillRouter simulating "was activated, now dead".
     /// worker_count defaults to 1 (no instance_count_rx -> in-process default).
-    fn make_worker_set_with_dead_prefill(namespace: &str, enforce_disagg: bool) -> Arc<WorkerSet> {
+    fn make_worker_set_with_dead_prefill(namespace: &str) -> Arc<WorkerSet> {
         let mut ws = WorkerSet::new(
             namespace.to_string(),
             "abc".to_string(),
@@ -1015,7 +1032,7 @@ mod tests {
         let pr = PrefillRouter::disabled(
             std::sync::Arc::new(crate::discovery::ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
-            enforce_disagg,
+            None,
         );
         pr.mark_active_for_test();
         pr.deactivate();
@@ -1024,7 +1041,7 @@ mod tests {
     }
 
     /// Baseline: a WorkerSet without a PrefillRouter is always displayable
-    /// (worker_count=1, is_prefill_set=true, no can_serve_requests block).
+    /// (worker_count=1, is_prefill_set=true).
     #[test]
     fn test_is_displayable_true_basic() {
         let model = Model::new("llama".to_string());
@@ -1035,77 +1052,89 @@ mod tests {
         );
     }
 
-    /// When the prefill engine dies and enforce_disagg is set, the model must be
-    /// hidden from /v1/models.
+    /// Prefill-router lifecycle is not a separate model-visibility policy. Registered worker
+    /// topology gates the serving-ready model list and request selection.
     #[test]
-    fn test_is_displayable_false_when_prefill_dies_enforce_disagg() {
+    fn test_is_displayable_ignores_prefill_router_lifecycle() {
         let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set_with_dead_prefill("ns1"));
+
+        assert!(
+            model.is_displayable(),
+            "prefill-router lifecycle must not override registered topology"
+        );
+    }
+
+    // -- Encode-set visibility --
+    //
+    // Encode workers are reached through encoder routing, not the public
+    // chat/completions surface. Tests below verify is_displayable correctly
+    // hides Encode-only
+    // deployments from /v1/models and continues to surface mixed
+    // Aggregated+Encode deployments via the Aggregated set only.
+
+    /// Helper: build an Encode-role WorkerSet wrapped in Arc. worker_count=1
+    /// via a live watcher so is_displayable doesn't filter it at the
+    /// worker_count == 0 guard. Dropping the sender is fine: tokio's
+    /// `watch::Receiver::borrow()` returns the current value even after the
+    /// sender closes, which is all `is_displayable` reads.
+    fn make_encode_worker_set(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Encode);
+        let (_tx, rx) = watch::channel(vec![1_u64]);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        Arc::new(ws)
+    }
+
+    #[test]
+    fn encode_only_model_is_not_displayable() {
+        // An Encode worker has no serving engines (the watcher's role gate
+        // skips pipeline construction) and is_prefill_set excludes Encode,
+        // so an Encode-only model has no displayable WorkerSet and stays
+        // hidden from /v1/models. The frontend's chat/completions surface
+        // is not where users reach Encode workers; encoder routing is.
+        let model = Model::new("llava".to_string());
         model.add_worker_set(
-            "ns1".to_string(),
-            make_worker_set_with_dead_prefill("ns1", true),
+            "dynamo:encode".to_string(),
+            make_encode_worker_set("dynamo", "mdc-e"),
         );
 
         assert!(
             !model.is_displayable(),
-            "model must be hidden when prefill died and enforce_disagg=true"
+            "Encode-only model must be hidden from /v1/models -- Encode workers \
+             aren't a public serving surface"
         );
     }
 
-    /// When enforce_disagg is false the deployment can fall back to aggregated mode,
-    /// so the model should remain visible in /v1/models.
     #[test]
-    fn test_is_displayable_true_when_prefill_dies_no_enforce() {
-        let model = Model::new("llama".to_string());
+    fn aggregated_plus_encode_model_is_displayable_via_aggregated() {
+        // E/Agg topology: an Aggregated worker plus an Encode peer. The
+        // Aggregated set is engineless in this stub but is_prefill_set
+        // remains true for it (legacy classification), so the model is
+        // displayable via the Aggregated WorkerSet's fallback. The Encode
+        // WorkerSet does NOT contribute to displayability -- it's filtered
+        // by is_encode_set excluding it from is_prefill_set.
+        let model = Model::new("llava".to_string());
+        model.add_worker_set("dynamo".to_string(), make_worker_set("dynamo", "mdc-a"));
         model.add_worker_set(
-            "ns1".to_string(),
-            make_worker_set_with_dead_prefill("ns1", false),
+            "dynamo:encode".to_string(),
+            make_encode_worker_set("dynamo", "mdc-e"),
         );
 
         assert!(
             model.is_displayable(),
-            "model must remain visible when prefill died but enforce_disagg=false (fallback)"
-        );
-    }
-
-    /// A single WorkerSet with a deactivated prefill router (enforce_disagg=true) must be
-    /// skipped by select_worker_set_with(), causing engine accessors to return Err.
-    #[test]
-    fn test_dead_prefill_single_set_not_selectable() {
-        let model = Model::new("llama".to_string());
-        model.add_worker_set(
-            "ns1".to_string(),
-            make_worker_set_with_dead_prefill("ns1", true),
+            "Aggregated+Encode model must be displayable via the Aggregated set"
         );
 
-        assert!(model.get_chat_engine().is_err());
-        assert!(model.get_completions_engine().is_err());
-    }
-
-    /// With two WorkerSets -- one healthy, one with dead prefill -- the healthy set
-    /// keeps the model displayable. Removing the healthy set hides the model.
-    #[test]
-    fn test_dead_prefill_multi_set_skips_dead_namespace() {
-        let model = Model::new("llama".to_string());
-
-        // Healthy set (no prefill constraint)
-        model.add_worker_set("healthy".to_string(), make_worker_set("healthy", "abc"));
-
-        // Dead set (deactivated prefill + enforce_disagg)
-        model.add_worker_set(
-            "dead".to_string(),
-            make_worker_set_with_dead_prefill("dead", true),
-        );
-
-        assert!(
-            model.is_displayable(),
-            "model must be displayable when at least one healthy set exists"
-        );
-
-        // Removing the healthy set leaves only the dead set -- model must be hidden.
-        model.remove_worker_set("healthy");
+        // Removing the Aggregated set leaves only the Encode set -- model
+        // must flip to hidden (the bug we're guarding against would have
+        // kept it displayable via the Encode set being misclassified as
+        // prefill).
+        model.remove_worker_set("dynamo");
         assert!(
             !model.is_displayable(),
-            "model must be hidden when only the dead prefill set remains"
+            "after Aggregated leaves, Encode-only model must be hidden"
         );
     }
 

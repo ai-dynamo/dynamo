@@ -9,8 +9,8 @@ Usage:
         --router-block-size 64
 
 Serves ``{namespace}.thunderagent_router.generate``. Pause/resume is
-opt-in per-request via ``nvext.agent_context.trajectory_id``; requests
-without it are routed via plain KvRouter with no lifecycle.
+opt-in per-request via header-derived ``session_id``; requests without it
+are routed via plain KvRouter with no lifecycle.
 """
 
 from __future__ import annotations
@@ -47,23 +47,16 @@ def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
     ctx = request.get("agent_context")
     if not isinstance(ctx, dict):
         return None
-    pid = ctx.get("trajectory_id")
+    pid = ctx.get("session_id")
     if isinstance(pid, str) and pid:
         return pid
     return None
 
 
-def _is_trajectory_final(request: dict[str, Any]) -> bool:
-    """``nvext.agent_context.trajectory_final`` marks a trajectory's
-    last turn. The router releases the program and short-circuits -- the request is NOT
-    forwarded to the engine (an empty completion returns), so producers send it as a
-    dedicated minimal request (e.g. ``max_tokens=1``; the body is just a carrier).
-    It is a separate close ping rather than a flag on the last real turn because a
-    reactive agent loop only learns a turn was terminal from its response -- so a run's
-    end is typically known only after its last real turn already returned (e.g.
-    pi-dynamo-provider fires it on ``agent_end``)."""
+def _is_session_final(request: dict[str, Any]) -> bool:
+    """``x-dynamo-session-final`` marks a session's last turn internally."""
     ctx = request.get("agent_context")
-    return isinstance(ctx, dict) and bool(ctx.get("trajectory_final"))
+    return isinstance(ctx, dict) and bool(ctx.get("session_final"))
 
 
 def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -141,14 +134,13 @@ class ThunderAgentRouterHandler:
             )
         program_id = _extract_program_id(request)
 
-        # A request marked trajectory_final just releases the program from the
+        # A request marked session_final just releases the program from the
         # table and is NOT forwarded to the engine (short-circuit).
-        if program_id is not None and _is_trajectory_final(request):
+        if program_id is not None and _is_session_final(request):
             await self._scheduler.end_program(program_id)
             return
 
         # Path A: no program_id -> behave like the standalone router.
-        # Backward compat for clients that don't send agent_context.
         if program_id is None:
             preprocessed = _wrap_preprocessed_request(request)
             async for chunk in await self._kv_router.generate_from_request(

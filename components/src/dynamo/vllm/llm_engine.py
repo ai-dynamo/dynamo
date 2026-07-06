@@ -64,7 +64,7 @@ from dynamo.llm import (
     unregister_model,
 )
 from dynamo.runtime import Endpoint
-from dynamo.vllm.args import configure_rl_logprobs_mode, parse_args
+from dynamo.vllm.args import Config, configure_rl_logprobs_mode, parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
@@ -88,10 +88,8 @@ logger = logging.getLogger(__name__)
 
 
 class _UnifiedStatLogger(StatLoggerBase):
-    """vLLM stat-logger that writes a :class:`ComponentSnapshot` into the
-    factory's shared dict on every iteration. The framework's poll task
-    reads the dict and drives both the router-input signal and the
-    ``dynamo_component_*`` gauges."""
+    """vLLM stat-logger that pushes :class:`ComponentSnapshot` values into
+    the Rust-owned :class:`SnapshotPublisher` on every iteration."""
 
     def __init__(self, factory: _UnifiedStatLoggerFactory, dp_rank: int) -> None:
         self._factory = factory
@@ -229,14 +227,29 @@ class VllmLLMEngine(LLMEngine):
 
     @classmethod
     async def from_args(
-        cls, argv: list[str] | None = None
+        cls, argv: list[str] | None = None, config: Config | None = None
     ) -> tuple[VllmLLMEngine, WorkerConfig]:
-        config = parse_args(argv)
+        # `config` lets unified_main thread its already-parsed args through so we
+        # don't re-parse (idempotent, but avoids a duplicate argparse + doubled
+        # vLLM deprecation warnings at startup).
+        if config is None:
+            config = parse_args(argv, fpm_trace_relay_supported=False)
 
         if config.disaggregation_mode == DisaggregationMode.ENCODE:
             raise NotImplementedError(
                 "ENCODE is not supported by the unified vLLM entry point; "
                 "use `python -m dynamo.vllm` for multimodal encode workers"
+            )
+
+        # Headless is handled by unified_main before engine construction; a
+        # headless config reaching here means run() was driven directly,
+        # bypassing the entry point. Fail loud rather than booting a full
+        # backend on what should be a vLLM-workers-only secondary node.
+        if config.headless:
+            raise NotImplementedError(
+                "--headless must be launched via `python -m dynamo.vllm.unified_main` "
+                "(or the legacy `python -m dynamo.vllm`); it is not supported when "
+                "driving the unified Worker directly"
             )
 
         if not config.served_model_name:
@@ -1278,6 +1291,10 @@ class VllmLLMEngine(LLMEngine):
         if self.engine_client is not None and request_id is not None:
             await self.engine_client.abort(request_id)
             logger.debug("Aborted request %s", request_id)
+
+    # No is_quiescent() override: vLLM's NixlConnector exposes no idle signal,
+    # so it inherits the base None and the framework drains prefill workers for
+    # the full budget.
 
     async def health_check_payload(self) -> Optional[dict[str, Any]]:
         if self.disaggregation_mode == DisaggregationMode.DECODE:

@@ -421,6 +421,12 @@ class LoraMixin:
                                 base_model_path=self.config.server_args.model_path,
                                 worker_type=lora_worker_type,
                                 needs=lora_needs,
+                                # Publish the worker's per-worker LoRA slot budget so the frontend
+                                # allocator sizes placement against real capacity instead of the
+                                # hard-coded default.
+                                max_gpu_lora_count=getattr(
+                                    self.config.server_args, "max_loras_per_batch", None
+                                ),
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
@@ -812,6 +818,57 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 logging.error(f"Failed to resume memory occupation: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
+        """Flush SGLang's local cache when no requests are active."""
+        tokenizer_manager = (
+            getattr(self.engine, "tokenizer_manager", None)
+            if self.engine is not None
+            else None
+        )
+        if tokenizer_manager is None:
+            yield {
+                "status": "error",
+                "message": "KV cache clear not supported on this worker",
+            }
+            return
+
+        try:
+            async with self._pause_lock:
+                if getattr(tokenizer_manager, "rid_to_state", None):
+                    yield {
+                        "status": "error",
+                        "message": "Cannot clear KV cache while requests are active",
+                    }
+                    return
+
+                if hasattr(tokenizer_manager, "auto_create_handle_loop"):
+                    tokenizer_manager.auto_create_handle_loop()
+                result = await tokenizer_manager.flush_cache()
+
+                if not result.success:
+                    yield {
+                        "status": "error",
+                        "message": getattr(result, "message", None)
+                        or "KV cache clear failed",
+                    }
+                    return
+
+                backend = tokenizer_manager.server_args.hicache_storage_backend
+                if backend and backend != "none":
+                    result = await tokenizer_manager.clear_hicache_storage()
+                    if not result.success:
+                        yield {
+                            "status": "error",
+                            "message": getattr(result, "message", None)
+                            or "External KV cache clear failed",
+                        }
+                        return
+
+                yield {"status": "success", "message": "KV cache cleared"}
+        except Exception as e:
+            logging.error("Failed to clear KV cache: %s", e)
+            yield {"status": "error", "message": str(e)}
+
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.
 
@@ -897,78 +954,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             "new_version": req.new_version,
         }
 
-    async def open_session(self, body: dict) -> dict:
-        """Open a streaming session for subagent KV isolation.
-
-        Args:
-            body: Dict with "session_id", optional "timeout" (default 120),
-                  and optional "capacity_of_str_len" (default 65536).
-        """
-        from sglang.srt.managers.io_struct import OpenSessionReqInput
-
-        session_id = body.get("session_id")
-        if not session_id:
-            return {"status": "error", "message": "session_id required"}
-        timeout = body.get("timeout", 120)
-        capacity = body.get("capacity_of_str_len", 65536)
-        try:
-            obj = OpenSessionReqInput(
-                capacity_of_str_len=capacity,
-                session_id=session_id,
-                streaming=True,
-                timeout=float(timeout),
-            )
-            result = await self.engine.tokenizer_manager.open_session(obj, None)
-            if result is None:
-                return {
-                    "status": "ok",
-                    "session_id": session_id,
-                    "message": "Session already exists",
-                }
-            return {"status": "ok", "session_id": result}
-        except Exception as e:
-            logging.error(f"Failed to open session {session_id}: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def close_session(self, body: dict) -> dict:
-        """Close a streaming session and release its KV resources.
-
-        Args:
-            body: Dict with "session_id".
-        """
-        from sglang.srt.managers.io_struct import CloseSessionReqInput
-
-        session_id = body.get("session_id")
-        if not session_id:
-            return {"status": "error", "message": "session_id required"}
-        try:
-            obj = CloseSessionReqInput(session_id=session_id)
-            await self.engine.tokenizer_manager.close_session(obj, None)
-            return {"status": "ok", "session_id": session_id}
-        except Exception as e:
-            logging.error(f"Failed to close session {session_id}: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def session_control(self, request, context=None):
-        """Service mesh endpoint for session lifecycle operations.
-
-        Args:
-            request: Dict with "action" key ("open_session" or "close_session")
-                     and action-specific parameters.
-            context: Optional Dynamo context (unused but required by protocol).
-
-        Yields:
-            Single dict with operation result.
-        """
-        action = request.get("action")
-        if action == "open_session":
-            result = await self.open_session(request)
-        elif action == "close_session":
-            result = await self.close_session(request)
-        else:
-            result = {"status": "error", "message": f"Unknown action: {action}"}
-        yield result
-
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
 
@@ -1030,18 +1015,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
-
-    def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        if not getattr(self.config.server_args, "enable_streaming_session", False):
-            return {}
-        routing = request.get("routing") or {}
-        session_control = routing.get("session_control") or {}
-        session_id = session_control.get("session_id")
-        if not session_id:
-            return {}
-
-        # Streaming sessions only need the session identifier on each turn.
-        return {"session_params": {"id": session_id}}
 
     @staticmethod
     def _get_guided_decoding_params(
