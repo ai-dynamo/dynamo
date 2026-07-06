@@ -889,6 +889,20 @@ impl ModelWatcher {
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
+        // Fast-fail before any expensive setup when the name is already reserved
+        // as another deployment's alias (`resolve_canonical_name` returns a
+        // different, canonical name only for a reserved alias). `add_worker_set`
+        // re-checks this atomically under `reservation_lock` and is the
+        // authoritative gate; rejecting here just avoids the config download,
+        // card save, and pipeline build for a name that cannot be claimed.
+        if self.manager.resolve_canonical_name(card.name()) != card.name() {
+            tracing::error!(
+                model_name = card.name(),
+                "Refusing to register: name is reserved as an alias of another deployment"
+            );
+            return Ok(());
+        }
+
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
@@ -953,8 +967,17 @@ impl ModelWatcher {
             // No engine on the worker set — just lifecycle tracking so the
             // prefill router can be activated/deactivated as workers come
             // and go.
-            self.manager
-                .add_worker_set(card.name(), &ws_key, worker_set);
+            if !self
+                .manager
+                .add_worker_set(card.name(), &ws_key, worker_set)
+            {
+                tracing::error!(
+                    model_name = card.name(),
+                    "Refusing to register prefill worker: its name is reserved as an alias of \
+                     another deployment"
+                );
+                return Ok(());
+            }
             // Mirror the prefill WorkerSet under any aliases so a disaggregated
             // alias reports readiness like its primary (decode attaches its own).
             self.attach_aliases(card, &ws_key);
@@ -1380,8 +1403,16 @@ impl ModelWatcher {
         // Add the completed WorkerSet to the Model, then mirror it under any
         // configured aliases so alias names resolve, list, and report readiness
         // exactly like the primary.
-        self.manager
-            .add_worker_set(card.name(), &ws_key, worker_set);
+        if !self
+            .manager
+            .add_worker_set(card.name(), &ws_key, worker_set)
+        {
+            tracing::error!(
+                model_name = card.name(),
+                "Refusing to register model: its name is reserved as an alias of another deployment"
+            );
+            return Ok(());
+        }
         self.attach_aliases(card, &ws_key);
 
         if let Some(tx) = &self.model_update_tx {
@@ -1398,12 +1429,11 @@ impl ModelWatcher {
     /// both the decode and prefill WorkerSets (the prefill worker registers on
     /// its own early-return path and would otherwise skip alias attachment).
     ///
-    /// `register_alias` reserves the name atomically (rejecting a collision with
-    /// a live primary or a different primary's alias); only a successful
-    /// reservation is followed by the WorkerSet attach. Because the reservation
-    /// already owns the name, the attach cannot lose a collision — the guarded
-    /// rollback is a defensive backstop for a would-be invariant violation, not
-    /// an expected path.
+    /// `register_alias` atomically reserves the name (rejecting a collision with a
+    /// live primary or a different primary's alias); only a successful reservation
+    /// is followed by the WorkerSet attach. The reservation holds the name against
+    /// any concurrent primary claim, so the subsequent attach cannot be refused —
+    /// a refusal would indicate a broken invariant and is only logged.
     fn attach_aliases(&self, card: &ModelDeploymentCard, ws_key: &str) {
         if card.aliases.is_empty() {
             return;
@@ -1435,12 +1465,13 @@ impl ModelWatcher {
                 .manager
                 .add_worker_set_arc(alias, ws_key, ws_arc.clone())
             {
+                // Unreachable: register_alias reserved this name, so no concurrent
+                // primary can occupy it and the attach cannot be refused.
                 tracing::error!(
                     model_name = card.name(),
                     alias,
-                    "Alias reserved but WorkerSet attach was refused; rolling back the mapping"
+                    "Alias reserved but WorkerSet attach was refused — invariant violated"
                 );
-                self.manager.unregister_alias_if_empty(alias, card.name());
             }
         }
     }

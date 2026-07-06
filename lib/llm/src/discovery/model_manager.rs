@@ -120,6 +120,14 @@ pub struct ModelManager {
 
     /// Alias → primary model name mapping. Used to normalize metrics labels.
     alias_to_primary: DashMap<String, String>,
+
+    /// Serializes name-reservation transitions — the primary claim in
+    /// [`Self::add_worker_set`] and the alias claim in [`Self::register_alias`] —
+    /// so a name cannot be concurrently claimed as both a primary and an alias.
+    /// A cold-path lock (worker registration, not request serving), uncontended
+    /// in steady state; held only across in-memory map reads/writes, never across
+    /// an `.await`.
+    reservation_lock: parking_lot::Mutex<()>,
 }
 
 impl Default for ModelManager {
@@ -149,6 +157,7 @@ impl ModelManager {
             lora_enabled: crate::lora::lora_serving_enabled(),
             lora_load_feeds: DashMap::new(),
             alias_to_primary: DashMap::new(),
+            reservation_lock: parking_lot::Mutex::new(()),
         }
     }
 
@@ -181,14 +190,37 @@ impl ModelManager {
         }
     }
 
-    /// Add a WorkerSet to a Model under its primary name. Creates the Model if
-    /// it doesn't exist. A real model always wins a name collision with an
-    /// operator-configured alias, so any stale alias claim on `model_name` is
-    /// reclaimed first (see [`Self::reclaim_primary_name`]).
-    pub fn add_worker_set(&self, model_name: &str, namespace: &str, worker_set: WorkerSet) {
-        self.reclaim_primary_name(model_name);
+    /// Add a WorkerSet to a Model under its primary name. Creates the Model if it
+    /// doesn't exist. Returns `false` (registering nothing) when `model_name` is
+    /// already reserved as another deployment's alias.
+    ///
+    /// The names a live deployment holds — its primary plus every alias — are
+    /// globally reserved until it is removed, so a later deployment cannot claim
+    /// any of them, as either a primary or an alias. This is the primary-side
+    /// mirror of [`Self::register_alias`] (which rejects an alias colliding with a
+    /// live primary or another primary's alias); together they make name
+    /// reservation first-come and symmetric across namespaces. A later deployment
+    /// re-using a name fails loudly rather than silently displacing the owner.
+    ///
+    /// Holds [`Self::reservation_lock`] across the reserved-name check and the
+    /// insert so the claim is atomic against a concurrent `register_alias` for
+    /// the same name (a name can never end up both a live primary and an alias).
+    /// The lock is always taken before any map access, so it never inverts with a
+    /// DashMap shard lock.
+    pub fn add_worker_set(&self, model_name: &str, namespace: &str, worker_set: WorkerSet) -> bool {
+        let _reservation = self.reservation_lock.lock();
+        if let Some(reserved_by) = self.alias_to_primary.get(model_name) {
+            tracing::warn!(
+                model_name,
+                reserved_by = reserved_by.value().as_str(),
+                "Model name is already reserved as an alias of another deployment — refusing to \
+                 register. Choose a different name or remove the conflicting deployment."
+            );
+            return false;
+        }
         let model = self.get_or_create_model(model_name);
         model.add_worker_set(namespace.to_string(), Arc::new(worker_set));
+        true
     }
 
     /// Add an already-Arc-wrapped WorkerSet to a Model. Creates the Model if it doesn't exist.
@@ -237,11 +269,13 @@ impl ModelManager {
     /// refused and logged so operators find the collision in the logs rather
     /// than through silent metric re-attribution.
     ///
-    /// The "is this name a live primary" probe is done *before* taking the
-    /// `alias_to_primary` entry so we never hold one map's shard lock while
-    /// acquiring the other's — [`Self::add_worker_set_arc`] takes them in the
-    /// opposite order, and holding across would risk a lock-order inversion.
+    /// Holds [`Self::reservation_lock`] across the live-primary probe and the
+    /// entry insert so the claim is atomic against a concurrent `add_worker_set`
+    /// for the same name. Within that section the `models` guard is dropped before
+    /// touching `alias_to_primary` (via `is_some_and`), and the lock is taken
+    /// before any map access, so no DashMap shard lock is ever held across another.
     pub fn register_alias(&self, alias: &str, primary: &str) -> bool {
+        let _reservation = self.reservation_lock.lock();
         if self
             .models
             .get(alias)
@@ -276,30 +310,6 @@ impl ModelManager {
                 slot.insert(primary.to_string());
                 true
             }
-        }
-    }
-
-    /// Ensure `name` is available as a primary model name. A real model always
-    /// wins a collision with an operator-configured alias: if `name` is currently
-    /// registered as an alias of a *different* model, drop that mapping and the
-    /// shared WorkerSets attached under it so HTTP stops canonicalizing the name
-    /// to the old primary. No-op in the common case where `name` is not an alias.
-    ///
-    /// Reconciliation across the two maps is best-effort: a name being both a
-    /// live primary of one model and an alias of another is an operator
-    /// misconfiguration (a correctly configured fleet never reuses a name), and
-    /// concurrent registration of such a collision may briefly leave a stale
-    /// mapping until the next registration event. It always self-corrects and
-    /// is logged; it cannot happen for distinct, correctly-named models.
-    fn reclaim_primary_name(&self, name: &str) {
-        if let Some((_, previous_primary)) = self.alias_to_primary.remove(name) {
-            tracing::warn!(
-                name,
-                previous_primary = previous_primary.as_str(),
-                "Name registered as a primary model was already an alias — reclaiming it for the \
-                 primary; the alias mapping is dropped."
-            );
-            self.models.remove(name);
         }
     }
 
@@ -1767,23 +1777,32 @@ mod tests {
     }
 
     #[test]
-    fn test_primary_registration_reclaims_alias_name() {
+    fn test_primary_registration_rejected_when_name_reserved_as_alias() {
         let mm = ModelManager::new();
 
-        // Model "a" claims "shared" as an alias and attaches its worker set.
+        // Model "a" reserves "shared" as an alias and attaches its worker set.
         assert!(mm.register_alias("shared", "a"));
         assert!(mm.add_worker_set_arc("shared", "ns1", Arc::new(make_worker_set("ns1", "abc"))));
         assert_eq!(mm.resolve_canonical_name("shared"), "a");
 
-        // A later model registers "shared" as its own primary — it must win the
-        // name back so requests for "shared" stop canonicalizing to "a".
-        mm.add_worker_set("shared", "ns2", make_worker_set("ns2", "def"));
-        assert_eq!(mm.resolve_canonical_name("shared"), "shared");
+        // A later deployment cannot claim "shared" as its own primary — the name
+        // stays reserved for "a" (first-come, symmetric with register_alias).
+        assert!(!mm.add_worker_set("shared", "ns2", make_worker_set("ns2", "def")));
+        assert_eq!(mm.resolve_canonical_name("shared"), "a");
 
-        // The reclaimed model holds only its own worker set, not "a"'s.
-        let model = mm.get_model("shared").expect("primary model present");
-        assert!(model.get_worker_set("ns2").is_some());
-        assert!(model.get_worker_set("ns1").is_none());
+        // "a"'s alias mirror is untouched and no foreign worker set was added.
+        let model = mm.get_model("shared").expect("alias model present");
+        assert!(model.get_worker_set("ns1").is_some());
+        assert!(model.get_worker_set("ns2").is_none());
+    }
+
+    #[test]
+    fn test_primary_registration_succeeds_for_unreserved_name() {
+        let mm = ModelManager::new();
+        assert!(mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc")));
+        assert!(mm.get_model("llama").is_some());
+        // A second worker set for the same primary is fine (replicas share a name).
+        assert!(mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc")));
     }
 
     #[test]
