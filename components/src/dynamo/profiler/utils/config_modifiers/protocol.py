@@ -27,7 +27,7 @@ from dynamo.profiler.utils.config import (
     break_arguments,
     get_service_name_by_type,
     sanitize_cli_args,
-    set_argument_value,
+    set_unique_argument_value,
     setup_worker_service_resources,
     update_image,
 )
@@ -336,8 +336,8 @@ class BaseConfigModifier:
             c.args = []
 
         def _patch(tokens: list[str]) -> list[str]:
-            tokens = set_argument_value(tokens, "--model-name", model_name)
-            tokens = set_argument_value(tokens, "--model-path", model_path)
+            tokens = set_unique_argument_value(tokens, "--model-name", model_name)
+            tokens = set_unique_argument_value(tokens, "--model-path", model_path)
             return tokens
 
         cls._update_container_args_preserving_shell_form(c, _patch)
@@ -364,10 +364,10 @@ class BaseConfigModifier:
             c = service.extraPodSpec.mainContainer
 
             def _patch(tokens: list[str]) -> list[str]:
-                tokens = set_argument_value(
+                tokens = set_unique_argument_value(
                     tokens, cls.WORKER_MODEL_PATH_ARG, model_path
                 )
-                tokens = set_argument_value(
+                tokens = set_unique_argument_value(
                     tokens, cls.WORKER_SERVED_MODEL_NAME_ARG, model_name
                 )
                 return tokens

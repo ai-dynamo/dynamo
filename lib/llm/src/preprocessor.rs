@@ -38,7 +38,6 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
-use std::borrow::Cow;
 use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -69,9 +68,7 @@ use crate::protocols::{
     },
     openai::{
         DeltaGeneratorExt,
-        chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse, jail::JailedStream,
-        },
+        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     },
@@ -676,6 +673,7 @@ impl OpenAIPreprocessor {
         let (token_ids, annotations) = {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
             self.gather_tokens(request, formatted_prompt.as_deref(), tracker)
+                .await
                 .with_context(|| "Failed to gather tokens")?
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
@@ -1621,7 +1619,7 @@ impl OpenAIPreprocessor {
     /// the caller asked for. The caller owns the result and is responsible for
     /// installing it on the builder via `builder.token_ids(...)` once any
     /// downstream consumers (e.g. MM-routing) have borrowed it.
-    pub fn gather_tokens<
+    pub async fn gather_tokens<
         R: OAIChatLikeRequest
             + AnnotationsProvider
             + SamplingOptionsProvider
@@ -1704,10 +1702,10 @@ impl OpenAIPreprocessor {
                                 tracing::warn!(
                                     "backend_instance_id provided but no token_data; tokenizing prompt"
                                 );
-                                let encoding = self.encode_with_timing(prompt, tracker)?;
+                                let encoding = self.encode_with_timing(prompt, tracker).await?;
                                 (encoding.token_ids().to_vec(), false)
                             } else {
-                                let encoding = self.encode_with_timing(prompt, tracker)?;
+                                let encoding = self.encode_with_timing(prompt, tracker).await?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -1725,7 +1723,7 @@ impl OpenAIPreprocessor {
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encoding = self.encode_with_timing(&texts[0], tracker)?;
+                                let encoding = self.encode_with_timing(&texts[0], tracker).await?;
                                 let tokens = encoding.token_ids().to_vec();
                                 token_count = Some(tokens.len());
                                 tokens_out = tokens;
@@ -1772,19 +1770,25 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    fn encode_with_timing(
+    async fn encode_with_timing(
         &self,
         prompt: &str,
         tracker: Option<&RequestTracker>,
     ) -> anyhow::Result<Encoding> {
         let encode_start = Instant::now();
-        let prompt = if prompt.contains('\0') {
+        // Offload the CPU-heavy BPE encode to the bounded blocking pool instead of running it on
+        // the async event loop. For long prompts at high concurrency, a synchronous encode here
+        // stalls the frontend tokio runtime for seconds, starving the I/O tasks that share the
+        // runtime. Own the prompt + clone the tokenizer (Arc) so the closure is 'static + Send;
+        // mirrors the embedding path's spawn_blocking offload.
+        let owned = if prompt.contains('\0') {
             tracing::debug!("Prompt contains null bytes; stripping to avoid tokenizer divergence");
-            Cow::Owned(prompt.replace('\0', ""))
+            prompt.replace('\0', "")
         } else {
-            Cow::Borrowed(prompt)
+            prompt.to_string()
         };
-        let encoding = self.tokenizer.encode(prompt.as_ref())?;
+        let tokenizer = self.tokenizer.clone();
+        let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
@@ -2422,7 +2426,20 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// Apply tool calling jail to the stream if needed
+    /// Apply tool calling jail to the stream if needed.
+    ///
+    /// The jail itself now lives in `dynamo-parsers`
+    /// (`dynamo_parsers::tool_calling::jail`), where it operates on the shared
+    /// `CreateChatCompletionStreamResponse` — dynamo-parsers cannot depend on
+    /// dynamo-runtime, so it does not know about `Annotated` or the `Nv`
+    /// newtype. This method is the boundary adapter: it unwraps the dynamo
+    /// `Annotated<Nv{inner, nvext}>` stream into the jail's
+    /// `Annotated<CreateChatCompletionStreamResponse>`, runs the moved jail, and
+    /// re-wraps the result.
+    ///
+    /// `nvext` is not populated on the streaming tool-call path (only the unary
+    /// aggregator/anthropic paths set it), so the jail never needs to preserve
+    /// it and re-wrapped chunks carry `nvext: None`.
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -2433,63 +2450,81 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        use dynamo_protocols::types::ChatCompletionToolChoiceOption;
+        use dynamo_parsers::tool_calling::jail::{
+            Annotated as JailAnnotated, apply_tool_calling_jail as jail_apply,
+        };
+        use std::sync::{Arc, Mutex};
 
-        let mut builder = JailedStream::builder();
-
-        // Set tool definitions if provided
-        if let Some(tool_definitions) = tool_definitions
-            && !tool_definitions.is_empty()
-        {
-            builder = builder.tool_definitions(tool_definitions);
+        // The jail operates on the shared `Create` payload and never touches the
+        // dynamo-only typed `llm_metrics`, which `transform_postprocessor_stream`
+        // stamps *upstream* of the jail. `Create` has no slot for it, so buffer it
+        // here on the way in and re-attach on the way out — keeping the metrics off
+        // the shared type while preserving them across the boundary.
+        //
+        // `llm_metrics` is cumulative (`output_tokens`) plus per-chunk
+        // (`chunk_tokens`), and the jail may fold N buffered input chunks into one
+        // emitted chunk. So accumulate `chunk_tokens` and stamp the running total,
+        // with the latest cumulative fields, onto the next emitted data chunk. That
+        // preserves what `metrics.rs` records: `observe_response` sums `chunk_tokens`
+        // and `observe_current_osl` takes the latest `output_tokens`. (The
+        // annotation form on data-less usage chunks rides through untouched via
+        // `event`/`comment`.)
+        #[derive(Default)]
+        struct PendingMetrics {
+            template: Option<LLMMetricAnnotation>,
+            chunk_tokens: usize,
         }
+        let pending = Arc::new(Mutex::new(PendingMetrics::default()));
+        let pending_in = Arc::clone(&pending);
 
-        // When structural_tag is active, the model output is already constrained by
-        // guided decoding into a model-specific format. Always use the marker-based
-        // parser to extract tool calls from that format.
-        if uses_tool_call_structural_tag {
-            if let Some(parser) = tool_call_parser {
-                builder = builder.tool_call_parser(parser);
+        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
+        let jail_input = stream.map(move |mut a| {
+            if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
+                let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
+                p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
+                p.template = Some(metrics);
             }
-        } else {
-            // Configure jail based on tool_choice
-            //
-            // For tool_choice=required or named we mirror SGLang / vLLM: assume the
-            // backend applied guided decoding and emit a bare JSON shape, so parse
-            // via the JSON array parser (base_json_parser) rather than the model's
-            // native-format parser.  If a parser is also configured we still carry
-            // it so the Immediate branch can fall back to marker-based parsing for
-            // backends that do not honor guided decoding (e.g. XML-native models
-            // like qwen3_coder — see regression test_tool_choice_required_with_
-            // qwen3_coder_parser).
-            match tool_choice {
-                Some(ChatCompletionToolChoiceOption::Named(named)) => {
-                    builder = builder
-                        .tool_choice_named(named.function.name.clone())
-                        .named_tool_filter(named.function.name.clone());
-                    if let Some(parser) = tool_call_parser {
-                        builder = builder.tool_call_parser(parser);
-                    }
-                }
-                Some(ChatCompletionToolChoiceOption::Required) => {
-                    builder = builder.tool_choice_required();
-                    if let Some(parser) = tool_call_parser {
-                        builder = builder.tool_call_parser(parser);
-                    }
-                }
-                Some(ChatCompletionToolChoiceOption::Auto)
-                | Some(ChatCompletionToolChoiceOption::None)
-                | None => {
-                    // Traditional marker-based jail for auto/none/unspecified
-                    if let Some(parser) = tool_call_parser {
-                        builder = builder.tool_call_parser(parser);
-                    }
-                }
+            JailAnnotated {
+                data: a.data.map(|nv| nv.inner),
+                id: a.id,
+                event: a.event,
+                comment: a.comment,
+                error: a.error.map(|e| e.to_string()),
             }
-        }
+        });
 
-        let jail = builder.build();
-        jail.apply_with_finish_reason(stream)
+        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach llm_metrics)
+        jail_apply(
+            tool_call_parser,
+            tool_choice,
+            tool_definitions,
+            uses_tool_call_structural_tag,
+            jail_input,
+        )
+        .map(move |a| {
+            // Stamp the accumulated metrics onto the next emitted data chunk;
+            // data-less/synthesized chunks carry it forward (or `None`).
+            let llm_metrics = a.data.as_ref().and_then(|_| {
+                let mut p = pending.lock().expect("jail metrics buffer poisoned");
+                let chunk_tokens = p.chunk_tokens;
+                p.chunk_tokens = 0;
+                p.template.take().map(|mut metrics| {
+                    metrics.chunk_tokens = chunk_tokens;
+                    metrics
+                })
+            });
+            Annotated {
+                data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                    inner,
+                    nvext: None,
+                    llm_metrics,
+                }),
+                id: a.id,
+                event: a.event,
+                comment: a.comment,
+                error: a.error.map(DynamoError::msg),
+            }
+        })
     }
 
     /// Whether the selected tool-call or reasoning parser depends on the
@@ -3168,7 +3203,9 @@ impl
         } else {
             // Normal path: tokenize the prompt; embeddings don't need MM routing,
             // so install tokens on the builder right away.
-            let (token_ids, ann) = self.gather_tokens(&request, None, tracker.as_deref())?;
+            let (token_ids, ann) = self
+                .gather_tokens(&request, None, tracker.as_deref())
+                .await?;
             builder.token_ids(token_ids);
             ann
         };

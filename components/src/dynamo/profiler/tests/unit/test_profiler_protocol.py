@@ -599,6 +599,114 @@ def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
         assert (
             model_path in flat_args
         ), f"Worker '{svc_name}' should use PVC model path '{model_path}'. args={args}"
+        assert args[args.index("--served-model-name") + 1] == model_name
+
+
+@pytest.mark.parametrize(
+    "backend,model_arg",
+    [("vllm", "--model"), ("sglang", "--model-path"), ("trtllm", "--model-path")],
+)
+def test_update_model_from_pvc_canonicalizes_duplicate_model_args(
+    backend, model_arg
+) -> None:
+    """PVC model updates leave exactly one logical name and runtime path."""
+    modifier = CONFIG_MODIFIERS[backend]
+    model_name = "Qwen/Qwen3-32B"
+    mount_path = "/opt/model-cache"
+    model_path = f"{mount_path}/qwen3-32b"
+    dgd_config = modifier.build_dgd_config(
+        mode="agg",
+        model_name="stale/model",
+        image=f"example/{backend}:test",
+        agg_cli_args=[],
+        agg_replicas=1,
+        agg_gpus=1,
+    )
+
+    services = dgd_config["spec"]["services"]
+    worker = next(
+        service
+        for name, service in services.items()
+        if name not in BaseConfigModifier._NON_WORKER_SERVICES
+    )
+    worker_args = worker["extraPodSpec"]["mainContainer"]["args"]
+    worker_args.extend(
+        [
+            f"{model_arg}=/stale/equal-form",
+            model_arg,
+            "/stale/split-form",
+            "--served-model-name=stale-equal",
+            "--served-model-name",
+            "stale-split",
+        ]
+    )
+
+    frontend_container = services["Frontend"]["extraPodSpec"]["mainContainer"]
+    frontend_container["args"] = frontend_container.get("args") or []
+    frontend_args = frontend_container["args"]
+    frontend_args.extend(
+        [
+            "--model-name=stale-equal",
+            "--model-name",
+            "stale-split",
+            "--model-path=/stale/equal-form",
+            "--model-path",
+            "/stale/split-form",
+        ]
+    )
+
+    result = modifier.update_model_from_pvc(
+        dgd_config,
+        model_name=model_name,
+        pvc_name="model-cache",
+        pvc_mount_path=mount_path,
+        pvc_path="qwen3-32b",
+    )
+
+    result_services = result["spec"]["services"]
+    result_worker = next(
+        service
+        for name, service in result_services.items()
+        if name not in BaseConfigModifier._NON_WORKER_SERVICES
+    )
+    result_worker_args = result_worker["extraPodSpec"]["mainContainer"]["args"]
+    assert [
+        arg
+        for arg in result_worker_args
+        if arg == model_arg or arg.startswith(f"{model_arg}=")
+    ] == [model_arg]
+    assert result_worker_args[result_worker_args.index(model_arg) + 1] == model_path
+    assert [
+        arg
+        for arg in result_worker_args
+        if arg == "--served-model-name" or arg.startswith("--served-model-name=")
+    ] == ["--served-model-name"]
+    assert (
+        result_worker_args[result_worker_args.index("--served-model-name") + 1]
+        == model_name
+    )
+
+    result_frontend_args = result_services["Frontend"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ]
+    assert [
+        arg
+        for arg in result_frontend_args
+        if arg == "--model-name" or arg.startswith("--model-name=")
+    ] == ["--model-name"]
+    assert [
+        arg
+        for arg in result_frontend_args
+        if arg == "--model-path" or arg.startswith("--model-path=")
+    ] == ["--model-path"]
+    assert (
+        result_frontend_args[result_frontend_args.index("--model-name") + 1]
+        == model_name
+    )
+    assert (
+        result_frontend_args[result_frontend_args.index("--model-path") + 1]
+        == model_path
+    )
 
 
 def test_build_dgd_config_pvc_without_model_path_sets_hf_home() -> None:

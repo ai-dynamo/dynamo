@@ -3521,6 +3521,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             prompt = TextPrompt(prompt=input_data)
 
+        _apply_nvext_cache_salt(request, prompt)
+
         # Build sampling params from OpenAI-style request
         sampling_params = build_sampling_params_openai(
             request, self.default_sampling_params

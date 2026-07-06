@@ -76,6 +76,16 @@ def _check_auto_backend_support(model: str, system: str) -> bool:
     )
 
 
+def _check_dgdr_aic_support(
+    dgdr: DynamoGraphDeploymentRequestSpec, backend: str, system: str
+) -> bool:
+    """Check AIC support using a mounted model config when one is available."""
+    model_path = resolve_model_path(dgdr)
+    if backend == "auto":
+        return _check_auto_backend_support(model_path, system)
+    return check_model_hardware_support(model_path, system, backend)
+
+
 def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
     """Pull all profiler parameters from dgdr and log them."""
     model = dgdr.model
@@ -362,10 +372,7 @@ async def run_profile(
             search_strategy,
             picking_mode,
         ) = _extract_profiler_params(dgdr)
-        if backend == "auto":
-            aic_supported = _check_auto_backend_support(model, system)
-        else:
-            aic_supported = check_model_hardware_support(model, system, backend)
+        aic_supported = _check_dgdr_aic_support(dgdr, backend, system)
         # then validate DGDR features based on AIC support
         validate_dgdr_dynamo_features(dgdr, aic_supported)
 

@@ -60,6 +60,26 @@ from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler
 logger = logging.getLogger(__name__)
 
 
+def _normalize_candidate_model_identity(
+    candidates,
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    model_cache: ModelCacheSpec,
+    config_modifier,
+) -> None:
+    """Keep the DGDR model name separate from its PVC runtime path."""
+    if not model_cache.pvcName or not model_cache.pvcModelPath:
+        return
+
+    for candidate in candidates:
+        candidate.dgd_config = config_modifier.update_model_from_pvc(
+            candidate.dgd_config,
+            model_name=dgdr.model,
+            pvc_name=model_cache.pvcName,
+            pvc_mount_path=model_cache.pvcMountPath,
+            pvc_path=model_cache.pvcModelPath,
+        )
+
+
 async def _benchmark_prefill_candidates(
     prefill_candidates,
     ops: ProfilerOperationalConfig,
@@ -409,6 +429,15 @@ async def run_thorough(
             runtime_backend=backend,
             model_name_or_path=local_or_hf_model,
         )
+
+    # Overrides may carry stale model arguments, so reassert the DGDR model
+    # identity and PVC runtime path after all user-controlled transforms.
+    _normalize_candidate_model_identity(
+        prefill_candidates, dgdr, model_cache, config_modifier
+    )
+    _normalize_candidate_model_identity(
+        decode_candidates, dgdr, model_cache, config_modifier
+    )
     logger.info(
         "Materialized %d prefill + %d decode benchmark candidates.",
         len(prefill_candidates),
