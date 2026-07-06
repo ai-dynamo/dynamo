@@ -352,6 +352,12 @@ emit request or response payload rows, even when the OpenAI request sets
 `store=true`. Set `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true` to emit
 payload rows for every eligible chat request.
 
+> [!WARNING]
+> Audit payload logging has migrated to request trace. This is a breaking
+> migration for legacy audit consumers: the `store=true` audit trigger and old
+> audit wire schema are not preserved. Payload rows use
+> `dynamo.request.trace.v1` with `event_type=request_payload`.
+
 > [!IMPORTANT]
 > The OTLP payload path is enabled by `DYN_REQUEST_TRACE_SINKS=otel`, or
 > by combining sinks such as `DYN_REQUEST_TRACE_SINKS=file,otel`.
@@ -385,9 +391,10 @@ Payload-related request trace variables:
 
 > [!WARNING]
 > Deprecated. `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`,
-> `DYN_AUDIT_NATS_SUBJECT`, and `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` remain
-> accepted as aliases. Prefer the `DYN_REQUEST_TRACE_*` variables for new
-> deployments.
+> `DYN_AUDIT_NATS_SUBJECT`, and `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are
+> migration shims, not legacy audit compatibility aliases. They configure
+> request trace sinks and request trace records. Prefer the
+> `DYN_REQUEST_TRACE_*` variables for new deployments.
 
 The `otel` sink ships over OTLP using the standard
 `OTEL_EXPORTER_OTLP_*` variables, resolved the same way as the runtime log and
