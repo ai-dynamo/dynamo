@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import msgspec
+import pytest
 
 from dynamo.common.export_forward_pass_metrics import (
     FpmExportRecord,
@@ -11,6 +12,8 @@ from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
 )
+
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
 def test_encode_export_record_is_ndjson_and_preserves_envelope_metadata():

@@ -422,9 +422,7 @@ pub(crate) struct FpmEventSubscriber {
 
     // recv mode state (lazily initialised on first recv() call)
     recv_started: Arc<AtomicBool>,
-    rx: Arc<
-        std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ReceivedFpmEvent>>>,
-    >,
+    rx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<ReceivedFpmEvent>>>>,
 
     // tracking mode state
     tracking_started: Arc<AtomicBool>,
@@ -446,6 +444,8 @@ struct ReceivedFpmEvent {
     published_at: u64,
     payload: Vec<u8>,
 }
+
+type FpmEnvelope = (u64, u64, u64, Vec<u8>);
 
 impl FpmEventSubscriber {
     fn ensure_recv_started(&self) -> PyResult<()> {
@@ -470,14 +470,13 @@ impl FpmEventSubscriber {
 
         let rt = component.drt().runtime().secondary();
         rt.spawn(async move {
-            let mut subscriber =
-                match EventSubscriber::for_component(&component, FPM_TOPIC).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!("FPM subscriber (recv): failed to create: {e}");
-                        return;
-                    }
-                };
+            let mut subscriber = match EventSubscriber::for_component(&component, FPM_TOPIC).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("FPM subscriber (recv): failed to create: {e}");
+                    return;
+                }
+            };
 
             tracing::info!("FPM subscriber (recv): listening for forward-pass-metrics events");
 
@@ -574,7 +573,7 @@ impl FpmEventSubscriber {
     /// Returns `(publisher_id, sequence, published_at_ms, payload)` or `None` if
     /// the stream is closed.  This shares recv mode with `recv()`; callers may use
     /// either method, but neither can be used after `start_tracking()`.
-    fn recv_envelope(&self, py: Python) -> PyResult<Option<(u64, u64, u64, Vec<u8>)>> {
+    fn recv_envelope(&self, py: Python) -> PyResult<Option<FpmEnvelope>> {
         Ok(self.blocking_recv_event(py)?.map(|event| {
             (
                 event.publisher_id,
