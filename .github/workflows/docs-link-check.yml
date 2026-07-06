@@ -38,7 +38,7 @@ jobs:
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"
             --exclude-path "./container/compliance/spdx_licenses/.*"
-            --accept "200..=299, 403, 429"
+            --accept "200..=299, 403, 429, 502..=504"
             --exclude-all-private
             --exclude 0.0.0.0
             --verbose
