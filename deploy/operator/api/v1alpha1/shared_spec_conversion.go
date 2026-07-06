@@ -1293,7 +1293,7 @@ func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec
 // fields (Resources, Envs, Probes, EnvFromSecret, ExtraPodSpec,
 // ExtraPodMetadata, FrontendSidecar) following the same merge precedence the
 // v1alpha1 controller uses at reconcile time: ExtraPodSpec.MainContainer wins
-// over dedicated fields, except for env which is additive.
+// over dedicated fields, except for env and volumeMounts which are additive.
 func buildPodTemplateToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
 	podTpl, err := buildSharedPodTemplateFromAlpha(src, ctx.PodTemplateOrigin, false)
 	if err != nil {
@@ -1347,12 +1347,17 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	}
 	main := src.ExtraPodSpec.MainContainer.DeepCopy()
 	baseEnvs := mainBase.Env
+	dedicatedVolumeMounts := slices.Clone(mainBase.VolumeMounts)
 	// Name must be "main" regardless of what MainContainer carried.
 	main.Name = mainContainerName
 	if err := mergo.Merge(mainBase, *main, mergo.WithOverride); err != nil {
 		return fmt.Errorf("merge main container: %w", err)
 	}
 	mainBase.Env = mergeEnvs(baseEnvs, main.Env)
+	// The v1alpha1 renderer merged extraPodSpec.mainContainer first, then
+	// appended the dedicated service-level mounts. Preserve that ordering rather
+	// than allowing mergo to replace the VolumeMounts slice.
+	mainBase.VolumeMounts = append(slices.Clone(main.VolumeMounts), dedicatedVolumeMounts...)
 	// StartupProbe has no dedicated v1alpha1 field; take it verbatim.
 	if main.StartupProbe != nil {
 		mainBase.StartupProbe = main.StartupProbe
@@ -1369,7 +1374,8 @@ func buildSharedPodTemplateFromAlpha(src *DynamoComponentDeploymentSharedSpec, p
 	// Main container: base from dedicated fields.
 	mainBase := buildMainContainerFromDedicated(src)
 
-	// Merge ExtraPodSpec.MainContainer on top, except for Env which is additive.
+	// Merge ExtraPodSpec.MainContainer on top, except for fields with legacy
+	// additive behavior handled by mergeExtraPodSpecMainContainer.
 	if err := mergeExtraPodSpecMainContainer(src, &mainBase); err != nil {
 		return nil, err
 	}
@@ -2196,7 +2202,8 @@ func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentS
 		ensureExtraPodSpecMainContainer(dst).Resources = *preservedMain.Resources.DeepCopy()
 	}
 	currentVolumeMounts := withoutCompilationCacheMounts(currentMain.VolumeMounts, dst.VolumeMounts)
-	if volumeMountOriginsMatchNative(volumeMountsFromNative(preservedSemanticMain.VolumeMounts), currentVolumeMounts) &&
+	preservedVolumeMounts := withoutCompilationCacheMounts(preservedSemanticMain.VolumeMounts, preserved.VolumeMounts)
+	if volumeMountOriginsMatchNative(volumeMountsFromNative(preservedVolumeMounts), currentVolumeMounts) &&
 		(len(preserved.VolumeMounts) > 0 || len(preservedMain.VolumeMounts) > 0) {
 		dst.VolumeMounts = restorePreservedVolumeMountOrigins(preserved.VolumeMounts, dst.VolumeMounts, preservedMain.VolumeMounts)
 		ensureExtraPodSpecMainContainer(dst).VolumeMounts = cloneNativeVolumeMounts(preservedMain.VolumeMounts)

@@ -73,6 +73,74 @@ func TestConvertFromSharedMemorySpec(t *testing.T) {
 	}
 }
 
+func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
+	in := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "volume-mounts", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					VolumeMounts: []VolumeMount{{
+						Name:                  "model-cache",
+						MountPoint:            "/models",
+						UseAsCompilationCache: true,
+					}},
+					ExtraPodSpec: &ExtraPodSpec{
+						PodSpec: &corev1.PodSpec{
+							Volumes: []corev1.Volume{{
+								Name: "config",
+								VolumeSource: corev1.VolumeSource{
+									ConfigMap: &corev1.ConfigMapVolumeSource{},
+								},
+							}},
+						},
+						MainContainer: &corev1.Container{
+							VolumeMounts: []corev1.VolumeMount{{
+								Name:      "config",
+								MountPath: "/config",
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := in.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if len(hub.Spec.Components) != 1 || hub.Spec.Components[0].PodTemplate == nil {
+		t.Fatalf("expected one converted component with a podTemplate, got %#v", hub.Spec.Components)
+	}
+	main, ok := findContainerByName(hub.Spec.Components[0].PodTemplate.Spec.Containers, mainContainerName)
+	if !ok {
+		t.Fatalf("expected converted main container, got %#v", hub.Spec.Components[0].PodTemplate.Spec.Containers)
+	}
+	wantHubMounts := []corev1.VolumeMount{
+		{Name: "config", MountPath: "/config"},
+		{Name: "model-cache", MountPath: "/models"},
+	}
+	if diff := cmp.Diff(wantHubMounts, main.VolumeMounts); diff != "" {
+		t.Fatalf("converted main volume mounts mismatch (-want +got):\n%s", diff)
+	}
+
+	out := &DynamoGraphDeployment{}
+	if err := out.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	got := out.Spec.Services["worker"]
+	if got == nil || got.ExtraPodSpec == nil || got.ExtraPodSpec.MainContainer == nil {
+		t.Fatalf("expected converted service and extra main container, got %#v", got)
+	}
+	if diff := cmp.Diff(in.Spec.Services["worker"].VolumeMounts, got.VolumeMounts); diff != "" {
+		t.Fatalf("service volume mounts changed after round-trip (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(in.Spec.Services["worker"].ExtraPodSpec.MainContainer.VolumeMounts, got.ExtraPodSpec.MainContainer.VolumeMounts); diff != "" {
+		t.Fatalf("extra main volume mounts changed after round-trip (-want +got):\n%s", diff)
+	}
+}
+
 func addGeneratedFrontendSidecarHubOnlySecurityContext(t *testing.T, podTemplate *corev1.PodTemplateSpec) {
 	t.Helper()
 	if podTemplate == nil {
