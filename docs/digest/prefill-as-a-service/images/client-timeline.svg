@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="266" viewBox="0 0 900 266" role="img" aria-label="Representative client-visible PFaS request timeline">
+<title>Representative client-visible PFaS request timeline</title>
+<rect width="900" height="266" fill="#111111"/>
+<text x="30.0" y="38.0" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="24" font-weight="700" text-anchor="start">Representative client-visible request timeline</text>
+<text x="30.0" y="62.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="13" font-weight="400" text-anchor="start">Run 3 · nearest median request · fingerprint 29d1f823181e</text>
+<rect x="70.0" y="118.0" width="498.5" height="56.0" rx="4" fill="#76b900"/>
+<rect x="568.5" y="118.0" width="261.5" height="56.0" rx="4" fill="#00a6a6"/>
+<text x="319.3" y="152.0" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="15" font-weight="600" text-anchor="middle">TTFT 14.03s</text>
+<text x="699.3" y="152.0" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="15" font-weight="600" text-anchor="middle">First-to-last token 7.36s</text>
+<text x="70.0" y="200.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">request start</text>
+<text x="568.5" y="200.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">first token</text>
+<text x="830.0" y="200.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">request complete</text>
+<text x="30.0" y="242.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="12" font-weight="400" text-anchor="start">These client intervals are not exact prefill, NIXL-transfer, network, or decode timings.</text>
+</svg>
