@@ -753,6 +753,23 @@ where
         instance_id: u64,
         allowed_fallback: Option<&HashSet<u64>>,
     ) -> anyhow::Result<ManyOut<U>> {
+        self.direct_within_prepared(request, instance_id, allowed_fallback, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    /// Like [`Self::direct_within`], but prepares the request after transport resolution and
+    /// returns the preparation metadata alongside the response stream.
+    pub async fn direct_within_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        allowed_fallback: Option<&HashSet<u64>>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         // When fault detection is disabled, check the raw discovery list
         // (not filtered by report_instance_down) so transient failures
         // don't poison the instance for subsequent retries.
@@ -785,7 +802,7 @@ where
         let fallback = allowed_fallback
             .map(TransportFallback::Within)
             .unwrap_or(TransportFallback::Allow);
-        self.generate_with_fault_detection(instance_id, request, fallback)
+        self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
             .await
     }
 
@@ -818,6 +835,32 @@ where
             .await?;
         let metadata = prepare(&mut request, instance_id)?;
         let stream = self.dispatch_exact(request, instance_id).await?;
+        let stream = match permit {
+            Some(permit) => permit.into_tracked_stream(stream),
+            None => stream,
+        };
+        Ok((metadata, stream))
+    }
+
+    /// Select a worker using the configured routing mode, prepare the request with the worker
+    /// that survives transport resolution, then dispatch with normal fallback behavior.
+    pub async fn select_and_dispatch<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        let (instance_id, permit) = self.select_exact_target(request.content(), None).await?;
+        let (metadata, stream) = self
+            .generate_with_fault_detection_prepared(
+                instance_id,
+                request,
+                TransportFallback::Allow,
+                prepare,
+            )
+            .await?;
         let stream = match permit {
             Some(permit) => permit.into_tracked_stream(stream),
             None => stream,
@@ -1136,21 +1179,45 @@ where
                                 .await
                         }
                         .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+                        tracing::info!(
+                            router_mode = "device-aware-weighted",
+                            worker_id = instance_id,
+                            candidate_count = selection.candidates.len(),
+                            load = state.load(instance_id),
+                            embedding_cache_hit = selection.embedding_cache_hit,
+                            request_cache_keys = selection.request_cache_keys,
+                            "Selected worker"
+                        );
                         let permit = (!selection.full_embedding_cache_hit)
                             .then(|| OccupancyPermit::new(state, instance_id));
                         return Ok((instance_id, permit));
                     }
                     _ => unreachable!(),
                 };
+                if self.router_mode == RouterMode::LeastLoaded {
+                    tracing::info!(
+                        router_mode = "least-loaded",
+                        worker_id = instance_id,
+                        candidate_count = instance_ids.len(),
+                        load = state.load(instance_id),
+                        "Selected worker"
+                    );
+                }
                 Ok((instance_id, Some(OccupancyPermit::new(state, instance_id))))
             }
-            RouterMode::RoundRobin | RouterMode::Random => self
-                .select_next_worker()
-                .map(|instance_id| (instance_id, None))
-                .ok_or_else(|| {
+            RouterMode::RoundRobin | RouterMode::Random => {
+                let instance_id = self.select_next_worker().ok_or_else(|| {
                     let routing_instances = self.client.routing_instances();
                     self.empty_free_pool_error(&routing_instances)
-                }),
+                })?;
+                tracing::info!(
+                    router_mode = ?self.router_mode,
+                    worker_id = instance_id,
+                    candidate_count = self.client.routing_instances().free_ids().len(),
+                    "Selected worker"
+                );
+                Ok((instance_id, None))
+            }
             RouterMode::Direct => Err(anyhow::anyhow!(
                 "Worker ID required for exact dispatch in Direct routing mode"
             )),
@@ -1185,6 +1252,21 @@ where
         request: SingleIn<T>,
         fallback: TransportFallback<'_>,
     ) -> anyhow::Result<ManyOut<U>> {
+        self.generate_with_fault_detection_prepared(instance_id, request, fallback, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn generate_with_fault_detection_prepared<M, F>(
+        &self,
+        instance_id: u64,
+        mut request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
         let route_span = if matches!(self.router_mode, RouterMode::KV) {
@@ -1202,6 +1284,7 @@ where
 
         let (instance_id, address, transport_kind, instance) =
             self.resolve_transport(instance_id, fallback)?;
+        let metadata = prepare(&mut request, instance_id)?;
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
@@ -1214,7 +1297,8 @@ where
             .generate(request)
             .instrument(route_span)
             .await;
-        self.wrap_with_fault_detection(stream, instance_id)
+        let stream = self.wrap_with_fault_detection(stream, instance_id)?;
+        Ok((metadata, stream))
     }
 
     /// Reject early if the selected worker is overloaded and fault detection
@@ -2400,6 +2484,42 @@ mod tests {
             );
         }
 
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn prepared_dispatch_observes_worker_after_transport_fallback() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_prepared_transport_fallback".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let real_id = client.wait_for_instances().await.unwrap()[0].id();
+        let stale_id = real_id.wrapping_add(1);
+        client.override_instance_avail(vec![stale_id, real_id]);
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        let observed = Arc::new(AtomicU64::new(0));
+        let observed_for_prepare = observed.clone();
+
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            router.select_and_dispatch(SingleIn::new(42), move |_, worker_id| {
+                observed_for_prepare.store(worker_id, Ordering::Relaxed);
+                Ok(())
+            }),
+        )
+        .await;
+
+        assert_eq!(observed.load(Ordering::Relaxed), real_id);
         rt.shutdown();
     }
 

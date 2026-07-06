@@ -150,7 +150,10 @@ impl SessionAffinityPushRouter {
         if !self.direct && session_id.is_none() {
             let explicit = explicit_target(&request, RequestPhase::Prefill)?;
             return self
-                .select_and_dispatch_exact_target(request, explicit, prepare)
+                .select_and_dispatch_exact_target(request, explicit, move |request, target| {
+                    Self::record_target(request, target);
+                    prepare(request, target)
+                })
                 .await;
         }
         let explicit = self.direct_target(
@@ -164,7 +167,10 @@ impl SessionAffinityPushRouter {
                 ));
             };
             return self
-                .select_and_dispatch_exact_target(request, Some(target), prepare)
+                .select_and_dispatch_exact_target(request, Some(target), move |request, target| {
+                    Self::record_target(request, target);
+                    prepare(request, target)
+                })
                 .await;
         };
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
@@ -230,7 +236,20 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
             None
         };
         if !self.direct && session_id.is_none() {
-            return self.inner.generate(request).await;
+            let (_, stream) = self
+                .inner
+                .select_and_dispatch(request, |request, worker_id| {
+                    Self::record_target(
+                        request,
+                        AffinityTarget {
+                            worker_id,
+                            dp_rank: None,
+                        },
+                    );
+                    Ok(())
+                })
+                .await?;
+            return Ok(stream);
         }
         let explicit = self.direct_target(explicit_target(&request, phase)?, phase)?;
         let Some(session_id) = session_id else {
@@ -239,7 +258,29 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
                     "Direct routing requires an explicit {phase} target"
                 )));
             };
-            return self.inner.direct(request, target.worker_id).await;
+            let (_, stream) = self
+                .inner
+                .direct_within_prepared(
+                    request,
+                    target.worker_id,
+                    None,
+                    move |request, worker_id| {
+                        Self::record_target(
+                            request,
+                            AffinityTarget {
+                                worker_id,
+                                dp_rank: if worker_id == target.worker_id {
+                                    target.dp_rank
+                                } else {
+                                    None
+                                },
+                            },
+                        );
+                        Ok(())
+                    },
+                )
+                .await?;
+            return Ok(stream);
         };
 
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
@@ -311,6 +352,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
@@ -321,6 +364,7 @@ mod tests {
     use crate::protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         preprocessor::RoutingHints,
+        timing::RequestTracker,
     };
     use crate::session_affinity::AffinityAcquire;
 
@@ -384,6 +428,62 @@ mod tests {
         assert!(router.affinity.is_none());
 
         drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn non_kv_modes_record_selected_worker_without_session_affinity() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("session_affinity_worker_disclosure".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+
+        for (index, mode) in [
+            RouterMode::Random,
+            RouterMode::RoundRobin,
+            RouterMode::PowerOfTwoChoices,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+            RouterMode::Direct,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let endpoint = component.endpoint(format!("mode-{index}"));
+            let client = endpoint.client().await.unwrap();
+            endpoint.register_endpoint_instance().await.unwrap();
+            let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+            let inner = PushRouter::from_client(client, mode).await.unwrap();
+            let router =
+                SessionAffinityPushRouter::new(inner, None, mode.is_direct_routing()).unwrap();
+            let tracker = Arc::new(RequestTracker::new());
+            let mut content = request(mode.is_direct_routing().then_some(worker_id), false);
+            content.tracker = Some(tracker.clone());
+
+            let _ = tokio::time::timeout(
+                Duration::from_millis(100),
+                router.generate(Context::new(content)),
+            )
+            .await;
+
+            assert_eq!(
+                tracker.prefill_worker_id(),
+                Some(worker_id),
+                "{mode:?} must disclose its prefill worker"
+            );
+            assert_eq!(
+                tracker.decode_worker_id(),
+                Some(worker_id),
+                "{mode:?} must disclose its decode worker"
+            );
+        }
+
         runtime.shutdown();
     }
 
