@@ -600,9 +600,6 @@ impl<
             )
             .await;
             let wait_ms = entry.enqueue_at.elapsed().as_millis() as u64;
-            #[cfg(feature = "metrics")]
-            super::metrics::SchedulingMetrics::get_or_init()
-                .observe_queue_wait(self.worker_type, entry.enqueue_at.elapsed().as_secs_f64() * 1000.0);
             if let Some(RefreshedOverlap {
                 tier_overlap_blocks,
                 effective_overlap_blocks,
@@ -638,6 +635,9 @@ impl<
                 break;
             }
             tracing::debug!("scheduling request from pending queue");
+            #[cfg(feature = "metrics")]
+            super::metrics::SchedulingMetrics::get_or_init()
+                .observe_queue_wait(self.worker_type, entry.enqueue_at.elapsed().as_secs_f64() * 1000.0);
             self.admit_one(request, admit_now);
         }
     }
