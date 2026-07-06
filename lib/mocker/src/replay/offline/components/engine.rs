@@ -401,7 +401,10 @@ impl EngineComponent {
                                     output_signals: Vec::new(),
                                     lifecycle_events: Vec::new(),
                                     kv_events: Vec::new(),
-                                    fpm: None,
+                                    fpm: Some(ForwardPassSnapshot {
+                                        wall_time_secs: group_wall_time_secs,
+                                        ..Default::default()
+                                    }),
                                     accept_length_output_tokens: 0,
                                     accept_length_decode_forwards: 0,
                                 },
@@ -715,6 +718,19 @@ mod tests {
         let first_epoch = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert_eq!(first_epoch.scheduled_completions.len(), 2);
         assert!(engine.debug_snapshots().iter().all(|rank| rank.busy));
+        let idle_fpm = first_epoch
+            .scheduled_completions
+            .iter()
+            .find(|completion| completion.payload.worker_idx == 1)
+            .unwrap()
+            .payload
+            .fpm
+            .as_ref()
+            .expect("idle DP rank must emit an empty FPM");
+        assert!(!fpm_has_scheduled_work(idle_fpm));
+        assert_eq!(idle_fpm.num_queued_prefill, 0);
+        assert_eq!(idle_fpm.num_queued_decode, 0);
+        assert!((idle_fpm.wall_time_secs - 0.009).abs() < f64::EPSILON);
 
         let mid_epoch = Uuid::from_u128(41);
         collector.on_arrival(mid_epoch, 4.0, 4, 1);
