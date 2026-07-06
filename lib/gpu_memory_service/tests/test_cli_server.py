@@ -64,10 +64,6 @@ def test_supervisor_starts_one_multi_tag_child_per_device(monkeypatch):
             "gpu_memory_service",
             "--device",
             str(device),
-            "--tag",
-            "weights",
-            "--tag",
-            "kv_cache",
         ]
         for device in range(3)
     ]
@@ -87,14 +83,14 @@ def test_supervisor_terminates_siblings_when_child_exits(monkeypatch):
     assert processes[1].terminated
 
 
-def test_parse_args_multi_tag_configs_are_independent(monkeypatch):
+def test_parse_args_defaults_to_one_config_per_production_tag(monkeypatch):
     monkeypatch.setattr(
         cli_args,
         "get_socket_path",
         lambda device, tag: f"/sockets/{device}-{tag}.sock",
     )
 
-    configs = parse_args(["--device", "3", "--tag", "weights", "--tag", "kv_cache"])
+    configs = parse_args(["--device", "3"])
 
     assert [config.tag for config in configs] == ["weights", "kv_cache"]
     assert [config.socket_path for config in configs] == [
@@ -103,22 +99,14 @@ def test_parse_args_multi_tag_configs_are_independent(monkeypatch):
     ]
     assert all(config.device == 3 for config in configs)
 
+    (config,) = parse_args(["--device", "3", "--tag", "kv_cache"])
+    assert config.tag == "kv_cache"
 
-def test_parse_args_rejects_socket_path_with_multiple_tags(capsys):
+
+def test_parse_args_rejects_socket_path_without_exactly_one_tag(capsys):
     with pytest.raises(SystemExit):
-        parse_args(
-            [
-                "--device",
-                "0",
-                "--tag",
-                "weights",
-                "--tag",
-                "kv_cache",
-                "--socket-path",
-                "/tmp/gms.sock",
-            ]
-        )
-    assert "--socket-path is only valid with a single --tag" in capsys.readouterr().err
+        parse_args(["--device", "0", "--socket-path", "/tmp/gms.sock"])
+    assert "--socket-path requires exactly one --tag" in capsys.readouterr().err
 
 
 def _config(tag: str, socket_path: str) -> Config:
