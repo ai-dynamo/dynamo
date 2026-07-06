@@ -101,7 +101,8 @@ Content-Type: application/json
 
 `POST /workers` returns `201`. `PATCH /workers/{worker_id}` updates supplied
 fields; collection fields such as `metadata` replace the whole value when
-provided, so clients must resend any keys they want to keep. `DELETE /workers/{worker_id}`
+provided, so clients must resend any keys they want to keep. For `metadata`,
+`{}` clears the map, and omitting the field leaves the map unchanged. `DELETE /workers/{worker_id}`
 marks the worker `unschedulable`. Deactivated records remain visible in
 `GET /workers` and `GET /ready` `workers`; use `lifecycle` or
 `schedulable_workers` for active worker views. `model_name` and `tenant_id` scope

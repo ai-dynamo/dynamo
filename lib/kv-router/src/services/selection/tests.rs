@@ -147,15 +147,31 @@ async fn worker_metadata_round_trips_without_affecting_readiness() {
 
     let patch = serde_json::json!({
         "metadata": {
-            "managed-by": "dynamo-operator",
-            "adapter": "external-sglang",
             "selector-url": "http://selector:8000"
         }
+    });
+    let response = patch_json(app.clone(), "/workers/7", &patch.to_string()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["metadata"]["selector-url"], "http://selector:8000");
+    assert!(body["metadata"].get("managed-by").is_none());
+    assert!(body["metadata"].get("adapter").is_none());
+
+    let patch = serde_json::json!({
+        "endpoint": "http://worker-7:8001"
+    });
+    let response = patch_json(app.clone(), "/workers/7", &patch.to_string()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["metadata"]["selector-url"], "http://selector:8000");
+
+    let patch = serde_json::json!({
+        "metadata": {}
     });
     let response = patch_json(app, "/workers/7", &patch.to_string()).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["metadata"]["selector-url"], "http://selector:8000");
+    assert!(body.get("metadata").is_none());
 }
 
 #[test]
