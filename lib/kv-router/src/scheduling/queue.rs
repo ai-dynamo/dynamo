@@ -570,7 +570,7 @@ impl<
                 #[cfg(feature = "metrics")]
                 super::metrics::SchedulingMetrics::get_or_init().observe_pending_queue_age(
                     self.worker_type,
-                    front.enqueue_at.elapsed().as_millis() as u64,
+                    front.enqueue_at.elapsed().as_secs_f64() * 1000.0,
                 );
                 break;
             }
@@ -602,7 +602,7 @@ impl<
             let wait_ms = entry.enqueue_at.elapsed().as_millis() as u64;
             #[cfg(feature = "metrics")]
             super::metrics::SchedulingMetrics::get_or_init()
-                .observe_queue_wait(self.worker_type, wait_ms);
+                .observe_queue_wait(self.worker_type, entry.enqueue_at.elapsed().as_secs_f64() * 1000.0);
             if let Some(RefreshedOverlap {
                 tier_overlap_blocks,
                 effective_overlap_blocks,
@@ -623,7 +623,7 @@ impl<
                 #[cfg(feature = "metrics")]
                 super::metrics::SchedulingMetrics::get_or_init().observe_pending_queue_age(
                     self.worker_type,
-                    entry.enqueue_at.elapsed().as_millis() as u64,
+                    entry.enqueue_at.elapsed().as_secs_f64() * 1000.0,
                 );
                 let isl_tokens = request.isl_tokens;
                 self.pending.push(QueueEntry {
@@ -687,7 +687,7 @@ impl<
 
         #[cfg(feature = "metrics")]
         super::metrics::SchedulingMetrics::get_or_init()
-            .observe_admission_compute(self.worker_type, op_start.elapsed().as_millis());
+            .observe_admission_compute(self.worker_type, op_start.elapsed().as_secs_f64() * 1000.0);
 
         let selection = match selection {
             Ok(s) => s,

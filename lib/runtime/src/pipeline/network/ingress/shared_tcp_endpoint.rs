@@ -817,9 +817,9 @@ impl SharedTcpServer {
                 crate::metrics::request_plane::REQUEST_PLANE_ACK_FLUSH_SECONDS
                     .observe(now.duration_since(meta.decoded_at).as_secs_f64());
                 crate::metrics::request_plane::REQUEST_PLANE_ACK_WRITE_QUEUE_MS
-                    .observe(queue_ms as f64);
+                    .observe(dq.duration_since(meta.decoded_at).as_secs_f64() * 1000.0);
                 crate::metrics::request_plane::REQUEST_PLANE_ACK_SOCKET_WRITE_MS
-                    .observe(write_ms as f64);
+                    .observe(now.duration_since(dq).as_secs_f64() * 1000.0);
                 if total_ms >= warn_ms {
                     tracing::warn!(
                         target: "dynamo_ack_trace",

@@ -140,16 +140,16 @@ impl SchedulingMetrics {
         SCHEDULING_METRICS.get_or_init(|| Self::new().expect("scheduling metrics"))
     }
 
-    pub fn observe_admission_compute(&self, worker_type: &str, ms: u128) {
+    pub fn observe_admission_compute(&self, worker_type: &str, ms: f64) {
         self.admission_compute_ms
             .with_label_values(&[worker_type])
-            .observe(ms as f64);
+            .observe(ms);
     }
 
-    pub fn observe_queue_wait(&self, worker_type: &str, ms: u64) {
+    pub fn observe_queue_wait(&self, worker_type: &str, ms: f64) {
         self.queue_wait_ms
             .with_label_values(&[worker_type])
-            .observe(ms as f64);
+            .observe(ms);
     }
 
     pub fn observe_actor_mailbox_wait(&self, worker_type: &str, command: &str, ms: f64) {
@@ -170,10 +170,10 @@ impl SchedulingMetrics {
             .observe(ms);
     }
 
-    pub fn observe_pending_queue_age(&self, worker_type: &str, ms: u64) {
+    pub fn observe_pending_queue_age(&self, worker_type: &str, ms: f64) {
         self.pending_queue_age_ms
             .with_label_values(&[worker_type])
-            .observe(ms as f64);
+            .observe(ms);
     }
 
     pub fn observe_worker_state_update_to_scheduler(&self, event: &str, ms: f64) {
