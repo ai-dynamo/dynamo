@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import sys
 import textwrap
 from pathlib import Path
 
@@ -51,9 +52,9 @@ def blueprint() -> dict:
 def _write_fake_cli(tmp_path: Path) -> Path:
     path = tmp_path / "dgd-apply-overrides"
     path.write_text(
-        textwrap.dedent(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(
             """\
-            #!/usr/bin/env python3
             import json
             import os
             import sys

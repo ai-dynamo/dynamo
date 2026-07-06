@@ -11,6 +11,7 @@ All tests are no-GPU (gpu_0) and pre_merge.
 """
 
 import asyncio
+import copy
 import logging
 import os
 from pathlib import Path
@@ -507,6 +508,21 @@ def _run_mocked_thorough(dgdr, ops, backend: str):
                 p.stop()
 
 
+def _apply_test_dgd_override(dgd_config: dict, override: dict) -> dict:
+    """Overlay fixture data without duplicating the Go engine's merge rules."""
+    result = copy.deepcopy(dgd_config)
+
+    def overlay(target: dict, values: dict) -> None:
+        for key, value in values.items():
+            if isinstance(value, dict) and isinstance(target.get(key), dict):
+                overlay(target[key], value)
+            else:
+                target[key] = copy.deepcopy(value)
+
+    overlay(result, override)
+    return result
+
+
 def _assert_overrides_applied(final_config_path: Path, dgdr):
     """Assert the final DGD exists and that overrides are reflected."""
     assert final_config_path.exists(), "final_config.yaml should exist"
@@ -544,7 +560,16 @@ def _assert_overrides_applied(final_config_path: Path, dgdr):
 
 
 class TestThoroughMockedOverrides:
-    """Thorough + DGD overrides: verify overrides are applied end-to-end."""
+    """Verify override propagation through the mocked thorough pipeline."""
+
+    @pytest.fixture(autouse=True)
+    def mock_dgd_override_engine(self, monkeypatch):
+        # Merge correctness belongs to the Go tests and the real boundary test;
+        # this suite exercises profiler orchestration without an operator Job.
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_materialization.apply_dgd_overrides",
+            _apply_test_dgd_override,
+        )
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
