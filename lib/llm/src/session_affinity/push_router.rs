@@ -57,6 +57,18 @@ impl SessionAffinityPushRouter {
         tracker.record_worker(target.worker_id, target.dp_rank, worker_type);
     }
 
+    fn record_resolved_target(
+        request: &mut PreprocessedRequest,
+        requested: AffinityTarget,
+        worker_id: u64,
+    ) {
+        let dp_rank = requested
+            .dp_rank
+            .filter(|_| worker_id == requested.worker_id);
+        request.routing_mut().dp_rank = dp_rank;
+        Self::record_target(request, AffinityTarget { worker_id, dp_rank });
+    }
+
     fn direct_target(
         &self,
         explicit: Option<AffinityTarget>,
@@ -265,17 +277,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
                     target.worker_id,
                     None,
                     move |request, worker_id| {
-                        Self::record_target(
-                            request,
-                            AffinityTarget {
-                                worker_id,
-                                dp_rank: if worker_id == target.worker_id {
-                                    target.dp_rank
-                                } else {
-                                    None
-                                },
-                            },
-                        );
+                        Self::record_resolved_target(request, target, worker_id);
                         Ok(())
                     },
                 )
@@ -402,6 +404,27 @@ mod tests {
             .affinity
             .as_ref()
             .expect("test router must enable affinity")
+    }
+
+    #[test]
+    fn direct_fallback_clears_stale_dp_rank() {
+        let tracker = Arc::new(RequestTracker::new());
+        let mut content = request(Some(7), false);
+        content.routing_mut().dp_rank = Some(3);
+        content.tracker = Some(tracker.clone());
+
+        SessionAffinityPushRouter::record_resolved_target(
+            &mut content,
+            AffinityTarget {
+                worker_id: 7,
+                dp_rank: Some(3),
+            },
+            8,
+        );
+
+        assert_eq!(content.routing.unwrap().dp_rank, None);
+        assert_eq!(tracker.prefill_worker_id(), Some(8));
+        assert_eq!(tracker.decode_worker_id(), Some(8));
     }
 
     #[tokio::test]

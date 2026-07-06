@@ -79,6 +79,15 @@ impl OccupancyPermit {
         }
     }
 
+    fn retarget(&mut self, instance_id: u64) {
+        if self.instance_id == instance_id {
+            return;
+        }
+        self.state.increment(instance_id);
+        self.state.decrement(self.instance_id);
+        self.instance_id = instance_id;
+    }
+
     fn into_tracked_stream<U: Data>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
         self.armed = false;
         let engine_ctx = stream.context();
@@ -852,13 +861,18 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        let (instance_id, permit) = self.select_exact_target(request.content(), None).await?;
+        let (instance_id, mut permit) = self.select_exact_target(request.content(), None).await?;
         let (metadata, stream) = self
             .generate_with_fault_detection_prepared(
                 instance_id,
                 request,
                 TransportFallback::Allow,
-                prepare,
+                |request, resolved_instance_id| {
+                    if let Some(permit) = permit.as_mut() {
+                        permit.retarget(resolved_instance_id);
+                    }
+                    prepare(request, resolved_instance_id)
+                },
             )
             .await?;
         let stream = match permit {
@@ -2504,15 +2518,20 @@ mod tests {
         let real_id = client.wait_for_instances().await.unwrap()[0].id();
         let stale_id = real_id.wrapping_add(1);
         client.override_instance_avail(vec![stale_id, real_id]);
-        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
             .await
             .unwrap();
+        let state = router.occupancy_state.clone().unwrap();
+        state.increment(real_id);
+        let state_for_prepare = state.clone();
         let observed = Arc::new(AtomicU64::new(0));
         let observed_for_prepare = observed.clone();
 
         let _ = tokio::time::timeout(
             std::time::Duration::from_millis(100),
             router.select_and_dispatch(SingleIn::new(42), move |_, worker_id| {
+                assert_eq!(state_for_prepare.load(stale_id), 0);
+                assert_eq!(state_for_prepare.load(worker_id), 2);
                 observed_for_prepare.store(worker_id, Ordering::Relaxed);
                 Ok(())
             }),
@@ -2520,6 +2539,8 @@ mod tests {
         .await;
 
         assert_eq!(observed.load(Ordering::Relaxed), real_id);
+        assert_eq!(state.load(real_id), 1);
+        state.decrement(real_id);
         rt.shutdown();
     }
 
