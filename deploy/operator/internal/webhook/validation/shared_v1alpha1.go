@@ -30,6 +30,7 @@ import (
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -220,7 +221,11 @@ func (v *SharedSpecValidatorV1Alpha1) validateGMSClientContainerNames() error {
 
 // validateServiceAnnotations validates known annotations on the service-level spec.
 func (v *SharedSpecValidatorV1Alpha1) validateServiceAnnotations() error {
-	return validateVLLMDistributedExecutorBackendAnnotation(v.fieldPath+".annotations", v.spec.Annotations)
+	annotationsPath := ""
+	if v.fieldPath != "" {
+		annotationsPath = v.fieldPath + ".annotations"
+	}
+	return vllmDistributedExecutorBackendAnnotationError(annotationsPath, v.spec.Annotations)
 }
 
 // validateEPPConfig validates EPP-specific configuration constraints.
@@ -484,4 +489,133 @@ func (v *SharedSpecValidatorV1Alpha1) validateFrontendSidecar() error {
 		}
 	}
 	return nil
+}
+
+// validateDynamoComponentDeploymentSharedSpecV1alpha1 validates spec. spec and fldPath must not be nil.
+func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
+	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+	dynamoNamespace string,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if spec.DynamoNamespace != nil && *spec.DynamoNamespace != "" {
+		v.warnf(
+			"%s.dynamoNamespace is deprecated and ignored. Value %q will be replaced with %q. Remove this field from your configuration",
+			fldPath,
+			*spec.DynamoNamespace,
+			dynamoNamespace,
+		)
+	}
+	//nolint:staticcheck // SA1019: Intentionally warning about a deprecated preserved field.
+	if spec.Autoscaling != nil {
+		v.warnf(
+			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
+			fldPath,
+		)
+	}
+
+	if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(spec.Annotations); invalid {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("annotations").Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),
+			value,
+			`must be "mp" or "ray"`,
+		))
+	}
+
+	volumeMountsPath := fldPath.Child("volumeMounts")
+	for i := range spec.VolumeMounts {
+		allErrs = append(allErrs, v.validateVolumeMountV1alpha1(&spec.VolumeMounts[i], volumeMountsPath.Index(i))...)
+	}
+	if spec.Ingress != nil {
+		allErrs = append(allErrs, v.validateIngressSpecV1alpha1(spec.Ingress, fldPath.Child("ingress"))...)
+	}
+	if spec.EPPConfig != nil {
+		allErrs = append(allErrs, v.validateEPPConfigV1alpha1(spec.EPPConfig, fldPath.Child("eppConfig"))...)
+	}
+	if spec.FrontendSidecar != nil && spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil &&
+		hasContainerNamed(spec.ExtraPodSpec.PodSpec.Containers, consts.FrontendSidecarContainerName) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("frontendSidecar"),
+			fmt.Sprintf("cannot inject frontend sidecar: a container named %q already exists in extraPodSpec.containers", consts.FrontendSidecarContainerName),
+		))
+	}
+	if spec.Failover != nil {
+		allErrs = append(allErrs, v.validateFailoverSpecV1alpha1(spec.Failover, fldPath.Child("failover"))...)
+	}
+	return allErrs
+}
+
+// validateVolumeMountV1alpha1 validates volumeMount. volumeMount and fldPath must not be nil.
+func (v *sharedValidation) validateVolumeMountV1alpha1(
+	volumeMount *nvidiacomv1alpha1.VolumeMount,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if !volumeMount.UseAsCompilationCache && volumeMount.MountPoint == "" {
+		allErrs = append(allErrs, field.Required(
+			fldPath.Child("mountPoint"),
+			"is required when useAsCompilationCache is false",
+		))
+	}
+	return allErrs
+}
+
+// validateIngressSpecV1alpha1 validates ingress. ingress and fldPath must not be nil.
+func (v *sharedValidation) validateIngressSpecV1alpha1(
+	ingress *nvidiacomv1alpha1.IngressSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if !ingress.Enabled || ingress.Host != "" {
+		return nil
+	}
+	return field.ErrorList{field.Required(fldPath.Child("host"), "is required when ingress is enabled")}
+}
+
+// validateEPPConfigV1alpha1 validates config. config and fldPath must not be nil.
+func (v *sharedValidation) validateEPPConfigV1alpha1(
+	config *nvidiacomv1alpha1.EPPConfig,
+	fldPath *field.Path,
+) field.ErrorList {
+	if (config.ConfigMapRef == nil) == (config.Config == nil) {
+		return field.ErrorList{field.Invalid(
+			fldPath,
+			nil,
+			"exactly one of configMapRef or config is required",
+		)}
+	}
+	if config.ConfigMapRef == nil || config.ConfigMapRef.Name != "" {
+		return nil
+	}
+	return field.ErrorList{field.Required(fldPath.Child("configMapRef", "name"), "is required")}
+}
+
+// validateFailoverSpecV1alpha1 validates failover. failover and fldPath must not be nil.
+func (v *sharedValidation) validateFailoverSpecV1alpha1(
+	failover *nvidiacomv1alpha1.FailoverSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if !failover.Enabled || failover.Mode != nvidiacomv1alpha1.GMSModeIntraPod {
+		return nil
+	}
+	if failover.NumShadows == 0 || failover.NumShadows == 1 {
+		return nil
+	}
+	return field.ErrorList{field.Invalid(
+		fldPath.Child("numShadows"),
+		failover.NumShadows,
+		fmt.Sprintf("is invalid for mode=%q: intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode=%q to configure numShadows", nvidiacomv1alpha1.GMSModeIntraPod, nvidiacomv1alpha1.GMSModeInterPod),
+	)}
+}
+
+func vllmDistributedExecutorBackendAnnotationError(fieldPath string, annotations map[string]string) error {
+	value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(annotations)
+	if !invalid {
+		return nil
+	}
+	if fieldPath == "" {
+		return fmt.Errorf("annotation %s has invalid value %q: must be \"mp\" or \"ray\"",
+			consts.KubeAnnotationVLLMDistributedExecutorBackend, value)
+	}
+	return fmt.Errorf("%s[%s] has invalid value %q: must be \"mp\" or \"ray\"",
+		fieldPath, consts.KubeAnnotationVLLMDistributedExecutorBackend, value)
 }

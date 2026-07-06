@@ -150,7 +150,10 @@ class SglangLLMEngine(LLMEngine):
     async def from_args(
         cls, argv: list[str] | None = None
     ) -> tuple[SglangLLMEngine, WorkerConfig]:
-        config = await parse_args(argv if argv is not None else sys.argv[1:])
+        config = await parse_args(
+            argv if argv is not None else sys.argv[1:],
+            fpm_trace_relay_supported=False,
+        )
         server_args = config.server_args
         dynamo_args = config.dynamo_args
 
