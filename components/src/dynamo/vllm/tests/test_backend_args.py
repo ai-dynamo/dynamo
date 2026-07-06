@@ -282,3 +282,77 @@ class TestValidateCustomEncoder:
         config.custom_encoder_class = None
         config.enable_multimodal = False
         config._validate_custom_encoder()
+
+
+class TestIdleSleepValidation:
+    """--idle-sleep-timeout TTL ladder validation."""
+
+    def test_disabled_by_default(self):
+        config = create_config()
+        assert config.idle_sleep_enabled is False
+        # Must not raise.
+        config._validate_idle_sleep()
+
+    def test_zero_timeout_is_disabled(self):
+        config = create_config()
+        config.idle_sleep_timeout = 0
+        assert config.idle_sleep_enabled is False
+        config._validate_idle_sleep()
+
+    def test_negative_timeout_rejected(self):
+        config = create_config()
+        config.idle_sleep_timeout = -1
+        with pytest.raises(ValueError, match="idle-sleep-timeout"):
+            config._validate_idle_sleep()
+
+    def test_ladder_accepted(self):
+        config = create_config()
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.idle_sleep_timeout = 300
+        config.idle_sleep_escalate_timeout = 600
+        # Must not raise.
+        config._validate_idle_sleep()
+
+    def test_escalate_timeout_requires_timeout(self):
+        config = create_config()
+        config.idle_sleep_escalate_timeout = 600
+        with pytest.raises(ValueError, match="requires --idle-sleep-timeout"):
+            config._validate_idle_sleep()
+
+    @pytest.mark.parametrize("level", [0, 4])
+    def test_invalid_level_rejected(self, level):
+        config = create_config()
+        config.idle_sleep_timeout = 300
+        config.idle_sleep_level = level
+        with pytest.raises(ValueError, match="idle-sleep-level"):
+            config._validate_idle_sleep()
+
+    def test_escalate_level_must_be_deeper(self):
+        config = create_config()
+        config.idle_sleep_timeout = 300
+        config.idle_sleep_level = 2
+        config.idle_sleep_escalate_timeout = 600
+        config.idle_sleep_escalate_level = 2
+        with pytest.raises(ValueError, match="deeper"):
+            config._validate_idle_sleep()
+
+    def test_encode_worker_rejected(self):
+        config = create_config()
+        config.disaggregation_mode = DisaggregationMode.ENCODE
+        config.idle_sleep_timeout = 300
+        with pytest.raises(ValueError, match="encode workers"):
+            config._validate_idle_sleep()
+
+    def test_embedding_worker_rejected(self):
+        config = create_config()
+        config.embedding_worker = True
+        config.idle_sleep_timeout = 300
+        with pytest.raises(ValueError, match="embedding-worker"):
+            config._validate_idle_sleep()
+
+    def test_gms_shadow_mode_rejected(self):
+        config = create_config()
+        config.gms_shadow_mode = True
+        config.idle_sleep_timeout = 300
+        with pytest.raises(ValueError, match="gms-shadow-mode"):
+            config._validate_idle_sleep()

@@ -215,6 +215,58 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
+        # Idle sleep TTL ladder
+        add_argument(
+            g,
+            flag_name="--idle-sleep-timeout",
+            env_var="DYN_VLLM_IDLE_SLEEP_TIMEOUT",
+            default=None,
+            arg_type=float,
+            help=(
+                "Seconds of idle time (zero in-flight requests) before the "
+                "worker auto-sleeps: it unregisters from discovery, drains, "
+                "and sleeps the engine at --idle-sleep-level. Requires vLLM "
+                "sleep mode (--enable-sleep-mode). Waking stays external via "
+                "the control/wake_up route. Disabled by default."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--idle-sleep-level",
+            env_var="DYN_VLLM_IDLE_SLEEP_LEVEL",
+            default=1,
+            arg_type=int,
+            help=(
+                "Sleep level for idle auto-sleep: 1=weights only, "
+                "2=weights+buffers, 3=everything (default: 1)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--idle-sleep-escalate-timeout",
+            env_var="DYN_VLLM_IDLE_SLEEP_ESCALATE_TIMEOUT",
+            default=None,
+            arg_type=float,
+            help=(
+                "Additional seconds asleep before deepening the sleep to "
+                "--idle-sleep-escalate-level. Escalation briefly wakes the "
+                "engine to re-sleep at the deeper level, so expect a "
+                "transient GPU memory spike. Requires --idle-sleep-timeout. "
+                "Disabled by default."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--idle-sleep-escalate-level",
+            env_var="DYN_VLLM_IDLE_SLEEP_ESCALATE_LEVEL",
+            default=2,
+            arg_type=int,
+            help=(
+                "Sleep level to escalate to after "
+                "--idle-sleep-escalate-timeout (default: 2)."
+            ),
+        )
+
         # Benchmark / self-profiling
         add_argument(
             g,
@@ -326,6 +378,12 @@ class DynamoVllmConfig(ConfigBase):
     # GMS shadow mode
     gms_shadow_mode: bool = False
 
+    # Idle sleep TTL ladder (None/0 = disabled)
+    idle_sleep_timeout: Optional[float] = None
+    idle_sleep_level: int = 1
+    idle_sleep_escalate_timeout: Optional[float] = None
+    idle_sleep_escalate_level: int = 2
+
     # Benchmark / self-profiling
     benchmark_mode: Optional[str] = None
     benchmark_prefill_granularity: int = 16
@@ -335,6 +393,11 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 300
 
+    @property
+    def idle_sleep_enabled(self) -> bool:
+        """True when idle auto-sleep is configured (timeout set and > 0)."""
+        return bool(self.idle_sleep_timeout)
+
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
         self._resolve_disaggregation_mode()
@@ -343,6 +406,7 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
+        self._validate_idle_sleep()
 
     def _resolve_embedding_transfer_mode(self) -> None:
         """Resolve embedding_transfer_mode from string to enum."""
@@ -561,6 +625,45 @@ class DynamoVllmConfig(ConfigBase):
                 f"--disaggregation-mode=agg (got {mode}). The custom encoder "
                 "runs in-process in a single aggregated worker."
             )
+
+    def _validate_idle_sleep(self) -> None:
+        """Validate the idle sleep TTL ladder configuration."""
+        if self.idle_sleep_timeout is not None and self.idle_sleep_timeout < 0:
+            raise ValueError(
+                "--idle-sleep-timeout must be >= 0 (0 disables idle sleep)"
+            )
+        if not self.idle_sleep_enabled:
+            if self.idle_sleep_escalate_timeout is not None:
+                raise ValueError(
+                    "--idle-sleep-escalate-timeout requires --idle-sleep-timeout"
+                )
+            return
+        if self.idle_sleep_level not in (1, 2, 3):
+            raise ValueError("--idle-sleep-level must be 1, 2 or 3")
+        if self.disaggregation_mode == DisaggregationMode.ENCODE:
+            raise ValueError(
+                "--idle-sleep-timeout is not supported for encode workers "
+                "(they do not expose the sleep/wake_up engine routes)"
+            )
+        if self.embedding_worker:
+            raise ValueError(
+                "--idle-sleep-timeout cannot be combined with --embedding-worker"
+            )
+        if self.gms_shadow_mode:
+            raise ValueError(
+                "--idle-sleep-timeout cannot be combined with --gms-shadow-mode: "
+                "shadow engines already manage their own pause lifecycle"
+            )
+        if self.idle_sleep_escalate_timeout is not None:
+            if self.idle_sleep_escalate_timeout <= 0:
+                raise ValueError("--idle-sleep-escalate-timeout must be > 0")
+            if self.idle_sleep_escalate_level not in (1, 2, 3):
+                raise ValueError("--idle-sleep-escalate-level must be 1, 2 or 3")
+            if self.idle_sleep_escalate_level <= self.idle_sleep_level:
+                raise ValueError(
+                    "--idle-sleep-escalate-level must be deeper than "
+                    "--idle-sleep-level"
+                )
 
     def _validate_embedding_worker_exclusivity(self) -> None:
         """Embedding worker is aggregated-only and exclusive of multimodal roles."""

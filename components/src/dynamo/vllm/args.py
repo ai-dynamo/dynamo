@@ -163,6 +163,15 @@ def cross_validate_config(
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
 
+    # Validate --idle-sleep-timeout requires vLLM sleep mode
+    if dynamo_config.idle_sleep_enabled and not getattr(
+        engine_config, "enable_sleep_mode", False
+    ):
+        raise ValueError(
+            "--idle-sleep-timeout requires vLLM sleep mode. "
+            "Add --enable-sleep-mode to the engine arguments."
+        )
+
 
 def update_dynamo_config_with_engine(
     dynamo_config: Config, engine_config: AsyncEngineArgs

@@ -16,7 +16,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import (
     Any,
     AsyncIterator,
@@ -98,6 +98,7 @@ from dynamo.vllm.kv_connector_protocols import (
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
+from .idle_sleep import IdleSleepMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.model import (
     ModelFamily,
@@ -1088,6 +1089,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     # hf_config.use_unified_vision_chunk on real instances.
     _use_unified_vision_chunk: bool = False
     _scale_ep_in_progress: bool = False
+    # Class-level default so test doubles that bypass __init__ via
+    # __new__ still behave as if idle sleep is disabled.
+    idle_monitor: Optional[IdleSleepMonitor] = None
 
     def __init__(
         self,
@@ -1141,6 +1145,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._pause_controller = VllmEnginePauseController(self.engine_client)
         self._pause_lock = asyncio.Lock()
+        # Opt-in idle sleep TTL ladder. The monitor drives the same
+        # unregister -> drain -> sleep path as the control/sleep route;
+        # wake stays external via control/wake_up.
+        if getattr(config, "idle_sleep_enabled", False):
+            self.idle_monitor = IdleSleepMonitor(
+                sleep_fn=self._idle_sleep,
+                timeout=config.idle_sleep_timeout,
+                level=config.idle_sleep_level,
+                escalate_fn=self._escalate_sleep,
+                escalate_timeout=config.idle_sleep_escalate_timeout,
+                escalate_level=config.idle_sleep_escalate_level,
+                shutdown_event=shutdown_event,
+            )
+            self.idle_monitor.start()
         # Maps request_id -> _DeferredAbort for in-flight decode-only requests so
         # admin abort_request can route through the deferred-abort path instead
         # of calling engine_client.abort() during the unsafe pre-first-token
@@ -1293,6 +1311,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "message": "Engine already sleeping",
                     }
 
+                if self.idle_monitor is not None:
+                    self.idle_monitor.notify_slept(level)
                 return {
                     "status": "ok",
                     "message": f"Engine slept (level={level})",
@@ -1318,6 +1338,59 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             f"Failed to re-register endpoint after sleep failure: {reg_err}"
                         )
                 return {"status": "error", "message": str(e)}
+
+    async def _idle_sleep(self, level: int) -> dict:
+        """Sleep transition invoked by the idle monitor.
+
+        Reuses the control/sleep route path so discovery stays consistent
+        (unregister -> drain -> sleep) and transitions stay single-flighted
+        under ``_pause_lock``.
+        """
+        return await self.sleep({"level": level})
+
+    async def _escalate_sleep(self, from_level: int, to_level: int) -> dict:
+        """Deepen an existing sleep without rejoining discovery.
+
+        vLLM cannot deepen a sleep in place, so the engine is briefly woken
+        and re-slept at the deeper level. Generation stays paused and the
+        endpoint stays unregistered throughout, so no requests can arrive.
+        """
+        async with self._pause_lock:
+            if not self._pause_controller.is_paused:
+                return {"status": "error", "message": "Engine is not sleeping"}
+            try:
+                await self.engine_client.wake_up()
+            except Exception as e:
+                logger.error(f"Failed to wake engine for sleep escalation: {e}")
+                return {"status": "error", "message": str(e)}
+            try:
+                await self.engine_client.sleep(to_level)
+            except Exception as e:
+                logger.error(f"Failed to escalate sleep to level {to_level}: {e}")
+                # Re-sleep at the previous depth so the controller's
+                # is_paused state stays truthful.
+                try:
+                    await self.engine_client.sleep(from_level)
+                except Exception:
+                    logger.exception(
+                        "Failed to restore sleep level %d after failed escalation",
+                        from_level,
+                    )
+                return {"status": "error", "message": str(e)}
+            return {
+                "status": "ok",
+                "message": f"Sleep escalated (level={from_level}->{to_level})",
+            }
+
+    @contextmanager
+    def _track_request_activity(self) -> Iterator[None]:
+        """Report request activity to the idle monitor (no-op when disabled)."""
+        monitor = self.idle_monitor
+        if monitor is None:
+            yield
+            return
+        with monitor.track_request():
+            yield
 
     async def scale_elastic_ep(self, body: dict) -> dict:
         """Scale the elastic expert-parallelism data-parallel size live.
@@ -1461,6 +1534,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     )
                 self._pause_controller.mark_resumed()
 
+                if self.idle_monitor is not None:
+                    self.idle_monitor.notify_woken()
                 return {
                     "status": "ok",
                     "message": "Engine woke",
@@ -2449,6 +2524,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def cleanup(self):
         """Clean up resources including temporary directories."""
+        if self.idle_monitor is not None:
+            self.idle_monitor.stop()
         for temp_dir in self.temp_dirs:
             try:
                 temp_dir.cleanup()
@@ -3259,7 +3336,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
         first_token = True
-        with time_and_log_code_section(
+        with self._track_request_activity(), time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
         ) as decode_timer:
             if self.use_vllm_tokenizer:
@@ -3670,7 +3747,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         logger.debug(f"Prefill Request ID: {request_id}")
 
         # Token-in-token-out mode: internal protocol format
-        with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
+        with self._track_request_activity(), time_and_log_code_section(
+            f"[PREFILL] request: {request_id} generate"
+        ):
             async for chunk in self._generate_token_mode(request, context, request_id):
                 yield chunk
 
