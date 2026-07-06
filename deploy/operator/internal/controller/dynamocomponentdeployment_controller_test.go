@@ -37,6 +37,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -66,6 +67,66 @@ func init() {
 	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
 		panic(err)
 	}
+}
+
+func TestDynamoComponentDeploymentReconcilerRejectsCheckpointWithActivePassiveFailover(t *testing.T) {
+	ctx := context.Background()
+	s := scheme.Scheme
+	require.NoError(t, v1beta1.AddToScheme(s))
+	require.NoError(t, appsv1.AddToScheme(s))
+
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-worker",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					Failover: &v1beta1.FailoverSpec{
+						Mode: v1beta1.GMSModeIntraPod,
+					},
+				},
+			},
+		},
+	}
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dcd).
+		WithStatusSubresource(dcd).
+		Build()
+	recorder := record.NewFakeRecorder(10)
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client:   fakeKubeClient,
+		Recorder: recorder,
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: dcd.Name, Namespace: dcd.Namespace},
+	})
+	require.ErrorContains(t, err, "unsupported component configuration: checkpoint/snapshot is not supported with active/passive failover")
+
+	updated := &v1beta1.DynamoComponentDeployment{}
+	require.NoError(t, fakeKubeClient.Get(ctx, client.ObjectKeyFromObject(dcd), updated))
+	var available *metav1.Condition
+	for i := range updated.Status.Conditions {
+		if updated.Status.Conditions[i].Type == v1beta1.DynamoComponentDeploymentConditionTypeAvailable {
+			available = &updated.Status.Conditions[i]
+			break
+		}
+	}
+	require.NotNil(t, available)
+	assert.Equal(t, metav1.ConditionFalse, available.Status)
+	assert.Contains(t, available.Message, "checkpoint/snapshot is not supported with active/passive failover")
+	assert.Contains(t, <-recorder.Events, "ReconcileError")
+
+	deployments := &appsv1.DeploymentList{}
+	require.NoError(t, fakeKubeClient.List(ctx, deployments))
+	assert.Empty(t, deployments.Items)
 }
 
 func normalizeLeaderWorkerSetForCompare(lws *leaderworkersetv1.LeaderWorkerSet) *leaderworkersetv1.LeaderWorkerSet {
@@ -1786,7 +1847,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	})
 
 	t.Run("ready gms checkpoint injects restore clients", func(t *testing.T) {
-		t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {
@@ -1908,7 +1968,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	})
 
 	t.Run("ready gms checkpoint wires user-declared loader", func(t *testing.T) {
-		t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
 		if err != nil {

@@ -27,6 +27,7 @@ For more background on the snapshot architecture and startup improvements, see
 
 - x86_64 (`amd64`) GPU nodes
 - NVIDIA driver 580.xx or newer on the target GPU nodes (590.xx or newer if testing multi-GPU snapshots)
+- NVIDIA driver 610 or newer when using GMS + Snapshot
 - vLLM or SGLang backend today; TensorRT-LLM is supported only for the
   experimental single-GPU aggregated text worker path.
 - Checkpoint storage. `ReadWriteMany` is the safest default for cross-node or
@@ -227,7 +228,8 @@ spec:
             ...
 ```
 
-GMS + Snapshot support is currently disabled.
+> [!IMPORTANT]
+> GMS + Snapshot is available only with NVIDIA driver version 610 or newer.
 
 For a full working example, see [deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml).
 
@@ -427,7 +429,7 @@ kubectl patch dgd vllm-auto-demo -n ${NAMESPACE} --type=merge \
 
 ## Failover Restore
 
-Failover restore is not yet available. The current Snapshot flow does not support GMS + Snapshot, so do not use failover restore as a supported checkpoint/restore path. For current GMS and active/passive failover guidance, see [Shadow Engine Failover](shadow-engine-failover.md).
+Active/passive failover cannot be combined with Snapshot. Admission rejects components that enable both. For current GMS and active/passive failover guidance, see [Shadow Engine Failover](shadow-engine-failover.md).
 
 ## Lower-Level Testing With `snapshotctl`
 
@@ -563,7 +565,7 @@ status:
 - **Backend support is limited**: checkpoint/restore currently supports vLLM workers only, and that support is still a limited preview.
 - **Worker coverage is narrow**: specialized workers such as multimodal, embedding, and diffusion are not supported.
 - **Multi-GPU remains preview**: vLLM tensor-parallel configurations have limited validation and are not yet a broadly supported path across clusters.
-- **GMS restore remains experimental**: GMS + Snapshot is currently disabled.
+- **GMS restore remains experimental**: GMS + Snapshot requires NVIDIA driver version 610 or newer.
 - **Admission is create-only**: with DGD `startupPolicy: Immediate`, only Pods created after a checkpoint is `Ready` are restore-shaped. Existing Pods cold-started before checkpoint readiness keep running as-is.
 - **Restore admission must be installed**: DGD restores rely on the snapshot Pod mutating webhook, so upgrade the snapshot chart/webhook configuration along with the operator and CRDs when enabling these features.
 - **Network state is sensitive**: restore is sensitive to live TCP socket state. Loopback bootstrap/control sockets are the most reliable path today.

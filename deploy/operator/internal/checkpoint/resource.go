@@ -144,9 +144,6 @@ func CreateOrGetAutoCheckpoint(
 	gpuMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec,
 	owner client.Object,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
-	if err := ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gpuMemoryService); err != nil {
-		return nil, err
-	}
 	if targetContainerName == "" {
 		targetContainerName = commonconsts.MainContainerName
 	}

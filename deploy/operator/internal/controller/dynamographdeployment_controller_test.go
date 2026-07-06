@@ -79,6 +79,65 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 	return s
 }
 
+func TestDynamoGraphDeploymentReconcilerRejectsCheckpointWithActivePassiveFailover(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-dgd",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+					Failover: &v1beta1.FailoverSpec{
+						Mode: v1beta1.GMSModeIntraPod,
+					},
+				},
+			}},
+		},
+	}
+	fakeKubeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(dgd).
+		WithStatusSubresource(dgd).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fakeKubeClient,
+	}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: dgd.Name, Namespace: dgd.Namespace},
+	})
+	require.ErrorContains(t, err, `component "worker": checkpoint/snapshot is not supported with active/passive failover`)
+
+	updated := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, fakeKubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), updated))
+	assert.Equal(t, v1beta1.DGDStateFailed, updated.Status.State)
+	var ready *metav1.Condition
+	for i := range updated.Status.Conditions {
+		if updated.Status.Conditions[i].Type == "Ready" {
+			ready = &updated.Status.Conditions[i]
+			break
+		}
+	}
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, "unsupported_checkpoint_failover_configuration", ready.Reason)
+	assert.Contains(t, ready.Message, "checkpoint/snapshot is not supported with active/passive failover")
+
+	checkpoints := &v1alpha1.DynamoCheckpointList{}
+	require.NoError(t, fakeKubeClient.List(ctx, checkpoints))
+	assert.Empty(t, checkpoints.Items)
+	components := &v1beta1.DynamoComponentDeploymentList{}
+	require.NoError(t, fakeKubeClient.List(ctx, components))
+	assert.Empty(t, components.Items)
+}
+
 func TestDynamoGraphDeploymentReconciler_preserveExistingDCDBackendFramework(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
@@ -751,7 +810,6 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Clea
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_DoesNotDeleteCheckpointTemplate(t *testing.T) {
-	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -989,7 +1047,6 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotReuseExistingC
 }
 
 func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotAdoptLegacyIdentityTemplate(t *testing.T) {
-	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -1076,7 +1133,6 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotAdoptLegacyIde
 }
 
 func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClient(t *testing.T) {
-	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -1259,7 +1315,6 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t 
 }
 
 func TestDynamoGraphDeploymentReconciler_createCheckpointCRUsesTargetContainer(t *testing.T) {
-	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{
@@ -1731,7 +1786,6 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_overlaysServiceGMSLoader(t *testing.T) {
-	t.Setenv(commonconsts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	identity := v1alpha1.DynamoCheckpointIdentity{

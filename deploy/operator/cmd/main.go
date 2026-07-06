@@ -66,7 +66,6 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
@@ -813,14 +812,6 @@ func registerWebhookHandlers(
 		setupLog.Info("Detected operator principal from downward API", "principal", operatorPrincipal)
 	} else {
 		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
-	}
-
-	// Temporary internal gate for GMS + Snapshot.
-	if os.Getenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar) == "1" {
-		setupLog.Info(
-			"INTERNAL OVERRIDE: GMS + Snapshot admission rule disabled via env var; do NOT enable in production",
-			"envVar", consts.DynamoOperatorAllowGMSSnapshotEnvVar,
-		)
 	}
 
 	setupLog.Info("Registering validation webhooks")

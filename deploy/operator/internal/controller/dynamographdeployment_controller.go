@@ -192,6 +192,14 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
+	for i := range dynamoDeployment.Spec.Components {
+		component := &dynamoDeployment.Spec.Components[i]
+		if err = dynamo.ValidateCheckpointFailoverCompatibility(component); err != nil {
+			reason = "unsupported_checkpoint_failover_configuration"
+			return ctrl.Result{}, fmt.Errorf("component %q: %w", component.ComponentName, err)
+		}
+	}
+
 	if err = r.migrateCurrentWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
 		logger.Error(err, "Failed to migrate worker hash")
 		reason = "failed_to_migrate_worker_hash"
@@ -2041,9 +2049,6 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	}
 	var checkpointGMSClaimTemplateName string
 	if gmsSpec != nil && gmsSpec.Enabled {
-		if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gmsSpec); err != nil {
-			return nil, err
-		}
 		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
 		checkpointGMSGPUCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
 		if err != nil {

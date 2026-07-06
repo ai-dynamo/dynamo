@@ -461,13 +461,12 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	assert.True(t, commonController.ContainsFinalizer(stored))
 }
 
-func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.T) {
-	t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "")
+func TestCreateOrGetAutoCheckpointAllowsGMSSnapshotByDefault(t *testing.T) {
 	ctx := context.Background()
 	s := testScheme()
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	_, err := CreateOrGetAutoCheckpoint(
+	ckpt, err := CreateOrGetAutoCheckpoint(
 		ctx,
 		c,
 		testNamespace,
@@ -479,8 +478,9 @@ func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.
 		&nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
 		nil,
 	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "GMS + Snapshot is temporarily disabled")
+	require.NoError(t, err)
+	require.NotNil(t, ckpt.Spec.GPUMemoryService)
+	assert.True(t, ckpt.Spec.GPUMemoryService.Enabled)
 }
 
 func TestCreateOrGetAutoCheckpointRetainStoresDeletionPolicy(t *testing.T) {
@@ -788,7 +788,6 @@ func TestResolveCheckpointForService(t *testing.T) {
 	})
 
 	t.Run("checkpointRef resolves ready CR", func(t *testing.T) {
-		t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		hash, err := ComputeIdentityHash(testIdentity())
 		require.NoError(t, err)
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
@@ -815,31 +814,6 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.Equal(t, hash, info.CheckpointName)
 		require.NotNil(t, info.GPUMemoryService)
 		assert.True(t, info.GPUMemoryService.Enabled)
-	})
-
-	t.Run("checkpointRef rejects GMS checkpoint when gate is disabled", func(t *testing.T) {
-		t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "")
-		hash, err := ComputeIdentityHash(testIdentity())
-		require.NoError(t, err)
-		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{Name: hash, Namespace: testNamespace},
-			Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-				Identity:         testIdentity(),
-				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
-			},
-			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
-				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
-				IdentityHash: hash,
-			},
-		}
-		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
-		ref := hash
-
-		_, err = ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
-			Enabled: true, CheckpointRef: &ref,
-		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "GMS + Snapshot is temporarily disabled")
 	})
 
 	t.Run("checkpointRef resolves not-ready CR", func(t *testing.T) {

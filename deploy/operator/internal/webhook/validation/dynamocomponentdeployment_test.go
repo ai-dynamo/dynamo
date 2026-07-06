@@ -66,6 +66,24 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name: "v1alpha1 checkpoint with active-passive failover is rejected",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Resources = &nvidiacomv1alpha1.Resources{
+					Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
+				}
+				dcd.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				}
+				dcd.Spec.Failover = &nvidiacomv1alpha1.FailoverSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				}
+				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true}
+			}),
+			wantWebhookErr: "spec.checkpoint cannot be enabled with failover.enabled=true: checkpoint/snapshot is not supported with active/passive failover",
+		},
+		{
 			name: "invalid replicas",
 			deployment: &nvidiacomv1alpha1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{
