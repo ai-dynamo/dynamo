@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Write;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -42,12 +43,11 @@ impl RequestTraceSink for StderrRequestTraceSink {
 
     async fn emit(&self, record: &RequestTraceRecord) {
         match serde_json::to_string(record) {
-            Ok(json) => tracing::info!(
-                target = "dynamo_llm::request_trace",
-                log_type = "request_trace",
-                record = %json,
-                "request_trace"
-            ),
+            Ok(json) => {
+                if let Err(error) = writeln!(std::io::stderr(), "{json}") {
+                    tracing::warn!(%error, "request trace stderr write failed");
+                }
+            }
             Err(error) => tracing::warn!("request trace serialization failed: {error}"),
         }
     }

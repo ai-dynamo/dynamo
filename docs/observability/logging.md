@@ -356,8 +356,8 @@ payload rows for every eligible chat request.
 > The OTLP payload path is enabled by `DYN_REQUEST_TRACE_SINKS=otel`, or
 > by combining sinks such as `DYN_REQUEST_TRACE_SINKS=file,otel`.
 > Setting `DYN_REQUEST_TRACE_SINKS=stderr` together with
-> `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` writes request trace JSON to the process
-> logger only; it does not export payload records over OTLP.
+> `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` writes request trace JSON directly to
+> stderr only; it does not export payload records over OTLP.
 
 ### How records are emitted
 
