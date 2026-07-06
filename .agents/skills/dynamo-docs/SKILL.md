@@ -330,8 +330,8 @@ Design Docs, Documentation, Hidden Pages. To place a page, match the nearest exi
   (vLLM / SGLang / TensorRT-LLM stay verbatim). Keep it in sync when the English page changes,
   or don't ship it stale.
 - **Versioned navs.** Author only against `docs/` on `main` (the `pages-dev` set). When a release is
-  cut, the publish step copies `pages-dev/ → pages-vX.Y.Z/` and rewrites nav paths — **never** edit a
-  `pages-vX.Y.Z/` directory by hand. Write portable paths so the rewrite stays clean.
+  cut, the publish step builds `pages-vX.Y.Z/` from the tagged `docs/` tree and rewrites nav paths —
+  **never** edit a `pages-vX.Y.Z/` directory by hand. Write portable paths so the rewrite stays clean.
 ### Redirects and the version model
 
 The site serves the same nav under three prefixes: **`dev`** (slug `dev`, tracks `main`, regenerated on

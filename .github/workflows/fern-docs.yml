@@ -257,7 +257,11 @@ jobs:
         id: changes
         run: |
           cd docs-checkout
-          if git diff --quiet && git diff --cached --quiet; then
+          # git status --porcelain also reports untracked files: a
+          # translation-only change arrives as a new untracked file under
+          # fern/translations/ with no tracked edit alongside it (unlike a
+          # new English page, which always touches the nav).
+          if [ -z "$(git status --porcelain)" ]; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "No changes detected"
           else

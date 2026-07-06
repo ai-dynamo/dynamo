@@ -62,7 +62,11 @@ import yaml
 LINK = re.compile(r"(!?)(\[[^\]]*\])\(([^)#\s]+)(#[^)]*)?\)")
 PAGE_EXT = (".md", ".mdx")
 # Fallback for links whose target isn't published in the nav (no site URL).
-GITHUB_BLOB = "https://github.com/ai-dynamo/dynamo/blob/main"
+# Pin to the build's commit: correct on PR-preview builds (the target may not
+# exist on main yet) and immune to later renames/moves on main.
+GITHUB_BLOB = "https://github.com/ai-dynamo/dynamo/blob/" + os.environ.get(
+    "GITHUB_SHA", "main"
+)
 
 
 def slugify(name: str) -> str:
@@ -189,6 +193,15 @@ def main() -> int:
                     return m.group(0)
                 slug = slugs.get(doc_rel)
                 if slug is None:
+                    if not (args.nav.parent / doc_rel).is_file():
+                        # Typo'd or missing target: a GitHub URL would be a
+                        # plausible-looking 404, so leave the link untouched.
+                        print(
+                            f"::warning::{lang}/{rel}: {target} not in nav and "
+                            f"not in docs/, left as-is"
+                        )
+                        warned += 1
+                        return m.group(0)
                     # Target exists in the repo but isn't published in the nav,
                     # so it has no site URL. A relative path would naive-join
                     # into a guaranteed 404 on the rendered page; link to the
@@ -223,7 +236,7 @@ def main() -> int:
 
     print(
         f"resolve_translation_links: rewrote {rewritten} link(s) to site URLs, "
-        f"{warned} to GitHub source (not in nav)"
+        f"{warned} warned (GitHub fallback or left as-is)"
     )
     return 0
 
