@@ -1,6 +1,6 @@
 ---
 name: dynamo-docs
-description: Add, update, move, or remove content on the Dynamo Fern docs site — standard docs pages, catalog-driven recipe and feature-benchmark pages, examples, recipes, and translations — keeping everything in line with the documentation style guide. Use for any change under docs/, recipes/, or examples/ (new page, edit, section move, rename, removal, recipe/benchmark page, .zh-CN translation, version cut) and whenever content needs its frontmatter, headings, links, callouts, or terminology fixed.
+description: Adds, updates, moves, or removes content on the Dynamo Fern docs site — standard docs pages, catalog-driven recipe and feature-benchmark pages, examples, recipes, and translations — keeping everything in line with the documentation style guide. Use for any change under docs/, recipes/, or examples/ (new page, edit, section move, rename, removal, recipe/benchmark page, .zh-CN translation, version cut) and whenever content needs its frontmatter, headings, links, callouts, or terminology fixed.
 license: Apache-2.0
 metadata:
   author: NVIDIA

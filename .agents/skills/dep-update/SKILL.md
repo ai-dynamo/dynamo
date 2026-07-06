@@ -1,6 +1,6 @@
 ---
 name: dep-update
-description: Update Dynamo Enhancement Proposal lifecycle state in GitHub, including triage, PIC assignment, review, approval, and status label changes.
+description: Updates Dynamo Enhancement Proposal lifecycle state in GitHub, including triage, PIC assignment, review, approval, and status label changes. Use when triaging a new DEP, assigning a PIC, or moving a proposal through review and approval.
 license: Apache-2.0
 metadata:
   author: NVIDIA

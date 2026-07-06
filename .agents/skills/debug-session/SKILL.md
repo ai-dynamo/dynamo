@@ -1,6 +1,6 @@
 ---
 name: debug-session
-description: Set up a structured debugging session for a Dynamo bug — pull the report from a Linear ticket, GitHub issue, or pasted text, capture the environment, create a persistent worklog markdown file, and walk through rebuild, reproduction, and investigation steps. Use when starting to investigate a reported Dynamo bug or regression and the investigation should be tracked in a worklog.
+description: Sets up a structured debugging session for a Dynamo bug — pull the report from a Linear ticket, GitHub issue, or pasted text, capture the environment, create a persistent worklog markdown file, and walk through rebuild, reproduction, and investigation steps. Use when starting to investigate a reported Dynamo bug or regression and the investigation should be tracked in a worklog.
 license: Apache-2.0
 user-invocable: true
 disable-model-invocation: true

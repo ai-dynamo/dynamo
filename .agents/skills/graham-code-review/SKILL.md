@@ -1,6 +1,6 @@
 ---
 name: graham-code-review
-description: Review code changes in the style of Graham King's ai-dynamo/dynamo reviews — exacting Rust and systems-level standards covering error handling, tracing discipline, unnecessary clones, async and concurrency correctness, log levels, and minimal diff surface. Use when reviewing Rust changes, code under lib/ or components/src/dynamo, or any performance-critical or networking path that needs a strict senior-engineer review.
+description: Reviews code changes in the style of Graham King's ai-dynamo/dynamo reviews — exacting Rust and systems-level standards covering error handling, tracing discipline, unnecessary clones, async and concurrency correctness, log levels, and minimal diff surface. Use when reviewing Rust changes, code under lib/ or components/src/dynamo, or any performance-critical or networking path that needs a strict senior-engineer review.
 license: Apache-2.0
 metadata:
   author: NVIDIA
