@@ -18,15 +18,15 @@
 //!
 //! Run tests:
 //! ```bash
-//! cargo test --test audit_nats_integration -- --ignored --nocapture
+//! cargo test --test request_trace_nats_integration -- --ignored --nocapture
 //! ```
 
 #[cfg(test)]
 mod tests {
-    use dynamo_llm::audit::handle;
-    use dynamo_llm::audit::init_from_env_with_shutdown;
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionResponse;
+    use dynamo_llm::request_trace::init_from_env_with_shutdown;
+    use dynamo_llm::request_trace::payload;
     use dynamo_runtime::transports::nats;
     use futures::StreamExt;
     use serde_json::Value;
@@ -140,7 +140,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Manual testing only - requires NATS on localhost:4222
-    async fn test_audit_nats_basic_flow() {
+    async fn test_request_trace_nats_basic_flow() {
         const TEST_SUBJECT: &str = "test.request_trace.basic";
         // Core test: request_payload records are published to NATS with correct structure
         async_with_vars(
@@ -164,7 +164,7 @@ mod tests {
 
                 // Emit a single combined request+response payload record.
                 let request = create_test_request("nemotron", true);
-                let handle = handle::create_handle(&request, "test-req-1")
+                let handle = payload::create_handle(&request, "test-req-1")
                     .expect("Failed to create payload handle");
                 handle.emit(Some(Arc::new(create_test_response(
                     "nemotron",
@@ -206,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Manual testing only - requires NATS on localhost:4222
-    async fn test_audit_nats_request_payload_records_ignore_store_flag() {
+    async fn test_request_trace_nats_request_payload_records_ignore_store_flag() {
         // Test that request_payload records are emitted regardless of store.
         const TEST_SUBJECT: &str = "test.request_trace.request_payload";
 
@@ -230,12 +230,12 @@ mod tests {
                 time::sleep(Duration::from_millis(100)).await;
 
                 let request_true = create_test_request("nemotron", true);
-                handle::create_handle(&request_true, "store-true")
+                payload::create_handle(&request_true, "store-true")
                     .expect("store=true handle")
                     .emit(None);
 
                 let request_false = create_test_request("nemotron", false);
-                handle::create_handle(&request_false, "store-false")
+                payload::create_handle(&request_false, "store-false")
                     .expect("store=false handle")
                     .emit(None);
 

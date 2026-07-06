@@ -1903,9 +1903,9 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
         }
     }
 
-    // ANNOTATION_AUDIT_USAGE is audit-only and must never reach the client SSE
-    // stream (the audit DeltaAggregator consumed its usage upstream).
-    if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_AUDIT_USAGE) {
+    // ANNOTATION_PAYLOAD_USAGE is payload-only and must never reach the client SSE
+    // stream (the payload DeltaAggregator consumed its usage upstream).
+    if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_PAYLOAD_USAGE) {
         annotated.event = None;
         annotated.comment = None;
         annotated.data = None;
@@ -1940,10 +1940,10 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
         annotated.comment = None;
     }
 
-    // ANNOTATION_AUDIT_USAGE is audit-only: the audit DeltaAggregator already
-    // consumed its usage upstream, so strip the whole chunk — it must never
+    // ANNOTATION_PAYLOAD_USAGE is payload-only: the payload DeltaAggregator already
+    // consumed its usage upstream, so strip the whole chunk; it must never
     // reach the client SSE stream.
-    if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_AUDIT_USAGE) {
+    if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_PAYLOAD_USAGE) {
         annotated.event = None;
         annotated.comment = None;
         annotated.data = None;
@@ -2583,9 +2583,9 @@ mod tests {
         // PR #9390: two metric annotations must never leak to the client SSE.
         // (1) Per-chunk `llm_metrics` rides on a content chunk: the content delta
         //     must reach the client, but the metrics event/comment must be stripped.
-        // (2) The audit-only `audit_usage` chunk must be dropped entirely (the audit
+        // (2) The payload-only `payload_usage` chunk must be dropped entirely (the payload
         //     DeltaAggregator already consumed its usage upstream).
-        use crate::preprocessor::{ANNOTATION_AUDIT_USAGE, LLMMetricAnnotation};
+        use crate::preprocessor::{ANNOTATION_PAYLOAD_USAGE, LLMMetricAnnotation};
         use crate::types::Annotated;
         use axum::response::IntoResponse;
         use axum::response::sse::Sse;
@@ -2656,7 +2656,7 @@ mod tests {
             "internal metrics leaked to client SSE: {wire}"
         );
 
-        // (2) Audit-only usage chunk (event = audit_usage, carries usage data).
+        // (2) Payload-only usage chunk (event = payload_usage, carries usage data).
         let usage: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
             serde_json::from_value(serde_json::json!({
                 "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
@@ -2664,24 +2664,24 @@ mod tests {
                 "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
             }))
             .unwrap();
-        let audit_usage = Annotated {
+        let payload_usage = Annotated {
             id: None,
             data: Some(usage),
-            event: Some(ANNOTATION_AUDIT_USAGE.to_string()),
+            event: Some(ANNOTATION_PAYLOAD_USAGE.to_string()),
             comment: metrics_comment,
             error: None,
         };
 
         let mut http_queue_guard = None;
         let result = process_response_using_event_converter_and_observe_metrics(
-            EventConverter::from(audit_usage),
+            EventConverter::from(payload_usage),
             &mut collector,
             &mut http_queue_guard,
         )
         .expect("conversion ok");
         assert!(
             result.is_none(),
-            "audit_usage chunk must not be forwarded to the client SSE stream"
+            "payload_usage chunk must not be forwarded to the client SSE stream"
         );
     }
 

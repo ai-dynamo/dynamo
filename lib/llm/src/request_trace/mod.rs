@@ -5,6 +5,8 @@ mod agent_context;
 pub mod config;
 mod integration;
 mod otel_sink;
+pub mod payload;
+pub(crate) mod payload_stream;
 mod record;
 mod replay;
 pub mod sink;
@@ -25,7 +27,6 @@ pub(crate) use agent_context::{
     record_completion_finish_reason_metadata, record_llm_metric_tokens, request_metrics,
     request_metrics_from_agent_state, start_request_trace_tool_event_ingest,
 };
-pub(crate) use config::capture_enabled;
 pub use config::{
     RequestTraceFileCompression, RequestTraceFileFormat, RequestTracePolicy,
     RequestTraceRecordKind, RequestTraceSinkKind, is_enabled, policy,
@@ -34,7 +35,7 @@ pub(crate) use integration::{
     build_request_end_trace_state, finish_reason_metadata_handle, wrap_chat_request_end_stream,
     wrap_completion_request_end_stream,
 };
-pub(crate) use record::{emit_request_payload, publish_tool_record, validate_tool_record};
+pub(crate) use record::{publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
 pub use types::{
     ChoiceFinishReasonMetadata, FinishReasonMetadata, RequestReplayMetrics,

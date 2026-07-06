@@ -7,7 +7,7 @@ subtitle: Export Dynamo request traces, tool-call metadata, and Perfetto timelin
 
 Agent tracing records what Dynamo measured for each eligible LLM request. When a request carries [session identity](session-ids.md), trace rows include the session fields so you can join LLM requests, inferred tool calls, optional harness tool spans, and Perfetto slices. Recording session identity does not enable sticky sessions or session-aware routing.
 
-Tracing is best-effort profiling data, not an audit log. Dynamo does not store tool-call arguments in request traces. Use audit sinks when you need request or response payloads.
+Tracing is best-effort profiling data, not a compliance audit log. Dynamo does not store tool-call arguments in request traces. Include `request_payload` in `DYN_REQUEST_TRACE_RECORDS` when you need request or response payloads.
 
 ## Enable Output
 
@@ -30,7 +30,7 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 
 ## Dynamo `request_end` Record
 
-Dynamo emits `request_end` after the response stream finishes or is dropped. The record carries session identity, `output_tokens`, and autodetected `finish_reason_metadata` such as tool-call names and finish reasons. `request_id` correlates with audit rows. The `replay` block lets DynoSim load the original request trace directly when Dynamo can represent the request as one replay request. Tool-call metadata is IDs and names only; arguments are intentionally not stored.
+Dynamo emits `request_end` after the response stream finishes or is dropped. The record carries session identity, `output_tokens`, and autodetected `finish_reason_metadata` such as tool-call names and finish reasons. `request_id` correlates with `request_payload` rows when payload logging is enabled. The `replay` block lets DynoSim load the original request trace directly when Dynamo can represent the request as one replay request. Tool-call metadata is IDs and names only; arguments are intentionally not stored.
 
 <details>
 <summary>Full <code>request_end</code> record</summary>

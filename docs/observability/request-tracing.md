@@ -64,7 +64,7 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 > `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`, `DYN_AUDIT_OUTPUT_PATH`,
 > `DYN_AUDIT_NATS_SUBJECT`, `DYN_AUDIT_JSONL_*`, and
 > `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are accepted as migration shims, not
-> legacy wire-compatibility aliases. `DYN_AUDIT_FORCE_LOGGING=true` maps to
+> legacy wire-compatibility aliases. A truthy `DYN_AUDIT_FORCE_LOGGING` maps to
 > `DYN_REQUEST_TRACE_RECORDS=request_payload`; `DYN_AUDIT_SINKS` only selects
 > destinations and does not enable `request_end` replay metadata.
 

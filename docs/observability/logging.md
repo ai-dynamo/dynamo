@@ -394,7 +394,7 @@ Payload-related request trace variables:
 > Deprecated. `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`,
 > `DYN_AUDIT_NATS_SUBJECT`, and `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` are
 > migration shims, not legacy audit compatibility aliases.
-> `DYN_AUDIT_FORCE_LOGGING=true` maps to
+> A truthy `DYN_AUDIT_FORCE_LOGGING` maps to
 > `DYN_REQUEST_TRACE_RECORDS=request_payload`; `DYN_AUDIT_SINKS` only selects
 > destinations and does not enable `request_end` replay metadata. Prefer the
 > `DYN_REQUEST_TRACE_*` variables for new deployments.
