@@ -25,8 +25,8 @@ class Config:
     verbose: bool
 
 
-def parse_args() -> Config:
-    """Parse command line arguments for GPU Memory Service server."""
+def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
+    """Parse command line arguments into one server Config per requested tag."""
     parser = argparse.ArgumentParser(
         description="GPU Memory Service allocation server."
     )
@@ -40,14 +40,16 @@ def parse_args() -> Config:
     parser.add_argument(
         "--tag",
         type=str,
-        default="weights",
-        help="Logical GMS tag for this server (default: weights).",
+        action="append",
+        help="Logical GMS tag for this server (default: weights). "
+        "Repeat to serve multiple independent tags from one process.",
     )
     parser.add_argument(
         "--socket-path",
         type=str,
         default=None,
-        help="Path for Unix domain socket. Default uses GPU UUID for stability.",
+        help="Path for Unix domain socket. Default uses GPU UUID for stability. "
+        "Only valid with a single tag.",
     )
     parser.add_argument(
         "--verbose",
@@ -69,20 +71,28 @@ def parse_args() -> Config:
         "Pass an explicit large value if you need essentially-unbounded retry.",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    # Use UUID-based socket path by default (stable across CUDA_VISIBLE_DEVICES)
-    socket_path = args.socket_path or get_socket_path(args.device, args.tag)
+    tags = args.tag or ["weights"]
+    if len(tags) != len(set(tags)):
+        parser.error("--tag values must be unique")
+    if args.socket_path is not None and len(tags) > 1:
+        parser.error("--socket-path is only valid with a single --tag")
     if args.alloc_retry_interval <= 0:
         parser.error("--alloc-retry-interval must be > 0")
     if args.alloc_retry_timeout is not None and args.alloc_retry_timeout <= 0:
         parser.error("--alloc-retry-timeout must be > 0 when set")
 
-    return Config(
-        device=args.device,
-        tag=args.tag,
-        socket_path=socket_path,
-        alloc_retry_interval=args.alloc_retry_interval,
-        alloc_retry_timeout=args.alloc_retry_timeout,
-        verbose=args.verbose,
-    )
+    return [
+        Config(
+            device=args.device,
+            tag=tag,
+            # Use UUID-based socket path by default (stable across
+            # CUDA_VISIBLE_DEVICES).
+            socket_path=args.socket_path or get_socket_path(args.device, tag),
+            alloc_retry_interval=args.alloc_retry_interval,
+            alloc_retry_timeout=args.alloc_retry_timeout,
+            verbose=args.verbose,
+        )
+        for tag in tags
+    ]
