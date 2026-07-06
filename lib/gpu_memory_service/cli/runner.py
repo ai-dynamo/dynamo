@@ -11,13 +11,16 @@ Usage:
     python -m gpu_memory_service --device 0 --socket-path /tmp/gpu_memory_service_{device}.sock
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
+from collections.abc import Sequence
 
 import uvloop
 from gpu_memory_service.server.rpc import GMSRPCServer
 
-from .args import parse_args
+from .args import Config, parse_args
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,38 +29,57 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def serve_configs(configs: Sequence[Config]) -> None:
+    """Construct and serve independent GMS instances in one process."""
+    servers = []
+    for config in configs:
+        if config.verbose:
+            logging.getLogger().setLevel(logging.DEBUG)
+            logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
+
+        logger.info("Starting GPU Memory Service Server for device %d", config.device)
+        logger.info("GMS tag: %s", config.tag)
+        logger.info("Socket path: %s", config.socket_path)
+        logger.info(
+            "Allocation retry config: interval=%ss timeout=%s",
+            config.alloc_retry_interval,
+            (
+                f"{config.alloc_retry_timeout}s"
+                if config.alloc_retry_timeout is not None
+                else "none"
+            ),
+        )
+        servers.append(
+            GMSRPCServer(
+                config.socket_path,
+                device=config.device,
+                allocation_retry_interval=config.alloc_retry_interval,
+                allocation_retry_timeout=config.alloc_retry_timeout,
+            )
+        )
+
+    tasks = [asyncio.create_task(server.serve()) for server in servers]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+        raise RuntimeError("GMS server stopped unexpectedly")
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def worker() -> None:
     """Main async worker function."""
     config = parse_args()
+    await serve_configs([config])
 
-    # Configure logging level
-    if config.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
 
-    logger.info(f"Starting GPU Memory Service Server for device {config.device}")
-    logger.info("GMS tag: %s", config.tag)
-    logger.info(f"Socket path: {config.socket_path}")
-    logger.info(
-        "Allocation retry config: interval=%ss timeout=%s",
-        config.alloc_retry_interval,
-        (
-            f"{config.alloc_retry_timeout}s"
-            if config.alloc_retry_timeout is not None
-            else "none"
-        ),
-    )
-
-    server = GMSRPCServer(
-        config.socket_path,
-        device=config.device,
-        allocation_retry_interval=config.alloc_retry_interval,
-        allocation_retry_timeout=config.alloc_retry_timeout,
-    )
-
-    logger.info("GPU Memory Service Server ready, waiting for connections...")
-    logger.info(f"Clients can connect via socket: {config.socket_path}")
-    await server.serve()
+def run(configs: Sequence[Config]) -> None:
+    """Run one or more independent GMS instances on a shared event loop."""
+    uvloop.install()
+    asyncio.run(serve_configs(configs))
 
 
 def main() -> None:
