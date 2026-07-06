@@ -105,6 +105,7 @@ def test_dual_tag_configs_have_independent_socket_paths(monkeypatch):
     assert all(config.device == 3 for config in configs)
 
 
+@pytest.mark.timeout(10)
 @pytest.mark.asyncio
 async def test_dual_tag_servers_bind_independent_listeners(monkeypatch, tmp_path):
     monkeypatch.setattr(server_allocations, "cuda_ensure_initialized", lambda: None)
@@ -135,7 +136,7 @@ async def test_dual_tag_servers_bind_independent_listeners(monkeypatch, tmp_path
             alloc_retry_timeout=60.0,
             verbose=False,
         )
-        for tag, socket_path in zip(dual_server.TAGS, socket_paths)
+        for tag, socket_path in zip(dual_server.TAGS, socket_paths, strict=True)
     ]
 
     task = asyncio.create_task(runner.serve_configs(configs))
@@ -157,6 +158,7 @@ async def test_dual_tag_servers_bind_independent_listeners(monkeypatch, tmp_path
             await task
 
 
+@pytest.mark.timeout(10)
 @pytest.mark.asyncio
 async def test_server_failure_cancels_other_listener(monkeypatch):
     both_started = asyncio.Event()
