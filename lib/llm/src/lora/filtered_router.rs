@@ -28,7 +28,9 @@ use crate::lora::filter::LoraFilter;
 use crate::lora::load_estimator::LoadEstimator;
 use crate::preprocessor::PreprocessedRequest;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
-use crate::protocols::common::timing::{RequestPhase, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+use crate::protocols::common::timing::{
+    RequestPhase, RequestTracker, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL,
+};
 
 /// Decrements the [`LoadEstimator`] counter for a LoRA when dropped.
 struct LoadGuard {
@@ -145,8 +147,8 @@ impl LoraFilteredRouter {
         }
     }
 
-    fn record_worker(request: &PreprocessedRequest, worker_id: u64) {
-        let Some(tracker) = request.tracker.as_ref() else {
+    fn record_worker(tracker: Option<&RequestTracker>, worker_id: u64) {
+        let Some(tracker) = tracker else {
             return;
         };
         let worker_type = if tracker.phase() == RequestPhase::Prefill {
@@ -176,13 +178,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // the inner load-aware push router so base traffic on a LoRA-enabled deployment keeps the
         // unmodified hot path (no avail/free scans, no set allocation, no LoadGuard).
         let Some(lora_name) = lora_name else {
-            let (_, stream) = self
+            let ((tracker, worker_id), stream) = self
                 .inner
                 .select_and_dispatch(request, |request, worker_id| {
-                    Self::record_worker(request, worker_id);
-                    Ok(())
+                    Ok((request.tracker.take(), worker_id))
                 })
                 .await?;
+            Self::record_worker(tracker.as_deref(), worker_id);
             return Ok(stream);
         };
 
@@ -249,18 +251,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // race where `target` disappears mid-dispatch reselects another replica-set worker rather
         // than escaping to an arbitrary worker outside the placement table.
         let candidate_set: std::collections::HashSet<u64> = candidates.iter().copied().collect();
-        let (_, response_stream) = self
+        let ((tracker, worker_id), response_stream) = self
             .inner
             .direct_within_prepared(
                 request,
                 target,
                 Some(&candidate_set),
-                |request, worker_id| {
-                    Self::record_worker(request, worker_id);
-                    Ok(())
-                },
+                |request, worker_id| Ok((request.tracker.take(), worker_id)),
             )
             .await?;
+        Self::record_worker(tracker.as_deref(), worker_id);
         let tracking = LoadTrackingStream {
             inner: response_stream,
             _guard: guard,
