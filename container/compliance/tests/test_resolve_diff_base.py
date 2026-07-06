@@ -10,12 +10,11 @@ Run from the repo root with the compliance package on the path:
 from __future__ import annotations
 
 import pytest
-
 from compliance.resolve_diff_base import (
     is_release_branch,
     parse_release_tuple,
-    pick_prior_release_tag,
     pick_previous_run_sha,
+    pick_prior_release_tag,
     resolve,
 )
 

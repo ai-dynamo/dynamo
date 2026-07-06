@@ -12,7 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from compliance.diff_osrb_csv import (
     ADDED,
     BASELINE_UNAVAILABLE,

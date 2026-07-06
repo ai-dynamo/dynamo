@@ -269,9 +269,7 @@ def main() -> None:
 
     if base_path is None or not base_path.is_file():
         reason = "no --base given" if base_path is None else f"missing: {base_path}"
-        print(
-            f"Baseline unavailable ({reason}); writing marker diff.", file=sys.stderr
-        )
+        print(f"Baseline unavailable ({reason}); writing marker diff.", file=sys.stderr)
         write_diff_csv(baseline_unavailable_rows(args.baseline_label), output_path)
         return
 

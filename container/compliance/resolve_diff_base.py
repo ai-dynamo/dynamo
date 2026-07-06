@@ -266,7 +266,9 @@ def main() -> None:
         "--event-context", required=True, choices=["pr", "push", "nightly"]
     )
     parser.add_argument(
-        "--current-branch", default="", help="github.ref_name (main, release/X.Y.Z, ...)"
+        "--current-branch",
+        default="",
+        help="github.ref_name (main, release/X.Y.Z, ...)",
     )
     parser.add_argument(
         "--base-branch",
