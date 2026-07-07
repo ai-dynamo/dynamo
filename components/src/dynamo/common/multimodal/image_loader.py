@@ -17,7 +17,11 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
 from ..http import HttpError, HttpStatusError, HttpTimeoutError, fetch_bytes
-from ..http.url_validator import UrlValidationPolicy, validate_media_url
+from ..http.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +147,14 @@ class ImageLoader:
         except Image.UnidentifiedImageError as e:
             logger.error(f"Unsupported image format loading: '{image_url}'")
             raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
+        except UrlValidationError as e:
+            # SSRF / disallowed-URL rejection surfaced during per-hop redirect
+            # revalidation. Preserve the type (a ValueError subclass) so the
+            # batch caller keeps its client-error semantics instead of the
+            # generic ValueError wrapping below flattening it. UrlValidationError
+            # subclasses ValueError, so this branch must precede the ValueError one.
+            logger.error(f"URL rejected loading image: '{image_url}': {e}")
+            raise
         except ValueError as e:
             if "Unsupported image format" in str(e):
                 logger.error(f"Unsupported image format loading: '{image_url}'")
@@ -253,6 +265,9 @@ class ImageLoader:
             HttpStatusError: If any image fails with an HTTP status error
                 (e.g. 415 Unsupported Media Type); the status is preserved so the
                 frontend returns the correct client-error code instead of 500.
+            UrlValidationError: If a media URL is rejected by the SSRF policy
+                (blocked IP/host, disallowed scheme, redirect-limit). Preserved
+                as a ValueError so the frontend returns a 4xx instead of 500.
             Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
         """
@@ -282,6 +297,7 @@ class ImageLoader:
         loaded_images = []
         collective_exceptions = ""
         status_error: HttpStatusError | None = None
+        url_error: UrlValidationError | None = None
         for media_item, result in zip(image_mm_items, results):
             if isinstance(result, Exception):
                 source = media_item.get(URL_VARIANT_KEY, "decoded")
@@ -295,11 +311,21 @@ class ImageLoader:
                 # the first one so single-item batches keep their client-error code.
                 if status_error is None and isinstance(result, HttpStatusError):
                     status_error = result
+                # Same reasoning for a rejected media URL (blocked IP/host,
+                # disallowed scheme, redirect-limit): UrlValidationError is a
+                # ValueError, which py_err_to_dynamo maps to Backend(InvalidArgument)
+                # -> HTTP 4xx. Collapsing it into the bare Exception below would
+                # strip that and mislabel the client error as a 500.
+                elif url_error is None and isinstance(result, UrlValidationError):
+                    url_error = result
                 continue
             loaded_images.append(result)
 
         if status_error is not None:
             raise status_error
+
+        if url_error is not None:
+            raise url_error
 
         if collective_exceptions:
             raise Exception(collective_exceptions)

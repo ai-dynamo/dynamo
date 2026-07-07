@@ -24,7 +24,7 @@ import pytest
 from PIL import Image
 
 from dynamo.common.http import HttpStatusError, HttpTimeoutError
-from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.image_loader import URL_VARIANT_KEY, ImageLoader
 
 pytestmark = [
@@ -270,6 +270,59 @@ async def test_unsupported_format_batch_data_url_raises_415(
             [{URL_VARIANT_KEY: f"data:image/svg+xml;base64,{svg_b64}"}]
         )
     assert exc_info.value.status == 415
+
+
+# --- SSRF / URL-validation error contract (DYN-3389) ---
+
+
+_BLOCKED_METADATA_URL = "https://169.254.169.254/latest/meta-data/"
+
+
+async def test_ssrf_blocked_batch_url_raises_url_validation_error() -> None:
+    """A URL blocked by the SSRF guard must escape load_image_batch as a
+    UrlValidationError (a ValueError), not a bare Exception.
+
+    This is the frontend-driven path: py_err_to_dynamo maps a ValueError to
+    Backend(InvalidArgument) -> HTTP 4xx, whereas a bare Exception maps to
+    Unknown -> 500. Regression test for DYN-3389 (link-local metadata IP
+    returned 500 instead of a clean client error). The default policy has the
+    guard active (allow_private_ips=False), so no real network hit occurs."""
+    strict_loader = ImageLoader(
+        cache_size=4, http_timeout=30.0, url_policy=UrlValidationPolicy()
+    )
+    with pytest.raises(UrlValidationError, match="blocked range") as exc_info:
+        await strict_loader.load_image_batch([{URL_VARIANT_KEY: _BLOCKED_METADATA_URL}])
+    # Must remain a ValueError so the frontend maps it to a 4xx, not a 500.
+    assert isinstance(exc_info.value, ValueError)
+
+
+async def test_ssrf_disallowed_scheme_batch_raises_url_validation_error() -> None:
+    """A disallowed scheme (http:// under the default deny policy) must also
+    surface from load_image_batch as a UrlValidationError, not a 500."""
+    strict_loader = ImageLoader(
+        cache_size=4, http_timeout=30.0, url_policy=UrlValidationPolicy()
+    )
+    with pytest.raises(UrlValidationError):
+        await strict_loader.load_image_batch(
+            [{URL_VARIANT_KEY: "http://example.com/x.png"}]
+        )
+
+
+async def test_url_validation_error_from_redirect_revalidation_preserved(
+    loader: ImageLoader,
+) -> None:
+    """A UrlValidationError raised during the fetch (e.g. per-hop redirect
+    revalidation or redirect-limit) must be preserved by _fetch_and_process's
+    except-UrlValidationError branch instead of being flattened into a generic
+    ValueError, so load_image_batch can re-raise it and keep the 4xx mapping."""
+    mock_fetch = _mock_fetch_bytes(
+        side_effect=UrlValidationError("Too many redirects (max=3)")
+    )
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        with pytest.raises(UrlValidationError, match="Too many redirects"):
+            await loader.load_image_batch(
+                [{URL_VARIANT_KEY: "https://example.com/img.png"}]
+            )
 
 
 async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:

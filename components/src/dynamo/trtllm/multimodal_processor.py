@@ -25,6 +25,8 @@ from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -341,6 +343,13 @@ class MultimodalRequestProcessor:
                             logging.info(
                                 f"Loaded {len(pil_images)} image(s) as PIL Images"
                             )
+                    except (UrlValidationError, HttpStatusError):
+                        # Rejections of user-supplied media (SSRF-blocked URL,
+                        # disallowed scheme, unsupported format) are client errors.
+                        # Propagate them so the frontend maps them to a 4xx instead
+                        # of the generic except below swallowing them into a silent
+                        # dropped image (which the frontend cannot report). See DYN-3389.
+                        raise
                     except Exception as e:
                         logging.error(f"Failed to load images: {e}")
                         return None
