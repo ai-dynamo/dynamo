@@ -480,12 +480,13 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
-	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
 
-	// The lease is acquired before runCheckpoint launches (in reconcileSourcePod) and released after
-	// checkpointFn returns. Assert while the dump is in-flight (fc.wasCalled is true but not done).
+	// acquireLease runs synchronously in reconcileSourcePod before the goroutine is launched, so
+	// the Lease exists immediately after the function returns.
 	_, err := w.clientset.CoordinationV1().Leases("inference").Get(context.Background(), "checkpoint-lease-abc", metav1.GetOptions{})
-	assert.NoError(t, err, "Lease checkpoint-lease-abc must exist in namespace inference while dump is in-flight")
+	assert.NoError(t, err, "Lease checkpoint-lease-abc must exist in namespace inference")
+
+	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
 
 	// Capture parameters are read from the source pod, not from PodSnapshotContent metadata.
 	params := fc.lastParams()
