@@ -51,9 +51,17 @@ cd $DYNAMO_HOME/examples/backends/vllm
 # GPU deployment
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct
 
+# Unified backend
+bash launch/agg_multimodal.sh --unified --model Qwen/Qwen3-VL-2B-Instruct
+
 # XPU deployment
 bash launch/xpu/agg_multimodal_xpu.sh --model Qwen/Qwen3-VL-2B-Instruct
 ```
+
+The unified entry point supports HTTP, data-URL, and decoded image/video input
+in aggregated mode and forwards model processor options such as
+`mm_processor_kwargs`. Separate Encode workers and multimodal P/D remain on the
+legacy entry point until their follow-up changes land.
 
 **Image request:**
 
