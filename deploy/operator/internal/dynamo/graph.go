@@ -1729,6 +1729,7 @@ func applyCompilationCacheVolume(podSpec *corev1.PodSpec, compilationCache *v1be
 	if compilationCache == nil {
 		return nil
 	}
+	found := false
 	for i := range podSpec.Volumes {
 		volume := &podSpec.Volumes[i]
 		if volume.Name != compilationCache.PVCName {
@@ -1743,6 +1744,12 @@ func applyCompilationCacheVolume(podSpec *corev1.PodSpec, compilationCache *v1be
 		if volume.PersistentVolumeClaim.ReadOnly {
 			return fmt.Errorf("compilation cache PVC %q must be writable", compilationCache.PVCName)
 		}
+		if found {
+			return fmt.Errorf("compilation cache volume %q is defined more than once", compilationCache.PVCName)
+		}
+		found = true
+	}
+	if found {
 		return nil
 	}
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
