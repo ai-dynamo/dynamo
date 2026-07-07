@@ -378,18 +378,10 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 
 	client := fake.NewSimpleClientset(pod, claim, slice)
 
-	previousDiscoverVisibleGPUs := discoverVisibleGPUs
-	discoverVisibleGPUs = func(context.Context, string, int) ([]string, error) {
-		return []string{uuid0, uuid1}, nil
-	}
-	t.Cleanup(func() {
-		discoverVisibleGPUs = previousDiscoverVisibleGPUs
-	})
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	got, err := DiscoverGPUUUIDs(
+	got, err := discoverGPUUUIDs(
 		ctx,
 		client,
 		podName,
@@ -397,6 +389,9 @@ func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 		"main",
 		"/proc",
 		123,
+		func(context.Context, string, int) ([]string, error) {
+			return []string{uuid0, uuid1}, nil
+		},
 		logr.Discard(),
 	)
 	if err != nil {

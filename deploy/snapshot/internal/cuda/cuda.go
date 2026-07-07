@@ -105,11 +105,34 @@ func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) 
 	return uuids, nil
 }
 
-// discoverVisibleGPUs is swapped out in tests.
-var discoverVisibleGPUs = GetGPUUUIDsViaNvidiaSmi
+type visibleGPUDiscovery func(context.Context, string, int) ([]string, error)
 
 // DiscoverGPUUUIDs resolves GPU UUIDs in the container's runtime ordinal order.
 func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
+	return discoverGPUUUIDs(
+		ctx,
+		clientset,
+		podName,
+		podNamespace,
+		containerName,
+		hostProcPath,
+		pid,
+		GetGPUUUIDsViaNvidiaSmi,
+		log,
+	)
+}
+
+func discoverGPUUUIDs(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	podName,
+	podNamespace,
+	containerName,
+	hostProcPath string,
+	pid int,
+	discoverVisibleGPUs visibleGPUDiscovery,
+	log logr.Logger,
+) ([]string, error) {
 	gpuUUIDs, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, containerName, log)
 	if err != nil {
 		if hasNVIDIADRAAllocation {

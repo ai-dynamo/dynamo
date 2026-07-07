@@ -387,4 +387,140 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 			t.Errorf("got %v, want nil", got)
 		}
 	})
+
+	t.Run("shared claim requests scope to the target container", func(t *testing.T) {
+		nodeName := "node-1"
+		poolName := "pool-node-1"
+		namespace := "default"
+		podName := "test-pod"
+		claimName := "shared-gpu-claim"
+		mainUUID := "GPU-aaaaaaaa-1111-2222-3333-444444444444"
+		sidecarUUID := "GPU-bbbbbbbb-5555-6666-7777-888888888888"
+
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+			Spec: corev1.PodSpec{
+				NodeName: nodeName,
+				Containers: []corev1.Container{
+					{
+						Name: "main",
+						Resources: corev1.ResourceRequirements{
+							Claims: []corev1.ResourceClaim{{Name: "gpu", Request: "main-gpu"}},
+						},
+					},
+					{
+						Name: "sidecar",
+						Resources: corev1.ResourceRequirements{
+							Claims: []corev1.ResourceClaim{{Name: "gpu", Request: "sidecar-gpu"}},
+						},
+					},
+				},
+				ResourceClaims: []corev1.PodResourceClaim{
+					{
+						Name:              "gpu",
+						ResourceClaimName: &claimName,
+					},
+				},
+			},
+		}
+		claim := &resourcev1.ResourceClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: namespace},
+			Status: resourcev1.ResourceClaimStatus{
+				Allocation: &resourcev1.AllocationResult{
+					Devices: resourcev1.DeviceAllocationResult{
+						Results: []resourcev1.DeviceRequestAllocationResult{
+							// Subrequest form exercises "<request>/<subrequest>" matching.
+							{Driver: nvidiaGPUDRADriver, Pool: poolName, Device: "gpu-0", Request: "main-gpu/fallback"},
+							{Driver: nvidiaGPUDRADriver, Pool: poolName, Device: "gpu-1", Request: "sidecar-gpu"},
+						},
+					},
+				},
+			},
+		}
+		slice := &resourcev1.ResourceSlice{
+			ObjectMeta: metav1.ObjectMeta{Name: poolName + "-gpu.nvidia.com-xxx"},
+			Spec: resourcev1.ResourceSliceSpec{
+				Driver:   nvidiaGPUDRADriver,
+				NodeName: &nodeName,
+				Pool:     resourcev1.ResourcePool{Name: poolName},
+				Devices: []resourcev1.Device{
+					{
+						Name: "gpu-0",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							resourcev1.QualifiedName("uuid"): {StringValue: &mainUUID},
+						},
+					},
+					{
+						Name: "gpu-1",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							resourcev1.QualifiedName("uuid"): {StringValue: &sidecarUUID},
+						},
+					},
+				},
+			},
+		}
+
+		client := fake.NewSimpleClientset(pod, claim, slice)
+
+		got, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, "main", log)
+		if err != nil {
+			t.Fatalf("GetGPUUUIDsViaDRAAPI: %v", err)
+		}
+		if !hasNVIDIADRAAllocation {
+			t.Fatal("expected hasNVIDIADRAAllocation to be true")
+		}
+		if len(got) != 1 || got[0] != mainUUID {
+			t.Fatalf("got %v, want [%s]", got, mainUUID)
+		}
+
+		got, _, err = GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, "sidecar", log)
+		if err != nil {
+			t.Fatalf("GetGPUUUIDsViaDRAAPI: %v", err)
+		}
+		if len(got) != 1 || got[0] != sidecarUUID {
+			t.Fatalf("got %v, want [%s]", got, sidecarUUID)
+		}
+	})
+
+	t.Run("lookup failures after claims are referenced forbid fallback", func(t *testing.T) {
+		claimName := "gpu-claim"
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default"},
+			Spec: corev1.PodSpec{
+				NodeName: "node-1",
+				Containers: []corev1.Container{
+					{
+						Name: "main",
+						Resources: corev1.ResourceRequirements{
+							Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+						},
+					},
+				},
+				ResourceClaims: []corev1.PodResourceClaim{
+					{
+						Name:              "gpu",
+						ResourceClaimName: &claimName,
+					},
+				},
+			},
+		}
+		// The referenced ResourceClaim object is missing, so the claim GET fails.
+		client := fake.NewSimpleClientset(pod)
+
+		_, mustNotFallBack, err := GetGPUUUIDsViaDRAAPI(ctx, client, "pod", "default", "main", log)
+		if err == nil {
+			t.Fatal("expected error for failed claim lookup")
+		}
+		if !mustNotFallBack {
+			t.Fatal("expected claim lookup failure to forbid fallback")
+		}
+
+		_, mustNotFallBack, err = GetGPUUUIDsViaDRAAPI(ctx, client, "pod", "default", "no-such-container", log)
+		if err == nil {
+			t.Fatal("expected error for unknown container name")
+		}
+		if !mustNotFallBack {
+			t.Fatal("expected unknown container to forbid fallback")
+		}
+	})
 }
