@@ -5,28 +5,28 @@ SPDX-License-Identifier: Apache-2.0
 
 # GLM-5.2 Recipes
 
-Recipes for
-[`nvidia/GLM-5.2-NVFP4`](https://huggingface.co/nvidia/GLM-5.2-NVFP4).
+Recipes for [`GLM-5.2`](https://huggingface.co/zai-org/GLM-5.2), served from
+the NVIDIA-optimized `nvidia/GLM-5.2-NVFP4` checkpoint.
 
 ## Configurations
 
 Dynamo + SGLang deployment profiles for the B200 agentic workload:
 
-| | B200 aggregate agentic | B200 disaggregated agentic |
+| | B200 aggregated agentic | B200 disaggregated agentic |
 | --- | --- | --- |
 | **GPU** (per worker) | 4x B200 | 4x B200 prefill + 8x B200 decode |
 | **Mode** | Aggregated | Prefill/decode disaggregated |
-| **Framework** | SGLang preview runtime | SGLang preview runtime |
+| **Framework** | SGLang | SGLang |
 | **Precision** | NVFP4 + FP8 KV | NVFP4 + FP8 KV |
-| **Parallelism** | TP4 / DP4 | Prefill TP4 / DP4 / EP4; decode TP8 / DP8 |
+| **Parallelism** | DTP4 | DEP4 / DTP8 |
 | **MoE backend** | FlashInfer TRT-LLM | Prefill FlashInfer TRT-LLM routed; decode FlashInfer Cutlass |
 | **Attention backend** | DSA | DSA TRT-LLM prefill; default decode |
 | **AllReduce backend** | FlashInfer fusion | FlashInfer fusion on decode |
 | **All2All backend** | None | None |
 | **Routing** | KV-aware | KV-aware |
-| **Speculative decoding** | Built-in EAGLE (DL=3, AL=2.69 for benchmarking) | Built-in EAGLE (DL=3, AL=2.69 for benchmarking) |
+| **Speculative decoding** | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) |
 | **Context length** | 500,000 | 500,000 |
-| **KV cache offloading** | SGLang HiCache CPU | SGLang HiCache CPU on prefill |
+| **KV cache offloading** | HiCache CPU | HiCache CPU |
 | **KV transfer** | N/A | NIXL over UCX/InfiniBand |
 
 Deployments:
