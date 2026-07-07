@@ -96,7 +96,9 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 # =============================================================================
-FROM ubuntu:24.04 AS criu-builder
+# Build against the oldest supported placeholder libc; the resulting binaries
+# also run in the newer snapshot-agent image.
+FROM ubuntu:22.04 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
@@ -116,6 +118,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-c-compiler \
     protobuf-compiler \
     python3 \
+    python3-pip \
     python3-protobuf \
     libgnutls28-dev \
     libnftables-dev \
@@ -151,14 +154,20 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
     fi
 
 # Install CRIU runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && \
+    gnutls_package="$(if apt-cache show libgnutls30t64 >/dev/null 2>&1; then \
+        echo libgnutls30t64; \
+    else \
+        echo libgnutls30; \
+    fi)" && \
+    apt-get install -y --no-install-recommends \
     libbsd0 \
     libcap2 \
     libnet1 \
     libnl-3-200 \
     libnl-route-3-200 \
     libprotobuf-c1 \
-    libgnutls30t64 \
+    "${gnutls_package}" \
     libnftables1 \
     iproute2 \
     iptables \
@@ -212,14 +221,20 @@ RUN if [ "${TARGETARCH}" != "amd64" ]; then \
     fi
 
 # Install minimal runtime dependencies for CRIU restore (nsrestore runs here via nsenter)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && \
+    gnutls_package="$(if apt-cache show libgnutls30t64 >/dev/null 2>&1; then \
+        echo libgnutls30t64; \
+    else \
+        echo libgnutls30; \
+    fi)" && \
+    apt-get install -y --no-install-recommends \
     libbsd0 \
     libcap2 \
     libnet1 \
     libnl-3-200 \
     libnl-route-3-200 \
     libprotobuf-c1 \
-    libgnutls30t64 \
+    "${gnutls_package}" \
     libnftables1 \
     iproute2 \
     iptables \

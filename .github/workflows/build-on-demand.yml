@@ -311,7 +311,14 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs:
+      - init
+      - vllm-build
+      - snapshot-agent
+      - snapshot-placeholder-vllm
+      - sglang-build
+      - trtllm-build
+      - operator
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
