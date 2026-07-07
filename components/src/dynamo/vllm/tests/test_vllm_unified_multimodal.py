@@ -124,7 +124,11 @@ async def test_from_args_rejects_unsupported_multimodal_topologies(
         route_to_encoder=route_to_encoder,
         headless=False,
     )
-    monkeypatch.setattr(mod, "parse_args", lambda argv: config)
+    monkeypatch.setattr(
+        mod,
+        "parse_args",
+        lambda argv, fpm_trace_relay_supported=False: config,
+    )
 
     with pytest.raises(NotImplementedError, match=message):
         await mod.VllmLLMEngine.from_args([])
@@ -143,7 +147,11 @@ async def test_from_args_rejects_multimodal_pd_until_followup(monkeypatch, mode)
         headless=False,
         enable_multimodal=True,
     )
-    monkeypatch.setattr(mod, "parse_args", lambda argv: config)
+    monkeypatch.setattr(
+        mod,
+        "parse_args",
+        lambda argv, fpm_trace_relay_supported=False: config,
+    )
 
     with pytest.raises(NotImplementedError, match="multimodal P/D"):
         await mod.VllmLLMEngine.from_args([])
@@ -171,7 +179,11 @@ async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
     )
     worker_config = object()
     from_runtime_config = MagicMock(return_value=worker_config)
-    monkeypatch.setattr(mod, "parse_args", lambda argv: config)
+    monkeypatch.setattr(
+        mod,
+        "parse_args",
+        lambda argv, fpm_trace_relay_supported=False: config,
+    )
     monkeypatch.setattr(
         mod.WorkerConfig,
         "from_runtime_config",
