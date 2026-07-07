@@ -1508,11 +1508,11 @@ func GenerateBasePodSpec(
 			return nil, fmt.Errorf("failed to merge podTemplate main container: %w", err)
 		}
 	}
-	if err := validateContainerVolumeMounts(container.VolumeMounts); err != nil {
-		return nil, err
-	}
 
 	if err := applyCompilationCache(&container, component, backendFramework); err != nil {
+		return nil, err
+	}
+	if err := validateContainerVolumeMounts(container.VolumeMounts); err != nil {
 		return nil, err
 	}
 
@@ -1571,15 +1571,8 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	if component.CompilationCache != nil {
-		podSpec.Volumes = appendUniqueVolume(podSpec.Volumes, corev1.Volume{
-			Name: component.CompilationCache.PVCName,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: component.CompilationCache.PVCName,
-				},
-			},
-		})
+	if err := applyCompilationCacheVolume(&podSpec, component.CompilationCache); err != nil {
+		return nil, err
 	}
 
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemorySize)
@@ -1686,31 +1679,88 @@ func applyCompilationCache(container *corev1.Container, component *v1beta1.Dynam
 	if component.CompilationCache == nil {
 		return nil
 	}
-	if component.CompilationCache.PVCName == "" {
+	compilationCache := component.CompilationCache
+	if compilationCache.PVCName == "" {
 		return fmt.Errorf("compilationCache.pvcName is required when compilationCache is set")
 	}
-	mountPath := component.CompilationCache.MountPath
+	mountPath := compilationCache.MountPath
 	if mountPath == "" {
 		mountPath = getDefaultCompilationCacheMountPoint(backendFramework)
 		if mountPath == "" {
 			return fmt.Errorf("compilationCache.mountPath is required for backend framework %s (no default available)", backendFramework)
 		}
-		component.CompilationCache.MountPath = mountPath
+		compilationCache.MountPath = mountPath
 	}
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      component.CompilationCache.PVCName,
-		MountPath: mountPath,
-	})
+
+	// Normalize cache mounts left by older conversions before validating the container.
+	normalizedMounts := make([]corev1.VolumeMount, 0, len(container.VolumeMounts)+1)
+	alreadyMounted := false
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == compilationCache.PVCName && mount.MountPath == "" {
+			mount.MountPath = mountPath
+		}
+		if mount.MountPath != mountPath {
+			normalizedMounts = append(normalizedMounts, mount)
+			continue
+		}
+		if mount.Name != compilationCache.PVCName {
+			return fmt.Errorf("compilationCache.mountPath %q is already used by volume %q", mountPath, mount.Name)
+		}
+		if mount.ReadOnly {
+			return fmt.Errorf("compilation cache volume %q at %q must be writable", compilationCache.PVCName, mountPath)
+		}
+		if alreadyMounted {
+			continue
+		}
+		normalizedMounts = append(normalizedMounts, mount)
+		alreadyMounted = true
+	}
+	if !alreadyMounted {
+		normalizedMounts = append(normalizedMounts, corev1.VolumeMount{
+			Name:      compilationCache.PVCName,
+			MountPath: mountPath,
+		})
+	}
+	container.VolumeMounts = normalizedMounts
 	return nil
 }
 
-func appendUniqueVolume(volumes []corev1.Volume, volume corev1.Volume) []corev1.Volume {
-	for i := range volumes {
-		if volumes[i].Name == volume.Name {
-			return volumes
-		}
+func applyCompilationCacheVolume(podSpec *corev1.PodSpec, compilationCache *v1beta1.CompilationCacheConfig) error {
+	if compilationCache == nil {
+		return nil
 	}
-	return append(volumes, volume)
+	found := false
+	for i := range podSpec.Volumes {
+		volume := &podSpec.Volumes[i]
+		if volume.Name != compilationCache.PVCName {
+			continue
+		}
+		if volume.PersistentVolumeClaim == nil {
+			return fmt.Errorf("compilation cache volume %q must reference PVC %q", volume.Name, compilationCache.PVCName)
+		}
+		if volume.PersistentVolumeClaim.ClaimName != compilationCache.PVCName {
+			return fmt.Errorf("compilation cache volume %q references PVC %q instead of %q", volume.Name, volume.PersistentVolumeClaim.ClaimName, compilationCache.PVCName)
+		}
+		if volume.PersistentVolumeClaim.ReadOnly {
+			return fmt.Errorf("compilation cache PVC %q must be writable", compilationCache.PVCName)
+		}
+		if found {
+			return fmt.Errorf("compilation cache volume %q is defined more than once", compilationCache.PVCName)
+		}
+		found = true
+	}
+	if found {
+		return nil
+	}
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+		Name: compilationCache.PVCName,
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: compilationCache.PVCName,
+			},
+		},
+	})
+	return nil
 }
 
 func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.VolumeMount) []corev1.Volume {
