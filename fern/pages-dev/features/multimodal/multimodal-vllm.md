@@ -122,6 +122,30 @@ curl http://localhost:8000/v1/chat/completions \
     }' | jq
 ```
 
+### Unified Frontend Processing
+
+The unified worker advertises frontend image-decoding support when
+`--frontend-decoding` is enabled. The Python vLLM frontend can also pre-render
+processor inputs and transfer them to an aggregated worker over shared memory
+or NIXL:
+
+```bash
+# Same-node shared-memory transfer
+DYN_CHAT_PROCESSOR=vllm DYNAMO_MM_TRANSFER=shm \
+  bash launch/agg_multimodal.sh --unified \
+  --model Qwen/Qwen3-VL-2B-Instruct
+
+# NIXL transfer
+DYN_CHAT_PROCESSOR=vllm DYNAMO_MM_TRANSFER=nixl \
+  bash launch/agg_multimodal.sh --unified \
+  --model Qwen/Qwen3-VL-2B-Instruct
+```
+
+The frontend includes the original media references when transfer preparation
+is unavailable or partial. Fully transferred requests omit those references to
+avoid duplicating large inline data URIs in the backend payload. A receiver-side
+failure after a full transfer does not currently have a raw-media fallback.
+
 ### E/PD Serving (Encode + PD)
 
 Use `disagg_multimodal_e_pd.sh` when you want a separate encode worker and a combined prefill/decode worker. This path is primarily useful for image-centric workloads and embedding-cache experiments.
