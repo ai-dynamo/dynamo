@@ -79,7 +79,7 @@ func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes 
 // and returns the replica statuses for each component.
 // - PodCliques: spec.replicas == status.readyReplicas
 // - PodCliqueScalingGroups: spec.replicas == status.availableReplicas
-func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *v1beta1.DynamoGraphDeployment) (bool, string, map[string]v1beta1.ComponentReplicaStatus) {
+func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *v1beta1.DynamoGraphDeployment) (bool, string, map[string]v1beta1.ComponentReplicaStatus, error) {
 	logger := log.FromContext(ctx)
 	var notReadyComponents []string
 
@@ -92,13 +92,19 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 		resourceName := fmt.Sprintf("%s-0-%s", PCSNameForDGD(dgd.Name, dgd.Spec.Components), strings.ToLower(componentName))
 
 		if usesPCSG {
-			ok, reason, componentStatus := CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
+			ok, reason, componentStatus, err := CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
+			if err != nil {
+				return false, "", nil, fmt.Errorf("failed to check component %q (pcsg/%s): %w", componentName, resourceName, err)
+			}
 			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("pcsg/%s: %s", resourceName, reason))
 			}
 		} else {
-			ok, reason, componentStatus := CheckPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
+			ok, reason, componentStatus, err := CheckPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
+			if err != nil {
+				return false, "", nil, fmt.Errorf("failed to check component %q (podclique/%s): %w", componentName, resourceName, err)
+			}
 			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("podclique/%s: %s", resourceName, reason))
@@ -107,26 +113,30 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 	}
 
 	if len(notReadyComponents) > 0 {
-		return false, strings.Join(notReadyComponents, "; "), componentStatuses
+		return false, strings.Join(notReadyComponents, "; "), componentStatuses, nil
 	}
 
-	return true, "", componentStatuses
+	return true, "", componentStatuses, nil
 }
 
 // CheckPodCliqueReady determines if a Grove PodClique is fully ready and available.
 // It checks various status fields to ensure all replicas are available and the PodClique
 // configuration has been fully applied. This is the PodClique equivalent of IsDeploymentReady
 // for standard Kubernetes Deployments.
-func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus) {
+func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus, error) {
+	serviceStatus := v1beta1.ComponentReplicaStatus{
+		ComponentKind:  v1beta1.ComponentKindPodClique,
+		ComponentNames: []string{resourceName},
+	}
+
 	podClique := &grovev1alpha1.PodClique{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("PodClique not found", "resourceName", resourceName)
-			return false, "resource not found", v1beta1.ComponentReplicaStatus{}
+			return false, "resource not found", serviceStatus, nil
 		}
-		logger.V(1).Info("Failed to get PodClique", "error", err, "resourceName", resourceName)
-		return false, fmt.Sprintf("get error: %v", err), v1beta1.ComponentReplicaStatus{}
+		return false, "", v1beta1.ComponentReplicaStatus{}, fmt.Errorf("failed to get PodClique %s/%s: %w", namespace, resourceName, err)
 	}
 
 	desiredReplicas := podClique.Spec.Replicas
@@ -146,60 +156,60 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		"replicas", replicas,
 	)
 
-	serviceStatus := v1beta1.ComponentReplicaStatus{
-		ComponentKind:   v1beta1.ComponentKindPodClique,
-		ComponentNames:  []string{resourceName},
-		Replicas:        podClique.Status.Replicas,
-		UpdatedReplicas: podClique.Status.UpdatedReplicas,
-		ReadyReplicas:   &readyReplicas,
-	}
+	serviceStatus.Replicas = podClique.Status.Replicas
+	serviceStatus.UpdatedReplicas = podClique.Status.UpdatedReplicas
+	serviceStatus.ReadyReplicas = &readyReplicas
 
 	if observedGeneration == nil {
 		logger.V(1).Info("PodClique observedGeneration is nil", "resourceName", resourceName)
-		return false, "observedGeneration is nil", serviceStatus
+		return false, "observedGeneration is nil", serviceStatus, nil
 	}
 
 	if observedGeneration != nil && *observedGeneration < generation {
 		logger.V(1).Info("PodClique spec not yet processed", "resourceName", resourceName, "generation", generation, "observedGeneration", observedGeneration)
-		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), serviceStatus
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), serviceStatus, nil
 	}
 
 	if desiredReplicas == 0 {
-		return true, "", serviceStatus
+		return true, "", serviceStatus, nil
 	}
 
 	if desiredReplicas != readyReplicas {
 		logger.V(1).Info("PodClique not ready", "resourceName", resourceName, "desired", desiredReplicas, "ready", readyReplicas)
-		return false, fmt.Sprintf("desired=%d, ready=%d", desiredReplicas, readyReplicas), serviceStatus
+		return false, fmt.Sprintf("desired=%d, ready=%d", desiredReplicas, readyReplicas), serviceStatus, nil
 	}
 
 	if desiredReplicas != updatedReplicas {
 		logger.V(1).Info("PodClique not fully updated", "resourceName", resourceName, "desired", desiredReplicas, "updated", updatedReplicas)
-		return false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, updatedReplicas), serviceStatus
+		return false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, updatedReplicas), serviceStatus, nil
 	}
 
 	if replicas != desiredReplicas {
 		logger.V(1).Info("PodClique performing rolling update", "resourceName", resourceName, "desired", desiredReplicas, "replicas", replicas)
-		return false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, replicas), serviceStatus
+		return false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, replicas), serviceStatus, nil
 	}
 
-	return true, "", serviceStatus
+	return true, "", serviceStatus, nil
 }
 
 // CheckPCSGReady determines if a Grove PodCliqueScalingGroup is fully ready and available.
 // It checks various status fields to ensure all replicas are available and the PodClique
 // configuration has been fully applied. This is the PodCliqueScalingGroup equivalent of IsDeploymentReady
 // for standard Kubernetes Deployments.
-func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus) {
+func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus, error) {
+	serviceStatus := v1beta1.ComponentReplicaStatus{
+		ComponentKind:  v1beta1.ComponentKindPodCliqueScalingGroup,
+		ComponentNames: []string{resourceName},
+	}
+
 	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("PodCliqueScalingGroup not found", "resourceName", resourceName)
-			return false, "resource not found", v1beta1.ComponentReplicaStatus{}
+			return false, "resource not found", serviceStatus, nil
 		}
-		logger.V(1).Info("Failed to get PodCliqueScalingGroup", "error", err, "resourceName", resourceName)
-		return false, fmt.Sprintf("get error: %v", err), v1beta1.ComponentReplicaStatus{}
+		return false, "", v1beta1.ComponentReplicaStatus{}, fmt.Errorf("failed to get PodCliqueScalingGroup %s/%s: %w", namespace, resourceName, err)
 	}
 
 	desiredReplicas := pcsg.Spec.Replicas
@@ -219,45 +229,41 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 		"replicas", replicas,
 	)
 
-	serviceStatus := v1beta1.ComponentReplicaStatus{
-		ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
-		ComponentNames:    []string{resourceName},
-		Replicas:          pcsg.Status.Replicas,
-		UpdatedReplicas:   pcsg.Status.UpdatedReplicas,
-		AvailableReplicas: &availableReplicas,
-	}
+	serviceStatus.Replicas = pcsg.Status.Replicas
+	serviceStatus.UpdatedReplicas = pcsg.Status.UpdatedReplicas
+	serviceStatus.AvailableReplicas = &availableReplicas
 
 	if observedGeneration == nil {
 		logger.V(1).Info("PodCliqueScalingGroup observedGeneration is nil", "resourceName", resourceName)
-		return false, "observedGeneration is nil", serviceStatus
+		return false, "observedGeneration is nil", serviceStatus, nil
 	}
 
 	if observedGeneration != nil && *observedGeneration < generation {
 		logger.V(1).Info("PodCliqueScalingGroup spec not yet processed", "resourceName", resourceName, "generation", generation, "observedGeneration", observedGeneration)
-		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), serviceStatus
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), serviceStatus, nil
 	}
 
 	if desiredReplicas == 0 {
 		// No replicas desired, so it's ready
-		return true, "", serviceStatus
+		return true, "", serviceStatus, nil
 	}
 
 	if desiredReplicas != availableReplicas {
 		logger.V(1).Info("PodCliqueScalingGroup not ready", "resourceName", resourceName, "desired", desiredReplicas, "available", availableReplicas)
-		return false, fmt.Sprintf("desired=%d, available=%d", desiredReplicas, availableReplicas), serviceStatus
+		return false, fmt.Sprintf("desired=%d, available=%d", desiredReplicas, availableReplicas), serviceStatus, nil
 	}
 
 	if desiredReplicas != updatedReplicas {
 		logger.V(1).Info("PodCliqueScalingGroup not fully updated", "resourceName", resourceName, "desired", desiredReplicas, "updated", updatedReplicas)
-		return false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, updatedReplicas), serviceStatus
+		return false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, updatedReplicas), serviceStatus, nil
 	}
 
 	if replicas != desiredReplicas {
 		logger.V(1).Info("PodCliqueScalingGroup performing rolling update", "resourceName", resourceName, "desired", desiredReplicas, "replicas", replicas)
-		return false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, replicas), serviceStatus
+		return false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, replicas), serviceStatus, nil
 	}
 
-	return true, "", serviceStatus
+	return true, "", serviceStatus, nil
 }
 
 // specToGroveTopologyConstraint converts a deployment-level SpecTopologyConstraint
