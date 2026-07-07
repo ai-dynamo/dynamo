@@ -55,7 +55,7 @@ and transfer decoded tensors to backend workers with NIXL.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `DYN_MM_VIDEO_DECODER_BACKEND` | `video_rs` | Startup default for frontend video decoding. Set to `opencv` when the wheel is built with `media-opencv-video` and OpenCV shared libraries are present; requests can override it with `media_io_kwargs.video.backend`. Dynamo framework containers build and copy OpenCV from source for this path. |
+| `DYN_MM_VIDEO_DECODER_BACKEND` | `video_rs` | Startup default for frontend video decoding. Set to `ffmpeg` for sampled-only RGB conversion, or `opencv` when the wheel is built with `media-opencv-video` and OpenCV shared libraries are present. Requests can override it with `media_io_kwargs.video.backend`. Dynamo framework containers build and copy OpenCV from source for the OpenCV path. |
 | `DYN_MM_VIDEO_NUM_FRAMES` | `32` | Default number of frames sampled by frontend video decoding. Requests can override sampling with `media_io_kwargs.video`. |
 
 ## Security: URL Validation

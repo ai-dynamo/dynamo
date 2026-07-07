@@ -54,14 +54,15 @@ def test_frontend_decoder_options_defaults(monkeypatch):
     }
 
 
-def test_frontend_video_decoder_options_from_env(monkeypatch):
-    monkeypatch.setenv(DYN_MM_VIDEO_DECODER_BACKEND, "opencv")
+@pytest.mark.parametrize("backend", ["ffmpeg", "opencv"])
+def test_frontend_video_decoder_options_from_env(monkeypatch, backend):
+    monkeypatch.setenv(DYN_MM_VIDEO_DECODER_BACKEND, backend)
     monkeypatch.setenv(DYN_MM_VIDEO_NUM_FRAMES, "8")
 
     assert build_frontend_video_decoder_options() == {
         "limits": {"max_alloc": 512 * 1024 * 1024},
         "num_frames": 8,
-        "backend": "opencv",
+        "backend": backend,
     }
 
 
@@ -70,7 +71,7 @@ def test_frontend_video_decoder_options_reject_invalid_backend(monkeypatch):
 
     with pytest.raises(
         ValueError,
-        match="DYN_MM_VIDEO_DECODER_BACKEND must be one of: opencv, video_rs",
+        match="DYN_MM_VIDEO_DECODER_BACKEND must be one of: ffmpeg, opencv, video_rs",
     ):
         build_frontend_video_decoder_options()
 

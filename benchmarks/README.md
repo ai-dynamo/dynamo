@@ -56,6 +56,7 @@ aiperf plot artifacts/my-benchmark
 - **`incluster/`** — Kubernetes Job manifest for running benchmarks inside the cluster
 - **`router/`** — KV Router benchmarking scripts (prefix ratio, trace replay, agent, priority queue)
 - **`prefix_data_generator/`** — Tools for analyzing and synthesizing prefix-structured data
+- **`multimodal/video_decode/`** — Experimental frontend video decoder microbenchmark
 
 ## Comprehensive Guide
 
