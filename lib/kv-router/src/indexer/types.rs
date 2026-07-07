@@ -465,6 +465,12 @@ pub enum WorkerTask {
         event: RouterEvent,
         resp: oneshot::Sender<bool>,
     },
+    #[cfg(feature = "bench")]
+    EventWithCompletion {
+        event: RouterEvent,
+        metadata: EventEnqueueMetadata,
+        completions: flume::Sender<EventEnqueueCompletion>,
+    },
     Anchor {
         worker: WorkerWithDpRank,
         anchor: AnchorTask,
@@ -488,6 +494,22 @@ pub enum WorkerTask {
     Stats(oneshot::Sender<WorkerLookupStats>),
     Flush(oneshot::Sender<()>),
     Terminate,
+}
+
+#[cfg(feature = "bench")]
+#[derive(Debug, Clone, Copy)]
+pub struct EventEnqueueMetadata {
+    pub logical_event_id: u64,
+    pub scheduled_at: std::time::Instant,
+    pub enqueued_at: std::time::Instant,
+}
+
+#[cfg(feature = "bench")]
+#[derive(Debug, Clone, Copy)]
+pub struct EventEnqueueCompletion {
+    pub metadata: EventEnqueueMetadata,
+    pub applied_at: std::time::Instant,
+    pub applied: bool,
 }
 
 /// A request to process a routing decision.

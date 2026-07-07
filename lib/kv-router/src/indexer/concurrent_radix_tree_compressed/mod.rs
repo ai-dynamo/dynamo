@@ -102,6 +102,18 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
+    #[cfg(feature = "bench")]
+    pub fn touch_for_benchmark(&self) {
+        let mut pending = vec![self.root.clone()];
+        pending.extend(self.anchor_nodes.iter().map(|entry| {
+            std::hint::black_box(entry.key());
+            entry.value().clone()
+        }));
+        while let Some(node) = pending.pop() {
+            node.touch_for_benchmark(&mut pending);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn raw_child_edge_count(&self) -> usize {
         let mut queue = VecDeque::from([self.root.clone()]);

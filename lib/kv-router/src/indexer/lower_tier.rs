@@ -528,6 +528,27 @@ impl SyncIndexer for LowerTierIndexer {
                     }
                     let _ = resp.send(applied);
                 }
+                #[cfg(feature = "bench")]
+                WorkerTask::EventWithCompletion {
+                    event,
+                    metadata,
+                    completions,
+                } => {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut worker_blocks, event);
+                    let applied = result.is_ok();
+                    if let Err(ref error) = result {
+                        tracing::warn!(%error, "Failed to apply lower-tier event");
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
+                    }
+                    let _ = completions.send(crate::indexer::EventEnqueueCompletion {
+                        metadata,
+                        applied_at: std::time::Instant::now(),
+                        applied,
+                    });
+                }
                 WorkerTask::Anchor { worker, anchor } => {
                     if let Err(error) = self.apply_anchor(worker, anchor) {
                         tracing::warn!(?error, "Failed to apply anchor");

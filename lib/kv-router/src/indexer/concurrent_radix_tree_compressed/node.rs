@@ -204,6 +204,29 @@ impl Node {
         queue.extend(self.children.iter().map(|entry| entry.value().clone()));
     }
 
+    #[cfg(feature = "bench")]
+    pub(super) fn touch_for_benchmark(&self, queue: &mut Vec<SharedNode>) {
+        let _gate = self.shape_gate.read();
+        let state = self.state.read();
+
+        for entry in &state.edge {
+            std::hint::black_box(entry);
+        }
+        for entry in &state.edge_index {
+            std::hint::black_box(entry);
+        }
+        for entry in &state.worker_cutoffs {
+            std::hint::black_box(entry);
+        }
+        for worker in &state.full_edge_workers {
+            std::hint::black_box(worker);
+        }
+        for child in &self.children {
+            std::hint::black_box(child.key());
+            queue.push(child.value().clone());
+        }
+    }
+
     pub(super) fn child_edges_snapshot(&self) -> Vec<(LocalBlockHash, SharedNode)> {
         self.children
             .iter()

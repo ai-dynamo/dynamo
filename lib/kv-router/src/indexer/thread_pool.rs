@@ -234,6 +234,57 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         Arc::clone(&self.backend)
     }
 
+    #[cfg(feature = "bench")]
+    pub fn pre_register_bench_workers(&self, worker_ids: impl IntoIterator<Item = WorkerId>) {
+        for worker_id in worker_ids {
+            Self::get_or_assign_thread_idx(
+                &self.worker_assignments,
+                &self.worker_assignment_count,
+                worker_id,
+                self.num_workers,
+            );
+        }
+    }
+
+    #[cfg(feature = "bench")]
+    pub fn enqueue_event_with_completion(
+        &self,
+        event: RouterEvent,
+        logical_event_id: u64,
+        scheduled_at: std::time::Instant,
+        completions: flume::Sender<crate::indexer::EventEnqueueCompletion>,
+    ) -> Result<(std::time::Instant, usize), KvRouterError> {
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            event.worker_id,
+            self.num_workers,
+        );
+        let enqueued_at = std::time::Instant::now();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::EventWithCompletion {
+                event,
+                metadata: crate::indexer::EventEnqueueMetadata {
+                    logical_event_id,
+                    scheduled_at,
+                    enqueued_at,
+                },
+                completions,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        let depth = self.worker_event_channels[thread_idx].len();
+        self.maybe_enqueue_cleanup(thread_idx);
+        Ok((enqueued_at, depth))
+    }
+
+    #[cfg(feature = "bench")]
+    pub fn bench_queue_depth(&self) -> usize {
+        self.worker_event_channels
+            .iter()
+            .map(flume::Sender::len)
+            .sum()
+    }
+
     pub(crate) async fn worker_lookup_stats(&self) -> WorkerLookupStats {
         let mut receivers = Vec::new();
         for channel in &self.worker_event_channels {
