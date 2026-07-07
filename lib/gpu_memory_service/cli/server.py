@@ -26,46 +26,44 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _start_processes(devices: list[int]) -> list[subprocess.Popen]:
-    processes = []
-    for device in devices:
-        # The child defaults to serving every production tag (GMS_TAGS).
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "gpu_memory_service", "--device", str(device)]
-        )
-        logger.info("Started GMS device=%d pid=%d", device, proc.pid)
-        processes.append(proc)
-    return processes
+def _child_command(device: int) -> list[str]:
+    """Command for one child process serving every production tag on one GPU."""
+    return [sys.executable, "-m", "gpu_memory_service", "--device", str(device)]
+
+
+def _terminate_all(processes: list[subprocess.Popen]) -> None:
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+
+
+def _supervise(processes: list[subprocess.Popen]) -> int:
+    """Block until any child exits, terminate the rest, and return its exit code."""
+    while processes:
+        for process in processes:
+            exit_code = process.poll()
+            if exit_code is not None:
+                _terminate_all(processes)
+                return exit_code
+        time.sleep(1)
+    return 0
 
 
 def main() -> None:
-    processes = _start_processes(list_devices())
-
-    def shutdown() -> None:
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
+    processes = []
+    for device in list_devices():
+        proc = subprocess.Popen(_child_command(device))
+        logger.info("Started GMS device=%d pid=%d", device, proc.pid)
+        processes.append(proc)
 
     def terminate(*_args) -> None:
-        shutdown()
+        _terminate_all(processes)
         raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
 
-    while True:
-        running = False
-        for process in processes:
-            exit_code = process.poll()
-            if exit_code is None:
-                running = True
-                continue
-            shutdown()
-            raise SystemExit(exit_code)
-
-        if not running:
-            return
-        time.sleep(1)
+    raise SystemExit(_supervise(processes))
 
 
 if __name__ == "__main__":

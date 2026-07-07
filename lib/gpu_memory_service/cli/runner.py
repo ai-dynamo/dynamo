@@ -33,6 +33,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def run_servers(servers: Sequence[GMSRPCServer]) -> None:
+    """Serve all instances; when any stops, cancel the rest and raise."""
+    tasks = [asyncio.create_task(server.serve()) for server in servers]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+        raise RuntimeError("GMS server stopped unexpectedly")
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def serve_configs(configs: Sequence[Config]) -> None:
     """Construct and serve independent GMS instances in one process."""
     if any(config.verbose for config in configs):
@@ -62,16 +76,7 @@ async def serve_configs(configs: Sequence[Config]) -> None:
             )
         )
 
-    tasks = [asyncio.create_task(server.serve()) for server in servers]
-    try:
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            task.result()
-        raise RuntimeError("GMS server stopped unexpectedly")
-    finally:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+    await run_servers(servers)
 
 
 def main() -> None:
