@@ -2326,6 +2326,21 @@ func topologyDomainsContain(domains []v1beta1.TopologyDomain, want v1beta1.Topol
 	return false
 }
 
+func resolveGroveSchedulerQueue(ctx context.Context, annotations map[string]string, runtimeConfig *controller_common.RuntimeConfig) (string, error) {
+	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled && runtimeConfig.VolcanoSchedulerEnabled {
+		return "", fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
+	}
+	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
+		return "", nil
+	}
+
+	queueName, err := DetermineKaiSchedulerQueue(ctx, annotations)
+	if err != nil {
+		return "", fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
+	}
+	return queueName, nil
+}
+
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
@@ -2372,18 +2387,9 @@ func GenerateGrovePodCliqueSet(
 	// specToGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.
 	gangSet.Spec.Template.TopologyConstraint = specToGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
 
-	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled && runtimeConfig.VolcanoSchedulerEnabled {
-		return nil, fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
-	}
-
-	// Validate kai-scheduler queue once if kai-scheduler is enabled
-	var validatedQueueName string
-	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled {
-		var err error
-		validatedQueueName, err = DetermineKaiSchedulerQueue(ctx, dynamoDeployment.Annotations)
-		if err != nil {
-			return nil, fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
-		}
+	validatedQueueName, err := resolveGroveSchedulerQueue(ctx, dynamoDeployment.Annotations, runtimeConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	discoveryBackend := controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
