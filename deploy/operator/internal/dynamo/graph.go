@@ -2485,28 +2485,15 @@ func GenerateGrovePodCliqueSet(
 		}
 
 		if usesPCSG {
-			replicas := component.Replicas
-			minAvailable := ptr.To(int32(1))
-			if component.MinAvailable != nil {
-				minAvailable = ptr.To(*component.MinAvailable)
-			}
-			if checkpointInfo != nil &&
-				checkpointInfo.Enabled &&
-				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
-				!checkpointInfo.Ready {
-				replicas = ptr.To(int32(0))
-			}
-			pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
-				Name:               strings.ToLower(componentName),
-				CliqueNames:        cliqueNames,
-				Replicas:           replicas,
-				MinAvailable:       minAvailable,
-				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint, dynamoDeployment.Spec.TopologyConstraint),
-			}
-			if isInterPodGMS {
-				pcsg.ResourceSharing = gmsResourceSharingEntries(componentName, roles)
-			}
-			scalingGroups = append(scalingGroups, pcsg)
+			scalingGroups = append(scalingGroups, buildGroveScalingGroupConfig(
+				componentName,
+				component,
+				dynamoDeployment.Spec.TopologyConstraint,
+				roles,
+				cliqueNames,
+				checkpointInfo,
+				isInterPodGMS,
+			))
 		}
 	}
 	if len(scalingGroups) > 0 {
@@ -2517,6 +2504,43 @@ func GenerateGrovePodCliqueSet(
 	}
 
 	return gangSet, nil
+}
+
+func buildGroveScalingGroupConfig(
+	componentName string,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	deploymentTopologyConstraint *v1beta1.SpecTopologyConstraint,
+	roles []ServiceRole,
+	cliqueNames []string,
+	checkpointInfo *checkpoint.CheckpointInfo,
+	isInterPodGMS bool,
+) grovev1alpha1.PodCliqueScalingGroupConfig {
+	replicas := component.Replicas
+	minAvailable := ptr.To(int32(1))
+	if component.MinAvailable != nil {
+		minAvailable = ptr.To(*component.MinAvailable)
+	}
+	if shouldGateGroveScalingGroupReplicas(checkpointInfo) {
+		replicas = ptr.To(int32(0))
+	}
+	pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
+		Name:               strings.ToLower(componentName),
+		CliqueNames:        cliqueNames,
+		Replicas:           replicas,
+		MinAvailable:       minAvailable,
+		TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint, deploymentTopologyConstraint),
+	}
+	if isInterPodGMS {
+		pcsg.ResourceSharing = gmsResourceSharingEntries(componentName, roles)
+	}
+	return pcsg
+}
+
+func shouldGateGroveScalingGroupReplicas(checkpointInfo *checkpoint.CheckpointInfo) bool {
+	return checkpointInfo != nil &&
+		checkpointInfo.Enabled &&
+		checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+		!checkpointInfo.Ready
 }
 
 func groveUpdateStrategyFromAnnotations(annotations map[string]string) (*grovev1alpha1.UpdateStrategyType, error) {
@@ -2909,7 +2933,7 @@ func GenerateBasePodSpecForController(
 	if options.WorkloadComponentType != "" {
 		componentSpec.ComponentType = options.WorkloadComponentType
 	}
-	if workerHash := dynComponent.GetLabels()[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" && IsWorkerComponent(string(componentSpec.ComponentType)) {
+	if workerHash := GetDCDEffectiveWorkerHash(dynComponent); workerHash != "" && IsWorkerComponent(string(componentSpec.ComponentType)) {
 		ensurePodTemplate(componentSpec).Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 

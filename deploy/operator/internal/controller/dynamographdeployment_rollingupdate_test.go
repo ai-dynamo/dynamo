@@ -1277,6 +1277,7 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 					UpdatedReplicas:   2,
 					ReadyReplicas:     ptr.To(int32(2)),
 					AvailableReplicas: ptr.To(int32(2)),
+					RuntimeNamespace:  "dynamo-newhash1",
 				},
 			},
 			oldWorkerStatuses: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
@@ -1287,6 +1288,7 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 					UpdatedReplicas:   0,
 					ReadyReplicas:     ptr.To(int32(1)),
 					AvailableReplicas: ptr.To(int32(1)),
+					RuntimeNamespace:  "dynamo-oldhash1",
 				},
 			},
 			expected: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
@@ -1297,6 +1299,7 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 					UpdatedReplicas:   2, // Only new are "updated"
 					ReadyReplicas:     ptr.To(int32(3)),
 					AvailableReplicas: ptr.To(int32(3)),
+					RuntimeNamespace:  "dynamo-oldhash1",
 				},
 			},
 		},
@@ -1325,13 +1328,22 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 			componentStatuses: map[string]nvidiacomv1beta1.ComponentReplicaStatus{},
 			oldWorkerStatuses: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
 				"prefill": {
-					ComponentKind:  "Deployment",
-					ComponentNames: []string{"dgd-prefill-oldhash1"},
-					Replicas:       2,
-					ReadyReplicas:  ptr.To(int32(2)),
+					ComponentKind:    "Deployment",
+					ComponentNames:   []string{"dgd-prefill-oldhash1"},
+					Replicas:         2,
+					ReadyReplicas:    ptr.To(int32(2)),
+					RuntimeNamespace: "dynamo-oldhash1",
 				},
 			},
-			expected: map[string]nvidiacomv1beta1.ComponentReplicaStatus{},
+			expected: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+				"prefill": {
+					ComponentKind:    "Deployment",
+					ComponentNames:   []string{"dgd-prefill-oldhash1"},
+					Replicas:         2,
+					ReadyReplicas:    ptr.To(int32(2)),
+					RuntimeNamespace: "dynamo-oldhash1",
+				},
+			},
 		},
 		{
 			name: "handles nil ReadyReplicas and AvailableReplicas on old",
@@ -1427,6 +1439,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 				Namespace: "default",
 				Labels: map[string]string{
 					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoNamespace:           "base",
 					consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
 				},
 			},
@@ -1464,6 +1477,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 		assert.Equal(t, []string{"test-dgd-prefill-oldhash1"}, statuses["prefill"].ComponentNames)
 		assert.Equal(t, int32(1), statuses["prefill"].Replicas)
 		assert.Equal(t, ptr.To(int32(1)), statuses["prefill"].ReadyReplicas)
+		assert.Equal(t, "base-oldhash1", statuses["prefill"].RuntimeNamespace)
 	})
 
 	t.Run("old DCD not found - skips gracefully", func(t *testing.T) {

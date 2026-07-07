@@ -1235,7 +1235,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	}
 
 	// Check resource readiness
-	result := r.checkResourcesReadiness(resources)
+	result := r.checkResourcesReadiness(dynamoDeployment, resources)
 	return result, nil
 }
 
@@ -1540,7 +1540,7 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForComponent(ctx c
 	return updatedInProgress
 }
 
-func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Resource) ReconcileResult {
+func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(dgd *nvidiacomv1beta1.DynamoGraphDeployment, resources []Resource) ReconcileResult {
 	// Sort resources by name to ensure deterministic ordering
 	sort.Slice(resources, func(i, j int) bool {
 		return resources[i].GetName() < resources[j].GetName()
@@ -1554,7 +1554,7 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 
 		resourceComponentStatuses := resource.GetComponentStatuses()
 		for componentName, componentStatus := range resourceComponentStatuses {
-			componentStatuses[componentName] = componentStatus
+			componentStatuses[componentName] = componentStatusWithRuntimeNamespace(dgd, componentName, resource, componentStatus)
 		}
 
 		if !ready {
@@ -1577,6 +1577,36 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 		Message:         Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))),
 		ComponentStatus: componentStatuses,
 	}
+}
+
+func componentStatusWithRuntimeNamespace(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	resource Resource,
+	status nvidiacomv1beta1.ComponentReplicaStatus,
+) nvidiacomv1beta1.ComponentReplicaStatus {
+	if status.RuntimeNamespace != "" {
+		return status
+	}
+	dcd, ok := resource.(*nvidiacomv1beta1.DynamoComponentDeployment)
+	if !ok {
+		return status
+	}
+	if dgd == nil {
+		status.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+		return status
+	}
+	component := dgd.GetComponentByName(componentName)
+	if component == nil {
+		status.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+		return status
+	}
+	status.RuntimeNamespace = dynamo.ComponentRuntimeNamespace(
+		dgd.GetDynamoNamespaceForComponent(component),
+		string(dcd.Spec.ComponentType),
+		dynamo.GetDCDEffectiveWorkerHash(dcd),
+	)
+	return status
 }
 
 func applyCheckpointStartupReadiness(
@@ -1670,7 +1700,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	}
 
 	// Check resource readiness
-	result := r.checkResourcesReadiness(resources)
+	result := r.checkResourcesReadiness(dynamoDeployment, resources)
 
 	// During rolling updates, aggregate old worker component statuses into the result
 	// so that Replicas, ReadyReplicas, etc. reflect the total across old and new DCDs.

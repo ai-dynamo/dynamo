@@ -2350,6 +2350,32 @@ func (m *mockScaleInterface) Patch(ctx context.Context, gvr schema.GroupVersionR
 	return &autoscalingv1.Scale{}, nil
 }
 
+func setWantReconcileResultRuntimeNamespaces(dgd *v1beta1.DynamoGraphDeployment, result *ReconcileResult) {
+	if dgd == nil || result == nil {
+		return
+	}
+	workerHash := ""
+	if hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd); err == nil {
+		workerHash = hash
+	}
+	for componentName, componentStatus := range result.ComponentStatus {
+		component := dgd.GetComponentByName(componentName)
+		if component == nil {
+			continue
+		}
+		componentWorkerHash := ""
+		if componentStatus.ComponentKind == v1beta1.ComponentKindDeployment || componentStatus.ComponentKind == v1beta1.ComponentKindLeaderWorkerSet {
+			componentWorkerHash = workerHash
+		}
+		componentStatus.RuntimeNamespace = dynamo.ComponentRuntimeNamespace(
+			dgd.GetDynamoNamespaceForComponent(component),
+			string(component.ComponentType),
+			componentWorkerHash,
+		)
+		result.ComponentStatus[componentName] = componentStatus
+	}
+}
+
 func Test_reconcileGroveResources(t *testing.T) {
 	ctx := context.Background()
 
@@ -2691,6 +2717,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
+			setWantReconcileResultRuntimeNamespaces(dgd, &tt.wantReconcileResult)
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
 		})
 	}
@@ -4614,6 +4641,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd, nil, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
+			setWantReconcileResultRuntimeNamespaces(dgd, &tt.wantReconcileResult)
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
 		})
 	}

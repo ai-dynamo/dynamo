@@ -1075,6 +1075,9 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
 		existing, found := oldStatuses[componentName]
 		if !found {
 			status := *dcd.Status.Component
+			if status.RuntimeNamespace == "" {
+				status.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(&dcd)
+			}
 			status.ComponentNames = componentReplicaResourceNames(dcd.Status.Component, dcd.Name)
 			oldStatuses[componentName] = status
 		} else {
@@ -1226,7 +1229,13 @@ func mergeWorkerComponentStatuses(
 	for componentName, oldStatus := range oldWorkerStatuses {
 		newStatus, exists := componentStatuses[componentName]
 		if !exists {
+			componentStatuses[componentName] = oldStatus
 			continue
+		}
+
+		if oldStatus.RuntimeNamespace != "" {
+			// Keep routing consumers on the old active worker namespace until rollout cutover.
+			newStatus.RuntimeNamespace = oldStatus.RuntimeNamespace
 		}
 
 		// Build sorted ComponentNames from old and new DCD names.
