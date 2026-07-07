@@ -272,7 +272,7 @@ async def test_unsupported_format_batch_data_url_raises_415(
     assert exc_info.value.status == 415
 
 
-# --- SSRF / URL-validation error contract (DYN-3389) ---
+# --- SSRF / URL-validation error contract ---
 
 
 _BLOCKED_METADATA_URL = "https://169.254.169.254/latest/meta-data/"
@@ -284,9 +284,9 @@ async def test_ssrf_blocked_batch_url_raises_url_validation_error() -> None:
 
     This is the frontend-driven path: py_err_to_dynamo maps a ValueError to
     Backend(InvalidArgument) -> HTTP 4xx, whereas a bare Exception maps to
-    Unknown -> 500. Regression test for DYN-3389 (link-local metadata IP
-    returned 500 instead of a clean client error). The default policy has the
-    guard active (allow_private_ips=False), so no real network hit occurs."""
+    Unknown -> 500. Regression test for the link-local metadata IP returning
+    500 instead of a clean client error. The default policy has the guard
+    active (allow_private_ips=False), so no real network hit occurs."""
     strict_loader = ImageLoader(
         cache_size=4, http_timeout=30.0, url_policy=UrlValidationPolicy()
     )

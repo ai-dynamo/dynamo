@@ -348,7 +348,7 @@ class MultimodalRequestProcessor:
                         # disallowed scheme, unsupported format) are client errors.
                         # Propagate them so the frontend maps them to a 4xx instead
                         # of the generic except below swallowing them into a silent
-                        # dropped image (which the frontend cannot report). See DYN-3389.
+                        # dropped image (which the frontend cannot report).
                         raise
                     except Exception as e:
                         logging.error(f"Failed to load images: {e}")

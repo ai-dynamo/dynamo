@@ -153,7 +153,7 @@ class ImageLoader:
             # batch caller keeps its client-error semantics instead of the
             # generic ValueError wrapping below flattening it. UrlValidationError
             # subclasses ValueError, so this branch must precede the ValueError one.
-            logger.error(f"URL rejected loading image: '{image_url}': {e}")
+            logger.error("URL rejected loading image: '%s': %s", image_url, e)
             raise
         except ValueError as e:
             if "Unsupported image format" in str(e):
