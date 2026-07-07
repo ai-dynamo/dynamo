@@ -549,6 +549,19 @@ def setup_vllm_engine(
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
 
+    # Match vLLM's behavior: forward ``--dyn-reasoning-parser`` to vLLM's
+    # engine-level ``reasoning_parser`` so vLLM's ``reasoning_config`` is
+    # populated and its builtin ``ThinkingBudgetLogitsProcessor`` coordinates
+    # with the structured-output (xgrammar) pipeline via
+    # ``should_fill_bitmask`` — the path that supports
+    # ``nvext.max_thinking_tokens`` + ``tool_choice=required`` simultaneously.
+    # Without this, the client would have to set both ``--dyn-reasoning-parser``
+    # (Dynamo-side response shaping) and ``--reasoning-parser`` (vLLM-side
+    # budget enforcement); auto-forwarding eliminates that duplication and
+    # matches ``vllm serve`` semantics.
+    if config.dyn_reasoning_parser and not engine_args.reasoning_parser:
+        engine_args.reasoning_parser = config.dyn_reasoning_parser
+
     # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
     # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
     if (

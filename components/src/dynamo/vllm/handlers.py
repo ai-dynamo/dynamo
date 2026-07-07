@@ -871,6 +871,8 @@ def build_sampling_params(
         # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM 0.20+ exposes
         # the same concept as `thinking_token_budget` on SamplingParams and
         # enforces it via the builtin thinking-budget logits processor.
+        # ``reasoning_parser`` is auto-forwarded in ``main.py`` so vLLM's
+        # ``reasoning_config`` is populated for budget enforcement.
         if (
             key == "max_thinking_tokens"
             and value is not None
