@@ -162,7 +162,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log)
+		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, !m.CUDA.HasJobFile, log)
 		if err != nil {
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}

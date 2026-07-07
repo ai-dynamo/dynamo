@@ -190,6 +190,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		log.V(1).Info("Resolved checkpoint CUDA PID mapping", "host_pids", cudaHostPIDs, "namespace_pids", cudaNamespacePIDs)
 	}
 	var gpuUUIDs []string
+	cudaHasJobFile := true // fail closed: only cleared by a positive determination below
 	if len(cudaHostPIDs) > 0 {
 		gpuUUIDs, err = cuda.DiscoverGPUUUIDs(
 			ctx,
@@ -204,6 +205,14 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
 		}
+
+		var entrypointArgs []string
+		if ociSpec != nil && ociSpec.Process != nil {
+			entrypointArgs = ociSpec.Process.Args
+		}
+		var reason string
+		cudaHasJobFile, reason = cuda.HasJobFile(entrypointArgs)
+		log.Info("Determined CUDA checkpoint job-file usage", "has_job_file", cudaHasJobFile, "reason", reason)
 	}
 
 	return &types.CheckpointContainerSnapshot{
@@ -218,6 +227,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		CUDAHostPIDs:   cudaHostPIDs,
 		CUDANSPIDs:     cudaNamespacePIDs,
 		GPUUUIDs:       gpuUUIDs,
+		CUDAHasJobFile: cudaHasJobFile,
 	}, nil
 }
 
@@ -240,7 +250,7 @@ func configureCheckpoint(
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
 	if len(state.CUDANSPIDs) > 0 {
-		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
+		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs, state.CUDAHasJobFile)
 	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
