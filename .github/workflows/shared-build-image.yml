@@ -499,13 +499,17 @@ jobs:
           DIFF_CURRENT_SHA: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           DIFF_REPO: ${{ github.repository }}
           DIFF_RUN_ID: ${{ github.run_id }}
+          # Container artifact prefix: lets the main-baseline walk look up
+          # compliance-<sha>-<prefix> availability per commit.
+          DIFF_ARTIFACT_PREFIX: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
         run: |
           # The build checkout is shallow with no tags. Make the refs each
           # baseline rule needs reachable (all best-effort; a miss just yields an
-          # empty base_sha and a baseline_unavailable diff):
-          git fetch --deepen=1 --quiet || true                                # HEAD~1 (main post-merge)
-          git fetch --tags --quiet || true                                    # vX.Y.Z tags (release branch)
-          git fetch --depth=1 origin main:refs/remotes/origin/main --quiet || true  # origin/main (PR -> main)
+          # empty base_sha and a baseline_unavailable diff). Depth 30 so the
+          # main-baseline first-parent walk has commits to traverse:
+          git fetch --deepen=30 --quiet || true                                     # HEAD~N (main post-merge walk)
+          git fetch --tags --quiet || true                                          # vX.Y.Z tags (release branch)
+          git fetch --depth=30 origin main:refs/remotes/origin/main --quiet || true # origin/main history (PR -> main walk)
           CURRENT_VERSION=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)
           python3 container/compliance/resolve_diff_base.py \
             --event-context "${DIFF_EVENT_CONTEXT}" \
@@ -513,6 +517,7 @@ jobs:
             --base-branch "${DIFF_BASE_BRANCH}" \
             --current-sha "${DIFF_CURRENT_SHA}" \
             --current-version "${CURRENT_VERSION}" \
+            --artifact-prefix "${DIFF_ARTIFACT_PREFIX}" \
             --repo "${DIFF_REPO}" \
             --current-run-id "${DIFF_RUN_ID}" \
             >> "$GITHUB_OUTPUT"

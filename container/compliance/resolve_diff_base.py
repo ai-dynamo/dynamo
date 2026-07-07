@@ -200,6 +200,85 @@ def _short(sha: str) -> str:
     return sha[:8] if sha else ""
 
 
+def artifact_exists(repo: str, sha: str, prefix: str) -> bool | None:
+    """Whether a non-expired ``compliance-<sha>-<prefix>`` artifact exists.
+
+    Returns True/False, or None when the API call itself failed — so callers can
+    tell "definitely absent" apart from "couldn't check" (transient API error).
+    """
+    if not (repo and sha and prefix):
+        return False
+    out = _gh(
+        f"/repos/{repo}/actions/artifacts?name=compliance-{sha}-{prefix}",
+        "--jq",
+        "[.artifacts[] | select(.expired == false)] | length",
+    )
+    if out is None:
+        return None
+    try:
+        return int(out.strip()) > 0
+    except ValueError:
+        return False
+
+
+def _first_parent_shas(ref: str, limit: int) -> list[str]:
+    """First-parent commit SHAs reachable from ref (newest first), capped at limit."""
+    out = _git("rev-list", "--first-parent", "-n", str(limit), ref)
+    return out.splitlines() if out else []
+
+
+def pick_commit_with_artifact(shas, exists_fn) -> tuple[str | None, bool]:
+    """Return (first sha whose exists_fn(sha) is True, saw_error).
+
+    saw_error is True if any check returned None (API failure), letting the
+    caller fall back instead of mistaking a flaky API for "no baseline".
+    """
+    saw_error = False
+    for sha in shas:
+        result = exists_fn(sha)
+        if result is True:
+            return sha, saw_error
+        if result is None:
+            saw_error = True
+    return None, saw_error
+
+
+def _resolve_main_baseline(
+    start_ref: str, repo: str, artifact_prefix: str, limit: int = 25
+) -> tuple[str, str]:
+    """Baseline for the main cases: the most recent commit on main's first-parent
+    history (from ``start_ref`` backward) that actually has a
+    ``compliance-<sha>-<prefix>`` artifact.
+
+    Post-merge builds every framework, but each container's artifact lands at a
+    different time (and a leg can fail), so the tip of main frequently lacks a
+    given container's artifact when a PR builds. Walking back finds the newest
+    commit that does have it, per container.
+    """
+    tip = _git("rev-parse", start_ref)
+    if not tip:
+        return "", f"main baseline ({start_ref} unresolved; shallow clone?)"
+    # Without a prefix (or token) we can't check availability -> use the tip,
+    # preserving the original behavior.
+    if not artifact_prefix:
+        return tip, f"main {_short(tip)}"
+    shas = _first_parent_shas(start_ref, limit)
+    chosen, saw_error = pick_commit_with_artifact(
+        shas, lambda s: artifact_exists(repo, s, artifact_prefix)
+    )
+    if chosen:
+        if chosen == tip:
+            return chosen, f"main {_short(chosen)}"
+        return (
+            chosen,
+            f"main {_short(chosen)} (nearest with {artifact_prefix} artifact)",
+        )
+    if saw_error:
+        # Artifacts API was unreachable; don't discard a possibly-valid diff.
+        return tip, f"main {_short(tip)} (artifact availability unchecked)"
+    return "", f"no main commit with a {artifact_prefix} artifact in last {limit}"
+
+
 def resolve(
     event_context: str,
     current_branch: str,
@@ -207,6 +286,7 @@ def resolve(
     current_version: str,
     repo: str = "",
     current_run_id: str = "",
+    artifact_prefix: str = "",
 ) -> tuple[str, str]:
     """Return (base_sha, base_label). base_sha empty when there is no baseline."""
     # Rule 4: nightly build -> previous successful run of the same workflow.
@@ -220,19 +300,16 @@ def resolve(
             return sha, f"previous nightly {_short(sha)}"
         return "", "no previous successful nightly run found"
 
-    # Rule 1: PR targeting main -> latest commit on main.
+    # Rule 1: PR targeting main -> most recent main commit that has this
+    # container's artifact (walk back main; the tip often isn't built yet).
     if event_context == "pr" and base_branch == "main":
-        sha = _git("rev-parse", "origin/main") or _git("rev-parse", "main")
-        if sha:
-            return sha, f"PR base main@{_short(sha)}"
-        return "", "PR base main (could not resolve origin/main)"
+        ref = "origin/main" if _git("rev-parse", "origin/main") else "main"
+        return _resolve_main_baseline(ref, repo, artifact_prefix)
 
-    # Rule 2: post-merge push to main -> previous commit on main.
+    # Rule 2: post-merge push to main -> walk back from the previous main commit
+    # (HEAD is the just-merged commit, still building, so start at HEAD~1).
     if event_context == "push" and current_branch == "main":
-        sha = _git("rev-parse", "HEAD~1")
-        if sha:
-            return sha, f"main parent {_short(sha)}"
-        return "", "main parent (unavailable; shallow clone?)"
+        return _resolve_main_baseline("HEAD~1", repo, artifact_prefix)
 
     # Rule 3: PR targeting / push to a release branch -> prior release tag.
     release_ref = base_branch if is_release_branch(base_branch) else current_branch
@@ -289,6 +366,13 @@ def main() -> None:
         default="",
         help="github.run_id of this build; used by the nightly context to find the previous run",
     )
+    parser.add_argument(
+        "--artifact-prefix",
+        default="",
+        help="Container artifact prefix (target_tag_plain, e.g. vllm-runtime); for the "
+        "main cases, the resolver walks main's history for a commit that has a "
+        "compliance-<sha>-<prefix> artifact. Requires --repo and GH_TOKEN.",
+    )
     args = parser.parse_args()
 
     base_sha, base_label = resolve(
@@ -298,6 +382,7 @@ def main() -> None:
         args.current_version,
         args.repo,
         args.current_run_id,
+        args.artifact_prefix,
     )
 
     print(

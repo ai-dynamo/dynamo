@@ -13,6 +13,7 @@ import pytest
 from compliance.resolve_diff_base import (
     is_release_branch,
     parse_release_tuple,
+    pick_commit_with_artifact,
     pick_previous_run_sha,
     pick_prior_release_tag,
     resolve,
@@ -99,6 +100,50 @@ class TestPickPreviousRunSha:
 
     def test_empty(self):
         assert pick_previous_run_sha(100, []) is None
+
+
+class TestPickCommitWithArtifact:
+    def test_returns_first_with_artifact(self):
+        # tip (sha_a) has none; walk back to sha_b which does.
+        have = {"sha_b"}
+        chosen, saw_error = pick_commit_with_artifact(
+            ["sha_a", "sha_b", "sha_c"], lambda s: s in have
+        )
+        assert chosen == "sha_b"
+        assert saw_error is False
+
+    def test_tip_has_artifact(self):
+        chosen, saw_error = pick_commit_with_artifact(
+            ["sha_a", "sha_b"], lambda s: True
+        )
+        assert chosen == "sha_a"
+        assert saw_error is False
+
+    def test_none_found(self):
+        chosen, saw_error = pick_commit_with_artifact(
+            ["sha_a", "sha_b"], lambda s: False
+        )
+        assert chosen is None
+        assert saw_error is False
+
+    def test_api_error_then_hit(self):
+        # None = API couldn't check; a later True still wins.
+        results = {"sha_a": None, "sha_b": True}
+        chosen, saw_error = pick_commit_with_artifact(
+            ["sha_a", "sha_b"], lambda s: results[s]
+        )
+        assert chosen == "sha_b"
+        assert saw_error is True
+
+    def test_all_api_error(self):
+        chosen, saw_error = pick_commit_with_artifact(
+            ["sha_a", "sha_b"], lambda s: None
+        )
+        assert chosen is None
+        assert saw_error is True
+
+    def test_empty(self):
+        assert pick_commit_with_artifact([], lambda s: True) == (None, False)
 
 
 class TestIsReleaseBranch:
