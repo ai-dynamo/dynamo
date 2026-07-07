@@ -9327,6 +9327,88 @@ func TestGenerateGrovePodCliqueSet_PriorityClassName(t *testing.T) {
 	assert.Equal(t, "high-priority", pcs.Spec.Template.PriorityClassName)
 }
 
+func TestGenerateGrovePodCliqueSet_UpdateStrategy(t *testing.T) {
+	tests := []struct {
+		name          string
+		annotation    string
+		hasAnnotation bool
+		wantStrategy  *grovev1alpha1.UpdateStrategyType
+		wantErr       string
+	}{
+		{
+			name: "default leaves Grove strategy unset",
+		},
+		{
+			name:          "RollingRecreate annotation maps to Grove strategy",
+			annotation:    "RollingRecreate",
+			hasAnnotation: true,
+			wantStrategy:  ptr.To(grovev1alpha1.RollingRecreateStrategy),
+		},
+		{
+			name:          "OnDelete annotation maps to Grove strategy",
+			annotation:    "OnDelete",
+			hasAnnotation: true,
+			wantStrategy:  ptr.To(grovev1alpha1.OnDeleteStrategy),
+		},
+		{
+			name:          "lowercase annotation is rejected",
+			annotation:    "ondelete",
+			hasAnnotation: true,
+			wantErr:       "unsupported Grove update strategy annotation",
+		},
+		{
+			name:          "annotation with whitespace is rejected",
+			annotation:    " OnDelete ",
+			hasAnnotation: true,
+			wantErr:       "unsupported Grove update strategy annotation",
+		},
+		{
+			name:          "unknown annotation is rejected",
+			annotation:    "BlueGreen",
+			hasAnnotation: true,
+			wantErr:       "unsupported Grove update strategy annotation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "ns",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(1)),
+						},
+					},
+				},
+			}
+			if tt.hasAnnotation {
+				dgd.Annotations = map[string]string{
+					commonconsts.KubeAnnotationGroveUpdateStrategy: tt.annotation,
+				}
+			}
+
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			if tt.wantStrategy == nil {
+				assert.Nil(t, pcs.Spec.UpdateStrategy)
+				return
+			}
+			require.NotNil(t, pcs.Spec.UpdateStrategy)
+			assert.Equal(t, *tt.wantStrategy, pcs.Spec.UpdateStrategy.Type)
+		})
+	}
+}
+
 func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.T) {
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{

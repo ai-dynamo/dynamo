@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
@@ -19,9 +20,11 @@ import dynamo.sglang.llm_engine as sglang_llm_engine
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
+    ensure_sglang_tensor_image_size,
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
+    start_profile_compat,
 )
 from dynamo.sglang.args import (
     _forward_pass_metrics_source,
@@ -118,6 +121,102 @@ def test_compat_restores_sglang_top_level_exports():
                 delattr(sgl, "ServerArgs")
         else:
             sgl.ServerArgs = original_server_args
+
+
+def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatch):
+    from sglang.srt.multimodal.processors.base_processor import (
+        BaseMultimodalProcessor,
+        BaseMultiModalProcessorOutput,
+        MultimodalSpecialTokens,
+    )
+
+    class Processor:
+        image_sizes = None
+
+        def _get_num_multimodal_tokens(self, *, image_sizes):
+            self.image_sizes = image_sizes
+            return SimpleNamespace(num_image_tokens=[4])
+
+    class ConcreteMultimodalProcessor(BaseMultimodalProcessor):
+        async def process_mm_data_async(self, *args, **kwargs):
+            raise NotImplementedError
+
+    original = BaseMultimodalProcessor.resolve_image_token_counts
+    try:
+        ensure_sglang_tensor_image_size()
+        installed = BaseMultimodalProcessor.resolve_image_token_counts
+        ensure_sglang_tensor_image_size()
+
+        processor = object.__new__(ConcreteMultimodalProcessor)
+        processor._processor = Processor()
+        image_token_id = 99
+        processor._process_and_collect_mm_items = lambda **kwargs: (
+            [],
+            torch.tensor(
+                [20, image_token_id, image_token_id, image_token_id, image_token_id, 21]
+            ),
+            {},
+        )
+        base_output = BaseMultiModalProcessorOutput(
+            input_text="decoded prompt",
+            input_ids=[10, image_token_id, 11],
+            images=[torch.empty((3, 48, 80), dtype=torch.uint8)],
+        )
+        mm_tokens = MultimodalSpecialTokens(image_token_id=image_token_id)
+        # SGLang defaults this on to preserve caller token IDs and expand only
+        # image placeholders instead of decoding and retokenizing the prompt.
+        monkeypatch.setenv("SGLANG_MM_AVOID_RETOKENIZE", "1")
+
+        with caplog.at_level(
+            logging.WARNING,
+            logger="sglang.srt.multimodal.processors.base_processor",
+        ):
+            _, input_ids, _ = processor.process_and_combine_mm_data(
+                base_output, mm_tokens
+            )
+
+        assert installed is BaseMultimodalProcessor.resolve_image_token_counts
+        assert processor._processor.image_sizes == [(48, 80)]
+        assert input_ids.tolist() == [
+            10,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            11,
+        ]
+        assert not any(
+            "falling back to decode+retokenize" in record.message
+            for record in caplog.records
+        )
+    finally:
+        BaseMultimodalProcessor.resolve_image_token_counts = original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_multimodal", [False, True])
+async def test_tensor_image_size_compat_uses_resolved_model_capability(
+    monkeypatch, mock_sglang_cli, is_multimodal
+):
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=is_multimodal),
+    )
+    install_calls = []
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ensure_sglang_tensor_image_size",
+        lambda: install_calls.append(True),
+    )
+    mock_sglang_cli(model="/tmp")
+
+    await parse_args(sys.argv[1:])
+
+    assert install_calls == ([True] if is_multimodal else [])
 
 
 def test_compat_filters_async_generate_kwargs_for_older_engines():
@@ -288,6 +387,46 @@ def test_compat_caches_async_generate_signature_inspection(monkeypatch):
     assert calls == 1
 
     sglang_compat._get_async_generate_supported_kwarg_names.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_compat_starts_profile_with_legacy_kwargs():
+    class LegacyTokenizerManager:
+        received = None
+
+        async def start_profile(self, output_dir=None, start_step=None, num_steps=None):
+            self.received = {
+                "output_dir": output_dir,
+                "start_step": start_step,
+                "num_steps": num_steps,
+            }
+
+    manager = LegacyTokenizerManager()
+    body = {"output_dir": "/tmp/profile", "start_step": 10, "num_steps": 5}
+
+    await start_profile_compat(manager, body)
+
+    assert manager.received == body
+
+
+@pytest.mark.asyncio
+async def test_compat_starts_profile_with_request_object(monkeypatch):
+    class RequestTokenizerManager:
+        received = None
+
+        async def start_profile(self, req=None):
+            self.received = req
+
+    request = SimpleNamespace(output_dir="/tmp/profile", start_step=10, num_steps=5)
+    monkeypatch.setattr(sglang_compat, "_build_profile_request", lambda body: request)
+    manager = RequestTokenizerManager()
+
+    await start_profile_compat(
+        manager,
+        {"output_dir": "/tmp/profile", "start_step": 10, "num_steps": 5},
+    )
+
+    assert manager.received is request
 
 
 @pytest.mark.asyncio
@@ -1107,10 +1246,10 @@ async def test_lora_registration_model_type_gate(
 
     assert results and results[-1]["status"] == "success", results
     assert captured, "register_llm was not invoked"
-    assert (
-        str(captured["model_type"]) == expected_model_type_str
-    ), f"model_type {captured['model_type']} != expected {expected_model_type_str}"
-    assert (
-        str(captured["worker_type"]) == expected_worker_type
-    ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
+    assert str(captured["model_type"]) == expected_model_type_str, (
+        f"model_type {captured['model_type']} != expected {expected_model_type_str}"
+    )
+    assert str(captured["worker_type"]) == expected_worker_type, (
+        f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
+    )
     assert captured["lora_name"] == "test_lora"

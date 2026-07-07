@@ -948,6 +948,12 @@ class SglangStreamingPostProcessor:
         # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
         self._skip_special_tokens = tool_call_parser is None
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
+        # Required/named guided output may be either bare JSON or
+        # reasoning followed by JSON. Delay only the ambiguous bracket-leading
+        # prefix so bare JSON does not get trapped as reasoning.
+        self._pending_guided_reasoning_parts: list[str] | None = (
+            [] if self._is_json_array_parser and reasoning_parser is not None else None
+        )
         self._eos_token_ids = set(eos_token_ids or [])
 
         self._all_token_ids: list[int] = []
@@ -1018,6 +1024,56 @@ class SglangStreamingPostProcessor:
 
         return window_text[len(prefix_text) :]
 
+    def _parse_reasoning_delta(
+        self, delta_text: str, finish_reason: str | None
+    ) -> tuple[str | None, str]:
+        assert self.reasoning_parser is not None
+
+        pending = self._pending_guided_reasoning_parts
+        if pending is None:
+            if not delta_text:
+                return None, ""
+            reasoning_text, normal_text = self.reasoning_parser.parse_stream_chunk(
+                delta_text
+            )
+            return reasoning_text or None, normal_text or ""
+
+        if delta_text:
+            pending.append(delta_text)
+        buffered = "".join(pending)
+        stripped = buffered.lstrip()
+
+        detector = getattr(self.reasoning_parser, "detector", None)
+        think_start = getattr(detector, "think_start_token", "")
+        starts_reasoning = bool(think_start and stripped.startswith(think_start))
+        could_be_partial_start = bool(
+            stripped
+            and think_start
+            and len(stripped) < len(think_start)
+            and think_start.startswith(stripped)
+        )
+
+        if not finish_reason and (
+            not stripped
+            or could_be_partial_start
+            or (stripped[0] in "[{" and not starts_reasoning)
+        ):
+            return None, ""
+
+        self._pending_guided_reasoning_parts = None
+        if finish_reason and _try_parse_json_array(buffered) is not None:
+            return None, buffered
+
+        if finish_reason and stripped and stripped[0] in "[{" and not starts_reasoning:
+            reasoning_text, normal_text = self.reasoning_parser.parse_non_stream(
+                buffered
+            )
+        else:
+            reasoning_text, normal_text = self.reasoning_parser.parse_stream_chunk(
+                buffered
+            )
+        return reasoning_text or None, normal_text or ""
+
     def process_output(self, engine_response: dict[str, Any]) -> dict[str, Any] | None:
         """Process a single engine response chunk into an OpenAI SSE choice dict.
 
@@ -1056,10 +1112,10 @@ class SglangStreamingPostProcessor:
         reasoning_text = None
         normal_text = delta_text
 
-        if self.reasoning_parser and delta_text:
-            r_text, n_text = self.reasoning_parser.parse_stream_chunk(delta_text)
-            reasoning_text = r_text or None
-            normal_text = n_text or ""
+        if self.reasoning_parser and (delta_text or finish_reason):
+            reasoning_text, normal_text = self._parse_reasoning_delta(
+                delta_text, finish_reason
+            )
 
         # -- Tool call parsing (accumulate deltas) --
         content_text = normal_text

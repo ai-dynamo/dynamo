@@ -136,8 +136,9 @@ Much of this prose is now drafted by agents. Edit it so it does not read that wa
 
 - **Lists by purpose:** numbered (`1.`) for sequences and steps, bulleted (`-`) otherwise; consistent
   within a page. Tables stay scannable; keep long prose out of cells.
-- **File names** are kebab-case (`router-configuration.md`); Chinese translations mirror the English
-  page as `<name>.zh-CN.md`.
+- **File names** are kebab-case (`router-configuration.md`); Chinese translations live under
+  `fern/translations/zh-CN/pages-dev/` at the same relative path and file name as the English page
+  (Fern's native localization pairs them and adds the language picker automatically).
 - **Code fences** always tag the language (`bash`, `yaml`, `python`, `json`, `rust`, `text`,
   `mermaid`; `bash`, not `sh`). Keep commands copy-pasteable: no `$`/`#` prompt prefixes, real flags
   not placeholders. Put output in its own `text` block. In prose, wrap flags (`--router-mode`),

@@ -2560,6 +2560,83 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         assert "think about this" in reasoning
         assert "42" in content
 
+    @pytest.mark.parametrize(
+        ("parser_name", "reasoning_output", "expected_reasoning"),
+        [
+            ("qwen3", None, ""),
+            ("qwen3", "Check the request.</think>", "Check the request."),
+            ("qwen3", "[check the request]</think>", "[check the request]"),
+            ("mistral", "[THINK]Check the request.[/THINK]", "Check the request."),
+        ],
+    )
+    def test_required_tool_distinguishes_bare_json_from_reasoning(
+        self, tokenizer, parser_name, reasoning_output, expected_reasoning
+    ):
+        """Guided tool JSON bypasses only when the complete output is bare JSON."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        }
+        tools = convert_tools(request["tools"])
+        tool_parser, reasoning_parser = create_parsers(
+            request,
+            tool_call_parser_name="qwen25",
+            reasoning_parser_name=parser_name,
+            sglang_tools=tools,
+            force_reasoning=True,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=tool_parser,
+            reasoning_parser=reasoning_parser,
+            sglang_tools=tools,
+            tool_call_parser_name="qwen25",
+        )
+
+        tool_json = json.dumps(
+            [{"name": "get_weather", "parameters": {"city": "New York"}}]
+        )
+        text = f"{reasoning_output or ''}{tool_json}"
+        token_ids = tokenizer.encode(text)
+        reasoning = ""
+        content = ""
+        tool_calls = []
+        finish_reason = None
+        for offset in range(0, len(token_ids), 3):
+            batch = token_ids[offset : offset + 3]
+            is_last = offset + 3 >= len(token_ids)
+            choice = post.process_output(
+                {"token_ids": batch, "finish_reason": "stop" if is_last else None}
+            )
+            if choice:
+                delta = choice.get("delta", {})
+                reasoning += delta.get("reasoning_content", "")
+                content += delta.get("content", "")
+                tool_calls.extend(delta.get("tool_calls", []))
+                finish_reason = choice.get("finish_reason") or finish_reason
+
+        assert reasoning == expected_reasoning
+        assert content == ""
+        assert finish_reason == "tool_calls"
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "get_weather"
+        assert json.loads(tool_calls[0]["function"]["arguments"]) == {
+            "city": "New York"
+        }
+
 
 # ---------------------------------------------------------------------------
 # Utility functions
