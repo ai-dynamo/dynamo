@@ -1,0 +1,200 @@
+{
+  "corpus_path": "/tmp/ckf-crtc-d16-3018026/corpus-v2/mooncake-d16.msgpack",
+  "corpus_sha256": "4056bc655ad04816545472cfdc9c877b727e221a141c413de4bd606d4e36da6c",
+  "corpus_bytes": 3942540417,
+  "resident_path": "/tmp/ckf-crtc-d16-3018026/corpus-v2/mooncake-d16.resident.msgpack",
+  "resident_sha256": "97bf27f6fd8b0a9c8aef6a287841e53c74e23655783d14ea38aa10f522fd7c74",
+  "resident_bytes": 696893359,
+  "header": {
+    "version": 1,
+    "created_by_git_sha": "7d29b240c6632d78bf06b1e44ac0773f133a5e3b",
+    "codec_id": "CKF1-v1",
+    "hash_scheme_id": "dynamo-sequence-xxh3-seed-1337-v1",
+    "filter_shape_sha256": "0d8c79f4eb5e1e2b31b4663af9652d398d8b515dac81f5e5453a4edbc6b08f9a",
+    "trace_sha256": "b434f1816a707f4bac697235588184ebc374c9907cb981bb65fb0643471fe711",
+    "trace_duplication_factor": 20,
+    "trace_length_factor": 4,
+    "trace_partition_seed": 42,
+    "block_size": 128,
+    "num_dcs": 16,
+    "event_threads": 8,
+    "query_concurrency": 16,
+    "source_span_us": 3619291978,
+    "ballast": {
+      "memberships_per_dc": 10000000,
+      "prefix_depth": 128,
+      "seed": 12975333958089703425,
+      "namespace_tag": 15090647565990756353
+    },
+    "filter_shapes": [
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017364,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017344,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017364,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017364,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017364,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017364,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017344,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017356,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017364,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017364,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017364,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017344,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017364,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017352,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017344,
+        "insertion_failures": 0
+      },
+      {
+        "seed": 6768574230984739379,
+        "buckets": 4194304,
+        "slots": 4,
+        "fingerprint_bits": 16,
+        "expected_load": 0.8,
+        "maximum_live_count": 10017356,
+        "insertion_failures": 0
+      }
+    ],
+    "totals": {
+      "requests": 472160,
+      "events": 2144651,
+      "request_blocks": 32748480,
+      "event_blocks": 46828259
+    },
+    "prefix_closure_violations": 0
+  },
+  "publisher": {
+    "bytes": 714220824,
+    "full_bytes": 0,
+    "delta_bytes": 714220824,
+    "full": 0,
+    "delta": 2144651,
+    "unchanged": 0,
+    "dirty_buckets": 48795147,
+    "missing_removals": 0,
+    "filter_removal_failures": 0
+  },
+  "publisher_timing": {
+    "generation_ns": 66779263270,
+    "full_generation_ns": 0,
+    "delta_generation_ns": 66779263270,
+    "unchanged_generation_ns": 0
+  }
+}

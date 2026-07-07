@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "measured_code_sha": "7d29b240c6632d78bf06b1e44ac0773f133a5e3b",
+  "corpus_sha256": "4056bc655ad04816545472cfdc9c877b727e221a141c413de4bd606d4e36da6c",
+  "backend": "ckf-native",
+  "repetition": 3,
+  "phase": "capacity",
+  "replay_window_ms": 1500.0,
+  "nominal_offered_mixed_ops_s": 1744540.6666666667,
+  "nominal_offered_block_ops_s": 53051159.333333336,
+  "actual_issue_mixed_ops_s": 1744208.7437427323,
+  "achieved_mixed_ops_s": 1062303.8146065434,
+  "achieved_block_ops_s": 32304462.71956564,
+  "achieved_over_offered": 0.6089303820221693,
+  "total_elapsed_ms": 2463.335784,
+  "generator_limited": false,
+  "kept_up": false,
+  "issue_lag": {
+    "p50_us": 974.218,
+    "p99_us": 9695.831,
+    "max_us": 11764.721
+  },
+  "query_queue_wait": {
+    "p50_us": 408.405,
+    "p99_us": 2068.075,
+    "max_us": 7246.442
+  },
+  "lookup_service": {
+    "p50_us": 23.375,
+    "p99_us": 150.716,
+    "max_us": 1063.398
+  },
+  "scheduled_to_completion": {
+    "p50_us": 1390.671,
+    "p99_us": 9113.704,
+    "max_us": 12121.493
+  },
+  "update_scheduled_to_enqueue": {
+    "p50_us": 993.702,
+    "p99_us": 10032.79,
+    "max_us": 11764.771
+  },
+  "update_enqueue_to_applied": {
+    "p50_us": 517226.806,
+    "p99_us": 1007451.283,
+    "max_us": 1016831.023
+  },
+  "update_scheduled_to_applied": {
+    "p50_us": 518891.037,
+    "p99_us": 1008129.87,
+    "max_us": 1017735.299
+  },
+  "query_queue": {
+    "at_stop": 35,
+    "maximum_depth": 1273,
+    "drain_ms": 6.032608
+  },
+  "update_queue": {
+    "at_stop": 919538,
+    "maximum_depth": 124878,
+    "drain_ms": 962.963739
+  },
+  "crtc_raw_events": 0,
+  "crtc_raw_blocks": 0,
+  "ckf_frames": 2144651,
+  "ckf_dirty_buckets": 48795147,
+  "ckf_bytes": 714220824,
+  "ckf_apply_mib_s": 162.71482397850528,
+  "ckf_full_apply_mib_s": 0.0,
+  "ckf_delta_apply_mib_s": 162.71482397850528,
+  "full_publications": 0,
+  "delta_publications": 2144651,
+  "unchanged_publications": 0,
+  "generation_conflicts": 0,
+  "native_fallbacks": 0,
+  "repeated_fallbacks": 0,
+  "errors": {
+    "insertion": 0,
+    "removal": 0,
+    "decode": 0,
+    "application": 0,
+    "epoch": 0,
+    "desynchronization": 0
+  },
+  "accuracy": {
+    "checked_results": 66048,
+    "inflated": 5,
+    "maximum_inflation": 1,
+    "under_reported": 0,
+    "full_map_mismatches": 0,
+    "wrong_best_dc": 4
+  },
+  "rss_bytes": 0,
+  "pss_bytes": null,
+  "uss_bytes": null
+}

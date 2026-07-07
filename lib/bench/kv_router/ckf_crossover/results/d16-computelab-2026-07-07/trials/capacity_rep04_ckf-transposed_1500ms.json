@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "measured_code_sha": "7d29b240c6632d78bf06b1e44ac0773f133a5e3b",
+  "corpus_sha256": "4056bc655ad04816545472cfdc9c877b727e221a141c413de4bd606d4e36da6c",
+  "backend": "ckf-transposed",
+  "repetition": 4,
+  "phase": "capacity",
+  "replay_window_ms": 1500.0,
+  "nominal_offered_mixed_ops_s": 1744540.6666666667,
+  "nominal_offered_block_ops_s": 53051159.333333336,
+  "actual_issue_mixed_ops_s": 1744434.217801828,
+  "achieved_mixed_ops_s": 1455400.791463401,
+  "achieved_block_ops_s": 44258469.152979136,
+  "achieved_over_offered": 0.8342601690359378,
+  "total_elapsed_ms": 1798.0002590000001,
+  "generator_limited": false,
+  "kept_up": false,
+  "issue_lag": {
+    "p50_us": 760.276,
+    "p99_us": 2322.653,
+    "max_us": 3499.93
+  },
+  "query_queue_wait": {
+    "p50_us": 441610.201,
+    "p99_us": 706723.745,
+    "max_us": 723724.913
+  },
+  "lookup_service": {
+    "p50_us": 22.433,
+    "p99_us": 356.217,
+    "max_us": 2101.533
+  },
+  "scheduled_to_completion": {
+    "p50_us": 442753.357,
+    "p99_us": 707505.914,
+    "max_us": 724133.711
+  },
+  "update_scheduled_to_enqueue": {
+    "p50_us": 779.71,
+    "p99_us": 2415.425,
+    "max_us": 3499.98
+  },
+  "update_enqueue_to_applied": {
+    "p50_us": 10054.988,
+    "p99_us": 100298.113,
+    "max_us": 106734.094
+  },
+  "update_scheduled_to_applied": {
+    "p50_us": 10835.307,
+    "p99_us": 101033.59,
+    "max_us": 107450.925
+  },
+  "query_queue": {
+    "at_stop": 223229,
+    "maximum_depth": 224123,
+    "drain_ms": 297.908866
+  },
+  "update_queue": {
+    "at_stop": 112503,
+    "maximum_depth": 18749,
+    "drain_ms": 90.152493
+  },
+  "crtc_raw_events": 0,
+  "crtc_raw_blocks": 0,
+  "ckf_frames": 2144651,
+  "ckf_dirty_buckets": 48795147,
+  "ckf_bytes": 714220824,
+  "ckf_apply_mib_s": 114.46157814598429,
+  "ckf_full_apply_mib_s": 0.0,
+  "ckf_delta_apply_mib_s": 114.46157814598429,
+  "full_publications": 0,
+  "delta_publications": 2144651,
+  "unchanged_publications": 0,
+  "generation_conflicts": 1260088,
+  "native_fallbacks": 1260088,
+  "repeated_fallbacks": 0,
+  "errors": {
+    "insertion": 0,
+    "removal": 0,
+    "decode": 0,
+    "application": 0,
+    "epoch": 0,
+    "desynchronization": 0
+  },
+  "accuracy": {
+    "checked_results": 66048,
+    "inflated": 5,
+    "maximum_inflation": 1,
+    "under_reported": 0,
+    "full_map_mismatches": 0,
+    "wrong_best_dc": 4
+  },
+  "rss_bytes": 0,
+  "pss_bytes": null,
+  "uss_bytes": null
+}

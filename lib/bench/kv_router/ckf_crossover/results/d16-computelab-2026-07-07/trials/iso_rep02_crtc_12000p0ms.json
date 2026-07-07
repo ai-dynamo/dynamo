@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "measured_code_sha": "7d29b240c6632d78bf06b1e44ac0773f133a5e3b",
+  "corpus_sha256": "4056bc655ad04816545472cfdc9c877b727e221a141c413de4bd606d4e36da6c",
+  "backend": "crtc",
+  "repetition": 2,
+  "phase": "iso",
+  "replay_window_ms": 12000.0,
+  "nominal_offered_mixed_ops_s": 218067.58333333334,
+  "nominal_offered_block_ops_s": 6631394.916666667,
+  "actual_issue_mixed_ops_s": 218050.51929933188,
+  "achieved_mixed_ops_s": 218014.49998196587,
+  "achieved_block_ops_s": 6629780.66175983,
+  "achieved_over_offered": 0.9997565738540499,
+  "total_elapsed_ms": 12002.921825,
+  "generator_limited": false,
+  "kept_up": true,
+  "issue_lag": {
+    "p50_us": 942.971,
+    "p99_us": 3642.016,
+    "max_us": 6925.076
+  },
+  "query_queue_wait": {
+    "p50_us": 52.781,
+    "p99_us": 189.24,
+    "max_us": 1653.823
+  },
+  "lookup_service": {
+    "p50_us": 2.375,
+    "p99_us": 10.019,
+    "max_us": 1871.115
+  },
+  "scheduled_to_completion": {
+    "p50_us": 907.262,
+    "p99_us": 3076.142,
+    "max_us": 6758.382
+  },
+  "update_scheduled_to_enqueue": {
+    "p50_us": 968.862,
+    "p99_us": 3736.592,
+    "max_us": 6925.146
+  },
+  "update_enqueue_to_applied": {
+    "p50_us": 999.259,
+    "p99_us": 7043.986,
+    "max_us": 17970.29
+  },
+  "update_scheduled_to_applied": {
+    "p50_us": 2085.858,
+    "p99_us": 8623.052,
+    "max_us": 24029.647
+  },
+  "query_queue": {
+    "at_stop": 0,
+    "maximum_depth": 483,
+    "drain_ms": 1.982878
+  },
+  "update_queue": {
+    "at_stop": 0,
+    "maximum_depth": 2435,
+    "drain_ms": 0.056908
+  },
+  "crtc_raw_events": 2144651,
+  "crtc_raw_blocks": 46828259,
+  "ckf_frames": 0,
+  "ckf_dirty_buckets": 0,
+  "ckf_bytes": 0,
+  "ckf_apply_mib_s": 0.0,
+  "ckf_full_apply_mib_s": 0.0,
+  "ckf_delta_apply_mib_s": 0.0,
+  "full_publications": 0,
+  "delta_publications": 0,
+  "unchanged_publications": 0,
+  "generation_conflicts": 0,
+  "native_fallbacks": 0,
+  "repeated_fallbacks": 0,
+  "errors": {
+    "insertion": 0,
+    "removal": 0,
+    "decode": 0,
+    "application": 0,
+    "epoch": 0,
+    "desynchronization": 0
+  },
+  "accuracy": {
+    "checked_results": 0,
+    "inflated": 0,
+    "maximum_inflation": 0,
+    "under_reported": 0,
+    "full_map_mismatches": 0,
+    "wrong_best_dc": 0
+  },
+  "rss_bytes": 0,
+  "pss_bytes": null,
+  "uss_bytes": null
+}

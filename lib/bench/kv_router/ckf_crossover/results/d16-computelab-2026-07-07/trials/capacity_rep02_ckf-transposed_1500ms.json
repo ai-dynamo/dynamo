@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "measured_code_sha": "7d29b240c6632d78bf06b1e44ac0773f133a5e3b",
+  "corpus_sha256": "4056bc655ad04816545472cfdc9c877b727e221a141c413de4bd606d4e36da6c",
+  "backend": "ckf-transposed",
+  "repetition": 2,
+  "phase": "capacity",
+  "replay_window_ms": 1500.0,
+  "nominal_offered_mixed_ops_s": 1744540.6666666667,
+  "nominal_offered_block_ops_s": 53051159.333333336,
+  "actual_issue_mixed_ops_s": 1743759.8935243147,
+  "achieved_mixed_ops_s": 1456444.810320801,
+  "achieved_block_ops_s": 44290217.57352858,
+  "achieved_over_offered": 0.8348586181734949,
+  "total_elapsed_ms": 1796.711404,
+  "generator_limited": false,
+  "kept_up": false,
+  "issue_lag": {
+    "p50_us": 799.079,
+    "p99_us": 2523.281,
+    "max_us": 3975.38
+  },
+  "query_queue_wait": {
+    "p50_us": 432331.273,
+    "p99_us": 704983.011,
+    "max_us": 717961.862
+  },
+  "lookup_service": {
+    "p50_us": 23.054,
+    "p99_us": 338.063,
+    "max_us": 5820.824
+  },
+  "scheduled_to_completion": {
+    "p50_us": 432969.33,
+    "p99_us": 705837.29,
+    "max_us": 718178.321
+  },
+  "update_scheduled_to_enqueue": {
+    "p50_us": 819.28,
+    "p99_us": 2558.33,
+    "max_us": 3975.58
+  },
+  "update_enqueue_to_applied": {
+    "p50_us": 18298.493,
+    "p99_us": 105654.583,
+    "max_us": 114177.674
+  },
+  "update_scheduled_to_applied": {
+    "p50_us": 19204.72,
+    "p99_us": 106642.773,
+    "max_us": 115158.242
+  },
+  "query_queue": {
+    "at_stop": 223015,
+    "maximum_depth": 224053,
+    "drain_ms": 296.03982499999995
+  },
+  "update_queue": {
+    "at_stop": 105493,
+    "maximum_depth": 20213,
+    "drain_ms": 95.004038
+  },
+  "crtc_raw_events": 0,
+  "crtc_raw_blocks": 0,
+  "ckf_frames": 2144651,
+  "ckf_dirty_buckets": 48795147,
+  "ckf_bytes": 714220824,
+  "ckf_apply_mib_s": 116.26049773660169,
+  "ckf_full_apply_mib_s": 0.0,
+  "ckf_delta_apply_mib_s": 116.26049773660169,
+  "full_publications": 0,
+  "delta_publications": 2144651,
+  "unchanged_publications": 0,
+  "generation_conflicts": 1323598,
+  "native_fallbacks": 1323598,
+  "repeated_fallbacks": 0,
+  "errors": {
+    "insertion": 0,
+    "removal": 0,
+    "decode": 0,
+    "application": 0,
+    "epoch": 0,
+    "desynchronization": 0
+  },
+  "accuracy": {
+    "checked_results": 66048,
+    "inflated": 5,
+    "maximum_inflation": 1,
+    "under_reported": 0,
+    "full_map_mismatches": 0,
+    "wrong_best_dc": 4
+  },
+  "rss_bytes": 0,
+  "pss_bytes": null,
+  "uss_bytes": null
+}

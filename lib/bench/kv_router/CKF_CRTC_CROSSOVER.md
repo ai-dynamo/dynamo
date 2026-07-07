@@ -222,12 +222,41 @@ This is an internal index benchmark. AIPerf cannot inject production `RouterEven
 
 ## Authoritative results
 
-Pending the ComputeLab run. Before opening the draft PR, replace this section with:
+Measured on `r6515-0048` at code `7d29b240c6632d78bf06b1e44ac0773f133a5e3b`. Corrected aggregate analysis uses `e8b9dbfb5aba89e922c71bbdd9b3e123003ef6c7`. The result-artifact commit is recorded in the follow-up documentation commit.
 
-- Measured code SHA and result commit SHA.
-- Corpus and hardware manifests.
-- Ranked headline findings.
-- The generated wide table from `matrix/aggregate/wide_results.md`.
-- Links to committed compact per-trial/aggregate JSON and CSV.
+Hardware was one exclusive AMD EPYC 7702P node: 64 physical cores/128 SMT threads, 1000 GiB allocation, Linux `6.14.0-29-generic`, Rust `1.96.1`, CPUs `0-63`, `interleave:0`, 64 Tokio workers, 8 event threads, and 16 query executors. The node did not expose cpufreq governor or AMD boost sysfs fields; the original manifest preserves that absence.
+
+Ranked findings:
+
+1. CKF doubled the tested keep-up grid ceiling: 26.53M block ops/s for native and transposed CKF versus 13.26M for CRTC. However, there is **no supported CKF-over-CRTC crossover in the generator-valid grid**. The first cells with paired-ratio CIs above one occur at 26.53M offered block ops/s, where the CRTC dispatcher is already generator-limited; those ratios are diagnostic only.
+2. At the valid common 6.63M block ops/s iso load, CRTC lookup service remained much faster. Native CKF was 9.3× slower at p50 and 23.9× at p99; transposed CKF was 10.8× and 37.7× slower. Scheduled-to-completion p99 was nearly tied for native and 11.0% slower for transposed because CRTC had higher issue/update delay while CKF had higher query service/queue delay.
+3. CKF updates were faster at the router. Iso update-apply p99 was 1.31 ms native and 1.48 ms transposed versus 7.09 ms CRTC. Every headline backend achieved at least 99.95% of offered load, stopped with zero queued work, drained in at most 3.88 ms, was generator-valid, and reported zero pipeline errors.
+4. CKF memory was dramatically lower under the synthetic 160M-membership resident state: 0.507 GiB native and 1.007 GiB transposed versus 50.461 GiB CRTC, or 99.6× and 50.1× smaller respectively. Relay producer state was 2.764 GiB.
+5. Transposition improved saturation throughput, not latency or the tested keep-up ceiling. At the generator-valid 53.05M offered point, it achieved 44.41M block ops/s versus 32.12M native, but neither kept up. It also incurred up to 873,081 selective native fallbacks per iso trial, with zero repeated fallbacks.
+6. Final-state CKF accuracy had 5 one-block inflations among 66,048 checked query/DC results (0.0076%), zero under-reporting, zero optimized-versus-linear map mismatches, and 4 wrong best-DC selections among 4,128 sampled queries. Native and transposed results were identical.
+7. Relay generation is supporting, untimed data rather than an end-to-end capacity claim. The sequential preparation loop built 32.1K event publications/s and 10.2 MiB/s; the iso replay consumed 178.7K events/s. Production has independent per-DC Relays, but their parallel scaling was not measured here.
+
+| Metric | CRTC | Native CKF | Transposed CKF | Interpretation |
+|---|---:|---:|---:|---|
+| Keep-up ceiling, block ops/s | 13.26M | 26.53M | 26.53M | CKF is 2.0× on the tested grid |
+| Peak achieved mean, block ops/s | 16.43M | 32.56M | 44.82M | Selected from all cells; the native/transposed peak cells and CRTC comparison are generator-limited |
+| Iso offered/achieved, block ops/s | 6.631M / 6.630M | 6.631M / 6.629M | 6.631M / 6.629M | All pass the no-backlog gate |
+| Iso lookup service p50 / p99 | 2.38 / 10.12 us | 22.09 / 241.55 us | 25.69 / 381.85 us | CRTC wins lookup latency decisively |
+| Iso query-wait p99 | 189 us | 1,728 us | 2,115 us | CKF spends more time in the fixed query executors |
+| Iso scheduled-to-completion p99 | 3.064 ms | 3.079 ms | 3.400 ms | Native nearly tied end-to-end; transposed +11.0% |
+| Iso update apply p99 | 7.087 ms | 1.310 ms | 1.480 ms | CKF router-side frame application wins |
+| Iso update visible p99 | 8.682 ms | 3.044 ms | 2.908 ms | Scheduled event to router-applied state |
+| Max iso queue-at-stop / drain | 0 / 2.03 ms | 0 / 3.88 ms | 0 / 3.80 ms | Comfortable keep-up; no tail-drain artifact |
+| Resident RSS | 50.461 GiB | 0.507 GiB | 1.007 GiB | Native 99.6× and transposed 50.1× smaller than CRTC |
+| Final-state inflation / under / wrong best | exact | 5 / 0 / 4 | 5 / 0 / 4 | Max inflation was one block |
+
+Artifacts:
+
+- [One 51-column capacity/iso/memory table](ckf_crossover/results/d16-computelab-2026-07-07/aggregate/wide_results.md)
+- [Capacity table](ckf_crossover/results/d16-computelab-2026-07-07/aggregate/capacity_table.md)
+- [Corrected aggregate JSON](ckf_crossover/results/d16-computelab-2026-07-07/aggregate/aggregate_results.json)
+- [Run metadata and validity notes](ckf_crossover/results/d16-computelab-2026-07-07/RUN_METADATA.md)
+- [Corpus manifest](ckf_crossover/results/d16-computelab-2026-07-07/provenance/corpus_manifest.json) and [hardware manifest](ckf_crossover/results/d16-computelab-2026-07-07/provenance/hardware.json)
+- [Committed artifact checksums](ckf_crossover/results/d16-computelab-2026-07-07/artifact_checksums.sha256); the original 232-file node checksum manifest is retained under `provenance/`.
 
 Do not post these results to DEP #11225 or Slack without separate approval.
