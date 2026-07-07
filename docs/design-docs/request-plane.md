@@ -38,6 +38,14 @@ For example, a deployment with TCP request plane can use different KV event plan
 - **NATS Core KV events (local indexer)**: requests use TCP, KV events use NATS Core pub/sub and persistence lives on workers.
 - **no KV events**: requests use TCP and KV routing runs without events (no NATS required, but no event-backed persistence).
 
+## Transport Security
+
+The TCP request plane does not authenticate peers or encrypt connections. Keep its dynamically registered ports on
+a trusted network and allow traffic only between the Dynamo components that require it.
+
+The NATS request plane uses the same client authentication settings as the NATS event plane. Configure credentials,
+TLS, and network access as described in [Event Plane Transport Security](event-plane.md#transport-security).
+
 ## Configuration
 
 ### Environment Variable

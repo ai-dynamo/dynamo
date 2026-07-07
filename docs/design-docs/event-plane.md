@@ -25,6 +25,23 @@ The event plane supports two transports:
 | **External infrastructure** | None (peer-to-peer) | Requires a NATS server |
 | **Setup complexity** | Automatic -- workers bind sockets and register via discovery | Simple -- point at a NATS server |
 
+## Transport Security
+
+ZMQ event publishers do not authenticate subscribers or encrypt traffic. Keep their ports on a trusted network and
+restrict access with Kubernetes NetworkPolicies or equivalent infrastructure controls.
+
+For NATS, configure one authentication mechanism for every Dynamo client:
+
+- `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD`
+- `NATS_AUTH_TOKEN`
+- `NATS_AUTH_NKEY`
+- `NATS_AUTH_CREDENTIALS_FILE`
+
+If none is set, the client attempts the default username and password `user` / `user`; do not treat this as a
+production credential. The bundled platform chart disables NATS TLS by default. Configure unique credentials and
+TLS on the NATS deployment, distribute client credentials through Kubernetes Secrets, and restrict the NATS client
+and monitoring ports.
+
 ## Configuration
 
 ### Transport Selection

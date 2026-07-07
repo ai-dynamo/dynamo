@@ -253,10 +253,21 @@ production topics apply:
 
 | Concern | Why it matters | Section |
 |---|---|---|
+| Image and model provenance | Containers, model repositories, tokenizers, and remote model code execute inside the serving workload. | [Model and Image Trust](#production-detail-model-and-image-trust) |
 | Model startup is slow or the model is gated | Avoid repeated downloads and pass `HF_TOKEN` cleanly. | [Model Caching](#production-detail-model-caching) |
 | Traffic changes over time | Planner can scale prefill/decode replicas at runtime. | [Planner](#production-detail-planner) |
 | The model spans nodes or uses disaggregated serving | Grove/LWS and RDMA affect scheduling and KV transfer. | [Multinode and RDMA](#production-detail-multinode-and-rdma) |
 | You need a specific inference engine | Backend choice affects MoE support, thorough profiling, and distributed behavior. | [Backend Selection](#production-detail-backend-selection) |
+
+## Production Detail: Model and Image Trust
+
+Treat runtime images, model repositories, tokenizers, and custom model code as executable dependencies. Use
+supported [Dynamo release artifacts](../reference/release-artifacts.md), pin production images by digest, and pin
+remote models to an immutable commit or revision. Control who can replace artifacts in registries, object storage,
+and persistent volumes.
+
+Remote model code behavior is backend-specific. Enable a backend's remote-code option only for reviewed models,
+and follow that backend's security and isolation guidance.
 
 ## Production Detail: Model Caching
 

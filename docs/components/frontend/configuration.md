@@ -25,6 +25,46 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `DYN_HTTP_BODY_LIMIT_MB` | `192` | Maximum request body size in MB |
 | `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | Graceful shutdown timeout in seconds |
 
+### TLS and Client Authentication
+
+The frontend supports server-side TLS but does not authenticate or authorize clients. For a public endpoint, put
+the frontend behind an authenticating gateway or service mesh. See
+[Security and Authentication](../../kubernetes/security.md) for the deployment trust model.
+
+To terminate TLS in the frontend, provide a Privacy-Enhanced Mail (PEM) certificate and private key:
+
+```bash
+python3 -m dynamo.frontend \
+  --tls-cert-path /etc/dynamo/tls/tls.crt \
+  --tls-key-path /etc/dynamo/tls/tls.key
+```
+
+On Kubernetes, mount a TLS Secret into the frontend component and set the corresponding environment variables in
+its `podTemplate`:
+
+```yaml
+podTemplate:
+  spec:
+    containers:
+      - name: main
+        env:
+          - name: DYN_TLS_CERT_PATH
+            value: /etc/dynamo/tls/tls.crt
+          - name: DYN_TLS_KEY_PATH
+            value: /etc/dynamo/tls/tls.key
+        volumeMounts:
+          - name: frontend-tls
+            mountPath: /etc/dynamo/tls
+            readOnly: true
+    volumes:
+      - name: frontend-tls
+        secret:
+          secretName: frontend-tls
+```
+
+Both files must be present when the frontend starts. The TLS listener does not provide mutual TLS or end-user
+authentication.
+
 ## Router
 
 | CLI Argument | Env Var | Default | Description |

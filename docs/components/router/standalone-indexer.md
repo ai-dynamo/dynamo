@@ -20,6 +20,9 @@ For Dynamo-native remote indexing, use `--serve-indexer` on `dynamo.frontend` or
 
 The HTTP API follows the [Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403) conventions.
 
+The service binds to `0.0.0.0` and does not provide authentication. Run it on a trusted internal network or place
+it behind an authenticating proxy and an appropriate network policy.
+
 `DYN_ROUTER_MIN_INITIAL_WORKERS` is also honored here. When set to a positive integer, the
 standalone indexer waits for that many workers to register before opening its startup-ready
 gate, matching the frontend/router startup behavior.
@@ -31,6 +34,9 @@ The indexer maintains one radix tree per `(model_name, routing_group)` pair. Wor
 - **`model_name`** (required on `/register` and `/query`): Identifies the model. Workers serving different models get separate radix trees.
 - **`routing_group`** (optional, defaults to `"default"`): Identifies a statically assigned worker pool within the model. Omit it when the model does not need independently selectable pools.
 - **`block_size`** is per-indexer: the first `/register` call for a given `(model_name, routing_group)` sets the block size. Subsequent registrations for the same pair must use the same block size or the request will fail.
+
+`tenant_id` partitions index state but does not authenticate the caller. Set it only from trusted identity metadata
+or isolate mutually untrusted tenants into separate services.
 
 ## Compatibility
 
