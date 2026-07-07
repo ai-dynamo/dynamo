@@ -4,10 +4,10 @@
 //! Dynamo SGLang sidecar backend.
 //!
 //! A [`SglangSidecarEngine`] implements [`dynamo_backend_common::LLMEngine`] by
-//! proxying inference to an out-of-process SGLang engine over the OpenEngine v1
-//! gRPC contract. The sidecar is **endpoint-only**: it is configured with just
-//! `--openengine-endpoint` and discovers model identity, disaggregation role,
-//! parallelism, KV block sizing, and context length from the engine itself.
+//! proxying inference to an out-of-process SGLang engine over SGLang's native
+//! `sglang.runtime.v1.SglangService` contract. Model identity, disaggregation
+//! role, parallelism, KV block sizing, and context length are discovered from
+//! the engine's gRPC metadata RPCs.
 //!
 //! The crate never depends on `sglang` or any engine crate — only
 //! `dynamo-backend-common`, `tonic`/`prost`, `clap`, and tokio.
@@ -18,6 +18,3 @@ pub mod engine;
 pub mod proto;
 
 pub use engine::SglangSidecarEngine;
-
-#[cfg(test)]
-mod tests;

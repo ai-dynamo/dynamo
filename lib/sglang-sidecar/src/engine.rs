@@ -1,41 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `SglangSidecarEngine` — a [`LLMEngine`] that drives an out-of-process SGLang
-//! engine over the OpenEngine v1 gRPC contract.
-//!
-//! # Endpoint-only configuration
-//!
-//! The sidecar takes a single engine-specific input: the OpenEngine endpoint.
-//! Everything else — model identity, disaggregation role, parallelism, KV
-//! block sizing, and context length — is **discovered** from the engine over
-//! `GetEngineInfo` / `GetModelInfo`. There is no `--model` or
-//! `--disaggregation-mode`.
-//!
-//! # Two-phase discovery
-//!
-//! [`run`](dynamo_backend_common::run) requires the [`WorkerConfig`]
-//! (namespace / component / disaggregation role) to be built *synchronously*
-//! in `from_args`, before the async [`start`](LLMEngine::start) runs. So:
-//!
-//! 1. **`from_args` (bootstrap):** on a throwaway current-thread runtime,
-//!    connect and call discovery to learn the role + model, derive the
-//!    component, and build `WorkerConfig`. The bootstrap channel is **dropped**
-//!    — it is bound to that temporary runtime's reactor and cannot be reused.
-//! 2. **`start` (worker runtime):** reconnect on the worker's runtime, poll
-//!    `Health` until `READY` (the engine may still be loading), re-run
-//!    discovery, validate the role is unchanged, and return the full
-//!    [`EngineConfig`].
+//! Dynamo backend for SGLang's native `sglang.runtime.v1` gRPC server.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
-    HEALTH_CHECK_KEY, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, MultimodalData,
-    PreprocessedRequest, TopLogprob, WorkerConfig, usage,
+    AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext, LLMEngine,
+    LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput, PreprocessedRequest,
+    StopReason, TopLogprob, WorkerConfig, usage,
 };
 use futures::stream::BoxStream;
+use serde_json::Value;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -44,119 +22,106 @@ use crate::args::{Args, TransportConfig, normalize_endpoint};
 use crate::client::{self, Client, Discovery, Pool};
 use crate::proto as pb;
 
-/// A Dynamo backend that proxies inference to a SGLang OpenEngine server.
 pub struct SglangSidecarEngine {
-    /// Normalised gRPC endpoint (e.g. `http://127.0.0.1:50051`).
     endpoint: String,
-    /// Connect / readiness tunables.
     transport: TransportConfig,
-    /// Role discovered at bootstrap; drives `generate()` dispatch and is
-    /// re-validated against the live engine in `start()`.
     disaggregation_mode: DisaggregationMode,
-    /// Connection pool, set once in `start()`. Streaming calls round-robin
-    /// across it; control RPCs use its stable connection.
+    bootstrap_host: Option<String>,
+    bootstrap_port: Option<u16>,
     pool: OnceCell<Pool>,
-    /// Cancels in-flight `generate()` streams on `cleanup()`.
     cancel: CancellationToken,
 }
 
 impl SglangSidecarEngine {
-    /// Direct constructor. The public entry point is [`from_args`](Self::from_args);
-    /// this exists for programmatic / test construction.
     pub(crate) fn new(
         endpoint: impl Into<String>,
         transport: TransportConfig,
         disaggregation_mode: DisaggregationMode,
+        bootstrap_host: Option<String>,
+        bootstrap_port: Option<u16>,
     ) -> Self {
         Self {
             endpoint: endpoint.into(),
             transport,
             disaggregation_mode,
+            bootstrap_host,
+            bootstrap_port,
             pool: OnceCell::new(),
             cancel: CancellationToken::new(),
         }
     }
 
-    /// Parse CLI args, bootstrap-discover the engine role + model, and build the
-    /// pair `run()` consumes.
     pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
         let args = match argv {
-            Some(a) => <Args as clap::Parser>::try_parse_from(a),
+            Some(args) => <Args as clap::Parser>::try_parse_from(args),
             None => <Args as clap::Parser>::try_parse(),
         }
-        .map_err(|e| client::invalid_arg(e.to_string()))?;
+        .map_err(|err| client::invalid_arg(err.to_string()))?;
 
-        let endpoint = normalize_endpoint(&args.openengine_endpoint);
+        let endpoint = normalize_endpoint(&args.sglang_endpoint);
         let transport = args.transport();
-
         let discovery = bootstrap_discover(&endpoint, &transport)?;
-        let role = engine_role(&discovery);
-        let disaggregation_mode = role_to_mode(role);
-
-        let served_model_name = (!discovery.model.served_model_name.is_empty())
-            .then(|| discovery.model.served_model_name.clone());
+        let disaggregation_mode = discovery_mode(&discovery)?;
+        let bootstrap_host = if disaggregation_mode.is_prefill() {
+            resolve_bootstrap_host(args.bootstrap_host.as_deref(), &endpoint, &discovery)?
+        } else {
+            None
+        };
+        let bootstrap_port = if disaggregation_mode.is_prefill() {
+            discovery_bootstrap_port(&discovery)?
+        } else {
+            None
+        };
 
         tracing::info!(
             %endpoint,
-            role = ?role,
-            model = %discovery.model.model_id,
-            "sglang sidecar bootstrapped engine discovery"
+            mode = ?disaggregation_mode,
+            model = %discovery.model_path,
+            "sglang sidecar bootstrapped native gRPC discovery"
         );
 
         let config = WorkerConfig {
             namespace: args.namespace,
-            component: component_for_role(role).to_string(),
+            component: component_for_mode(disaggregation_mode).to_string(),
             endpoint: args.endpoint,
             endpoint_types: args.endpoint_types,
             custom_jinja_template: args.custom_jinja_template,
             disaggregation_mode,
-            model_name: discovery.model.model_id.clone(),
-            served_model_name,
-            // Response parsers the engine advertises (empty when unset). Written
-            // into the worker's ModelRuntimeConfig so the frontend applies
-            // tool-call / reasoning parsing to this sidecar-served model.
-            reasoning_parser: (!discovery.model.reasoning_parser.is_empty())
-                .then(|| discovery.model.reasoning_parser.clone()),
-            tool_call_parser: (!discovery.model.tool_call_parser.is_empty())
-                .then(|| discovery.model.tool_call_parser.clone()),
+            model_name: discovery.model_path.clone(),
+            served_model_name: discovery.served_model_name.clone(),
+            model_input: ModelInput::Tokens,
+            reasoning_parser: discovery_string(&discovery.server_info, "reasoning_parser"),
+            tool_call_parser: discovery_string(&discovery.server_info, "tool_call_parser"),
             ..Default::default()
         };
 
-        let engine = Self::new(endpoint, transport, disaggregation_mode);
-        Ok((engine, config))
+        Ok((
+            Self::new(
+                endpoint,
+                transport,
+                disaggregation_mode,
+                bootstrap_host,
+                bootstrap_port,
+            ),
+            config,
+        ))
     }
 
-    /// Poll `Health` until the engine reports `READY` or the deadline elapses.
-    /// Transient RPC errors are treated as "not ready yet" and retried — the
-    /// engine may still be loading the model when we reconnect.
     async fn await_ready(&self, client: &mut Client) -> Result<(), DynamoError> {
         let deadline = Instant::now() + self.transport.deadline;
-        let request = || pb::HealthRequest {
-            include_inference_probe: false,
-            model: String::new(),
-            role: pb::EngineRole::Unspecified as i32,
-        };
-
         loop {
-            let outcome = client.health(request()).await;
-            let retry_msg = match outcome {
-                Ok(resp) => {
-                    let state = pb::HealthState::try_from(resp.into_inner().state)
-                        .unwrap_or(pb::HealthState::Unspecified);
-                    match state {
-                        pb::HealthState::Ready => return Ok(()),
-                        pb::HealthState::Draining => {
-                            return Err(client::engine_shutdown("engine is draining"));
-                        }
-                        other => format!("engine not ready (state {other:?})"),
+            let retry_message = match client.health_check(pb::HealthCheckRequest {}).await {
+                Ok(response) => {
+                    if response.into_inner().healthy {
+                        return Ok(());
                     }
+                    "SGLang reported unhealthy".to_string()
                 }
-                Err(status) => format!("Health RPC failed: {}", status.message()),
+                Err(status) => format!("HealthCheck RPC failed: {}", status.message()),
             };
-
             if Instant::now() >= deadline {
                 return Err(client::engine_shutdown(format!(
-                    "engine did not reach READY within {:?}: {retry_msg}",
+                    "SGLang did not become healthy within {:?}: {retry_message}",
                     self.transport.deadline
                 )));
             }
@@ -177,29 +142,28 @@ impl LLMEngine for SglangSidecarEngine {
         let mut control = pool.control_client();
         self.await_ready(&mut control).await?;
         let discovery = client::discover(&mut control).await?;
-
-        // The role is the engine's authoritative `kv_role`; it must not have
-        // flipped between bootstrap and now (that would mean the worker
-        // registered under the wrong component).
-        let observed = role_to_mode(engine_role(&discovery));
-        if observed != self.disaggregation_mode {
+        let observed_mode = discovery_mode(&discovery)?;
+        if observed_mode != self.disaggregation_mode {
             return Err(client::invalid_arg(format!(
-                "engine role changed since bootstrap: registered as {:?} but engine now reports {:?}",
-                self.disaggregation_mode, observed
+                "SGLang role changed since bootstrap: registered as {:?}, now reports {:?}",
+                self.disaggregation_mode, observed_mode
             )));
         }
 
-        let pool_size = pool.len();
+        let config = build_engine_config(
+            &discovery,
+            self.disaggregation_mode,
+            self.bootstrap_host.clone(),
+            self.bootstrap_port,
+        )?;
+        let connection_count = pool.len();
         self.pool
             .set(pool)
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
-
-        let config = build_engine_config(&discovery);
         tracing::info!(
             model = %config.model,
-            context_length = ?config.context_length,
-            kv_cache_block_size = ?config.kv_cache_block_size,
-            connections = pool_size,
+            mode = ?self.disaggregation_mode,
+            connections = connection_count,
             "sglang sidecar started"
         );
         Ok(config)
@@ -210,171 +174,82 @@ impl LLMEngine for SglangSidecarEngine {
         request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let mut client = self
+        let mut grpc_client = self
             .pool
             .get()
             .map(Pool::stream_client)
             .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
 
-        // Decode workers must receive the prefill peer's handoff. SGLang's
-        // PrefillRouter uses the Bootstrap path (router-assigned room in
-        // `bootstrap_info`, sent to prefill + decode concurrently); the Completed
-        // path (`prefill_result.disaggregated_params`) is also accepted.
-        if self.disaggregation_mode.is_decode()
-            && request.prefill_result.is_none()
-            && request.bootstrap_info.is_none()
-        {
-            return Err(client::invalid_arg(
-                "sglang sidecar decode worker received request with neither bootstrap_info \
-                 nor prefill_result; expected the frontend's PrefillRouter to forward one",
-            ));
-        }
-
-        let is_prefill = self.disaggregation_mode.is_prefill();
-        let prompt_len = request.token_ids.len() as u32;
-        let grpc_req = build_generate_request(&request, ctx.id(), is_prefill)?;
+        let prompt_tokens = request.token_ids.len() as u32;
+        let return_tokens_as_ids = request
+            .output_options
+            .return_tokens_as_token_ids
+            .unwrap_or(false);
+        let grpc_request = build_generate_request(
+            &request,
+            ctx.id(),
+            self.disaggregation_mode,
+            self.bootstrap_host.as_deref(),
+            self.bootstrap_port,
+        )?;
+        let prefill_handoff = if self.disaggregation_mode.is_prefill() {
+            grpc_request
+                .disaggregated_params
+                .as_ref()
+                .map(disaggregated_params_to_json)
+        } else {
+            None
+        };
         let cancel = self.cancel.clone();
+        let is_prefill = self.disaggregation_mode.is_prefill();
 
         Ok(Box::pin(async_stream::stream! {
-            // Pre-flight: honour an already-cancelled request before opening the
-            // RPC, so a stopped context never streams a single token.
             if ctx.is_stopped() || cancel.is_cancelled() {
-                yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_len, 0)));
+                yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
             }
 
-            // TTFT-tail per-hop tracing: stamp request dispatch and first-token
-            // receipt at the sidecar to split the outbound wrapper (everything
-            // up to + including the SGLang OpenEngine server + gRPC-return) from the downstream
-            // sidecar -> frontend -> client delivery path.
-            let __t0 = std::time::Instant::now();
-            let mut __first_token = true;
-            tracing::info!(request_id = %ctx.id(), "sc.send");
-            let open = tokio::select! {
+            tracing::debug!(request_id = %ctx.id(), "sending request to SGLang gRPC");
+            let opened = tokio::select! {
                 biased;
                 _ = ctx.stopped() => None,
                 _ = cancel.cancelled() => None,
-                res = client.generate(grpc_req) => Some(res),
+                response = grpc_client.generate(grpc_request) => Some(response),
             };
-            let Some(open) = open else {
-                yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_len, 0)));
+            let Some(opened) = opened else {
+                yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
             };
-            let mut stream = match open {
-                Ok(resp) => resp.into_inner(),
+            let mut stream = match opened {
+                Ok(response) => response.into_inner(),
                 Err(status) => {
                     yield Err(client::status_to_dynamo("Generate", status));
                     return;
                 }
             };
 
-            // `generated` is our own running count of forwarded token IDs; it,
-            // not the engine's self-report, defines the terminal
-            // completion_tokens so `sum(chunk.token_ids) == completion_tokens`
-            // holds by construction.
-            let mut generated: u32 = 0;
-            let mut prompt_tokens = prompt_len;
-
+            let mut generated = 0_u32;
+            let mut observed_prompt_tokens = prompt_tokens;
+            let mut logprob_offset = 0_usize;
             loop {
                 tokio::select! {
                     biased;
                     _ = ctx.stopped() => {
                         yield Ok(LLMEngineOutput::cancelled()
-                            .with_usage(usage(prompt_tokens, generated)));
+                            .with_usage(usage(observed_prompt_tokens, generated)));
                         break;
                     }
                     _ = cancel.cancelled() => {
                         yield Ok(LLMEngineOutput::cancelled()
-                            .with_usage(usage(prompt_tokens, generated)));
+                            .with_usage(usage(observed_prompt_tokens, generated)));
                         break;
                     }
-                    msg = stream.message() => {
-                        match msg {
-                            Ok(Some(resp)) => {
-                                if let Some(u) = resp.usage.as_ref()
-                                    && u.prompt_tokens != 0
-                                {
-                                    prompt_tokens = u.prompt_tokens;
-                                }
-                                match resp.event {
-                                    Some(pb::generate_response::Event::Token(t)) => {
-                                        // Prefill workers exist only to populate the KV cache and
-                                        // hand it off; the decode peer regenerates from the
-                                        // transferred KV, so the prefill's sampled token is
-                                        // discarded. Suppress token outputs here so the FIRST
-                                        // output the PrefillRouter observes is the terminal one
-                                        // carrying `disaggregated_params` — the router reads
-                                        // `first_output` only.
-                                        if is_prefill || t.token_ids.is_empty() {
-                                            continue;
-                                        }
-                                        if __first_token {
-                                            __first_token = false;
-                                            tracing::info!(
-                                                request_id = %ctx.id(),
-                                                elapsed_ms = __t0.elapsed().as_millis() as u64,
-                                                "sc.first_token"
-                                            );
-                                        }
-                                        generated += t.token_ids.len() as u32;
-                                        // Chosen-token logprob per output token.
-                                        let log_probs = (!t.logprobs.is_empty()).then(|| {
-                                            t.logprobs.iter().map(|lp| lp.logprob).collect::<Vec<f64>>()
-                                        });
-                                        // Top-K alternatives per output token.
-                                        let top_logprobs = (!t.top_logprobs.is_empty()).then(|| {
-                                            t.top_logprobs
-                                                .iter()
-                                                .map(|tl| {
-                                                    tl.entries
-                                                        .iter()
-                                                        .map(|lp| TopLogprob {
-                                                            rank: lp.rank,
-                                                            token_id: lp.token_id,
-                                                            token: (!lp.token.is_empty())
-                                                                .then(|| lp.token.clone()),
-                                                            logprob: lp.logprob,
-                                                            bytes: None,
-                                                        })
-                                                        .collect::<Vec<_>>()
-                                                })
-                                                .collect::<Vec<_>>()
-                                        });
-                                        yield Ok(LLMEngineOutput {
-                                            token_ids: t.token_ids,
-                                            log_probs,
-                                            top_logprobs,
-                                            ..Default::default()
-                                        });
-                                    }
-                                    Some(pb::generate_response::Event::Finished(f)) => {
-                                        let reason = pb::FinishReason::try_from(f.reason)
-                                            .unwrap_or(pb::FinishReason::Unspecified);
-                                        yield Ok(finish_output(
-                                            reason, prompt_tokens, generated, None,
-                                        ));
-                                        break;
-                                    }
-                                    Some(pb::generate_response::Event::PrefillReady(p)) => {
-                                        let disagg = p.kv_session.map(kv_session_to_disagg_json);
-                                        yield Ok(finish_output(
-                                            pb::FinishReason::Stop,
-                                            prompt_tokens,
-                                            generated,
-                                            disagg,
-                                        ));
-                                        break;
-                                    }
-                                    Some(pb::generate_response::Event::Error(e)) => {
-                                        yield Err(client::engine_error_to_dynamo(&e));
-                                        break;
-                                    }
-                                    None => continue,
-                                }
-                            }
+                    message = stream.message() => {
+                        let response = match message {
+                            Ok(Some(response)) => response,
                             Ok(None) => {
                                 yield Err(client::engine_shutdown(
-                                    "engine closed the Generate stream before a terminal event",
+                                    "SGLang closed Generate before a finished response",
                                 ));
                                 break;
                             }
@@ -382,6 +257,69 @@ impl LLMEngine for SglangSidecarEngine {
                                 yield Err(client::status_to_dynamo("Generate", status));
                                 break;
                             }
+                        };
+
+                        if let Some(value) = meta_u32(&response.meta_info, "prompt_tokens") {
+                            observed_prompt_tokens = value;
+                        }
+                        let token_ids = match output_ids_to_u32(&response.output_ids) {
+                            Ok(ids) => ids,
+                            Err(err) => {
+                                yield Err(err);
+                                break;
+                            }
+                        };
+                        let (log_probs, top_logprobs, next_offset) =
+                            match extract_logprobs(
+                                &response.meta_info,
+                                logprob_offset,
+                                return_tokens_as_ids,
+                            ) {
+                                Ok(values) => values,
+                                Err(err) => {
+                                    yield Err(err);
+                                    break;
+                                }
+                            };
+                        logprob_offset = next_offset;
+
+                        if is_prefill {
+                            if response.finished {
+                                let mut terminal = terminal_from_meta(
+                                    &response.meta_info,
+                                    observed_prompt_tokens,
+                                    0,
+                                );
+                                terminal.disaggregated_params = prefill_handoff.clone();
+                                yield Ok(terminal);
+                                break;
+                            }
+                            continue;
+                        }
+
+                        generated = generated.saturating_add(token_ids.len() as u32);
+                        if response.finished {
+                            let mut terminal = terminal_from_meta(
+                                &response.meta_info,
+                                observed_prompt_tokens,
+                                generated,
+                            );
+                            terminal.token_ids = token_ids;
+                            terminal.log_probs = log_probs;
+                            terminal.top_logprobs = top_logprobs;
+                            terminal.engine_data = engine_data_from_meta(&response.meta_info);
+                            yield Ok(terminal);
+                            break;
+                        }
+
+                        if !token_ids.is_empty() {
+                            yield Ok(LLMEngineOutput {
+                                token_ids,
+                                log_probs,
+                                top_logprobs,
+                                engine_data: engine_data_from_meta(&response.meta_info),
+                                ..Default::default()
+                            });
                         }
                     }
                 }
@@ -390,577 +328,743 @@ impl LLMEngine for SglangSidecarEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(mut client) = self.pool.get().map(Pool::control_client) else {
+        let Some(mut grpc_client) = self.pool.get().map(Pool::control_client) else {
             return;
         };
-        let req = pb::AbortRequest {
-            request_id: ctx.id().to_string(),
-            kv_session: None,
+        let request = pb::AbortRequest {
+            rid: ctx.id().to_string(),
             abort_all: false,
         };
-        // Idempotent on the engine side (unknown id → ABORTED); failures here
-        // are best-effort and swallowed.
-        if let Err(status) = client.abort(req).await {
-            tracing::debug!(error = %status.message(), request_id = ctx.id(), "sglang sidecar: abort RPC failed (ignored)");
+        if let Err(status) = grpc_client.abort(request).await {
+            tracing::debug!(
+                request_id = ctx.id(),
+                error = %status.message(),
+                "SGLang Abort RPC failed"
+            );
         }
-    }
-
-    async fn drain(&self) -> Result<(), DynamoError> {
-        let Some(mut client) = self.pool.get().map(Pool::control_client) else {
-            return Ok(());
-        };
-        let deadline_ms = self
-            .transport
-            .deadline
-            .as_millis()
-            .min(u32::MAX as u128) as u32;
-        let req = pb::DrainRequest {
-            stop_accepting_new_requests: true,
-            deadline_ms,
-            abort_after_deadline: false,
-        };
-        match client.drain(req).await {
-            Ok(resp) => {
-                let mut stream = resp.into_inner();
-                loop {
-                    match stream.message().await {
-                        Ok(Some(_)) => continue,
-                        Ok(None) => break,
-                        Err(status) => {
-                            tracing::warn!(error = %status.message(), "sglang sidecar: drain stream error (ignored)");
-                            break;
-                        }
-                    }
-                }
-            }
-            Err(status) => {
-                tracing::warn!(error = %status.message(), "sglang sidecar: drain RPC failed (ignored)");
-            }
-        }
-        Ok(())
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
-        // Cancels in-flight `generate()` streams (they select on this token).
-        // Idempotent (CancellationToken::cancel) and null-safe (no resources
-        // to free on a partially-started engine; the pool's channels close when
-        // it drops).
         self.cancel.cancel();
-        tracing::info!("sglang sidecar: cleanup invoked");
+        tracing::info!("sglang sidecar shutdown complete");
         Ok(())
-    }
-
-    async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
-        let Some(mut client) = self.pool.get().map(Pool::control_client) else {
-            return Ok(Vec::new());
-        };
-        let resp = client
-            .get_kv_event_sources(pb::GetKvEventSourcesRequest {
-                data_parallel_ranks: Vec::new(),
-            })
-            .await
-            .map_err(|s| client::status_to_dynamo("GetKvEventSources", s))?
-            .into_inner();
-
-        // Surface only ZMQ publishers; the Dynamo KV router subscribes to those
-        // directly. Other transports are not yet routable.
-        let sources = resp
-            .sources
-            .into_iter()
-            .filter(|s| s.transport == "zmq")
-            .filter_map(|s| {
-                let e = s.endpoint_addr?;
-                let proto = if e.protocol.is_empty() {
-                    "tcp"
-                } else {
-                    &e.protocol
-                };
-                Some(KvEventSource::Zmq {
-                    endpoint: format!("{proto}://{}:{}", e.host, e.port),
-                    topic: s.topic,
-                    dp_rank: s.data_parallel_rank,
-                })
-            })
-            .collect();
-        Ok(sources)
-    }
-
-    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
-        // Canary round-tripped through generate() by the runtime's
-        // HealthCheckManager: a single greedy token.
-        let mut payload = serde_json::json!({
-            "token_ids": [1],
-            "stop_conditions": {"max_tokens": 1, "ignore_eos": true},
-            "sampling_options": {"temperature": 0.0},
-        });
-        // Decode-mode generate() rejects requests without prefill_result;
-        // synthesize an empty handoff so the canary clears the precondition.
-        if self.disaggregation_mode.is_decode() {
-            payload["prefill_result"] = serde_json::json!({"disaggregated_params": {}});
-        }
-        payload[HEALTH_CHECK_KEY] = serde_json::Value::Bool(true);
-        Ok(Some(payload))
     }
 }
 
-// ============================================================================
-// Discovery → config helpers
-// ============================================================================
-
-/// Bootstrap discovery on a throwaway current-thread runtime. The connection
-/// is intentionally dropped with the runtime — `start()` reconnects on the
-/// worker runtime.
 fn bootstrap_discover(
     endpoint: &str,
     transport: &TransportConfig,
 ) -> Result<Discovery, DynamoError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| client::engine_shutdown(format!("bootstrap runtime: {e}")))?;
-    rt.block_on(async {
-        let mut client = client::connect(endpoint, transport).await?;
-        client::discover(&mut client).await
+        .map_err(|err| client::engine_shutdown(format!("bootstrap runtime: {err}")))?;
+    runtime.block_on(async {
+        let mut grpc_client = client::connect(endpoint, transport).await?;
+        client::discover(&mut grpc_client).await
     })
 }
 
-fn engine_role(discovery: &Discovery) -> pb::EngineRole {
-    pb::EngineRole::try_from(discovery.engine.role).unwrap_or(pb::EngineRole::Aggregated)
-}
-
-fn role_to_mode(role: pb::EngineRole) -> DisaggregationMode {
-    match role {
-        pb::EngineRole::Prefill => DisaggregationMode::Prefill,
-        pb::EngineRole::Decode => DisaggregationMode::Decode,
-        _ => DisaggregationMode::Aggregated,
+fn discovery_mode(discovery: &Discovery) -> Result<DisaggregationMode, DynamoError> {
+    match discovery
+        .server_info
+        .get("disaggregation_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("null")
+    {
+        "null" | "agg" | "aggregated" => Ok(DisaggregationMode::Aggregated),
+        "prefill" => Ok(DisaggregationMode::Prefill),
+        "decode" => Ok(DisaggregationMode::Decode),
+        mode => Err(client::protocol_error(format!(
+            "unsupported SGLang disaggregation_mode `{mode}`"
+        ))),
     }
 }
 
-/// Prefill workers register under the `prefill` component (targeted by the
-/// frontend's PrefillRouter); aggregated and decode workers use `backend`.
-fn component_for_role(role: pb::EngineRole) -> &'static str {
-    match role {
-        pb::EngineRole::Prefill => "prefill",
-        _ => "backend",
+fn component_for_mode(mode: DisaggregationMode) -> &'static str {
+    if mode.is_prefill() {
+        "prefill"
+    } else {
+        "backend"
     }
 }
 
-fn build_engine_config(discovery: &Discovery) -> EngineConfig {
-    let model = &discovery.model;
-    let parallelism = discovery.engine.parallelism.clone().unwrap_or_default();
-    let served_model_name =
-        (!model.served_model_name.is_empty()).then(|| model.served_model_name.clone());
-
-    // SGLang disaggregation keys KV transfer on a (host, port, room) triple. A
-    // prefill engine advertises its bootstrap host/port as the first
-    // `KvConnectorInfo.local_endpoints` entry; the frontend's PrefillRouter
-    // needs them in `EngineConfig` to drive the decode peer's connect. Empty
-    // (aggregated / decode) → `None`.
-    let bootstrap = discovery
-        .engine
-        .kv_connector
-        .as_ref()
-        .and_then(|kv| kv.local_endpoints.first())
-        .filter(|e| !e.host.is_empty() && e.port != 0);
-    let bootstrap_host = bootstrap.map(|e| e.host.clone());
-    let bootstrap_port = bootstrap.map(|e| e.port as u16);
-
-    // Proto3 scalar `0` is "unset"; gate each optional field so we advertise
-    // `None` rather than a bogus zero.
-    EngineConfig {
-        model: model.model_id.clone(),
-        served_model_name,
-        context_length: (model.max_context_length != 0).then_some(model.max_context_length),
-        kv_cache_block_size: (model.kv_block_size != 0).then_some(model.kv_block_size),
-        total_kv_blocks: (model.total_kv_blocks != 0).then_some(model.total_kv_blocks),
-        max_num_seqs: (model.max_running_requests != 0).then_some(model.max_running_requests),
-        max_num_batched_tokens: (model.max_batched_tokens != 0).then_some(model.max_batched_tokens),
-        data_parallel_size: (parallelism.data_parallel_size != 0)
-            .then_some(parallelism.data_parallel_size),
-        data_parallel_start_rank: (parallelism.data_parallel_start_rank != 0)
-            .then_some(parallelism.data_parallel_start_rank),
-        bootstrap_host,
-        bootstrap_port,
-        runtime_data: Default::default(),
-    }
+fn discovery_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
 }
 
-// ============================================================================
-// Request building + terminal mapping
-// ============================================================================
+fn discovery_bootstrap_port(discovery: &Discovery) -> Result<Option<u16>, DynamoError> {
+    client::json_u64(&discovery.server_info, "disaggregation_bootstrap_port")
+        .map(|port| {
+            u16::try_from(port).map_err(|_| {
+                client::protocol_error(format!(
+                    "SGLang disaggregation_bootstrap_port is out of range: {port}"
+                ))
+            })
+        })
+        .transpose()
+        .and_then(|port| {
+            port.filter(|port| *port != 0).map_or_else(
+                || {
+                    Err(client::protocol_error(
+                        "prefill SGLang server did not report disaggregation_bootstrap_port",
+                    ))
+                },
+                |port| Ok(Some(port)),
+            )
+        })
+}
+
+fn resolve_bootstrap_host(
+    explicit: Option<&str>,
+    endpoint: &str,
+    discovery: &Discovery,
+) -> Result<Option<String>, DynamoError> {
+    if let Some(host) = explicit.filter(|host| !host.trim().is_empty()) {
+        return Ok(Some(host.trim().to_string()));
+    }
+    let from_dist = discovery
+        .server_info
+        .get("dist_init_addr")
+        .and_then(Value::as_str)
+        .and_then(host_from_address);
+    let from_endpoint = url::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string));
+    from_dist.or(from_endpoint).map(Some).ok_or_else(|| {
+        client::invalid_arg("could not derive a prefill bootstrap host; set --bootstrap-host")
+    })
+}
+
+fn host_from_address(address: &str) -> Option<String> {
+    let candidate = if address.contains("://") {
+        address.to_string()
+    } else {
+        format!("tcp://{address}")
+    };
+    url::Url::parse(&candidate)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+}
+
+fn build_engine_config(
+    discovery: &Discovery,
+    mode: DisaggregationMode,
+    bootstrap_host: Option<String>,
+    bootstrap_port: Option<u16>,
+) -> Result<EngineConfig, DynamoError> {
+    let page_size = client::json_u32(&discovery.server_info, "page_size");
+    let max_total_tokens = client::json_u64(&discovery.server_info, "max_total_num_tokens");
+    let total_kv_blocks = match (max_total_tokens, page_size) {
+        (Some(tokens), Some(page_size)) if page_size > 0 => {
+            Some(tokens.saturating_add(u64::from(page_size) - 1) / u64::from(page_size))
+        }
+        _ => None,
+    };
+    let dp_size = client::json_u32(&discovery.server_info, "dp_size")
+        .unwrap_or(1)
+        .max(1);
+    let max_num_seqs =
+        client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
+            if dp_size > 1 {
+                value / u64::from(dp_size)
+            } else {
+                value
+            }
+        });
+    let max_num_batched_tokens =
+        client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
+
+    let enable_dp_attention = discovery
+        .server_info
+        .get("enable_dp_attention")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let nnodes = client::json_u32(&discovery.server_info, "nnodes")
+        .unwrap_or(1)
+        .max(1);
+    let node_rank = client::json_u32(&discovery.server_info, "node_rank").unwrap_or(0);
+    let (data_parallel_start_rank, data_parallel_size) = if enable_dp_attention && dp_size > 1 {
+        let local_size = (dp_size / nnodes).max(1);
+        (Some(node_rank.saturating_mul(local_size)), Some(local_size))
+    } else {
+        (Some(0), Some(1))
+    };
+
+    if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
+        return Err(client::protocol_error(
+            "prefill SGLang discovery did not provide a usable bootstrap address",
+        ));
+    }
+
+    let mut runtime_data = HashMap::new();
+    runtime_data.insert(
+        "grpc_service".to_string(),
+        Value::String("sglang.runtime.v1.SglangService".to_string()),
+    );
+
+    Ok(EngineConfig {
+        model: discovery.model_path.clone(),
+        served_model_name: discovery.served_model_name.clone(),
+        runtime_data,
+        llm: Some(LlmRegistration {
+            context_length: discovery.max_model_len,
+            kv_cache_block_size: page_size,
+            total_kv_blocks,
+            max_num_seqs,
+            max_num_batched_tokens,
+            data_parallel_size,
+            data_parallel_start_rank,
+            bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),
+            bootstrap_port: mode.is_prefill().then_some(bootstrap_port).flatten(),
+        }),
+    })
+}
 
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
     request_id: &str,
-    is_prefill: bool,
+    mode: DisaggregationMode,
+    bootstrap_host: Option<&str>,
+    bootstrap_port: Option<u16>,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    let sampling = &request.sampling_options;
-    // Prefill only needs to populate the KV cache for the prompt: cap to one
-    // token regardless of the client's request.
-    let max_tokens = if is_prefill {
-        1
-    } else {
-        request.stop_conditions.max_tokens.unwrap_or(0)
-    };
-
-    let proto_sampling = pb::SamplingParams {
-        temperature: sampling.temperature.unwrap_or(0.0) as f64,
-        top_p: sampling.top_p.unwrap_or(0.0) as f64,
-        top_k: sampling.top_k.filter(|v| *v > 0).unwrap_or(0),
-        frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0) as f64,
-        presence_penalty: sampling.presence_penalty.unwrap_or(0.0) as f64,
-        max_tokens,
-        seed: sampling
-            .seed
-            .filter(|v| *v > 0)
-            .map(|v| v as u64)
-            .unwrap_or(0),
-        ignore_eos: request.stop_conditions.ignore_eos.unwrap_or(false),
-    };
-
-    let mut stop = Vec::new();
-    if let Some(strings) = &request.stop_conditions.stop {
-        for text in strings {
-            stop.push(pb::StopCondition {
-                condition: Some(pb::stop_condition::Condition::StopText(text.clone())),
-            });
-        }
-    }
-    if let Some(ids) = &request.stop_conditions.stop_token_ids {
-        for id in ids {
-            stop.push(pb::StopCondition {
-                condition: Some(pb::stop_condition::Condition::StopTokenId(*id)),
-            });
-        }
-    }
-
-    // Disaggregation handoff → KV session the engine forwards to its connector.
-    // SGLang's Bootstrap path (router-assigned `bootstrap_info`, sent to both
-    // prefill and decode) takes precedence; fall back to the Completed path
-    // (`prefill_result.disaggregated_params`). Aggregated → None.
-    let kv_session = request
-        .bootstrap_info
-        .as_ref()
-        .map(|bi| bootstrap_info_to_kv_session(bi, request_id))
-        .or_else(|| {
-            request
-                .prefill_result
-                .as_ref()
-                .map(|pr| disagg_json_to_kv_session(&pr.disaggregated_params, request_id))
-        });
-
-    // Forward the KV router's forced DP-rank decision so the engine pins this
-    // request to the rank that holds its prefix. Without it, SGLang internal-DP
-    // load-balances and scatters the prefix across ranks, so a child block's
-    // parent lands under a different rank → `parent_block_not_found` in the
-    // indexer. The sidecar advertises one KV-event source per *engine-local*
-    // rank (`GetKvEventSources`), so the router indexes — and decides — in the
-    // engine-local rank space; the value is forwarded as-is. The in-process
-    // backend reads the same `routing.dp_rank` for both prefill and decode
-    // (`dynamo.common.backend.dp_rank.forced_dp_rank`); `prefill_dp_rank` is
-    // never populated by the router.
-    let data_parallel_rank = request.routing.as_ref().and_then(|r| r.dp_rank);
-
-    let media = build_media(request)?;
-
-    // Constrained / guided decoding. Validated by the frontend; the engine's
-    // grammar backend enforces it during sampling. At most one guide is sent.
-    let guided = request.sampling_options.guided_decoding.as_ref().and_then(|g| {
-        use pb::guided_decoding::Guide;
-        let guide = if let Some(json) = &g.json {
-            Some(Guide::JsonSchema(json_value_to_string(json)))
-        } else if let Some(regex) = &g.regex {
-            Some(Guide::Regex(regex.clone()))
-        } else if let Some(grammar) = &g.grammar {
-            Some(Guide::EbnfGrammar(grammar.clone()))
-        } else {
-            g.structural_tag
-                .as_ref()
-                .map(|t| Guide::StructuralTag(json_value_to_string(t)))
-        };
-        guide.map(|guide| pb::GuidedDecoding {
-            guide: Some(guide),
-            backend: g.backend.clone().unwrap_or_default(),
+    validate_request(request)?;
+    let input_ids = request
+        .token_ids
+        .iter()
+        .map(|token| {
+            i32::try_from(*token)
+                .map_err(|_| client::invalid_arg(format!("token id {token} does not fit in i32")))
         })
-    });
+        .collect::<Result<Vec<_>, _>>()?;
+    let max_new_tokens = if mode.is_prefill() {
+        Some(1)
+    } else {
+        request
+            .stop_conditions
+            .max_tokens
+            .map(i32::try_from)
+            .transpose()
+            .map_err(|_| client::invalid_arg("max_tokens does not fit in i32"))?
+    };
+    let min_new_tokens = request
+        .stop_conditions
+        .min_tokens
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| client::invalid_arg("min_tokens does not fit in i32"))?;
 
-    // Per-request LoRA adapter (router/preprocessor sets it on routing hints).
-    let lora_name = request
+    let mut stop_token_ids = Vec::new();
+    for tokens in [
+        request.stop_conditions.stop_token_ids.as_ref(),
+        request.stop_conditions.stop_token_ids_hidden.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for token in tokens {
+            let token = i32::try_from(*token).map_err(|_| {
+                client::invalid_arg(format!("stop token id {token} does not fit in i32"))
+            })?;
+            if !stop_token_ids.contains(&token) {
+                stop_token_ids.push(token);
+            }
+        }
+    }
+
+    let guided = request.sampling_options.guided_decoding.as_ref();
+    let sampling_params = pb::SamplingParams {
+        temperature: request.sampling_options.temperature,
+        top_p: request.sampling_options.top_p,
+        top_k: request.sampling_options.top_k,
+        min_p: request.sampling_options.min_p,
+        frequency_penalty: request.sampling_options.frequency_penalty,
+        presence_penalty: request.sampling_options.presence_penalty,
+        repetition_penalty: request.sampling_options.repetition_penalty,
+        max_new_tokens,
+        min_new_tokens,
+        stop: request.stop_conditions.stop.clone().unwrap_or_default(),
+        stop_token_ids,
+        ignore_eos: request.stop_conditions.ignore_eos,
+        n: request.sampling_options.n.map(i32::from),
+        json_schema: guided
+            .and_then(|value| value.json.as_ref())
+            .map(json_value_to_string),
+        regex: guided.and_then(|value| value.regex.clone()),
+    };
+
+    let output_options = &request.output_options;
+    let return_logprob =
+        output_options.logprobs.is_some() || output_options.prompt_logprobs.is_some();
+    let top_logprobs_num = output_options
+        .logprobs
+        .unwrap_or(0)
+        .max(output_options.prompt_logprobs.unwrap_or(0));
+    let top_logprobs_num = i32::try_from(top_logprobs_num)
+        .map_err(|_| client::invalid_arg("requested logprobs does not fit in i32"))?;
+    let logprob_start_len = output_options.prompt_logprobs.map(|_| 0).unwrap_or(-1);
+    let routed_dp_rank = request
         .routing
         .as_ref()
-        .and_then(|r| r.lora_name.clone())
-        .unwrap_or_default();
+        .and_then(|routing| routing.dp_rank)
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| client::invalid_arg("routed dp_rank does not fit in i32"))?;
+    let lora_path = request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.lora_name.clone());
 
-    // Logprobs: `logprobs` is the top-alternatives count; `prompt_logprobs`
-    // asks the engine to also score the prompt (offset 0). Absent → completion
-    // tokens only (engine default, signalled by logprob_start_len = -1).
-    let opts = &request.output_options;
-    let return_logprobs = opts.logprobs.is_some() || opts.prompt_logprobs.is_some();
-    let top_logprobs = opts.logprobs.unwrap_or(0);
-    let logprob_start_len = if opts.prompt_logprobs.is_some() { 0 } else { -1 };
+    let mut trace_headers = HashMap::new();
+    dynamo_runtime::logging::inject_trace_headers_into_map(&mut trace_headers);
 
     Ok(pb::GenerateRequest {
-        request_id: request_id.to_string(),
-        model: request.model.clone(),
-        input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-            ids: request.token_ids.clone(),
-        })),
-        sampling: Some(proto_sampling),
-        stop,
-        stream: true,
-        media,
-        guided,
-        lora_name,
-        return_logprobs,
-        top_logprobs,
-        logprob_start_len,
-        data_parallel_rank,
-        kv_session,
-        metadata: Default::default(),
+        input_ids,
+        sampling_params: Some(sampling_params),
+        stream: Some(true),
+        return_logprob: Some(return_logprob),
+        top_logprobs_num: Some(top_logprobs_num),
+        logprob_start_len: Some(logprob_start_len),
+        rid: Some(request_id.to_string()),
+        lora_path,
+        routing_key: request.mdc_sum.clone(),
+        routed_dp_rank,
+        trace_headers,
+        session_id: None,
+        disaggregated_params: resolve_disaggregated_params(
+            request,
+            mode,
+            bootstrap_host,
+            bootstrap_port,
+        )?,
     })
 }
 
-/// A guided-decoding constraint can arrive as a JSON string or a JSON
-/// object/value; flatten to the string SGLang's grammar backend expects.
-fn json_value_to_string(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
+fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
+    if request.token_ids.is_empty() {
+        return Err(client::invalid_arg("token_ids must not be empty"));
+    }
+    if request.prompt_embeds.is_some() {
+        return Err(client::invalid_arg(
+            "prompt_embeds are not supported by SGLang's native gRPC proto",
+        ));
+    }
+    if request.multi_modal_data.is_some() || request.mm_processor_kwargs.is_some() {
+        return Err(client::invalid_arg(
+            "multimodal payloads are not supported by SGLang's native Generate RPC",
+        ));
+    }
+    if request.sampling_options.n.unwrap_or(1) != 1 {
+        return Err(client::invalid_arg("n must be 1 for the SGLang sidecar"));
+    }
+    if request.sampling_options.best_of.unwrap_or(1) != 1 {
+        return Err(client::invalid_arg(
+            "best_of is not represented by SGLang's native gRPC proto",
+        ));
+    }
+    if request.sampling_options.use_beam_search.unwrap_or(false) {
+        return Err(client::invalid_arg(
+            "beam search is not represented by SGLang's native gRPC proto",
+        ));
+    }
+    if let Some(penalty) = request.sampling_options.length_penalty
+        && (penalty - 1.0).abs() > f32::EPSILON
+    {
+        return Err(client::invalid_arg(
+            "length_penalty is not represented by SGLang's native gRPC proto",
+        ));
+    }
+    if request.sampling_options.seed.is_some() {
+        return Err(client::invalid_arg(
+            "seed is not represented by SGLang's native gRPC proto",
+        ));
+    }
+    if request.stop_conditions.max_thinking_tokens.is_some() {
+        return Err(client::invalid_arg(
+            "max_thinking_tokens is not represented by SGLang's native gRPC proto",
+        ));
+    }
+    if request
+        .sampling_options
+        .include_stop_str_in_output
+        .unwrap_or(false)
+    {
+        return Err(client::invalid_arg(
+            "include_stop_str_in_output is not represented by SGLang's native gRPC proto",
+        ));
+    }
+    if request
+        .stop_conditions
+        .stop_token_ids_visible
+        .as_ref()
+        .is_some_and(|tokens| !tokens.is_empty())
+    {
+        return Err(client::invalid_arg(
+            "visible stop-token semantics are not represented by SGLang's native gRPC proto",
+        ));
+    }
+    if let Some(guided) = request.sampling_options.guided_decoding.as_ref()
+        && (guided
+            .choice
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+            || guided.grammar.is_some()
+            || guided
+                .backend
+                .as_ref()
+                .is_some_and(|value| !value.is_empty())
+            || guided.whitespace_pattern.is_some()
+            || guided.structural_tag.is_some())
+    {
+        return Err(client::invalid_arg(
+            "the native SGLang gRPC proto currently supports only JSON-schema and regex guided decoding",
+        ));
+    }
+    if request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.priority)
+        .unwrap_or(0)
+        != 0
+    {
+        return Err(client::invalid_arg(
+            "engine priority is not represented by SGLang's native gRPC proto",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_disaggregated_params(
+    request: &PreprocessedRequest,
+    mode: DisaggregationMode,
+    bootstrap_host: Option<&str>,
+    bootstrap_port: Option<u16>,
+) -> Result<Option<pb::DisaggregatedParams>, DynamoError> {
+    if mode == DisaggregationMode::Aggregated {
+        return Ok(None);
+    }
+    if let Some(info) = request.bootstrap_info.as_ref() {
+        return bootstrap_values_to_proto(
+            &info.bootstrap_host,
+            u64::from(info.bootstrap_port),
+            info.bootstrap_room,
+        )
+        .map(Some);
+    }
+    if let Some(prefill) = request.prefill_result.as_ref() {
+        return disaggregated_json_to_proto(&prefill.disaggregated_params).map(Some);
+    }
+    if mode.is_prefill() {
+        let host = bootstrap_host.ok_or_else(|| {
+            client::invalid_arg("prefill request has no bootstrap host from discovery")
+        })?;
+        let port = bootstrap_port.ok_or_else(|| {
+            client::invalid_arg("prefill request has no bootstrap port from discovery")
+        })?;
+        let room = rand::random::<u64>() & (i64::MAX as u64);
+        return bootstrap_values_to_proto(host, u64::from(port), room).map(Some);
+    }
+    Err(client::invalid_arg(
+        "decode request has neither bootstrap_info nor prefill_result",
+    ))
+}
+
+fn disaggregated_json_to_proto(value: &Value) -> Result<pb::DisaggregatedParams, DynamoError> {
+    let host = value
+        .get("bootstrap_host")
+        .and_then(Value::as_str)
+        .ok_or_else(|| client::invalid_arg("disaggregated_params.bootstrap_host is missing"))?;
+    let port = value
+        .get("bootstrap_port")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| client::invalid_arg("disaggregated_params.bootstrap_port is missing"))?;
+    let room = value
+        .get("bootstrap_room")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| client::invalid_arg("disaggregated_params.bootstrap_room is missing"))?;
+    bootstrap_values_to_proto(host, port, room)
+}
+
+fn bootstrap_values_to_proto(
+    host: &str,
+    port: u64,
+    room: u64,
+) -> Result<pb::DisaggregatedParams, DynamoError> {
+    if host.trim().is_empty() {
+        return Err(client::invalid_arg("bootstrap_host must not be empty"));
+    }
+    let bootstrap_port = i32::try_from(port)
+        .map_err(|_| client::invalid_arg(format!("bootstrap_port is out of range: {port}")))?;
+    let bootstrap_room = i64::try_from(room).map_err(|_| {
+        client::invalid_arg(format!(
+            "bootstrap_room must fit SGLang's signed int64 field: {room}"
+        ))
+    })?;
+    Ok(pb::DisaggregatedParams {
+        bootstrap_host: host.to_string(),
+        bootstrap_port,
+        bootstrap_room,
+    })
+}
+
+fn disaggregated_params_to_json(params: &pb::DisaggregatedParams) -> Value {
+    serde_json::json!({
+        "bootstrap_host": params.bootstrap_host,
+        "bootstrap_port": params.bootstrap_port,
+        "bootstrap_room": params.bootstrap_room,
+    })
+}
+
+fn json_value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        value => value.to_string(),
     }
 }
 
-/// Map a media-map key (`image_url`/`video_url`/`audio_url`) to its proto
-/// modality. Unknown keys fall back to `Unspecified`, which the engine treats
-/// as image.
-fn modality_for_key(key: &str) -> pb::Modality {
-    match key {
-        "image_url" => pb::Modality::Image,
-        "video_url" => pb::Modality::Video,
-        "audio_url" => pb::Modality::Audio,
-        _ => pb::Modality::Unspecified,
-    }
+fn output_ids_to_u32(ids: &[i32]) -> Result<Vec<u32>, DynamoError> {
+    ids.iter()
+        .map(|id| {
+            u32::try_from(*id).map_err(|_| {
+                client::protocol_error(format!("SGLang returned a negative token id: {id}"))
+            })
+        })
+        .collect()
 }
 
-/// A URL / `data:` string becomes a `data_uri` source when it is a data URI,
-/// otherwise a plain `url` source the engine fetches.
-fn media_source_from_str(s: &str) -> pb::media_item::Source {
-    if s.starts_with("data:") {
-        pb::media_item::Source::DataUri(s.to_string())
-    } else {
-        pb::media_item::Source::Url(s.to_string())
-    }
+fn meta_value(meta: &HashMap<String, String>, key: &str) -> Option<Value> {
+    meta.get(key)
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
 }
 
-/// Build the proto `media` list from the request's multimodal map.
-///
-/// The sidecar runs the frontend in URL-passthrough mode (`media_decoder:
-/// null`), so each item is a URL or `data:` URI the engine fetches and
-/// preprocesses. A pre-decoded RDMA descriptor (`MultimodalData::Decoded`) is
-/// rejected fail-closed: the sidecar has no NIXL agent to dereference it.
-///
-/// Items are emitted in a fixed modality order (image, then video, then audio)
-/// so the i-th item aligns with the i-th placeholder marker for single-modality
-/// prompts.
-fn build_media(request: &PreprocessedRequest) -> Result<Vec<pb::MediaItem>, DynamoError> {
-    let Some(map) = request.multi_modal_data.as_ref() else {
-        return Ok(Vec::new());
-    };
-    let mut media = Vec::new();
-    for key in ["image_url", "video_url", "audio_url"] {
-        let Some(items) = map.get(key) else { continue };
-        let modality = modality_for_key(key);
-        for item in items {
-            let source = match item {
-                MultimodalData::Url(u) => media_source_from_str(u.as_str()),
-                MultimodalData::RawUrl(s) => media_source_from_str(s),
-                MultimodalData::Decoded(_) => {
-                    return Err(client::invalid_arg(
-                        "sglang-sidecar received a pre-decoded RDMA media descriptor; the \
-                         sidecar has no NIXL agent to dereference it. Run the frontend in \
-                         URL-passthrough mode (set the model's media_decoder to null).",
-                    ));
-                }
-            };
-            media.push(pb::MediaItem {
-                modality: modality as i32,
-                source: Some(source),
-                mime_type: String::new(),
-                uuid: String::new(),
-            });
-        }
-    }
-    Ok(media)
+fn meta_u32(meta: &HashMap<String, String>, key: &str) -> Option<u32> {
+    meta_value(meta, key)
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok())
 }
 
-fn finish_output(
-    reason: pb::FinishReason,
+fn terminal_from_meta(
+    meta: &HashMap<String, String>,
     prompt_tokens: u32,
     generated: u32,
-    disaggregated_params: Option<serde_json::Value>,
 ) -> LLMEngineOutput {
-    let mut out = match reason {
-        pb::FinishReason::Length => LLMEngineOutput::length(),
-        pb::FinishReason::Cancelled => LLMEngineOutput::cancelled(),
-        pb::FinishReason::Error => {
-            LLMEngineOutput::error("engine reported error finish reason".to_string())
-        }
-        // STOP and UNSPECIFIED both map to a normal stop terminal.
+    let finish = meta_value(meta, "finish_reason").unwrap_or(Value::Null);
+    let finish_type = finish
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| finish.as_str())
+        .unwrap_or("stop");
+    let mut output = match finish_type {
+        "length" => LLMEngineOutput::length(),
+        "abort" | "cancelled" => LLMEngineOutput::cancelled(),
+        "error" => LLMEngineOutput::error(
+            finish
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("SGLang generation error")
+                .to_string(),
+        ),
         _ => LLMEngineOutput::stop(),
     }
     .with_usage(usage(prompt_tokens, generated));
-    out.disaggregated_params = disaggregated_params;
-    out
-}
-
-// ============================================================================
-// KV session <-> disaggregated_params encoding
-// ============================================================================
-
-/// Build a `KvSessionRef` from the frontend's router-assigned `BootstrapInfo`
-/// (SGLang Bootstrap path). The `(host, port, room)` triple is carried in
-/// `attributes_struct` so the engine maps it back to SGLang bootstrap kwargs.
-fn bootstrap_info_to_kv_session(
-    bi: &dynamo_backend_common::BootstrapInfo,
-    request_id: &str,
-) -> pb::KvSessionRef {
-    let mut fields = std::collections::BTreeMap::new();
-    fields.insert(
-        "bootstrap_host".to_string(),
-        prost_types::Value {
-            kind: Some(prost_types::value::Kind::StringValue(bi.bootstrap_host.clone())),
-        },
-    );
-    fields.insert(
-        "bootstrap_port".to_string(),
-        prost_types::Value {
-            kind: Some(prost_types::value::Kind::NumberValue(bi.bootstrap_port as f64)),
-        },
-    );
-    fields.insert(
-        // The Dynamo PrefillRouter mints a full u64 room; carry it as a STRING so
-        // the f64 NumberValue precision loss (and i64 saturation on the engine
-        // side) doesn't collapse rooms >= 2^63 to the same value -> room
-        // collisions -> NIXL KVReceiver handshake failures under concurrency.
-        "bootstrap_room".to_string(),
-        prost_types::Value {
-            kind: Some(prost_types::value::Kind::StringValue(bi.bootstrap_room.to_string())),
-        },
-    );
-    pb::KvSessionRef {
-        session_id: request_id.to_string(),
-        transfer_backend: "nixl".to_string(),
-        endpoints: Vec::new(),
-        dp_rank: 0,
-        attributes_struct: Some(prost_types::Struct {
-            fields: fields.into_iter().collect(),
-        }),
-    }
-}
-
-/// Encode a prefill `KvSessionRef` into the JSON the frontend's PrefillRouter
-/// forwards to the decode peer (round-trips with
-/// [`disagg_json_to_kv_session`]).
-///
-/// The sidecar carries typed connector handoff metadata as native JSON.
-pub(crate) fn kv_session_to_disagg_json(session: pb::KvSessionRef) -> serde_json::Value {
-    let mut obj = serde_json::json!({
-        "session_id": session.session_id,
-        "transfer_backend": session.transfer_backend,
-        "dp_rank": session.dp_rank,
-    });
-    if let Some(s) = session.attributes_struct.as_ref() {
-        obj["attributes_struct"] = prost_struct_to_json(s);
-    }
-    obj
-}
-
-/// Reconstruct a `KvSessionRef` from the prefill peer's forwarded JSON.
-pub(crate) fn disagg_json_to_kv_session(
-    params: &serde_json::Value,
-    request_id: &str,
-) -> pb::KvSessionRef {
-    let obj = params.as_object();
-    let get_str = |key: &str| {
-        obj.and_then(|o| o.get(key))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    };
-    let session_id = get_str("session_id").unwrap_or_else(|| request_id.to_string());
-    let transfer_backend = get_str("transfer_backend").unwrap_or_default();
-    let dp_rank = obj
-        .and_then(|o| o.get("dp_rank"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
-    let attributes_struct = obj
-        .and_then(|o| o.get("attributes_struct"))
-        .and_then(json_to_prost_struct);
-    pb::KvSessionRef {
-        session_id,
-        transfer_backend,
-        endpoints: Vec::new(),
-        dp_rank,
-        attributes_struct,
-    }
-}
-
-/// Convert a JSON object into a `google.protobuf.Struct`. Non-object inputs
-/// yield `None`.
-pub(crate) fn json_to_prost_struct(value: &serde_json::Value) -> Option<prost_types::Struct> {
-    match value {
-        serde_json::Value::Object(map) => Some(prost_types::Struct {
-            fields: map.iter().map(|(k, v)| (k.clone(), json_to_prost_value(v))).collect(),
-        }),
+    output.stop_reason = finish.get("matched").and_then(|matched| match matched {
+        Value::String(value) => Some(StopReason::String(value.clone())),
+        Value::Number(value) => value.as_i64().map(StopReason::Int),
         _ => None,
-    }
+    });
+    output
 }
 
-fn json_to_prost_value(value: &serde_json::Value) -> prost_types::Value {
-    use prost_types::value::Kind;
-    let kind = match value {
-        serde_json::Value::Null => Kind::NullValue(prost_types::NullValue::NullValue as i32),
-        serde_json::Value::Bool(b) => Kind::BoolValue(*b),
-        serde_json::Value::Number(n) => Kind::NumberValue(n.as_f64().unwrap_or(0.0)),
-        serde_json::Value::String(s) => Kind::StringValue(s.clone()),
-        serde_json::Value::Array(arr) => Kind::ListValue(prost_types::ListValue {
-            values: arr.iter().map(json_to_prost_value).collect(),
-        }),
-        serde_json::Value::Object(map) => Kind::StructValue(prost_types::Struct {
-            fields: map.iter().map(|(k, v)| (k.clone(), json_to_prost_value(v))).collect(),
-        }),
+fn engine_data_from_meta(meta: &HashMap<String, String>) -> Option<Value> {
+    meta_value(meta, "routed_experts")
+        .map(|routed_experts| serde_json::json!({"routed_experts": routed_experts}))
+}
+
+type ExtractedLogprobs = (Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>, usize);
+
+fn extract_logprobs(
+    meta: &HashMap<String, String>,
+    offset: usize,
+    return_tokens_as_ids: bool,
+) -> Result<ExtractedLogprobs, DynamoError> {
+    let Some(Value::Array(all_logprobs)) = meta_value(meta, "output_token_logprobs") else {
+        return Ok((None, None, offset));
     };
-    prost_types::Value { kind: Some(kind) }
-}
-
-/// Convert a `google.protobuf.Struct` back into a JSON object.
-pub(crate) fn prost_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
-    serde_json::Value::Object(
-        s.fields.iter().map(|(k, v)| (k.clone(), prost_value_to_json(v))).collect(),
-    )
-}
-
-fn prost_value_to_json(value: &prost_types::Value) -> serde_json::Value {
-    use prost_types::value::Kind;
-    match &value.kind {
-        None | Some(Kind::NullValue(_)) => serde_json::Value::Null,
-        Some(Kind::BoolValue(b)) => serde_json::Value::Bool(*b),
-        Some(Kind::NumberValue(n)) => number_to_json(*n),
-        Some(Kind::StringValue(s)) => serde_json::Value::String(s.clone()),
-        Some(Kind::ListValue(l)) => {
-            serde_json::Value::Array(l.values.iter().map(prost_value_to_json).collect())
-        }
-        Some(Kind::StructValue(s)) => prost_struct_to_json(s),
+    if offset >= all_logprobs.len() {
+        return Ok((None, None, all_logprobs.len()));
     }
+
+    let mut log_probs = Vec::with_capacity(all_logprobs.len() - offset);
+    for entry in &all_logprobs[offset..] {
+        let value = entry
+            .as_array()
+            .and_then(|parts| parts.first())
+            .and_then(Value::as_f64)
+            .ok_or_else(|| {
+                client::protocol_error("invalid output_token_logprobs entry from SGLang")
+            })?;
+        log_probs.push(value);
+    }
+
+    let top_logprobs = match meta_value(meta, "output_top_logprobs") {
+        Some(Value::Array(all_top)) => {
+            let mut positions = Vec::new();
+            for position in all_top.iter().skip(offset) {
+                let Some(entries) = position.as_array() else {
+                    positions.push(Vec::new());
+                    continue;
+                };
+                let mut mapped = Vec::with_capacity(entries.len());
+                for (index, entry) in entries.iter().enumerate() {
+                    let parts = entry.as_array().ok_or_else(|| {
+                        client::protocol_error("invalid output_top_logprobs entry from SGLang")
+                    })?;
+                    let logprob = parts.first().and_then(Value::as_f64).ok_or_else(|| {
+                        client::protocol_error("missing top-logprob value from SGLang")
+                    })?;
+                    let token_id = parts.get(1).and_then(Value::as_u64).ok_or_else(|| {
+                        client::protocol_error("missing top-logprob token id from SGLang")
+                    })?;
+                    let token_id = u32::try_from(token_id).map_err(|_| {
+                        client::protocol_error("top-logprob token id does not fit u32")
+                    })?;
+                    let token = if return_tokens_as_ids {
+                        Some(format!("token_id:{token_id}"))
+                    } else {
+                        parts.get(2).and_then(Value::as_str).map(str::to_string)
+                    };
+                    mapped.push(TopLogprob {
+                        rank: u32::try_from(index + 1).unwrap_or(u32::MAX),
+                        token_id,
+                        token,
+                        logprob,
+                        bytes: None,
+                    });
+                }
+                positions.push(mapped);
+            }
+            Some(positions)
+        }
+        _ => None,
+    };
+
+    Ok((Some(log_probs), top_logprobs, all_logprobs.len()))
 }
 
-/// `google.protobuf.Struct` numbers are IEEE-754 doubles; recover integral
-/// values as JSON integers so connector params (`remote_port`, `tp_size`, …)
-/// keep their integer type through the pass-through.
-fn number_to_json(n: f64) -> serde_json::Value {
-    if n.is_finite() && n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-        serde_json::Value::Number((n as i64).into())
-    } else {
-        serde_json::Number::from_f64(n)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null)
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use dynamo_backend_common::{
+        BootstrapInfo, DisaggregationMode, FinishReason, OutputOptions, PreprocessedRequest,
+        SamplingOptions, StopConditions,
+    };
+    use serde_json::json;
+
+    use super::{build_generate_request, extract_logprobs, terminal_from_meta};
+
+    fn request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("Qwen/Qwen3-0.6B".to_string())
+            .token_ids(vec![1, 2, 3])
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .stop_conditions(StopConditions {
+                max_tokens: Some(8),
+                ..Default::default()
+            })
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn request_maps_native_fields_and_full_width_room() {
+        let mut request = request();
+        request.bootstrap_info = Some(BootstrapInfo {
+            bootstrap_host: "prefill".to_string(),
+            bootstrap_port: 5000,
+            bootstrap_room: i64::MAX as u64,
+            handoff_id: None,
+        });
+        let mapped =
+            build_generate_request(&request, "rid-1", DisaggregationMode::Decode, None, None)
+                .unwrap();
+        assert_eq!(mapped.input_ids, vec![1, 2, 3]);
+        assert_eq!(mapped.rid.as_deref(), Some("rid-1"));
+        assert_eq!(mapped.sampling_params.unwrap().max_new_tokens, Some(8));
+        assert_eq!(
+            mapped.disaggregated_params.unwrap().bootstrap_room,
+            i64::MAX
+        );
+    }
+
+    #[test]
+    fn prefill_clamps_generation_and_creates_handoff() {
+        let mapped = build_generate_request(
+            &request(),
+            "rid-2",
+            DisaggregationMode::Prefill,
+            Some("prefill"),
+            Some(5001),
+        )
+        .unwrap();
+        assert_eq!(mapped.sampling_params.unwrap().max_new_tokens, Some(1));
+        assert_eq!(mapped.disaggregated_params.unwrap().bootstrap_port, 5001);
+    }
+
+    #[test]
+    fn logprobs_are_sliced_from_cumulative_metadata() {
+        let meta = HashMap::from([
+            (
+                "output_token_logprobs".to_string(),
+                json!([[-0.1, 10, "a"], [-0.2, 11, "b"]]).to_string(),
+            ),
+            (
+                "output_top_logprobs".to_string(),
+                json!([[[-0.1, 10, "a"]], [[-0.2, 11, "b"]]]).to_string(),
+            ),
+        ]);
+        let (logprobs, top, next) = extract_logprobs(&meta, 1, false).unwrap();
+        assert_eq!(logprobs.unwrap(), vec![-0.2]);
+        assert_eq!(top.unwrap()[0][0].token_id, 11);
+        assert_eq!(next, 2);
+    }
+
+    #[test]
+    fn terminal_maps_finish_reason_and_usage() {
+        let meta = HashMap::from([(
+            "finish_reason".to_string(),
+            json!({"type": "length"}).to_string(),
+        )]);
+        let terminal = terminal_from_meta(&meta, 4, 3);
+        assert_eq!(terminal.finish_reason, Some(FinishReason::Length));
+        assert_eq!(terminal.completion_usage.unwrap().total_tokens, 7);
+    }
+
+    #[test]
+    fn decode_requires_rendezvous_params() {
+        assert!(
+            build_generate_request(&request(), "rid-3", DisaggregationMode::Decode, None, None,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn room_above_signed_int64_is_rejected() {
+        let mut request = request();
+        request.bootstrap_info = Some(BootstrapInfo {
+            bootstrap_host: "prefill".to_string(),
+            bootstrap_port: 5000,
+            bootstrap_room: i64::MAX as u64 + 1,
+            handoff_id: None,
+        });
+        assert!(
+            build_generate_request(&request, "rid-4", DisaggregationMode::Decode, None, None,)
+                .is_err()
+        );
     }
 }
