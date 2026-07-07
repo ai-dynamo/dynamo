@@ -7,6 +7,16 @@ propagate (so the frontend returns a 4xx) instead of swallowing them to None."""
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import torch
+
+# multimodal_processor imports tensorrt_llm, whose import needs CUDA. -m selection
+# happens after collection, so this module is still imported on the CPU-only step;
+# skip at collection there to avoid an ImportError. GPU runs it via the gpu_1 marker.
+if not torch.cuda.is_available():
+    pytest.skip(
+        "CUDA/GPU not available, but tensorrt_llm import and the test require GPU.",
+        allow_module_level=True,
+    )
 
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError
