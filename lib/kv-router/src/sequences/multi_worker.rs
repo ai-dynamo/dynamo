@@ -25,7 +25,9 @@ use tokio_util::sync::CancellationToken;
 use super::prefill_tracker::PrefillTimeLoad;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
-use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
+use super::single::{
+    ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PromptMembershipDelta, RequestId,
+};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
@@ -112,7 +114,7 @@ pub enum ReplicaWorkerPolicy {
 #[derive(Debug, Clone, Copy)]
 struct SequenceTrackerOptions {
     replica_worker_policy: ReplicaWorkerPolicy,
-    expiry_enabled: bool,
+    expiry_duration: Option<Duration>,
 }
 
 /// Errors that can occur during sequence management operations.
@@ -210,7 +212,31 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker_type,
             SequenceTrackerOptions {
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
-                expiry_enabled: false,
+                expiry_duration: None,
+            },
+        )
+    }
+
+    /// Create a tracker with an explicit stale active-request cleanup guard.
+    pub fn new_with_expiry_duration(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+        expiry_duration: Duration,
+    ) -> Self {
+        Self::new_with_options(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                expiry_duration: Some(expiry_duration),
             },
         )
     }
@@ -234,7 +260,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker_type,
             SequenceTrackerOptions {
                 replica_worker_policy,
-                expiry_enabled: true,
+                expiry_duration: Some(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION),
             },
         )
     }
@@ -250,10 +276,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
-        let workers = if options.expiry_enabled {
-            WorkerTable::new(block_size, &dp_range)
-        } else {
-            WorkerTable::new_without_expiry(block_size, &dp_range)
+        let workers = match options.expiry_duration {
+            Some(duration) => {
+                WorkerTable::new_with_expiry_duration(block_size, &dp_range, duration)
+            }
+            None => WorkerTable::new_without_expiry(block_size, &dp_range),
         };
         let initial_workers: Vec<_> = workers.workers().collect();
         let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());

@@ -12,14 +12,18 @@ pub use dynamo_kv_router::multi_worker_sequence::{
     SequenceSubscriber,
 };
 use dynamo_kv_router::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
+use dynamo_kv_router::sequence::DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
 use dynamo_runtime::component::Component;
+use dynamo_runtime::config::environment_names::router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS;
 use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
@@ -124,6 +128,39 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
 /// Type alias for the runtime-wired multi-worker sequence tracker.
 pub type ActiveSequencesMulti = ActiveSequencesMultiWorker<RuntimeSequencePublisher>;
 
+fn active_request_expiry_duration() -> Duration {
+    active_request_expiry_duration_from_lookup(|key| env::var(key).ok())
+}
+
+fn active_request_expiry_duration_from_lookup(
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Duration {
+    let Some(raw) = get_env(DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS) else {
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    };
+
+    let Ok(seconds) = raw.parse::<u64>() else {
+        tracing::warn!(
+            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            value = %raw,
+            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
+            "invalid active request expiry override, falling back to default"
+        );
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    };
+
+    if seconds == 0 {
+        tracing::warn!(
+            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
+            "active request expiry override must be greater than zero, falling back to default"
+        );
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    }
+
+    Duration::from_secs(seconds)
+}
+
 /// Convenience async constructor that creates the NATS publishers/subscribers
 /// and returns an `Arc<ActiveSequencesMulti>` with replica sync already running.
 pub async fn create_multi_worker_sequences(
@@ -157,13 +194,14 @@ pub async fn create_multi_worker_sequences(
         })
         .collect();
 
-    let multi_worker = ActiveSequencesMultiWorker::new(
+    let multi_worker = ActiveSequencesMultiWorker::new_with_expiry_duration(
         publisher,
         block_size,
         dp_range,
         replica_sync,
         router_id,
         worker_type,
+        active_request_expiry_duration(),
     );
 
     let arc = Arc::new(multi_worker);
@@ -186,6 +224,34 @@ mod tests {
     use super::*;
     use dynamo_runtime::{DistributedRuntime, Runtime};
     use tokio::time::Instant;
+
+    #[test]
+    fn active_request_expiry_duration_override_uses_positive_seconds() {
+        let lookup =
+            |key: &str| (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| "3600".to_string());
+
+        assert_eq!(
+            active_request_expiry_duration_from_lookup(lookup),
+            Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn active_request_expiry_duration_override_falls_back_to_default() {
+        assert_eq!(
+            active_request_expiry_duration_from_lookup(|_| None),
+            DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
+        );
+        for value in ["", "abc", "0"] {
+            let lookup = |key: &str| {
+                (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| value.to_string())
+            };
+            assert_eq!(
+                active_request_expiry_duration_from_lookup(lookup),
+                DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
+            );
+        }
+    }
 
     fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
         Some(PrefillLoadHint {
