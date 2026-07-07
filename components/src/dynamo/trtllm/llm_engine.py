@@ -74,6 +74,12 @@ from dynamo.trtllm.utils.disagg_utils import (
 )
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 
+try:
+    from tensorrt_llm.llmapi import ConversationParams
+except ImportError:
+    # Older TRT-LLM builds carry conversation_id on DisaggregatedParams instead.
+    ConversationParams = None
+
 if TYPE_CHECKING:
     from tensorrt_llm.metrics import MetricsCollector
 
@@ -832,14 +838,18 @@ class TrtllmLLMEngine(LLMEngine):
         conv_id = conversation_id_from_request(request)
         conversation_params = None
         if conv_id is not None:
-            if disaggregated_params is not None and hasattr(
+            if ConversationParams is not None:
+                conversation_params = ConversationParams(conversation_id=conv_id)
+            elif disaggregated_params is not None and hasattr(
                 type(disaggregated_params), "conversation_id"
             ):
                 disaggregated_params.conversation_id = conv_id
-            else:
-                from tensorrt_llm.llmapi import ConversationParams
-
-                conversation_params = ConversationParams(conversation_id=conv_id)
+            elif self._engine_conv_affinity:
+                raise RuntimeError(
+                    "DYN_ENGINE_CONV_AFFINITY=1 requires a TRT-LLM build that "
+                    "supports ConversationParams or "
+                    "DisaggregatedParams.conversation_id"
+                )
         # exp-H (gap #4): confirm propagation at run time. PERF-SAFE: log the FIRST request at
         # INFO (one-shot) so it's confirmable WITHOUT enabling debug at benchmark time; rest debug.
         _set_on_disagg = (

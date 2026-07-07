@@ -23,6 +23,7 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.llm_engine import TrtllmLLMEngine
+from dynamo.trtllm.request_handlers import handler_base as handler_base_module
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
 pytestmark = [
@@ -639,6 +640,93 @@ class TestDisaggRequestId:
             request={}, ep_disaggregated_params=None
         )
         assert params_a.disagg_request_id != params_b.disagg_request_id
+
+
+class TestConversationParamsCompatibility:
+    def _make_handler(self, mode=DisaggregationMode.AGGREGATED) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        config.disagg_machine_id = 42
+        handler = _ConcreteHandler(config)
+        handler.disaggregation_mode = mode
+        return handler
+
+    def test_prefers_conversation_params_when_available(self):
+        class FakeConversationParams:
+            def __init__(self, conversation_id):
+                self.conversation_id = conversation_id
+
+        handler = self._make_handler()
+        request = {"routing": {"conversation_id": "conv-new"}}
+
+        with mock.patch.object(
+            handler_base_module, "ConversationParams", FakeConversationParams
+        ):
+            (
+                disagg_params,
+                _,
+                _,
+                conversation_params,
+            ) = handler._setup_disaggregated_params_for_mode(request, None)
+
+        assert disagg_params is None
+        assert conversation_params.conversation_id == "conv-new"
+
+    def test_uses_legacy_disaggregated_params_field(self):
+        class LegacyDisaggregatedParams:
+            conversation_id = None
+
+            def __init__(self, **kwargs):
+                self.request_type = kwargs.get("request_type")
+                self.disagg_request_id = kwargs.get("disagg_request_id")
+
+        handler = self._make_handler(DisaggregationMode.PREFILL)
+        request = {"routing": {"conversation_id": "conv-old"}}
+
+        with (
+            mock.patch.object(handler_base_module, "ConversationParams", None),
+            mock.patch.object(
+                handler_base_module,
+                "LlmDisaggregatedParams",
+                LegacyDisaggregatedParams,
+            ),
+        ):
+            (
+                disagg_params,
+                _,
+                _,
+                conversation_params,
+            ) = handler._setup_disaggregated_params_for_mode(request, None)
+
+        assert conversation_params is None
+        assert disagg_params.conversation_id == "conv-old"
+
+    def test_missing_api_is_ignored_when_affinity_disabled(self, monkeypatch):
+        monkeypatch.delenv("DYN_ENGINE_CONV_AFFINITY", raising=False)
+        handler = self._make_handler()
+        request = {"routing": {"conversation_id": "conv-unused"}}
+
+        with mock.patch.object(handler_base_module, "ConversationParams", None):
+            (
+                disagg_params,
+                _,
+                _,
+                conversation_params,
+            ) = handler._setup_disaggregated_params_for_mode(request, None)
+
+        assert disagg_params is None
+        assert conversation_params is None
+
+    def test_missing_api_fails_clearly_when_affinity_enabled(self, monkeypatch):
+        monkeypatch.setenv("DYN_ENGINE_CONV_AFFINITY", "1")
+        handler = self._make_handler()
+        request = {"routing": {"conversation_id": "conv-required"}}
+
+        with (
+            mock.patch.object(handler_base_module, "ConversationParams", None),
+            pytest.raises(RuntimeError, match="requires a TRT-LLM build"),
+        ):
+            handler._setup_disaggregated_params_for_mode(request, None)
 
 
 class TestHealthCheckPriority:

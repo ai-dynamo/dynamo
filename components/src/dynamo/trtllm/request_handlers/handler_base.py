@@ -55,6 +55,12 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParamsCodec,
 )
 
+try:
+    from tensorrt_llm.llmapi import ConversationParams
+except ImportError:
+    # Older TRT-LLM builds carry conversation_id on DisaggregatedParams instead.
+    ConversationParams = None
+
 if TYPE_CHECKING:
     # tensorrt_llm may use a different version that doesn't have MetricsCollector,
     # so guard this import inside TYPE_CHECKING to avoid runtime import errors.
@@ -758,14 +764,18 @@ class HandlerBase(BaseGenerativeHandler):
         _conv_id = conversation_id_from_request(request)
         conversation_params = None
         if _conv_id is not None:
-            if disaggregated_params is not None and hasattr(
+            if ConversationParams is not None:
+                conversation_params = ConversationParams(conversation_id=_conv_id)
+            elif disaggregated_params is not None and hasattr(
                 type(disaggregated_params), "conversation_id"
             ):
                 disaggregated_params.conversation_id = _conv_id
-            else:
-                from tensorrt_llm.llmapi import ConversationParams
-
-                conversation_params = ConversationParams(conversation_id=_conv_id)
+            elif os.environ.get("DYN_ENGINE_CONV_AFFINITY") == "1":
+                raise RuntimeError(
+                    "DYN_ENGINE_CONV_AFFINITY=1 requires a TRT-LLM build that "
+                    "supports ConversationParams or "
+                    "DisaggregatedParams.conversation_id"
+                )
 
         return (
             disaggregated_params,
