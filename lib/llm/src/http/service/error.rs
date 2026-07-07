@@ -7,13 +7,9 @@ use axum::http::StatusCode;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use thiserror::Error;
 
-/// HTTP status code returned for overload / admission-control rejections.
-///
-/// Defaults to 529 ("Site is overloaded"). Operators can override it via the
-/// `DYN_HTTP_OVERLOAD_STATUS_CODE` env var (e.g. `503` for Service Unavailable
-/// retry semantics). An unset, unparseable, or out-of-range value falls back to
-/// the 529 default. Resolved once on first use — env vars don't change at
-/// runtime, and this is on the rejection path.
+/// Overload / admission-control rejection status. Reads
+/// `DYN_HTTP_OVERLOAD_STATUS_CODE` (default 529); cached since env is fixed at
+/// runtime and this is on the rejection path.
 pub(crate) fn overload_status_code() -> StatusCode {
     static CODE: LazyLock<StatusCode> = LazyLock::new(|| {
         let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
