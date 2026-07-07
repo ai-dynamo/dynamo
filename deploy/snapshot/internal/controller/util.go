@@ -15,13 +15,13 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-const (
-	checkpointLeaseDuration      = 30 * time.Second
-	checkpointLeaseRenewInterval = 10 * time.Second
-)
+const checkpointLeaseDuration = 30 * time.Second
+
+// checkpointLeaseRenewInterval is a package-level var (not const) so tests can shorten the
+// renewal loop without a fake clock. Only same-package _test.go files should mutate it.
+var checkpointLeaseRenewInterval = 10 * time.Second
 
 func checkpointLeaseExpired(lease *coordinationv1.Lease, now time.Time) bool {
 	if lease == nil || lease.Spec.LeaseDurationSeconds == nil {
@@ -83,6 +83,12 @@ func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.L
 	return err
 }
 
+// checkpointLeaseName returns the Lease guarding the artifact identified by checkpointID. The
+// checkpoint ID is the cluster-global artifact identity (the artifact path has no namespace
+// segment), so the lease name derives from it, not from the work-order name. Lease names are
+// DNS-1123 subdomains (253 max), so no length cap is needed beyond the label validation upstream.
+func checkpointLeaseName(checkpointID string) string { return "checkpoint-lease-" + checkpointID }
+
 // acquireLease acquires or renews a checkpoint lease at an arbitrary namespace/name key,
 // returning false when another live holder owns it.
 func (w *NodeController) acquireLease(ctx context.Context, key client.ObjectKey) (bool, error) {
@@ -133,8 +139,9 @@ func (w *NodeController) acquireLease(ctx context.Context, key client.ObjectKey)
 	return true, nil
 }
 
-// renewLease periodically renews the lease until ctx is cancelled.
-func (w *NodeController) renewLease(ctx context.Context, key client.ObjectKey) {
+// renewLease periodically renews the lease until ctx is cancelled. A failed renewal cancels the
+// dump via stop so a lease-lost checkpoint cannot keep writing the artifact.
+func (w *NodeController) renewLease(ctx context.Context, key client.ObjectKey, stop context.CancelCauseFunc) {
 	ticker := time.NewTicker(checkpointLeaseRenewInterval)
 	defer ticker.Stop()
 	for {
@@ -143,7 +150,7 @@ func (w *NodeController) renewLease(ctx context.Context, key client.ObjectKey) {
 			return
 		case <-ticker.C:
 			if err := w.renewLeaseOnce(ctx, key); err != nil {
-				log.FromContext(ctx).Error(err, "Failed to renew checkpoint lease", "lease", key.String())
+				stop(fmt.Errorf("checkpoint lease renewal failed: %w", err))
 				return
 			}
 		}
@@ -183,7 +190,15 @@ func (w *NodeController) releaseLease(ctx context.Context, key client.ObjectKey)
 	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != w.holderID {
 		return nil
 	}
-	if err := leaseClient.Delete(ctx, key.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+	// Preconditions prevent deleting a lease that another holder acquired between our Get and Delete
+	// (e.g. a surviving renewLeaseOnce racing the cancel signal). A Conflict or NotFound here means
+	// the lease changed hands or is already gone — both are benign; the lease expires on its own.
+	uid := lease.UID
+	rv := lease.ResourceVersion
+	err = leaseClient.Delete(ctx, key.Name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv},
+	})
+	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 		return fmt.Errorf("delete checkpoint lease %s: %w", key.String(), err)
 	}
 	return nil

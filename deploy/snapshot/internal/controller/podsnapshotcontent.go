@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -127,14 +128,31 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return nil
 	}
 
-	key := content.Name
-	if !w.tryAcquire(key) {
+	// Capture parameters come from the source pod, which is the single source of truth. The
+	// checkpoint ID is the pod label; the work order name is treated as opaque (never parsed).
+	id := strings.TrimSpace(pod.Labels[snapshotprotocol.CheckpointIDLabel])
+	if id == "" {
+		w.setSnapshotContentFailed(ctx, content, "MissingCheckpointID",
+			fmt.Errorf("source pod %q missing %s label", pod.Name, snapshotprotocol.CheckpointIDLabel))
+		return nil
+	}
+	if errs := validation.IsDNS1123Label(id); len(errs) > 0 {
+		w.setSnapshotContentFailed(ctx, content, "InvalidCheckpointID",
+			fmt.Errorf("checkpoint ID %q is not a valid DNS-1123 label: %s", id, strings.Join(errs, "; ")))
+		return nil
+	}
+
+	// The checkpoint ID is the artifact identity, so the in-flight guard and lease key on it:
+	// a PodSnapshot delete/recreate changes the work-order name but must not admit a second dump
+	// into the same artifact path. tryAcquire must stay after the terminal-content check and ID
+	// validation so the guard is never held by a terminal work order.
+	if !w.tryAcquire(id) {
 		return nil
 	}
 	releaseInFlight := true
 	defer func() {
 		if releaseInFlight {
-			w.release(key)
+			w.release(id)
 		}
 	}()
 
@@ -144,15 +162,6 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	if reason, msg := classifySourcePod(content, pod); reason != "" {
 		w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg))
 		w.removeCaptureEligibleLabel(ctx, pod)
-		return nil
-	}
-
-	// Capture parameters come from the source pod, which is the single source of truth. The
-	// checkpoint ID is the pod label; the work order name is treated as opaque (never parsed).
-	id := strings.TrimSpace(pod.Labels[snapshotprotocol.CheckpointIDLabel])
-	if id == "" {
-		w.setSnapshotContentFailed(ctx, content, "MissingCheckpointID",
-			fmt.Errorf("source pod %q missing %s label", pod.Name, snapshotprotocol.CheckpointIDLabel))
 		return nil
 	}
 
@@ -195,7 +204,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return nil
 	}
 
-	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: content.Name}
+	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: checkpointLeaseName(id)}
 	acquired, err := w.acquireLease(ctx, leaseKey)
 	if err != nil {
 		return fmt.Errorf("acquire checkpoint lease %s: %w", leaseKey.String(), err)
@@ -205,7 +214,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	}
 
 	releaseInFlight = false
-	go w.runCheckpoint(ctx, content, pod, containerName[0], containerID, containerPID, id, loc, leaseKey, key)
+	go w.runCheckpoint(ctx, content, pod, containerName[0], containerID, containerPID, id, loc, leaseKey, id)
 	return nil
 }
 
@@ -226,9 +235,6 @@ func (w *NodeController) runCheckpoint(
 	logger := logr.FromContextOrDiscard(ctx)
 	defer w.release(inFlightKey)
 
-	leaseCtx, stopLease := context.WithCancel(ctx)
-	defer stopLease()
-	go w.renewLease(leaseCtx, leaseKey)
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -236,6 +242,10 @@ func (w *NodeController) runCheckpoint(
 			logger.Error(err, "Failed to release checkpoint lease", "lease", leaseKey.String())
 		}
 	}()
+
+	leaseCtx, stopLease := context.WithCancelCause(ctx)
+	defer stopLease(nil)
+	go w.renewLease(leaseCtx, leaseKey, stopLease)
 
 	params := CheckpointParams{
 		Pod:           pod,
@@ -248,6 +258,9 @@ func (w *NodeController) runCheckpoint(
 		StartedAt:     time.Now(),
 	}
 	if err := w.checkpointFn(leaseCtx, params); err != nil {
+		if cause := context.Cause(leaseCtx); cause != nil && !errors.Is(cause, context.Canceled) {
+			err = fmt.Errorf("%w; %v", err, cause)
+		}
 		logger.Error(err, "Checkpoint failed")
 		w.setSnapshotContentFailed(ctx, content, "CheckpointFailed", err)
 		return

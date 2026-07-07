@@ -182,19 +182,17 @@ func TestReconcileSnapshotContent_GateLabelsPodOnSuccess(t *testing.T) {
 }
 
 func TestReconcileSourcePod_InFlightGuard(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")},
-		Spec:       corev1.PodSpec{NodeName: "node-a"},
-		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
-	}
+	// Content name differs from ID to prove the guard is keyed on the ID, not the content name.
+	content := makeWorkOrder("podsnapshotcontent-mywork", "node-a", "x")
+	pod := makeSourcePod("x")
+	pod.Labels[snapshotprotocol.CaptureEligibleLabel] = "true"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	// Pre-mark the work order in-flight; the capture path must short-circuit.
-	w.inFlight["podsnapshotcontent-x"] = struct{}{}
+	// Seed the guard using the checkpoint ID ("x"), not the content name.
+	w.inFlight["x"] = struct{}{}
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 	got := getContent(t, w, content.Name)
-	assert.Empty(t, got.Status.Conditions)
+	assert.Empty(t, got.Status.Conditions, "in-flight guard must not write any status")
 }
 
 func TestReconcileSourcePod_MissingCheckpointIDFails(t *testing.T) {
@@ -227,19 +225,50 @@ func TestReconcileSourcePod_ProvenanceInvalidFailsAndUnlabels(t *testing.T) {
 }
 
 func TestReconcileSourcePod_InFlightShortCircuits(t *testing.T) {
-	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	// Content name differs from ID to prove the guard is keyed on the ID, not the content name.
+	content := makeWorkOrder("podsnapshotcontent-mywork", "node-a", "x")
 	pod := makeSourcePod("x")
 	pod.Labels[snapshotprotocol.CaptureEligibleLabel] = "true"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
 	// A dump is already in flight: tryAcquire short-circuits before any further work, so a second
-	// reconcile does nothing — no status write, no relabel.
-	w.inFlight["podsnapshotcontent-x"] = struct{}{}
+	// reconcile does nothing — no status write, no relabel. Guard keyed on ID "x".
+	w.inFlight["x"] = struct{}{}
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 
 	got := getPod(t, w, "inference", "worker-0")
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions, "in-flight dump must not be touched")
 	assert.Equal(t, "true", got.Labels[snapshotprotocol.CaptureEligibleLabel], "in-flight dump must not be unlabeled")
+}
+
+func TestReconcileSourcePod_GuardSurvivesWorkOrderRecreation(t *testing.T) {
+	// A PodSnapshot delete+recreate yields a new content name but the same checkpoint ID.
+	// The in-flight guard is keyed on the ID, so the new work order must not start a second dump.
+	content := makeWorkOrder("podsnapshotcontent-recreated", "node-a", "x")
+	pod := makeSourcePod("x")
+	pod.Labels[snapshotprotocol.CaptureEligibleLabel] = "true"
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	// Seed guard with ID "x" — simulates the original work order's dump still running.
+	w.inFlight["x"] = struct{}{}
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions, "second work order must not start a dump or write status")
+}
+
+func TestReconcileSourcePod_InvalidCheckpointIDFails(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	pod := makeSourcePod("x")
+	// Replace the valid ID with one that contains an uppercase letter — not a valid DNS-1123 label.
+	pod.Labels[snapshotprotocol.CheckpointIDLabel] = "Bad_ID"
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "InvalidCheckpointID", cond.Reason)
 }
 
 func TestReconcileSnapshotContent_FailedContainerUnsticksAndFails(t *testing.T) {
@@ -472,6 +501,12 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 		}
 		return meta.FindStatusCondition(c.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) != nil
 	}, time.Second, 5*time.Millisecond)
+
+	// The lease must be keyed on the checkpoint ID, not the work-order name.
+	require.Eventually(t, func() bool {
+		_, err := w.clientset.CoordinationV1().Leases("inference").Get(context.Background(), "checkpoint-lease-abc", metav1.GetOptions{})
+		return err == nil
+	}, time.Second, 5*time.Millisecond, "Lease checkpoint-lease-abc must exist in namespace inference")
 }
 
 func TestRunCheckpoint_WritesReadyOnSuccess(t *testing.T) {
@@ -479,13 +514,13 @@ func TestRunCheckpoint_WritesReadyOnSuccess(t *testing.T) {
 	fc := &fakeCheckpointer{}
 	w := makeNodeController(t, fc, content)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
-	leaseKey := client.ObjectKey{Namespace: "inference", Name: content.Name}
+	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
 	loc := checkpointLocations{
 		HostPath:      filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
 		ContainerPath: filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
 	}
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", loc, leaseKey, "podsnapshotcontent-abc")
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", loc, leaseKey, "abc")
 
 	assert.True(t, fc.wasCalled())
 	got := getContent(t, w, content.Name)
@@ -498,13 +533,13 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	fc := &fakeCheckpointer{err: errors.New("criu boom")}
 	w := makeNodeController(t, fc, content)
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID("pod-uid")}}
-	leaseKey := client.ObjectKey{Namespace: "inference", Name: content.Name}
+	leaseKey := client.ObjectKey{Namespace: "inference", Name: "checkpoint-lease-abc"}
 	loc := checkpointLocations{
 		HostPath:      filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
 		ContainerPath: filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"),
 	}
 
-	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", loc, leaseKey, "podsnapshotcontent-abc")
+	w.runCheckpoint(context.Background(), content, pod, "main", "abc123", 7, "abc", loc, leaseKey, "abc")
 
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
