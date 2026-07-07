@@ -295,7 +295,15 @@ class VllmLLMEngine(LLMEngine):
         request_id = context.id()
 
         token_ids = request.get("token_ids", [])
-        prompt = TokensPrompt(prompt_token_ids=token_ids)
+        prompt_text = request.get("prompt_text")
+        if not token_ids and prompt_text:
+            # Frontend tokenization was skipped (DYN_SKIP_FRONTEND_TOKENIZE=1);
+            # pass the rendered prompt text so vLLM tokenizes internally.
+            from vllm.inputs import TextPrompt
+
+            prompt = TextPrompt(prompt=prompt_text)
+        else:
+            prompt = TokensPrompt(prompt_token_ids=token_ids)
 
         # TODO: remove dict() once build_sampling_params accepts GenerateRequest
         sampling_params = build_sampling_params(

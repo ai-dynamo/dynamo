@@ -256,6 +256,14 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_info: Option<BootstrapInfo>,
 
+    /// Rendered prompt text, set when frontend tokenization is skipped
+    /// (`DYN_SKIP_FRONTEND_TOKENIZE=1`). Engines use this as text input
+    /// so they can tokenize the prompt themselves; `token_ids` is empty
+    /// in that case and must not be used for routing or length estimation.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_text: Option<String>,
+
     /// Additional arguments for extensibility
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

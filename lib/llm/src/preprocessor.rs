@@ -252,6 +252,14 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
             .expect("dim-fetch http client construction failed")
     });
 
+/// Cached at first access — env var reads acquire the process-global env mutex,
+/// which would serialize every concurrent preprocessing thread on every request.
+static SKIP_FRONTEND_TOKENIZE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    std::env::var(dynamo_runtime::config::environment_names::llm::DYN_SKIP_FRONTEND_TOKENIZE)
+        .ok()
+        .is_some_and(|v| v == "1" || v == "true")
+});
+
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
 
@@ -676,15 +684,28 @@ impl OpenAIPreprocessor {
             .as_ref()
             .is_some_and(|p| p.trim_end().ends_with("<think>"));
 
+        let skip_tokenize = *SKIP_FRONTEND_TOKENIZE;
+        if skip_tokenize && formatted_prompt.is_none() {
+            anyhow::bail!(
+                "DYN_SKIP_FRONTEND_TOKENIZE=1 requires a chat-template-rendered text \
+                 prompt. Raw token-ID completion requests and multimodal requests are \
+                 not supported with this flag."
+            );
+        }
+
         let tokenize_start = Instant::now();
-        let (token_ids, annotations) = {
+        let (token_ids, annotations) = if skip_tokenize {
+            (vec![], HashMap::new())
+        } else {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
             self.gather_tokens(request, formatted_prompt.as_deref(), tracker)
                 .await
                 .with_context(|| "Failed to gather tokens")?
         };
-        let tokenize_elapsed = tokenize_start.elapsed();
-        TOKENIZE_SECONDS.observe(tokenize_elapsed.as_secs_f64());
+        if !skip_tokenize {
+            let tokenize_elapsed = tokenize_start.elapsed();
+            TOKENIZE_SECONDS.observe(tokenize_elapsed.as_secs_f64());
+        }
 
         let _mm_image_entries = self
             .gather_multi_modal_data(
@@ -706,6 +727,9 @@ impl OpenAIPreprocessor {
         // Install tokens on the builder. Done after MM routing built its
         // view so the routing-side borrow stays cheap and builder ownership
         // moves once.
+        if skip_tokenize {
+            builder.prompt_text(formatted_prompt.clone());
+        }
         builder.token_ids(token_ids);
 
         STAGE_DURATION_SECONDS
@@ -722,8 +746,10 @@ impl OpenAIPreprocessor {
 
         // If omitted, allow generation up to the remaining context length. Responses requests
         // preserve omission so backend adapters can compute the dynamic cap from their
-        // effective prompt length/tokenization.
-        if preprocessed.stop_conditions.max_tokens.is_none()
+        // effective prompt length/tokenization. When tokenization is skipped the engine
+        // applies its own cap once it knows the actual prompt length.
+        if !skip_tokenize
+            && preprocessed.stop_conditions.max_tokens.is_none()
             && let Some(max_tokens) = Self::omitted_max_tokens_default(
                 preprocessed.token_ids.len(),
                 self.context_length,

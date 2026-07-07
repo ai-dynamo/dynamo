@@ -383,6 +383,15 @@ class TrtllmLLMEngine(LLMEngine):
             "ON" if self._engine_conv_affinity else "OFF",
             self._attention_dp_size,
         )
+        if (
+            os.environ.get("DYN_SKIP_FRONTEND_TOKENIZE") in ("1", "true")
+            and not self._engine_conv_affinity
+        ):
+            logger.warning(
+                "DYN_SKIP_FRONTEND_TOKENIZE=1 has no effect for TRT-LLM without "
+                "DYN_ENGINE_CONV_AFFINITY=1. Frontend tokenization will proceed normally. "
+                "Set DYN_ENGINE_CONV_AFFINITY=1 to enable engine-side tokenization."
+            )
         self._convid_first_logged = False
         # Always start the metrics-poll thread: it pushes the latest
         # ComponentSnapshot into the framework's SnapshotPublisher and
@@ -858,8 +867,23 @@ class TrtllmLLMEngine(LLMEngine):
             max_tokens = stop_conditions.get("max_tokens")
             if max_tokens is not None:
                 sampling_params.max_tokens = max_tokens
-            elif self.max_seq_len is not None:
+            elif self.max_seq_len is not None and (
+                token_ids or not self._engine_conv_affinity
+            ):
                 sampling_params.max_tokens = max(1, self.max_seq_len - len(token_ids))
+            elif (
+                self.max_seq_len is not None
+                and not token_ids
+                and self._engine_conv_affinity
+            ):
+                # Frontend tokenization was skipped; engine tokenizes internally and
+                # enforces its own context-length cap (generate_async caps to
+                # max_input_len / max_seq_len when max_new_tokens is unset).
+                # Log once so operators can confirm TRT-LLM is enforcing the limit.
+                logger.debug(
+                    "max_tokens not set on skip-tokenize path; "
+                    "TRT-LLM will cap generation after tokenizing the prompt."
+                )
 
         # TODO: mirror visible/hidden stop-token handling from the disagg
         # path (handler_base.py) into a shared helper. See PR #9778.
@@ -893,8 +917,26 @@ class TrtllmLLMEngine(LLMEngine):
         # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
+        prompt_text = request.get("prompt_text")
+        if not token_ids and prompt_text and not self._engine_conv_affinity:
+            raise RuntimeError(
+                "Received a request with empty token_ids and prompt_text set, but "
+                "DYN_ENGINE_CONV_AFFINITY is not enabled. "
+                "DYN_SKIP_FRONTEND_TOKENIZE=1 requires DYN_ENGINE_CONV_AFFINITY=1 "
+                "for TRT-LLM."
+            )
+        # When frontend tokenization is skipped (DYN_SKIP_FRONTEND_TOKENIZE=1)
+        # AND conv-aware routing is active, token_ids is empty and prompt_text
+        # carries the rendered prompt. TRT-LLM generate_async accepts a plain
+        # string and tokenizes internally. Outside conv-aware mode the engine
+        # does not own routing decisions, so we require token_ids for KV routing.
+        engine_input = (
+            prompt_text
+            if (self._engine_conv_affinity and not token_ids and prompt_text)
+            else token_ids
+        )
         generation_result = self._engine.llm.generate_async(
-            inputs=token_ids,
+            inputs=engine_input,
             sampling_params=sampling_params,
             streaming=streaming,
             disaggregated_params=disaggregated_params,

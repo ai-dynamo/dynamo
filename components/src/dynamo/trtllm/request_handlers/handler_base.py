@@ -992,6 +992,24 @@ class HandlerBase(BaseGenerativeHandler):
             request, embeddings, ep_disaggregated_params, epd_metadata
         )
 
+        # Frontend tokenization can only be skipped when TRT-LLM's
+        # conversation-aware router is active. In that mode prompt_text carries
+        # the rendered prompt and TRT-LLM tokenizes it internally.
+        engine_conv_affinity = os.environ.get("DYN_ENGINE_CONV_AFFINITY") == "1"
+        request_token_ids = request.get("token_ids") or []
+        prompt_text = request.get("prompt_text")
+        skip_tokenize_text = bool(
+            engine_conv_affinity and not request_token_ids and prompt_text
+        )
+        if not request_token_ids and prompt_text and not engine_conv_affinity:
+            error_msg = (
+                "DYN_SKIP_FRONTEND_TOKENIZE=1 requires "
+                "DYN_ENGINE_CONV_AFFINITY=1 for TRT-LLM."
+            )
+            logging.warning("Request rejected: %s", error_msg)
+            yield {"finish_reason": {"error": error_msg}, "token_ids": []}
+            return
+
         # Check if there is an error in the publisher error queue
         publishers_error = (
             self.publisher.check_error_queue() if self.publisher else None
@@ -1045,7 +1063,7 @@ class HandlerBase(BaseGenerativeHandler):
         max_tokens = request["stop_conditions"]["max_tokens"]
         if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
-        elif self.max_seq_len is not None:
+        elif self.max_seq_len is not None and not skip_tokenize_text:
             if self.multimodal_processor and processed_input is not None:
                 logging.debug(
                     "Skipping dynamic max_tokens default for multimodal request..."
@@ -1055,6 +1073,11 @@ class HandlerBase(BaseGenerativeHandler):
                 input_length = len(token_ids)
                 dynamic_default = max(1, self.max_seq_len - input_length)
                 sampling_params.max_tokens = dynamic_default
+        elif self.max_seq_len is not None:
+            logging.debug(
+                "max_tokens not set on skip-tokenize path; "
+                "TRT-LLM will cap generation after tokenizing the prompt."
+            )
 
         stop_conditions = request["stop_conditions"]
         ignore_eos = stop_conditions.get("ignore_eos")
@@ -1114,7 +1137,6 @@ class HandlerBase(BaseGenerativeHandler):
         # exp-H (gap #4): when DYN_ENGINE_CONV_AFFINITY=1, do NOT force attention_dp_rank — the
         # engine's ConversationAwareADPRouter must pick the rank from disaggregated_params.conversation_id.
         # An explicit attention_dp_rank is honored BEFORE conv-affinity in the engine and would bypass it.
-        engine_conv_affinity = os.environ.get("DYN_ENGINE_CONV_AFFINITY") == "1"
         scheduling_params = None
         if dp_rank is not None and not engine_conv_affinity:
             scheduling_params = SchedulingParams(
@@ -1147,9 +1169,16 @@ class HandlerBase(BaseGenerativeHandler):
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
 
         try:
+            # DYN_SKIP_FRONTEND_TOKENIZE=1 + DYN_ENGINE_CONV_AFFINITY=1: the Rust
+            # preprocessor elides tokenization, leaving token_ids empty and
+            # forwarding the rendered prompt as request["prompt_text"]. Pass the
+            # string through to TRT-LLM (which tokenizes internally); otherwise
+            # the executor's `assert isinstance(prompt_token_ids[0], int)` fires.
+            engine_input = prompt_text if skip_tokenize_text else processed_input
+
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
-                inputs=processed_input,  # Use the correctly extracted inputs
+                inputs=engine_input,  # skip-tok: substituted to prompt_text if token_ids is empty
                 sampling_params=sampling_params,
                 disaggregated_params=disaggregated_params,
                 streaming=streaming,
@@ -1235,7 +1264,15 @@ class HandlerBase(BaseGenerativeHandler):
                                     "this indicates a possible bug"
                                 )
 
-                            num_input_tokens = len(request.get("token_ids", []))
+                            # With frontend tokenization skipped, TRT-LLM owns
+                            # tokenization and exposes the resulting IDs on the
+                            # completed request output.
+                            prompt_token_ids = getattr(res, "prompt_token_ids", None)
+                            num_input_tokens = len(
+                                prompt_token_ids
+                                if prompt_token_ids is not None
+                                else request_token_ids
+                            )
                             total_completion_tokens = sum(
                                 len(o.token_ids) for o in res.outputs
                             )

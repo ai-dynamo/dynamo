@@ -179,18 +179,20 @@ impl DefaultWorkerSelector {
         // Normalize backlog above the least-loaded eligible worker by this request's
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
-        let overlap_credit_decay =
-            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
-                let active_prefill_tokens = worker_load.unwrap_or_default().active_prefill_tokens;
-                let excess_active_prefill_blocks =
-                    active_prefill_tokens.saturating_sub(min_active_prefill_tokens) as f64
-                        / block_size_f64;
-                let normalized_prefill_load =
-                    excess_active_prefill_blocks / request.request_blocks(block_size) as f64;
-                1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
-            } else {
-                1.0
-            };
+        let overlap_credit_decay = if request.track_prefill_tokens
+            && request.isl_tokens > 0
+            && weights.overlap_score_credit_decay > 0.0
+        {
+            let active_prefill_tokens = worker_load.unwrap_or_default().active_prefill_tokens;
+            let excess_active_prefill_blocks =
+                active_prefill_tokens.saturating_sub(min_active_prefill_tokens) as f64
+                    / block_size_f64;
+            let normalized_prefill_load =
+                excess_active_prefill_blocks / request.request_blocks(block_size) as f64;
+            1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
+        } else {
+            1.0
+        };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
         let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
             + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
@@ -240,7 +242,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        assert!(request.isl_tokens > 0);
+        // isl_tokens may be 0 when DYN_SKIP_FRONTEND_TOKENIZE=1 elides
+        // tokenization in the Rust preprocessor. Downstream math
+        // (request_blocks / worker_logit) is 0-safe: prefill load
+        // projection collapses to 0 and the router falls back to
+        // decode-load balancing.
         eligibility.validate_pinned_worker_allowed()?;
 
         let pinned_worker = eligibility.pinned_worker();
@@ -700,6 +706,32 @@ mod tests {
             selected_count > 1,
             "zero-temperature tie-breaking should not always select the same worker"
         );
+    }
+
+    #[test]
+    fn test_default_selector_accepts_zero_isl_with_overlap_decay() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                router_temperature: 0.0,
+                overlap_score_credit_decay: 1.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let workers = HashMap::from([
+            (10, SimpleWorkerConfig::default()),
+            (20, SimpleWorkerConfig::default()),
+        ]);
+        let request = base_request(0);
+
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .expect("zero-ISL requests must fall back to decode-load balancing");
+
+        assert!(matches!(result.worker.worker_id, 10 | 20));
+        assert_eq!(result.required_blocks, 0);
     }
 
     #[test]
