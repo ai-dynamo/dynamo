@@ -141,9 +141,10 @@ DYN_CHAT_PROCESSOR=vllm DYNAMO_MM_TRANSFER=nixl \
   --model Qwen/Qwen3-VL-2B-Instruct
 ```
 
-The frontend retains the original media reference. If transfer metadata is
-missing, invalid, or no longer readable, the worker falls back to backend media
-loading.
+The frontend includes the original media references when transfer preparation
+is unavailable or partial. Fully transferred requests omit those references to
+avoid duplicating large inline data URIs in the backend payload. A receiver-side
+failure after a full transfer does not currently have a raw-media fallback.
 
 ### E/PD Serving (Encode + PD)
 

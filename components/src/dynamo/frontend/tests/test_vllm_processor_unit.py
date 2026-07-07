@@ -248,31 +248,6 @@ class TestMultimodalFeatureMetadata:
             == "image"
         )
 
-    def test_transfer_keeps_raw_media_for_backend_fallback(self):
-        from dynamo.frontend.vllm_processor import _attach_mm_fallback_data
-
-        dynamo_preproc = {"extra_args": {"mm_kwargs_shm": {"items": []}}}
-        _attach_mm_fallback_data(
-            {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": "https://example.com/cat.png"},
-                            }
-                        ],
-                    }
-                ]
-            },
-            dynamo_preproc,
-        )
-
-        assert dynamo_preproc["multi_modal_data"] == {
-            "image_url": [{"Url": "https://example.com/cat.png"}]
-        }
-
 
 @pytest.mark.asyncio
 async def test_prepare_mm_routing_skips_single_modality_transfer_for_mixed_features(

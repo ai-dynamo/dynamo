@@ -144,16 +144,6 @@ def _single_transfer_modality(mm_features: list[Any]) -> str | None:
     return next(iter(modalities))
 
 
-def _attach_mm_fallback_data(
-    request: dict[str, Any],
-    dynamo_preproc: dict[str, Any],
-) -> None:
-    """Keep raw media references available if an optional transfer fails."""
-    mm_data = extract_mm_urls(request.get("messages") or [])
-    if mm_data:
-        dynamo_preproc["multi_modal_data"] = mm_data
-
-
 def _build_reasoning_parser_metadata(
     reasoning_parser_class: type[ReasoningParser] | None,
     tokenizer: TokenizerLike,
@@ -560,13 +550,24 @@ class VllmProcessor:
             (
                 mm_routing_info,
                 cleanup_items,
-                _,
+                nixl_transferred,
             ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
 
-            # SHM/NIXL is an optional fast path. Preserve the raw references so
-            # the backend can load media if validation or transport fails; it
-            # ignores this field when the pre-rendered input is usable.
-            _attach_mm_fallback_data(request, dynamo_preproc)
+            # Forward multimodal URLs so the backend handler can load the media.
+            # Only skip when ALL features were transferred — a partial transfer
+            # (some features had data=None due to processor cache) still needs
+            # URLs for the backend to process the missing features.
+            n_features = (
+                len(vllm_preproc.mm_features) if vllm_preproc.mm_features else 0
+            )
+            n_with_data = sum(
+                1 for f in (vllm_preproc.mm_features or []) if f.data is not None
+            )
+            all_transferred = nixl_transferred and n_with_data == n_features
+            if not all_transferred:
+                mm_data = extract_mm_urls(request.get("messages") or [])
+                if mm_data:
+                    dynamo_preproc["multi_modal_data"] = mm_data
 
             # Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
             if request_for_sampling.mm_processor_kwargs is not None:
