@@ -508,14 +508,16 @@ jobs:
 
           # Rewrites relative page links in the translation snapshot to site
           # URLs under this tag's version slug, from the tag's nav (see
-          # fern/resolve_translation_links.py). GITHUB_SHA is the tag commit,
-          # so GitHub-fallback links pin to the release.
+          # fern/resolve_translation_links.py). --github-ref pins the
+          # GitHub-fallback links to the tag itself, which stays faithful on
+          # workflow_dispatch rebuilds where GITHUB_SHA is not the tag commit.
           if compgen -G "docs-checkout/fern/translations/*/pages-$TAG" > /dev/null; then
             pip install --quiet pyyaml
             python3 source-checkout/fern/resolve_translation_links.py \
               --nav source-checkout/docs/index.yml \
               --translations-root docs-checkout/fern/translations \
-              --site-root /dynamo --version-slug "$TAG" --pages-dir "pages-$TAG"
+              --site-root /dynamo --version-slug "$TAG" \
+              --pages-dir "pages-$TAG" --github-ref "$TAG"
           fi
 
       - name: Create version config file

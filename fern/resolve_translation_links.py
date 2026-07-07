@@ -61,12 +61,7 @@ import yaml
 
 LINK = re.compile(r"(!?)(\[[^\]]*\])\(([^)#\s]+)(#[^)]*)?\)")
 PAGE_EXT = (".md", ".mdx")
-# Fallback for links whose target isn't published in the nav (no site URL).
-# Pin to the build's commit: correct on PR-preview builds (the target may not
-# exist on main yet) and immune to later renames/moves on main.
-GITHUB_BLOB = "https://github.com/ai-dynamo/dynamo/blob/" + os.environ.get(
-    "GITHUB_SHA", "main"
-)
+GITHUB_REPO_BLOB = "https://github.com/ai-dynamo/dynamo/blob"
 
 
 def slugify(name: str) -> str:
@@ -153,7 +148,17 @@ def main() -> int:
         help="translation subtree to process, mirroring the base pages dir "
         "(pages-dev, or pages-vX.Y.Z for a release snapshot)",
     )
+    ap.add_argument(
+        "--github-ref",
+        default=os.environ.get("GITHUB_SHA", "main"),
+        help="ref for GitHub-fallback links (targets not published in the "
+        "nav). Defaults to the build's commit, which is correct for dev "
+        "syncs and PR previews; release snapshots pass the tag so fallback "
+        "links stay faithful to the release on workflow_dispatch rebuilds "
+        "too.",
+    )
     args = ap.parse_args()
+    github_blob = f"{GITHUB_REPO_BLOB}/{args.github_ref}"
 
     slugs = build_slug_map(args.nav)
     rewritten = warned = 0
@@ -221,7 +226,7 @@ def main() -> int:
                         f"linking to GitHub source"
                     )
                     warned += 1
-                    return f"{bang}{label}({GITHUB_BLOB}/docs/{doc_rel}{anchor})"
+                    return f"{bang}{label}({github_blob}/docs/{doc_rel}{anchor})"
                 # Locale sits between product and version in Fern URLs
                 # (/dynamo/zh-CN/dev/...); links starting with the product
                 # slug pass through Fern's renderer unmodified.
