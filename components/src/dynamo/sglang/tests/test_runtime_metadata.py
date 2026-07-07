@@ -5,7 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from dynamo.sglang.capacity import get_spec_decode_runtime_data
+from dynamo.sglang.capacity import (
+    get_hicache_native_offloading_capacity,
+    get_spec_decode_runtime_data,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -73,10 +76,8 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
 
 
 def test_hicache_publishes_native_offloading_capacity():
-    from dynamo.sglang.register import _get_hicache_native_offloading_capacity
-
-    assert _get_hicache_native_offloading_capacity(
-        {"hicache_host_total_tokens": 300}
+    assert get_hicache_native_offloading_capacity(
+        SimpleNamespace(), {"hicache_host_total_tokens": 300}
     ) == {"total_tokens": 300}
 
 
@@ -84,10 +85,51 @@ def test_hicache_publishes_native_offloading_capacity():
     "value", [None, False, 0, 0.5, -1, "300", float("inf"), float("nan")]
 )
 def test_hicache_native_offloading_capacity_ignores_invalid_values(value):
-    from dynamo.sglang.register import _get_hicache_native_offloading_capacity
+    assert (
+        get_hicache_native_offloading_capacity(
+            SimpleNamespace(), {"hicache_host_total_tokens": value}
+        )
+        is None
+    )
+
+
+def test_hicache_derives_ratio_based_write_back_capacity():
+    server_args = SimpleNamespace(
+        enable_hierarchical_cache=True,
+        hicache_size=0,
+        hicache_write_policy="write_back",
+        hicache_ratio=4.0,
+        page_size=16,
+    )
+
+    assert get_hicache_native_offloading_capacity(
+        server_args, {"max_total_num_tokens": 416_864}
+    ) == {"total_tokens": 1_667_472}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"enable_hierarchical_cache": False},
+        {"hicache_size": 16},
+        {"hicache_write_policy": "write_through"},
+        {"hicache_write_policy": "write_through_selective"},
+    ],
+)
+def test_hicache_does_not_derive_unsupported_capacity(overrides):
+    values = {
+        "enable_hierarchical_cache": True,
+        "hicache_size": 0,
+        "hicache_write_policy": "write_back",
+        "hicache_ratio": 4.0,
+        "page_size": 16,
+    }
+    values.update(overrides)
 
     assert (
-        _get_hicache_native_offloading_capacity({"hicache_host_total_tokens": value})
+        get_hicache_native_offloading_capacity(
+            SimpleNamespace(**values), {"max_total_num_tokens": 416_864}
+        )
         is None
     )
 

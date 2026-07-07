@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from dynamo.common.native_offloading import native_offloading_capacity
+
 
 @dataclass(frozen=True)
 class RuntimeCapacity:
@@ -97,3 +99,33 @@ def get_spec_decode_runtime_data(server_args: Any) -> dict[str, Any] | None:
     if method:
         data["method"] = str(method)
     return data
+
+
+def get_hicache_native_offloading_capacity(
+    server_args: Any, scheduler_info: dict[str, Any]
+) -> dict[str, int] | None:
+    """Return reported HiCache capacity, or derive ratio-based write-back capacity."""
+    if "hicache_host_total_tokens" in scheduler_info:
+        return native_offloading_capacity(scheduler_info["hicache_host_total_tokens"])
+
+    if (
+        not getattr(server_args, "enable_hierarchical_cache", False)
+        or (getattr(server_args, "hicache_size", 0) or 0) > 0
+        or getattr(server_args, "hicache_write_policy", None) != "write_back"
+    ):
+        return None
+
+    device_capacity = native_offloading_capacity(
+        scheduler_info.get("max_total_num_tokens")
+    )
+    page_size = getattr(server_args, "page_size", None)
+    ratio = getattr(server_args, "hicache_ratio", None)
+    if device_capacity is None or not page_size:
+        return None
+
+    try:
+        host_tokens = int(device_capacity["total_tokens"] * ratio)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+    return native_offloading_capacity((host_tokens // page_size + 1) * page_size)

@@ -56,10 +56,7 @@ from dynamo.common.backend.health_check import (
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.native_offloading import (
-    NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY,
-    native_offloading_capacity,
-)
+from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
@@ -71,6 +68,7 @@ from dynamo.sglang._disagg import (
 )
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.capacity import (
+    get_hicache_native_offloading_capacity,
     kv_metrics_block_values,
     local_dp_rank_bounds,
     runtime_capacity,
@@ -102,8 +100,8 @@ def _get_runtime_data(
     worker_group_id = get_sglang_worker_group_id(server_args)
     if worker_group_id is not None:
         runtime_data[SGLANG_WORKER_GROUP_ID_KEY] = worker_group_id
-    offloading_capacity = native_offloading_capacity(
-        (scheduler_info or {}).get("hicache_host_total_tokens")
+    offloading_capacity = get_hicache_native_offloading_capacity(
+        server_args, scheduler_info or {}
     )
     if offloading_capacity is not None:
         runtime_data[NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY] = offloading_capacity
