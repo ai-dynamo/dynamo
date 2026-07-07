@@ -140,7 +140,7 @@ struct ClassCandidate {
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
     pending: BinaryHeap<PolicyQueueEntry<T>>,
-    held_by_session: HashMap<String, PolicyQueueEntry<T>>,
+    held: HashMap<u64, PolicyQueueEntry<T>>,
     ready_by_worker: HashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
     stats: PolicyQueueStats,
     deficit: usize,
@@ -148,15 +148,13 @@ struct PolicyClassQueue<T> {
 
 impl<T> PolicyClassQueue<T> {
     fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-            && self.held_by_session.is_empty()
-            && self.ready_by_worker.is_empty()
+        self.pending.is_empty() && self.held.is_empty() && self.ready_by_worker.is_empty()
     }
 
     fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
         self.pending
             .iter()
-            .chain(self.held_by_session.values())
+            .chain(self.held.values())
             .chain(self.ready_by_worker.values().flat_map(|ready| ready.iter()))
     }
 
@@ -240,7 +238,7 @@ impl<T> PolicyQueue<T> {
                 .map(|config| PolicyClassQueue {
                     config,
                     pending: BinaryHeap::new(),
-                    held_by_session: HashMap::new(),
+                    held: HashMap::new(),
                     ready_by_worker: HashMap::new(),
                     stats: PolicyQueueStats::default(),
                     deficit: 0,
@@ -279,9 +277,7 @@ impl<T> PolicyQueue<T> {
         self.pending_count = 0;
         for class in &mut self.classes {
             retain_heap(&mut class.pending, &mut keep);
-            class
-                .held_by_session
-                .retain(|_, entry| keep(entry.payload()));
+            class.held.retain(|_, entry| keep(entry.payload()));
             class.ready_by_worker.retain(|_, ready| {
                 retain_heap(ready, &mut keep);
                 !ready.is_empty()
@@ -368,9 +364,8 @@ impl<T> PolicyQueue<T> {
         arrival_offset_secs: f64,
         priority_jump: f64,
         strict_priority: u32,
-        session_id: String,
         payload: T,
-    ) -> Result<(), (QueueRejection, T)> {
+    ) -> Result<u64, (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
             return Err((rejection, payload));
@@ -379,6 +374,7 @@ impl<T> PolicyQueue<T> {
             class.config.queue_admission.is_some(),
             "held request requires a queue_admission class"
         );
+        let entry_id = self.next_enqueue_seq;
         let entry = make_entry(
             class_index,
             snapshot,
@@ -386,23 +382,23 @@ impl<T> PolicyQueue<T> {
             priority_jump,
             strict_priority,
             class.config.queue_policy,
-            self.next_enqueue_seq,
+            entry_id,
             payload,
         );
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         assert!(
-            class.held_by_session.insert(session_id, entry).is_none(),
-            "session already has a held request"
+            class.held.insert(entry_id, entry).is_none(),
+            "queue entry ID reused"
         );
         add_stats(&mut class.stats, snapshot);
         self.pending_count += 1;
-        Ok(())
+        Ok(entry_id)
     }
 
     pub fn ready_held(
         &mut self,
         class_index: usize,
-        session_id: &str,
+        entry_id: u64,
         snapshot: QueueSnapshot,
         priority_boost: f64,
         intent: DispatchIntent,
@@ -412,7 +408,7 @@ impl<T> PolicyQueue<T> {
         if class.config.queue_admission.is_none() {
             return false;
         }
-        let Some(mut entry) = class.held_by_session.remove(session_id) else {
+        let Some(mut entry) = class.held.remove(&entry_id) else {
             return false;
         };
         subtract_stats(&mut class.stats, entry.snapshot);
@@ -507,7 +503,7 @@ impl<T> PolicyQueue<T> {
             class
                 .pending
                 .into_iter()
-                .chain(class.held_by_session.into_values())
+                .chain(class.held.into_values())
                 .chain(class.ready_by_worker.into_values().flatten())
         })
     }
@@ -724,17 +720,8 @@ policy_classes:
     #[test]
     fn held_requests_are_counted_and_move_to_worker_lanes() {
         let mut queue = PolicyQueue::new(admission_profile());
-        queue
-            .enqueue_held(
-                0,
-                2,
-                QueueSnapshot::new(10, 0),
-                2.0,
-                0.0,
-                0,
-                "session-held".to_string(),
-                "held",
-            )
+        let entry_id = queue
+            .enqueue_held(0, 2, QueueSnapshot::new(10, 0), 2.0, 0.0, 0, "held")
             .unwrap();
 
         assert_eq!(queue.pending_count(), 1);
@@ -744,7 +731,7 @@ policy_classes:
         let worker = WorkerWithDpRank::new(7, 1);
         assert!(queue.ready_held(
             0,
-            "session-held",
+            entry_id,
             QueueSnapshot::new(10, 5),
             1.0,
             DispatchIntent::Exact(worker),
