@@ -14,8 +14,6 @@ use crate::scheduler::{
     EngineCore, EnginePassResult, SchedulerCommand, SchedulerCommandEffects,
     SchedulerCommandResult, SchedulerLifecycleEvent,
 };
-#[cfg(feature = "kvbm-offload")]
-use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +80,7 @@ pub(crate) enum DisaggPhase {
 
 pub(crate) struct DisaggRequestState {
     original: Option<DirectRequest>,
+    session_id: Option<String>,
     #[cfg(test)]
     arrival_ms: f64,
     pub(in crate::replay::offline) phase: DisaggPhase,
@@ -113,11 +112,13 @@ impl DisaggRequestState {
         handoff_id: HandoffId,
         order: HandoffOrder,
         replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
     ) -> Self {
         #[cfg(not(test))]
         let _ = arrival_ms;
         Self {
             original: Some(request),
+            session_id,
             #[cfg(test)]
             arrival_ms,
             phase: match order {
@@ -141,6 +142,10 @@ impl DisaggRequestState {
         self.original
             .as_ref()
             .ok_or_else(|| anyhow!("offline disagg replay request payload was already released"))
+    }
+
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
     }
 
     pub(crate) fn build_prefill_request(&self) -> Result<DirectRequest> {
@@ -468,6 +473,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1; 8],
                 max_output_tokens: 12,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(1)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(0.0),
@@ -478,6 +484,7 @@ mod tests {
             0.0,
             HandoffId::from(Uuid::from_u128(2)),
             HandoffOrder::SourceFirst,
+            None,
             None,
         );
 

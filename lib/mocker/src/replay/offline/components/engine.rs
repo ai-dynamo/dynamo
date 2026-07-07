@@ -15,8 +15,6 @@ use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArg
 use crate::replay::TraceCollector;
 use crate::scheduler::RouterEventVisibility;
 use crate::scheduler::{SchedulerCommand, SchedulerCommandEffects};
-#[cfg(feature = "kvbm-offload")]
-use dynamo_kv_router::protocols::RouterEvent;
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
@@ -78,8 +76,10 @@ impl EngineComponent {
         id
     }
 
-    /// Mark a worker for removal. It will be skipped by `drive_ready` and
-    /// removed once fully drained.
+    /// Mark a worker for removal. Round-robin routing skips marked workers;
+    /// in router mode the caller must also remove the worker from the router
+    /// (see `apply_target_count`). The worker remains eligible for
+    /// `drive_ready` until its existing work drains.
     pub(in crate::replay::offline) fn mark_for_removal(&mut self, worker_id: usize) {
         self.pending_removal.insert(worker_id);
     }
@@ -234,9 +234,7 @@ impl EngineComponent {
         now_ms: f64,
         mut collector: Option<&mut TraceCollector>,
     ) -> anyhow::Result<EngineEffects> {
-        let worker_ids: Vec<usize> = self.workers.keys().copied().collect();
-        for worker_id in worker_ids {
-            let worker = self.workers.get(&worker_id).unwrap();
+        for (&worker_id, worker) in self.workers.iter_mut() {
             if !worker.is_ready() {
                 continue;
             }
@@ -246,16 +244,9 @@ impl EngineComponent {
                     let Some(collector) = collector.as_deref_mut() else {
                         bail!("offline replay visible engine pass requires a collector");
                     };
-                    self.workers
-                        .get_mut(&worker_id)
-                        .unwrap()
-                        .execute_pass(collector, now_ms)
+                    worker.execute_pass(collector, now_ms)
                 }
-                EnginePassMode::Hidden => self
-                    .workers
-                    .get_mut(&worker_id)
-                    .unwrap()
-                    .execute_hidden_pass(now_ms),
+                EnginePassMode::Hidden => worker.execute_hidden_pass(now_ms),
             };
 
             let mut effects = EngineEffects {
@@ -282,6 +273,15 @@ impl EngineComponent {
             };
 
             if executed.end_ms == now_ms {
+                // NOTE: Keep both lifecycle extremes in view when changing this gate.
+                // Tight-spin/livelock occurs when an effect-free, queued-only,
+                // zero-duration pass is repeatedly treated as progress at the same
+                // virtual timestamp. Dead-end/lost-wakeup occurs when replay declares
+                // quiescence while workers still own unfinished requests but have no
+                // concrete future event, deadline, or dependency notification. Stop
+                // same-time iteration when no observable state changed, but only after
+                // the owning subsystem can account for every unfinished request's
+                // future wakeup; an empty event queue alone is not quiescence.
                 let made_progress = !effects.admissions.is_empty()
                     || !effects.pass_start_kv_events.is_empty()
                     || payload.completed_requests > 0
@@ -300,7 +300,7 @@ impl EngineComponent {
                 return Ok(effects);
             }
 
-            self.workers.get_mut(&worker_id).unwrap().mark_busy();
+            worker.mark_busy();
             effects
                 .scheduled_completions
                 .push(ScheduledWorkerCompletion {

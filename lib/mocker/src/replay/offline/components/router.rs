@@ -134,6 +134,7 @@ struct PendingRequest {
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
+    session_id: Option<String>,
 }
 
 impl PendingRequest {
@@ -176,6 +177,7 @@ impl PendingRequest {
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
             policy_class: self.policy_class.clone(),
+            session_id: self.session_id.clone(),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -234,13 +236,24 @@ impl OfflineReplayRouter {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn on_request_arrival(
         &mut self,
         request: &DirectRequest,
         replay_hashes: Option<ReplayRequestHashes>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let pending = self.build_pending_request(request, replay_hashes)?;
+        self.on_request_arrival_for_session(request, replay_hashes, None, now_ms)
+    }
+
+    pub(crate) fn on_request_arrival_for_session(
+        &mut self,
+        request: &DirectRequest,
+        replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
+        let pending = self.build_pending_request(request, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
         let (class_index, snapshot) = match self
             .profile
@@ -464,6 +477,7 @@ impl OfflineReplayRouter {
         &self,
         request: &DirectRequest,
         replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
     ) -> Result<PendingRequest> {
         let uuid = request
             .uuid
@@ -515,6 +529,7 @@ impl OfflineReplayRouter {
             priority_jump,
             strict_priority,
             policy_class: request.policy_class.clone(),
+            session_id,
         })
     }
 
@@ -675,6 +690,7 @@ mod tests {
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
     };
+    use rustc_hash::FxHashMap;
     use uuid::Uuid;
 
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
@@ -750,6 +766,7 @@ mod tests {
         DirectRequest {
             tokens: vec![token; input_tokens],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
@@ -782,6 +799,17 @@ mod tests {
             },
             storage_tier,
         )
+    }
+
+    #[test]
+    fn session_identity_reaches_scheduling_request() {
+        let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let pending = router
+            .build_pending_request(&request(1, 7), None, Some("session-a".to_string()))
+            .unwrap();
+        let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
+
+        assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
     }
 
     #[test]
