@@ -6,10 +6,6 @@ subtitle: Overview of Dynamo's design principles, performance techniques, and pr
 sidebar-title: Introduction
 ---
 
-<p align="left">
-  <a href="./introduction.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
 Dynamo is an open-source, high-throughput, low-latency inference framework,
 designed to serve generative AI workloads in distributed environments. It is
 Kubernetes-native for production deployments, with an operator, CRDs, Helm

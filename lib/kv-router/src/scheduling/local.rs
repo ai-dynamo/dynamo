@@ -254,6 +254,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
+            session_id,
             overlap,
             shared_cache_hits,
         } = request;
@@ -271,6 +272,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
+            session_id,
             overlap,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
@@ -415,6 +417,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
+            session_id: None,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -791,6 +794,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             overlap: OverlapSignals::default(),
             shared_cache_hits: None,
         }

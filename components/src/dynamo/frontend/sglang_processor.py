@@ -16,6 +16,7 @@ from concurrent.futures import wait as _futures_wait
 from dataclasses import dataclass
 from typing import Any
 
+from sglang.srt.parser.conversation import chat_template_exists
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
@@ -40,6 +41,7 @@ from .utils import (
     make_internal_error,
     nvext_extra_field_requested,
     random_uuid,
+    read_jinja_chat_template,
     resolve_chat_template,
     worker_warmup,
 )
@@ -84,7 +86,7 @@ def _load_tokenizer(source_path: str, trust_remote_code: bool):
     (e.g. chat_template.json) when the tokenizer defines none."""
     tokenizer = get_tokenizer(source_path, trust_remote_code=trust_remote_code)
     if getattr(tokenizer, "chat_template", None) is None:
-        tokenizer.chat_template = resolve_chat_template(source_path)
+        tokenizer.chat_template = resolve_chat_template(source_path, backend="sglang")
     return tokenizer
 
 
@@ -142,6 +144,30 @@ _w_exclude_tools_when_tool_choice_none: bool = True
 _w_template_force_reasoning: bool = False
 
 
+def _load_chat_template(chat_template: str | None) -> str | None:
+    """Load a chat template override from a Jinja template file."""
+    if not chat_template:
+        return None
+    if chat_template_exists(chat_template):
+        raise ValueError(
+            "SGLang built-in chat template names are not supported by "
+            "Dynamo's SGLang chat processor; pass a .jinja template file path."
+        )
+    expanded_template = os.path.expanduser(os.path.expandvars(chat_template))
+    if not os.path.exists(expanded_template):
+        raise FileNotFoundError(f"Chat template file not found: {expanded_template}")
+    if not os.path.isfile(expanded_template):
+        raise FileNotFoundError(
+            f"Chat template path is not a file: {expanded_template}"
+        )
+    if not expanded_template.endswith(".jinja"):
+        raise ValueError(
+            "Dynamo's SGLang chat processor supports only .jinja chat template "
+            f"files, got: {expanded_template}"
+        )
+    return read_jinja_chat_template(expanded_template, backend="sglang")
+
+
 @dataclass
 class SglangPreprocessWorkerResult:
     """Picklable return value from the SGLang preprocess worker."""
@@ -164,11 +190,14 @@ def _init_worker(
     exclude_tools_when_tool_choice_none: bool = True,
     trust_remote_code: bool = False,
     template_force_reasoning: bool = False,
+    chat_template: str | None = None,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
+    if chat_template is not None:
+        _w_tokenizer.chat_template = chat_template
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
@@ -419,6 +448,8 @@ class SglangProcessor:
                 pre.guided_decoding,
                 pre.tool_call_parser,
             )
+        except PreprocessError as exc:
+            raise InvalidArgument(str(exc)) from exc
         except InvalidArgument:
             raise
         except Exception as exc:
@@ -660,11 +691,13 @@ class SglangEngineFactory:
         debug_perf: bool = False,
         tool_call_parser_name: str | None = None,
         reasoning_parser_name: str | None = None,
+        chat_template: str | None = None,
     ):
         self.config = config
         self.debug_perf = debug_perf
         self.tool_call_parser_name = tool_call_parser_name
         self.reasoning_parser_name = reasoning_parser_name
+        self.chat_template = chat_template
 
         self.trust_remote_code = config.trust_remote_code
         self.stream_interval = 20
@@ -702,6 +735,10 @@ class SglangEngineFactory:
 
         logger.info("Loading SGLang tokenizer from %s", local_dir)
         tokenizer = _load_tokenizer(local_dir, self.trust_remote_code)
+        chat_template = _load_chat_template(self.chat_template)
+        if chat_template is not None:
+            logger.info("Using custom chat template override")
+            tokenizer.chat_template = chat_template
 
         eos_token_ids = _tokenizer_eos_token_ids(tokenizer)
 
@@ -744,6 +781,7 @@ class SglangEngineFactory:
                     self.config.exclude_tools_when_tool_choice_none,
                     self.trust_remote_code,
                     template_force_reasoning,
+                    chat_template,
                 ),
             )
             futures = [

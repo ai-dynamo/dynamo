@@ -5,10 +5,6 @@ title: Overall Architecture
 subtitle: Architecture and components of the Dynamo inference runtime
 ---
 
-<p align="left">
-  <a href="./architecture.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
 Dynamo is a distributed inference runtime for generative AI systems that must operate at high throughput, low latency, and high reliability under changing traffic conditions. It is backend-agnostic (SGLang, TRT-LLM, vLLM, and others) and is built around three cooperating concerns:
 
 - A fast **request path** for token generation

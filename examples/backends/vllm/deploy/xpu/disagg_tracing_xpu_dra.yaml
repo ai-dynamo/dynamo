@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated vLLM deployment with OpenTelemetry tracing on Intel XPU.
+# Base deployment: disagg_xpu_dra.yaml
+# See docs/observability/tracing.md for setup instructions.
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-tracing-xpu
+spec:
+  envs:
+    - name: DYN_LOGGING_JSONL
+      value: "true"
+    - name: OTEL_EXPORT_ENABLED
+      value: "true"
+    # NOTE: Update or remove if observability stack not deployed
+    - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+      value: "http://tempo.observability.svc.cluster.local:4317"
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          # NOTE: Frontend doesn't need XPU
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: "dynamo-frontend"
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: gpu-template
+        # NOTE: Uncomment if needed for your environment
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44
+        #     - 991
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
+          resources:
+            claims:
+              - name: gpu
+          env:
+            - name: VLLM_TARGET_DEVICE
+              value: xpu
+            - name: OTEL_SERVICE_NAME
+              value: "dynamo-worker-decode"
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"xpu"}'
+            - --block-size
+            - "64"
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: gpu-template
+        # NOTE: Uncomment if needed for your environment
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44
+        #     - 991
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
+          resources:
+            claims:
+              - name: gpu
+          env:
+            - name: VLLM_TARGET_DEVICE
+              value: xpu
+            - name: OTEL_SERVICE_NAME
+              value: "dynamo-worker-prefill"
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - prefill
+            # NOTE: kv_buffer_device must be "xpu" for Intel GPU
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"xpu"}'
+            - --block-size
+            - "64"
