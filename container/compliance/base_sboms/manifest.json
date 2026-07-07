@@ -88,6 +88,17 @@
       "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
       "from_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
       "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:184914ac7c32e4aa7789bb686bfaa0817dd56dbdc8ee05fc0ec671aa0b1792f0",
+      "baseline_image": "vllm/vllm-openai",
+      "baseline_sbom": "vllm-openai@184914ac-amd64.cdx.json",
+      "baseline_tag": "nightly-69715823df89b11ee684b84066390cbb9092d5c1",
+      "capture_note": "Exact immutable external base for the dedicated Python-overlay mode; linux/amd64 manifest sha256:1fd4323d0aafe8d92b4a4b568ad33661ecaf3bfc7f40860c95d09fed4e6ccd58; captured with Syft 1.46.0 so runtime compliance attributes only the Dynamo, FlashInfer, and Python-overlay delta added above this nightly",
+      "from_digest": "sha256:184914ac7c32e4aa7789bb686bfaa0817dd56dbdc8ee05fc0ec671aa0b1792f0",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "nightly-69715823df89b11ee684b84066390cbb9092d5c1",
+      "platform": "linux/amd64"
     }
   ],
   "entry_schema": {
@@ -101,7 +112,7 @@
     "layer_prefix_check_skipped": "(optional) true if the engineer opted out at capture time",
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
-  "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-07-03T06:54:02+00:00",
+  "format": "CycloneDX JSON, one baseline file per platform; slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
+  "generated_at": "2026-07-07T04:03:01+00:00",
   "schema_version": 2
 }

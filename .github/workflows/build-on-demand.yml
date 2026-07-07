@@ -121,6 +121,7 @@ jobs:
         VLLM_GIT_SHA=${{ inputs.vllm_git_sha }}
         VLLM_INSTALL_MODE=${{ inputs.vllm_install_mode }}
         VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}
+        BASELINE_SBOM_FILE=${{ inputs.vllm_install_mode == 'python-overlay' && 'vllm-openai@184914ac' || 'cuda@2ab6381d' }}
     secrets: inherit
 
   snapshot-agent:
