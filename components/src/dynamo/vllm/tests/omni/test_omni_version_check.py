@@ -21,6 +21,7 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
+
 def _fake_version(mapping):
     def _inner(name):
         return mapping[name]
