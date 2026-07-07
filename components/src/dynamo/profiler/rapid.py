@@ -118,6 +118,23 @@ def _run_naive_fallback(
         "AIC does not support this combo — falling back to naive config generation."
     )
 
+    sla = dgdr.sla
+    if sla is not None and sla.e2eLatency is not None:
+        requested_sla = f"e2eLatency={sla.e2eLatency:.1f}ms"
+    elif sla is not None and sla.ttft is not None and sla.itl is not None:
+        requested_sla = f"ttft={sla.ttft:.1f}ms, itl={sla.itl:.1f}ms"
+    else:
+        requested_sla = "requested SLA"
+    logger.warning(
+        "SLA is unverified (%s): no performance estimates are available for "
+        "model=%s, system=%s, backend=%s. Naive fallback will generate a default "
+        "configuration that may not meet the requested SLA.",
+        requested_sla,
+        model,
+        system,
+        backend,
+    )
+
     generator_params = build_naive_generator_params(
         model_name=model,
         total_gpus=total_gpus,
