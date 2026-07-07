@@ -1161,6 +1161,39 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/vllm-distributed-executor-backend]: Invalid value: "typo": must be "mp" or "ray"`},
 		},
 		{
+			name: "Grove update strategy annotation accepts RollingRecreate",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "RollingRecreate"}
+			}),
+		},
+		{
+			name: "Grove update strategy annotation accepts OnDelete",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "OnDelete"}
+			}),
+		},
+		{
+			name: "Grove update strategy annotation rejects lowercase value",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "ondelete"}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: "ondelete": supported values: "RollingRecreate", "OnDelete"`},
+		},
+		{
+			name: "Grove update strategy annotation rejects whitespace",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: " OnDelete "}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: " OnDelete ": supported values: "RollingRecreate", "OnDelete"`},
+		},
+		{
+			name: "Grove update strategy annotation rejects unknown value",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationGroveUpdateStrategy: "BlueGreen"}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/grove-update-strategy]: Unsupported value: "BlueGreen": supported values: "RollingRecreate", "OnDelete"`},
+		},
+		{
 			name: "discovery mode accepts pod",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "pod"}
