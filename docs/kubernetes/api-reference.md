@@ -2724,8 +2724,9 @@ _Appears in:_
 
 
 
-ParetoConfig represents a single Pareto-optimal deployment configuration
-discovered during profiling.
+ParetoConfig is retained for compatibility with status objects produced by
+older profiler releases.
+Deprecated: The profiler no longer generates Pareto configurations.
 
 
 
@@ -2775,7 +2776,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pareto` _[ParetoConfig](#paretoconfig) array_ | Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.<br />Each entry represents a different cost/performance trade-off. |  | Optional: \{\} <br /> |
+| `pareto` _[ParetoConfig](#paretoconfig) array_ | Pareto is retained for compatibility with existing status objects.<br />Deprecated: The controller no longer populates this field. |  | Optional: \{\} <br /> |
 | `selectedConfig` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | SelectedConfig is the recommended configuration chosen by the profiler<br />based on the SLA targets. This is the configuration used for deployment<br />when autoApply is true. |  | Type: object <br />Optional: \{\} <br /> |
 
 

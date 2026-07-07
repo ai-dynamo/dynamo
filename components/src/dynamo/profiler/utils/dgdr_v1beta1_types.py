@@ -291,7 +291,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
 
 
 class ParetoConfig(BaseModel):
-    """ParetoConfig represents a single Pareto-optimal deployment configuration discovered during profiling."""
+    """ParetoConfig is retained for compatibility with status objects produced by older profiler releases. Deprecated: The profiler no longer generates Pareto configurations."""
 
     config: Dict[str, Any] = Field(
         description="Config is the full deployment configuration for this Pareto point."
@@ -303,7 +303,7 @@ class ProfilingResultsStatus(BaseModel):
 
     pareto: Optional[List[ParetoConfig]] = Field(
         default=None,
-        description="Pareto is the list of Pareto-optimal deployment configurations discovered during profiling. Each entry represents a different cost/performance trade-off.",
+        description="Pareto is retained for compatibility with existing status objects. Deprecated: The controller no longer populates this field.",
     )
     selectedConfig: Optional[Dict[str, Any]] = Field(
         default=None,
