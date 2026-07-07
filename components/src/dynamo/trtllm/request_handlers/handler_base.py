@@ -1147,9 +1147,24 @@ class HandlerBase(BaseGenerativeHandler):
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
 
         try:
+            # DYN_SKIP_FRONTEND_TOKENIZE=1 + DYN_ENGINE_CONV_AFFINITY=1: the Rust
+            # preprocessor elides tokenization, leaving token_ids empty and
+            # forwarding the rendered prompt as request["prompt_text"]. Pass the
+            # string through to TRT-LLM (which tokenizes internally); otherwise
+            # the executor's `assert isinstance(prompt_token_ids[0], int)` fires.
+            engine_input = processed_input
+            if (
+                engine_conv_affinity
+                and isinstance(processed_input, list)
+                and len(processed_input) == 0
+            ):
+                _prompt_text = request.get("prompt_text")
+                if _prompt_text:
+                    engine_input = _prompt_text
+
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
-                inputs=processed_input,  # Use the correctly extracted inputs
+                inputs=engine_input,  # skip-tok: substituted to prompt_text if token_ids is empty
                 sampling_params=sampling_params,
                 disaggregated_params=disaggregated_params,
                 streaming=streaming,
