@@ -195,6 +195,7 @@ docker-push-all: docker-push-planner docker-push-frontend docker-push-vllm docke
 
 .PHONY: check
 check: generate manifests generate-api-docs generate-helm-docs
+	@$(MAKE) check-rbac
 	@echo "> Checking for uncommitted changes"
 	@if [ -n "$$(git status --porcelain)" ]; then \
 		echo "ERROR: Git tree is dirty after running validation steps."; \
@@ -204,6 +205,13 @@ check: generate manifests generate-api-docs generate-helm-docs
 		exit 1; \
 	fi
 	@echo "> Check complete"
+
+
+.PHONY: check-rbac
+check-rbac: ## Verify the platform chart's operator RBAC matches marker-generated RBAC.
+	@python3 api/scripts/check_rbac.py \
+		config/rbac/role.yaml \
+		../helm/charts/platform/components/operator/templates/manager-rbac.yaml
 
 
 .PHONY: tilt-up
