@@ -322,6 +322,17 @@ class AudioFormatter:
                     b64_json=base64.b64encode(audio_bytes).decode(),
                 )
 
+            if ctx.get("request_type") == RequestType.CHAT_COMPLETION:
+                return _chat_audio_chunk(
+                    request_id,
+                    self._model_name,
+                    audio_data_obj.model_dump(),
+                    sample_rate=sample_rate,
+                    num_samples=len(audio_np),
+                    media_type=media_type,
+                    inference_time_s=time.time() - start_time,
+                )
+
             return NvAudioSpeechResponse(
                 id=request_id,
                 object="audio.speech",
@@ -404,6 +415,41 @@ class AudioFormatter:
             created=int(time.time()),
             error=error,
         ).model_dump()
+
+
+def _chat_audio_chunk(
+    request_id: str,
+    model_name: str,
+    audio_data: Dict[str, Any],
+    *,
+    sample_rate: int,
+    num_samples: int,
+    media_type: str,
+    inference_time_s: float,
+) -> Dict[str, Any]:
+    content = audio_data.get("b64_json") or audio_data.get("url") or ""
+    return {
+        "id": request_id,
+        "created": int(time.time()),
+        "object": "chat.completion.chunk",
+        "model": model_name,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }
+        ],
+        "nvext": {
+            "audio": {
+                **audio_data,
+                "sample_rate": sample_rate,
+                "num_samples": num_samples,
+                "media_type": media_type,
+            },
+            "inference_time_s": inference_time_s,
+        },
+    }
 
 
 def _error_chunk(

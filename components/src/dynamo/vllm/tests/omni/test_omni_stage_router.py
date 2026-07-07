@@ -13,6 +13,11 @@ from dynamo.common.utils.output_modalities import RequestType
 
 try:
     from dynamo.vllm.omni import stage_router
+    from dynamo.vllm.omni.stage_worker import (
+        _ASYNC_PREPARE_KEY,
+        _ASYNC_PREWARM_KEY,
+        _ASYNC_PREWARM_READY_KEY,
+    )
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -46,10 +51,12 @@ class _StageClient:
         return _gen()
 
 
-def _make_stage_cfg(stage_id: int):
+def _make_stage_cfg(stage_id: int, *, worker_type="ar", final_output_type="text"):
     return SimpleNamespace(
         stage_id=stage_id,
-        engine_args=SimpleNamespace(model_stage=f"stage{stage_id}"),
+        worker_type=worker_type,
+        final_output_type=final_output_type,
+        engine_args=SimpleNamespace(model_stage=f"stage{stage_id}", async_chunk=False),
     )
 
 
@@ -62,6 +69,8 @@ def _make_router(stage_configs, stage_clients, formatter=None, output_modalities
     )
     router.stage_configs = stage_configs
     router.stage_clients = stage_clients
+    router._async_chunk = False
+    router._model_name = "test-model"
     router._formatter = formatter or AsyncMock()
     return router
 
@@ -74,6 +83,76 @@ def _patched_generate(router, request, request_id="req-1", request_type="chat"):
         ),
         patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value=request_id),
     )
+
+
+@pytest.mark.asyncio
+async def test_async_chunk_router_prewarm_order():
+    events: list[str] = []
+    stage1_ready = asyncio.Event()
+    stage2_ready = asyncio.Event()
+
+    async def stage0_handler(request):
+        if request.get(_ASYNC_PREPARE_KEY):
+            events.append("prepare")
+            return {
+                "original_prompt": {"prompt": "hi"},
+                "sampling_params_list": {"max_tokens": 8},
+                "prompt_token_ids": [1, 2, 3],
+                "final_stage_id": 2,
+                "finished": True,
+            }
+        assert stage1_ready.is_set()
+        assert stage2_ready.is_set()
+        assert request["prompt_token_ids"] == [1, 2, 3]
+        events.append("stage0")
+        return {"shm_meta": {"text": True}, "finished": True}
+
+    async def stage1_handler(request):
+        assert request.get(_ASYNC_PREWARM_KEY) is True
+        assert request["final_stage_id"] == 2
+        assert request["prompt_token_ids"] == [1, 2, 3]
+        events.append("stage1-prewarm")
+        stage1_ready.set()
+        return {_ASYNC_PREWARM_READY_KEY: True, "finished": True}
+
+    async def stage2_handler(request):
+        assert request.get(_ASYNC_PREWARM_KEY) is True
+        assert request["final_stage_id"] == 2
+        assert request["prompt_token_ids"] == [1, 2, 3]
+        events.append("stage2-prewarm")
+        stage2_ready.set()
+        return {
+            _ASYNC_PREWARM_READY_KEY: True,
+            "shm_meta": {"audio": True},
+            "finished": True,
+        }
+
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"finished": True}
+    router = _make_router(
+        stage_configs=[
+            _make_stage_cfg(0),
+            _make_stage_cfg(1),
+            _make_stage_cfg(2, worker_type="generation", final_output_type="audio"),
+        ],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+            "stage2": _StageClient(stage2_handler),
+        },
+        formatter=mock_formatter,
+    )
+    router._async_chunk = True
+
+    with patch.object(stage_router, "shm_deserialize", return_value=SimpleNamespace()):
+        p1, p2 = _patched_generate(
+            router, {"prompt": "hi"}, request_type=RequestType.CHAT_COMPLETION
+        )
+        with p1, p2:
+            chunks = [c async for c in router.generate({"prompt": "hi"}, None)]
+
+    assert events == ["prepare", "stage1-prewarm", "stage2-prewarm", "stage0"]
+    assert chunks == [{"finished": True}]
 
 
 def test_router_loads_stage_configs_from_model_deploy_config():
