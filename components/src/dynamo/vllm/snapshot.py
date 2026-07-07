@@ -5,6 +5,8 @@ import gc
 import logging
 from collections.abc import Callable
 
+from vllm import envs as vllm_envs
+
 from dynamo.common.snapshot.lifecycle import (
     EngineSnapshotController,
     SnapshotConfig,
@@ -39,6 +41,12 @@ async def prepare_snapshot_engine(
 
     engine = setup_vllm_engine(config)
     gc.collect()
+    if vllm_envs.VLLM_EXPERIMENT_CHECKPOINT_HEAP_CLEANUP:
+        logger.info(
+            "Checkpoint heap cleanup coverage: required roles are Dynamo parent, "
+            "all vLLM EngineCore processes, and all vLLM GPU workers; coordinator "
+            "and helper processes are not covered"
+        )
     snapshot_controller = EngineSnapshotController(
         engine=engine,
         pause_controller=VllmEnginePauseController(engine[0]),

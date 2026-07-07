@@ -31,6 +31,7 @@ from typing import (
 
 import torch
 from vllm import PoolingParams
+from vllm import envs as vllm_envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
@@ -43,6 +44,7 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.utils.mem_utils import run_experimental_checkpoint_heap_cleanup
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
@@ -351,6 +353,8 @@ class VllmEnginePauseController:
                     "Failed to resume generation after native vLLM sleep failure"
                 )
             raise
+        if vllm_envs.VLLM_EXPERIMENT_CHECKPOINT_HEAP_CLEANUP:
+            run_experimental_checkpoint_heap_cleanup(role="dynamo-parent")
         self._is_paused = True
         return True
 

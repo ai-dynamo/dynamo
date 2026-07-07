@@ -3,7 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -96,6 +96,53 @@ async def test_pause_without_level_uses_vllm_default_sleep():
     assert changed is True
     engine_client.pause_generation.assert_awaited_once()
     engine_client.sleep.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_pause_runs_parent_heap_cleanup_after_engine_sleep(monkeypatch):
+    engine_client = SimpleNamespace(
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        resume_generation=AsyncMock(),
+    )
+    controller = VllmEnginePauseController(engine_client)
+    cleanup = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.handlers.vllm_envs.VLLM_EXPERIMENT_CHECKPOINT_HEAP_CLEANUP",
+        True,
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.handlers.run_experimental_checkpoint_heap_cleanup",
+        cleanup,
+    )
+
+    assert await controller.pause(None) is True
+
+    engine_client.sleep.assert_awaited_once_with()
+    cleanup.assert_called_once_with(role="dynamo-parent")
+
+
+@pytest.mark.asyncio
+async def test_parent_heap_cleanup_failure_prevents_pause(monkeypatch):
+    engine_client = SimpleNamespace(
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        resume_generation=AsyncMock(),
+    )
+    controller = VllmEnginePauseController(engine_client)
+    monkeypatch.setattr(
+        "dynamo.vllm.handlers.vllm_envs.VLLM_EXPERIMENT_CHECKPOINT_HEAP_CLEANUP",
+        True,
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.handlers.run_experimental_checkpoint_heap_cleanup",
+        Mock(side_effect=RuntimeError("trim failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="trim failed"):
+        await controller.pause(None)
+
+    assert controller.is_paused is False
 
 
 @pytest.mark.asyncio

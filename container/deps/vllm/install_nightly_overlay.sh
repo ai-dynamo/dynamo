@@ -7,7 +7,7 @@ set -euo pipefail
 readonly EXPECTED_BASE_COMMIT=69715823df89b11ee684b84066390cbb9092d5c1
 readonly EXPECTED_BASE_DIGEST=sha256:184914ac7c32e4aa7789bb686bfaa0817dd56dbdc8ee05fc0ec671aa0b1792f0
 readonly EXPECTED_AMD64_DIGEST=sha256:1fd4323d0aafe8d92b4a4b568ad33661ecaf3bfc7f40860c95d09fed4e6ccd58
-readonly EXPECTED_VLLM_HEAD=bb7610592e7df0e3fdd9fd7ef7dd024e0ab8ffa8
+readonly EXPECTED_VLLM_HEAD=17355f6f668857d9b85e0e7714529b42757e0730
 readonly EXPECTED_FLASHINFER_SHA=330cc8e1a09f59c1241084459f3df3204b9b8327
 readonly PROVENANCE_FILE=/opt/dynamo/source-provenance.txt
 readonly OVERLAY_PROVENANCE_FILE=/opt/dynamo/vllm-overlay-provenance.txt
@@ -19,19 +19,34 @@ readonly -a OVERLAY_PATHS=(
     vllm/distributed/device_communicators/cuda_communicator.py
     vllm/distributed/device_communicators/flashinfer_all_reduce.py
     vllm/distributed/parallel_state.py
+    vllm/envs.py
     vllm/model_executor/warmup/kernel_warmup.py
+    vllm/utils/mem_utils.py
+    vllm/v1/attention/backends/flashinfer.py
+    vllm/v1/engine/core.py
+    vllm/v1/worker/gpu/attn_utils.py
     vllm/v1/worker/gpu_model_runner.py
+    vllm/v1/worker/gpu_worker.py
 )
 
 readonly -a EXPECTED_DIFF=(
+    "A	tests/utils/test_checkpoint_memory_cleanup.py"
+    "A	tests/v1/attention/test_flashinfer_workspace_experiment.py"
+    "A	tests/v1/worker/test_checkpoint_memory_cleanup.py"
     "M	tests/distributed/test_weight_transfer.py"
     "M	vllm/distributed/device_communicators/all2all.py"
     "M	vllm/distributed/device_communicators/base_device_communicator.py"
     "M	vllm/distributed/device_communicators/cuda_communicator.py"
     "M	vllm/distributed/device_communicators/flashinfer_all_reduce.py"
     "M	vllm/distributed/parallel_state.py"
+    "M	vllm/envs.py"
     "M	vllm/model_executor/warmup/kernel_warmup.py"
+    "M	vllm/utils/mem_utils.py"
+    "M	vllm/v1/attention/backends/flashinfer.py"
+    "M	vllm/v1/engine/core.py"
+    "M	vllm/v1/worker/gpu/attn_utils.py"
     "M	vllm/v1/worker/gpu_model_runner.py"
+    "M	vllm/v1/worker/gpu_worker.py"
 )
 
 die() {
@@ -77,7 +92,7 @@ validate_overlay_source() {
     git -C "${source}" cat-file -e "${EXPECTED_BASE_COMMIT}^{commit}"
     git -C "${source}" merge-base --is-ancestor "${EXPECTED_BASE_COMMIT}" HEAD
     [[ "$(git -C "${source}" rev-list --count "${EXPECTED_BASE_COMMIT}..HEAD")" \
-        == 3 ]] || die "vLLM overlay must contain exactly three commits"
+        == 4 ]] || die "vLLM overlay must contain exactly four commits"
 
     mapfile -t actual_diff < <(
         git -C "${source}" diff --no-renames --name-status \
@@ -165,7 +180,7 @@ vllm_runtime_base_image=${VLLM_RUNTIME_BASE_IMAGE}
 vllm_runtime_amd64_digest=${EXPECTED_AMD64_DIGEST}
 vllm_base_commit=${EXPECTED_BASE_COMMIT}
 vllm_source_sha=${EXPECTED_VLLM_HEAD}
-vllm_overlay_files=7
+vllm_overlay_files=13
 flashinfer_source_sha=${EXPECTED_FLASHINFER_SHA}
 flashinfer_source_version=${flashinfer_source_version}
 EOF
