@@ -61,20 +61,20 @@ func (m *MockRBACManager) EnsureServiceAccountWithRBAC(ctx context.Context, targ
 	return nil
 }
 
-// writeFaultClient injects a one-shot DGDR update conflict.
+// writeFaultClient injects a one-shot DGDR apply conflict.
 type writeFaultClient struct {
 	client.Client
-	updateConflictOnce bool
+	applyConflictOnce bool
 }
 
-func (c *writeFaultClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
-	if _, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeploymentRequest); ok && c.updateConflictOnce {
-		c.updateConflictOnce = false
+func (c *writeFaultClient) Apply(ctx context.Context, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+	if c.applyConflictOnce {
+		c.applyConflictOnce = false
 		return apierrors.NewConflict(schema.GroupResource{
 			Group: nvidiacomv1beta1.GroupVersion.Group, Resource: "dynamographdeploymentrequests",
-		}, obj.GetName(), errors.New("injected update conflict"))
+		}, "injected", errors.New("injected apply conflict"))
 	}
-	return c.Client.Update(ctx, obj, opts...)
+	return c.Client.Apply(ctx, obj, opts...)
 }
 
 var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
@@ -487,6 +487,46 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				_ = k8sClient.Delete(ctx, job)
 			}
 		})
+
+		It("Should preserve output written before the Job create event is observed", func() {
+			ctx := context.Background()
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr-fast-output", Namespace: defaultNamespace},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model: "test-model", Backend: "vllm", Image: "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](8),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			waitForObservation, err := reconciler.createProfilingJob(ctx, dgdr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(waitForObservation).Should(BeTrue())
+
+			job := &batchv1.Job{}
+			jobKey := types.NamespacedName{Name: getProfilingJobName(dgdr), Namespace: dgdr.Namespace}
+			Expect(k8sClient.Get(ctx, jobKey, job)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, job) }()
+
+			outputCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: getOutputConfigMapName(dgdr), Namespace: dgdr.Namespace},
+				Data:       map[string]string{ProfilingOutputFile: "fast output"},
+			}
+			Expect(k8sClient.Create(ctx, outputCM)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, outputCM) }()
+
+			waitForObservation, err = reconciler.createProfilingJob(ctx, dgdr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(waitForObservation).Should(BeFalse())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: outputCM.Name, Namespace: outputCM.Namespace}, outputCM)).Should(Succeed())
+			Expect(outputCM.Data[ProfilingOutputFile]).Should(Equal("fast output"))
+		})
 	})
 
 	Context("When profiling completes", func() {
@@ -656,7 +696,7 @@ spec:
 			Expect(k8sClient.Create(ctx, outputCM)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, outputCM) }()
 
-			reconciler.Client = &writeFaultClient{Client: k8sClient, updateConflictOnce: true}
+			reconciler.Client = &writeFaultClient{Client: k8sClient, applyConflictOnce: true}
 			_, err := reconciler.handleProfilingPhase(ctx, dgdr)
 			Expect(apierrors.IsConflict(err)).Should(BeTrue())
 
@@ -2362,7 +2402,7 @@ spec:
 			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeployed))
-			Expect(updated.Annotations).NotTo(HaveKey(AnnotationGeneratedDGDSpec))
+			Expect(updated.Annotations[AnnotationGeneratedDGDSpec]).Should(BeEmpty())
 
 			// Once an existing DGD has been observed, a later deletion must not be
 			// recreated from a marker left behind by a prior crash.

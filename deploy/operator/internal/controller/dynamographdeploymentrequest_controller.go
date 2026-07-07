@@ -823,7 +823,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.removeGeneratedSpecAnnotation(ctx, dgdr); err != nil {
+	if err := r.clearGeneratedSpecAnnotation(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1035,18 +1035,33 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	return ctrl.Result{}, nil
 }
 
-// removeGeneratedSpecAnnotation marks the DGD as observed in the informer cache.
-func (r *DynamoGraphDeploymentRequestReconciler) removeGeneratedSpecAnnotation(
+// clearGeneratedSpecAnnotation marks the DGD as observed in the informer cache.
+func (r *DynamoGraphDeploymentRequestReconciler) clearGeneratedSpecAnnotation(
 	ctx context.Context,
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) error {
 	if dgdr.Annotations[AnnotationGeneratedDGDSpec] == "" {
 		return nil
 	}
-	delete(dgdr.Annotations, AnnotationGeneratedDGDSpec)
-	if err := r.Update(ctx, dgdr); err != nil {
-		return fmt.Errorf("failed to remove generated DGD annotation: %w", err)
+	annotations := map[string]any{AnnotationGeneratedDGDSpec: ""}
+	if additionalResources := dgdr.Annotations[AnnotationAdditionalResources]; additionalResources != "" {
+		annotations[AnnotationAdditionalResources] = additionalResources
 	}
+	apply := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": nvidiacomv1beta1.GroupVersion.String(),
+		"kind":       "DynamoGraphDeploymentRequest",
+		"metadata": map[string]any{
+			"name":            dgdr.Name,
+			"namespace":       dgdr.Namespace,
+			"resourceVersion": dgdr.ResourceVersion,
+			"annotations":     annotations,
+		},
+	}}
+	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(apply), client.FieldOwner("dynamo-operator-dgdr"), client.ForceOwnership); err != nil {
+		return fmt.Errorf("failed to clear generated DGD annotation: %w", err)
+	}
+	dgdr.Annotations[AnnotationGeneratedDGDSpec] = ""
+	dgdr.ResourceVersion = apply.GetResourceVersion()
 	return nil
 }
 
@@ -1381,26 +1396,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		return true, nil
 	}
 
-	// Delete any existing output ConfigMap to ensure fresh profiling results
-	// This prevents using stale data from previous profiling runs
-	outputConfigMapName := getOutputConfigMapName(dgdr)
-	existingCM := &corev1.ConfigMap{}
-	err = r.Get(ctx, types.NamespacedName{
-		Name:      outputConfigMapName,
-		Namespace: dgdr.Namespace,
-	}, existingCM)
-	if err == nil {
-		// ConfigMap exists, delete it
-		logger.Info("Deleting existing output ConfigMap to ensure fresh profiling results", "configMap", outputConfigMapName)
-		if err := r.Delete(ctx, existingCM); err != nil && !apierrors.IsNotFound(err) {
-			logger.Error(err, "Failed to delete existing output ConfigMap", "configMap", outputConfigMapName)
-			return false, fmt.Errorf("failed to delete existing output ConfigMap: %w", err)
+	// Delete stale output only before creating the profiling Job. Once the Job
+	// exists, the ConfigMap may contain fresh output from a fast profiler.
+	existingJob := &batchv1.Job{}
+	err = r.Get(ctx, types.NamespacedName{Name: getProfilingJobName(dgdr), Namespace: dgdr.Namespace}, existingJob)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("failed to check for existing profiling Job: %w", err)
+	}
+	if apierrors.IsNotFound(err) {
+		outputConfigMapName := getOutputConfigMapName(dgdr)
+		existingCM := &corev1.ConfigMap{}
+		err = r.Get(ctx, types.NamespacedName{Name: outputConfigMapName, Namespace: dgdr.Namespace}, existingCM)
+		if err == nil {
+			logger.Info("Deleting existing output ConfigMap to ensure fresh profiling results", "configMap", outputConfigMapName)
+			if err := r.Delete(ctx, existingCM); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("failed to delete existing output ConfigMap: %w", err)
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("failed to check for existing output ConfigMap: %w", err)
 		}
-		logger.Info("Successfully deleted old output ConfigMap", "configMap", outputConfigMapName)
-	} else if !apierrors.IsNotFound(err) {
-		// Unexpected error checking for ConfigMap
-		logger.Error(err, "Failed to check for existing output ConfigMap", "configMap", outputConfigMapName)
-		return false, fmt.Errorf("failed to check for existing output ConfigMap: %w", err)
 	}
 
 	// Ensure profiling job RBAC exists (only for cluster-wide installation)
@@ -2089,9 +2103,24 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	}
 	dgdr.Annotations[AnnotationGeneratedDGDSpec] = string(dgdYAML)
 
-	if err := r.Update(ctx, dgdr); err != nil {
+	annotations := map[string]any{AnnotationGeneratedDGDSpec: string(dgdYAML)}
+	if additionalResources := dgdr.Annotations[AnnotationAdditionalResources]; additionalResources != "" {
+		annotations[AnnotationAdditionalResources] = additionalResources
+	}
+	apply := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": nvidiacomv1beta1.GroupVersion.String(),
+		"kind":       "DynamoGraphDeploymentRequest",
+		"metadata": map[string]any{
+			"name":            dgdr.Name,
+			"namespace":       dgdr.Namespace,
+			"resourceVersion": dgdr.ResourceVersion,
+			"annotations":     annotations,
+		},
+	}}
+	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(apply), client.FieldOwner("dynamo-operator-dgdr"), client.ForceOwnership); err != nil {
 		return nil, "", fmt.Errorf("failed to persist generated DGDR annotations: %w", err)
 	}
+	dgdr.ResourceVersion = apply.GetResourceVersion()
 	return profilingResults, dgd.Name, nil
 }
 
