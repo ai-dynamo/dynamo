@@ -533,18 +533,17 @@ Lifecycle and runtime:
   `VllmEnginePauseController` (discovery unregister before sleep,
   re-register after wake; `worker.rs` `engine_control_policy`)
 - **Elastic EP scaling (vLLM)** — `scale_elastic_ep` control at parity
-  with the handler: `new_data_parallel_size` validation, a
+  with `new_data_parallel_size` validation, a
   single-flight lock (concurrent scales rejected, not queued), and the
   `ray.util.state.list_nodes` → GCS shim for ray `--minimal`. Served at
   `/engine/control/scale_elastic_ep` on the system port (the unified
   Worker namespaces controls under `/engine/control/<name>`, matching the
-  backend). Requires the Ray DP backend
+  existing backend behavior). Requires the Ray DP backend
   (`--data-parallel-backend ray`, `nnodes == 1`) **and `ray` installed**
   (`pip install "ray>=2.55.0"`; the vLLM runtime image does not ship it).
-  The single head-node backend
-  drives `add_dp_placement_groups` to place DP-worker Ray actors across
-  the Ray cluster, so multi-node is a Ray-cluster-membership concern
-  (operator-managed `ray start`), not a per-node backend concern.
+  The single head-node backend drives `add_dp_placement_groups` to place DP-worker
+  Ray actors across the Ray cluster, so multi-node is a Ray-cluster-membership
+  concern (operator-managed `ray start`), not a per-node backend concern.
   Locally GPU-validated on H200 GPUs with vLLM 0.24.0: scale-**up** (2→4)
   and scale-**down** (4→2) return `status:ok`, and serving continues after
   each transition. The integration test remains skipped in CI because each
