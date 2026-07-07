@@ -139,9 +139,8 @@ func (d *DGDDefaulter) RegisterWithManager(mgr manager.Manager) error {
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dgdV1Beta1DefaultingWebhookPath, betaWebhook)
 
-	// Keep the v1alpha1 endpoint in the binary before the Helm registration
-	// moves to v1beta1. This lets an upgrade switch the registration only after
-	// all running operators already serve both endpoints.
+	// TODO(1.5): Remove the v1alpha1 endpoint and defaulter after 1.3 is no longer
+	// a supported upgrade or rollback target.
 	alphaDefaulter := &dgdV1Alpha1Defaulter{defaulter: d}
 	alphaWebhook := admission.
 		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, alphaDefaulter).

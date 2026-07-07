@@ -22,7 +22,7 @@ def main():
     # mp) run vLLM workers only and never touch the DistributedRuntime, so they
     # bypass the Worker/engine lifecycle entirely. Intercept before run() —
     # which would otherwise build the full backend and register an endpoint.
-    config = parse_args()
+    config = parse_args(fpm_trace_relay_supported=False)
     if config.headless:
         run_dynamo_headless(config)
         return

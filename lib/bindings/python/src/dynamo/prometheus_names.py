@@ -349,6 +349,8 @@ class router:
     REMOTE_INDEXER_QUERY_FAILURES_TOTAL = "router_remote_indexer_query_failures_total"
     # Total number of remote indexer routing-decision writes that failed
     REMOTE_INDEXER_WRITE_FAILURES_TOTAL = "router_remote_indexer_write_failures_total"
+    # Number of workers expected to publish KV events but missing query endpoints
+    KV_EVENT_SOURCE_MISMATCH_WORKERS = "router_kv_event_source_mismatch_workers"
     # Time to first token observed at the router (seconds)
     TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
     # Average inter-token latency observed at the router (seconds)
