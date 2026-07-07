@@ -201,6 +201,7 @@ class VllmProcessor:
         routed_engine: RoutedEngine,
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
+        mm_routing_enabled: bool = True,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -211,6 +212,12 @@ class VllmProcessor:
         self.exclude_tools_when_tool_choice_none = True
         self.block_size = block_size
         self.enable_auto_tool_choice = enable_auto_tool_choice
+        # Whether the KV router uses prefix-overlap routing. When False
+        # (load-balancing only — e.g. --load-aware, overlap_score_credit=0, or
+        # not KV mode) the per-request mm_routing_info is wasted, so we skip
+        # building it. process_inputs and the mm_kwargs transfer are unaffected
+        # (they serve the backend, not routing).
+        self.mm_routing_enabled = mm_routing_enabled
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -259,9 +266,18 @@ class VllmProcessor:
 
         rng_routing = _nvtx.start_range("mm_frontend:build_routing_info", color="cyan")
         if vllm_preproc.mm_features:
-            mm_routing_info = build_mm_routing_info_from_features(
-                vllm_preproc.mm_features,
-                prompt_token_ids=list(vllm_preproc.prompt_token_ids),
+            # Build the KV-router overlap view only when the router actually
+            # uses prefix overlap. When load-balancing only, it's wasted (the
+            # router ignores it), so skip it. The mm_kwargs transfer below and
+            # the mm_hashes/placeholders forwarding still run — they serve the
+            # backend, not routing.
+            mm_routing_info = (
+                build_mm_routing_info_from_features(
+                    vllm_preproc.mm_features,
+                    prompt_token_ids=list(vllm_preproc.prompt_token_ids),
+                )
+                if self.mm_routing_enabled
+                else None
             )
             (
                 mm_hashes_list,
@@ -965,6 +981,16 @@ class EngineFactory:
 
         block_size = self.config.kv_cache_block_size or 16
 
+        # Mirrors KvRouterConfig::uses_prefix_overlap() on the Rust side: MM
+        # routing only helps when the router scores prefix overlap (KV mode +
+        # overlap_score_credit > 0), independent of use_kv_events (approximate
+        # KV mode still scores overlap). --load-aware (overlap_score_credit=0)
+        # or a non-KV mode skips the wasted mm_routing_info build.
+        mm_routing_enabled = bool(
+            getattr(self.config, "router_mode", None) == "kv"
+            and getattr(self.config, "overlap_score_credit", 0.0) > 0.0
+        )
+
         gen = VllmProcessor(
             tokenizer,
             input_processor,
@@ -974,6 +1000,7 @@ class EngineFactory:
             routed_engine,
             block_size=block_size,
             enable_auto_tool_choice=enable_auto_tool_choice,
+            mm_routing_enabled=mm_routing_enabled,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

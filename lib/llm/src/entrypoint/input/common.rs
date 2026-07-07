@@ -438,7 +438,8 @@ where
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(card)?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?
+        // Static pipeline (no router-mode context here) — keep MM routing on.
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone(), true)?
             .into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);

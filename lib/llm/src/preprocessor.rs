@@ -274,6 +274,13 @@ pub struct OpenAIPreprocessor {
     /// doesn't round-trip to a single id.
     #[cfg(feature = "mm-routing")]
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
+    /// Whether the KV router scores prefix overlap (and so needs the per-image
+    /// `mm_hash`). False under `--load-aware` / `overlap_score_credit=0` or a
+    /// non-KV mode — there `mm_hash` and its per-image dim fetches are skipped
+    /// as wasted work. Independent of KV-event subscription (approximate KV mode
+    /// still scores overlap). Media transfer (frontend decode) is unaffected.
+    #[cfg(feature = "mm-routing")]
+    mm_routing_enabled: bool,
 }
 
 impl OpenAIPreprocessor {
@@ -391,7 +398,13 @@ impl OpenAIPreprocessor {
         let formatter = prompt_formatter_from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
         match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
+            // Default to MM routing enabled — callers without router context
+            // (C API, tests, static pipelines) preserve prior behavior; the
+            // model watcher uses `new_with_parts` directly with the resolved
+            // router-mode gate.
+            PromptFormatter::OAI(formatter) => {
+                Self::new_with_parts(mdc, formatter, tokenizer, true)
+            }
         }
     }
 
@@ -399,7 +412,13 @@ impl OpenAIPreprocessor {
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
+        // Whether the KV router uses prefix-overlap routing; when false the
+        // per-image `mm_hash` work is skipped (see `mm_routing_enabled` field).
+        // Ignored when the `mm-routing` feature is off.
+        mm_routing_enabled: bool,
     ) -> Result<Arc<Self>> {
+        #[cfg(not(feature = "mm-routing"))]
+        let _ = mm_routing_enabled;
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
@@ -602,6 +621,8 @@ impl OpenAIPreprocessor {
             routing_image_token_id,
             #[cfg(feature = "mm-routing")]
             routing_prepend_bos,
+            #[cfg(feature = "mm-routing")]
+            mm_routing_enabled,
         }))
     }
 
@@ -1084,7 +1105,7 @@ impl OpenAIPreprocessor {
                         _ => continue,
                     };
                     #[cfg(feature = "mm-routing")]
-                    if type_str == "image_url" {
+                    if type_str == "image_url" && self.mm_routing_enabled {
                         total_image_count += 1;
                     }
                     fetch_tasks.push((type_str.to_string(), content_part));
@@ -1102,7 +1123,7 @@ impl OpenAIPreprocessor {
                         _ => continue,
                     };
                     #[cfg(feature = "mm-routing")]
-                    if type_str == "image_url" {
+                    if type_str == "image_url" && self.mm_routing_enabled {
                         total_image_count += 1;
                         let mm_hash = Self::hash_image_url(url.as_str());
                         url_passthrough_images.push((mm_hash, url.to_string()));
@@ -1130,8 +1151,11 @@ impl OpenAIPreprocessor {
 
                 // Decoded RDMA descriptor carries shape `[H, W, C]`.
                 // Image-only; MM-routing doesn't cover audio/video.
+                // Gate on `mm_routing_enabled`: the decode above already ran
+                // (media transfer needs it); we only skip the routing-side
+                // `mm_image_entries` accumulation when the router won't use it.
                 #[cfg(feature = "mm-routing")]
-                if type_str == "image_url" {
+                if type_str == "image_url" && self.mm_routing_enabled {
                     let shape = &rdma_descriptor.tensor_info.shape;
                     if shape.len() >= 2 {
                         let h = shape[0] as u32;
@@ -1338,6 +1362,13 @@ impl OpenAIPreprocessor {
     ) -> Result<()> {
         use crate::protocols::common::preprocessor::MmRoutingInfo;
 
+        // Skip when the router is load-balancing only (no prefix-overlap) —
+        // mm_image_entries is already empty in that case (gather_multi_modal_data
+        // gates its accumulation on the same flag), but guard explicitly so the
+        // intent is local and future callers can't reintroduce the wasted work.
+        if !self.mm_routing_enabled {
+            return Ok(());
+        }
         if mm_image_entries.is_empty() {
             return Ok(());
         }
