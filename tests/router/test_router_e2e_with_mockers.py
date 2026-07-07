@@ -1055,7 +1055,6 @@ def test_bootstrap_prefill_rejection_gates_decode(
             block_size=1,
             frontend_port=frontend_port,
             namespace=shared_namespace,
-            enforce_disagg=True,
             request_plane=request_plane,
             min_initial_workers=1,
         ):

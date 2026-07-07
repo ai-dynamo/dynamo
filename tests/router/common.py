@@ -1640,27 +1640,58 @@ def _test_bootstrap_prefill_rejection_gates_decode(
             filler_tasks: list[asyncio.Task] = []
             try:
                 await wait_for_model()
-                frontend_send_baseline = await metric(
-                    frontend_metrics_url,
-                    "dynamo_request_plane_send_seconds_count",
-                )
-
-                first_response = await asyncio.wait_for(
-                    session.post(chat_url, json=request_payload("active")),
-                    timeout=15,
-                )
-                if first_response.status != 200:
-                    body = await first_response.text()
-                    raise AssertionError(
-                        f"Active bootstrap request returned "
-                        f"{first_response.status}: {body}"
+                # Worker registration can make /v1/models ready just before the
+                # asynchronously-created prefill router becomes active. Close
+                # any request that lands in that narrow aggregated-routing
+                # window, and retain the first request proven to have reached
+                # the prefill TCP handler.
+                activation_deadline = asyncio.get_running_loop().time() + 15
+                activation_attempt = 0
+                while first_response is None:
+                    activation_attempt += 1
+                    frontend_send_baseline = await metric(
+                        frontend_metrics_url,
+                        "dynamo_request_plane_send_seconds_count",
                     )
+                    candidate_response = await asyncio.wait_for(
+                        session.post(
+                            chat_url,
+                            json=request_payload(f"active-{activation_attempt}"),
+                        ),
+                        timeout=15,
+                    )
+                    if candidate_response.status != 200:
+                        body = await candidate_response.text()
+                        raise AssertionError(
+                            f"Active bootstrap request returned "
+                            f"{candidate_response.status}: {body}"
+                        )
 
-                await wait_for_metric(
-                    prefill_metrics_url,
-                    "dynamo_work_handler_pool_active_tasks",
-                    lambda value: value >= 1,
-                )
+                    frontend_send_after_candidate = await wait_for_metric(
+                        frontend_metrics_url,
+                        "dynamo_request_plane_send_seconds_count",
+                        lambda value: value >= frontend_send_baseline + 1,
+                    )
+                    try:
+                        await wait_for_metric(
+                            prefill_metrics_url,
+                            "dynamo_work_handler_pool_active_tasks",
+                            lambda value: value >= 1,
+                            timeout=0.5,
+                        )
+                    except AssertionError:
+                        if (
+                            frontend_send_after_candidate == frontend_send_baseline + 1
+                            and asyncio.get_running_loop().time() < activation_deadline
+                        ):
+                            candidate_response.close()
+                            await asyncio.sleep(0.05)
+                            continue
+                        candidate_response.close()
+                        raise
+
+                    first_response = candidate_response
+
                 frontend_send_after_first = await wait_for_metric(
                     frontend_metrics_url,
                     "dynamo_request_plane_send_seconds_count",
@@ -1689,6 +1720,15 @@ def _test_bootstrap_prefill_rejection_gates_decode(
                     raise AssertionError(
                         "dispatcher-held request unexpectedly established a response stream"
                     )
+
+                # An ACK proves enqueueing, not that the dispatcher has drained
+                # the item. Wait for zero queue depth so the first filler is
+                # dispatcher-held before placing the second filler in the queue.
+                await wait_for_metric(
+                    prefill_metrics_url,
+                    "dynamo_work_handler_queue_depth",
+                    lambda value: value == 0,
+                )
 
                 queued_task = asyncio.create_task(
                     session.post(chat_url, json=request_payload("queued"))
