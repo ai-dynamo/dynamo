@@ -29,7 +29,8 @@ use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
-    SelectRequest, SelectionCore, SelectionError, SelectionServiceConfig, WorkerRequest,
+    SelectRequest, SelectionError, SelectionService as RustSelectionService,
+    SelectionServiceBuilder, SelectionServiceConfig, WorkerPatchRequest, WorkerRequest,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -381,11 +382,11 @@ fn selection_to_pyerr(err: SelectionError) -> PyErr {
     })
 }
 
-/// In-process handle to a runtime-free Dynamo `SelectionCore`.
+/// In-process handle to a managed Dynamo `SelectionService`.
 #[cfg(feature = "select-service")]
 #[pyclass]
 pub(crate) struct SelectionService {
-    inner: Arc<SelectionCore>,
+    inner: Arc<RustSelectionService>,
 }
 
 #[cfg(feature = "select-service")]
@@ -393,14 +394,31 @@ pub(crate) struct SelectionService {
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (*, indexer_threads = 4))]
-    fn new(indexer_threads: usize) -> Self {
-        let inner = Arc::new(SelectionCore::new(
-            kv_router_config_from_dynamo_env(),
-            indexer_threads,
-            tokio_util::sync::CancellationToken::new(),
-        ));
-        Self { inner }
+    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None))]
+    fn new(
+        indexer_threads: usize,
+        indexer_peers: Option<Vec<String>>,
+        replica_sync_port: Option<u16>,
+        replica_sync_peers: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let replica_sync_peers = replica_sync_peers.unwrap_or_default();
+        if replica_sync_port.is_none() && !replica_sync_peers.is_empty() {
+            return Err(PyValueError::new_err(
+                "replica_sync_peers requires replica_sync_port",
+            ));
+        }
+        let mut builder = SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
+            .indexer_threads(indexer_threads)
+            .indexer_peers(indexer_peers.unwrap_or_default());
+        if let Some(port) = replica_sync_port {
+            builder = builder.replica_sync(port, replica_sync_peers);
+        }
+        let inner = pyo3_async_runtimes::tokio::get_runtime()
+            .block_on(builder.build())
+            .map_err(to_pyerr)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 
     /// Stop the service: cancel KV-event listeners and scheduling so that
@@ -408,8 +426,12 @@ impl SelectionService {
     ///
     /// The KV indexer thread pool is released when the last Python handle is
     /// dropped. Idempotent, and also run automatically on drop.
-    fn shutdown(&self) {
-        self.inner.shutdown();
+    fn shutdown<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let service = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            service.shutdown().await;
+            Ok(())
+        })
     }
 
     /// Upsert a worker and subscribe to its live KV events via each `kv_events_endpoints`.
@@ -419,6 +441,25 @@ impl SelectionService {
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let record = core.upsert_worker(req).await.map_err(selection_to_pyerr)?;
+            Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
+        })
+    }
+
+    /// Patch supplied worker fields and reconcile KV-event listeners.
+    fn patch_worker<'p>(
+        &self,
+        py: Python<'p>,
+        worker_id: u64,
+        patch: PyObject,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let patch: WorkerPatchRequest =
+            depythonize(patch.bind(py)).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let service = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let record = service
+                .patch_worker(worker_id, patch)
+                .await
+                .map_err(selection_to_pyerr)?;
             Python::with_gil(|py| pythonize(py, &record).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
@@ -585,6 +626,69 @@ impl SelectionService {
             Python::with_gil(|py| pythonize(py, &resp).map(|o| o.unbind()).map_err(to_pyerr))
         })
     }
+
+    /// Add a live selector replica peer. Returns whether membership changed.
+    fn register_replica_peer<'p>(
+        &self,
+        py: Python<'p>,
+        endpoint: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let service = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            service
+                .register_replica_peer(endpoint)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Remove a selector replica peer. Returns whether membership changed.
+    fn deregister_replica_peer<'p>(
+        &self,
+        py: Python<'p>,
+        endpoint: String,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let service = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            service
+                .deregister_replica_peer(endpoint)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// List configured selector replica peers.
+    fn list_replica_peers(&self) -> Vec<String> {
+        self.inner.list_replica_peers()
+    }
+
+    /// Export the current indexer state in the standalone `/dump` shape.
+    fn indexer_snapshot<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let service = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let snapshot = service.indexer_snapshot().await;
+            Python::with_gil(|py| {
+                pythonize(py, &snapshot)
+                    .map(|o| o.unbind())
+                    .map_err(to_pyerr)
+            })
+        })
+    }
+
+    /// Recover indexer state from the first reachable standalone peer.
+    fn recover_indexer_from_peers<'p>(
+        &self,
+        py: Python<'p>,
+        peers: Vec<String>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let service = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            service
+                .recover_indexer_from_peers(&peers)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
 }
 
 #[cfg(all(test, feature = "select-service"))]
@@ -593,19 +697,11 @@ mod selection_service_lifecycle_tests {
 
     #[test]
     fn idempotent_shutdown() {
-        let service = SelectionService::new(1);
-        service.shutdown();
-
-        // Idempotent: a second shutdown and the final drop must not panic.
-        service.shutdown();
+        let service = SelectionService::new(1, None, None, None).unwrap();
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(service.inner.shutdown());
+        runtime.block_on(service.inner.shutdown());
         drop(service);
-    }
-}
-
-#[cfg(feature = "select-service")]
-impl Drop for SelectionService {
-    fn drop(&mut self) {
-        self.inner.shutdown();
     }
 }
 
