@@ -47,6 +47,11 @@ pub use config::{
     KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
     SharedCacheType,
 };
+pub use indexer::cuckoo::{
+    CuckooConsumerSession, CuckooDcConfig, CuckooFilter, CuckooFrameEnvelope, CuckooFrameIndexer,
+    CuckooFrameMetadata, CuckooIndexerConfig, CuckooIndexerMode, CuckooPublication,
+    SnapshotProducer, TransposedTable,
+};
 #[allow(deprecated)]
 pub use indexer::{
     AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,

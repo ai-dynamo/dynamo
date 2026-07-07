@@ -2490,6 +2490,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
+ "bytemuck",
  "chrono",
  "dashmap",
  "derive_builder",

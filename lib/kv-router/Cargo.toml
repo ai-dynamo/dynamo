@@ -31,6 +31,7 @@ dynamo-tokens = { workspace = true }
 # workspace
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+bytemuck = "1.22"
 dashmap = { workspace = true }
 indexmap = { workspace = true }
 ordered-float = { workspace = true }

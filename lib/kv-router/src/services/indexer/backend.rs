@@ -9,6 +9,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ConcurrentRadixTreeCompressed;
 use crate::ThreadPoolIndexer;
+use crate::indexer::cuckoo::{
+    CuckooFrameEnvelope, CuckooFrameIndexer, CuckooFrameMetadata, CuckooIndexerConfig,
+    CuckooIndexerMode,
+};
 use crate::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
     MatchDetails, TieredMatchDetails, TieredMatchProvider, query_lower_tiers,
@@ -31,6 +35,19 @@ pub enum Indexer {
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
         lower_tier: LowerTierIndexers,
     },
+    CuckooNative {
+        primary: Arc<CuckooFrameIndexer>,
+    },
+    CuckooTransposed {
+        primary: Arc<CuckooFrameIndexer>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum IndexerKind {
+    Exact,
+    CuckooNative(CuckooIndexerConfig),
+    CuckooTransposed(CuckooIndexerConfig),
 }
 
 impl Indexer {
@@ -41,6 +58,9 @@ impl Indexer {
         match self {
             Indexer::Single { primary, .. } => primary.apply_event(event).await,
             Indexer::Concurrent { primary, .. } => primary.apply_event(event).await,
+            Indexer::CuckooNative { primary } | Indexer::CuckooTransposed { primary } => {
+                primary.apply_event(event).await
+            }
         }
     }
 
@@ -90,6 +110,24 @@ impl Indexer {
                         .await;
                 }
             },
+            Indexer::CuckooNative { primary } | Indexer::CuckooTransposed { primary } => {
+                primary.apply_event(event).await;
+            }
+        }
+    }
+
+    pub fn apply_cuckoo_frame(
+        &self,
+        envelope: CuckooFrameEnvelope,
+        metadata: CuckooFrameMetadata,
+    ) -> anyhow::Result<()> {
+        match self {
+            Indexer::CuckooNative { primary } | Indexer::CuckooTransposed { primary } => {
+                primary.submit(envelope, metadata)
+            }
+            Indexer::Single { .. } | Indexer::Concurrent { .. } => {
+                anyhow::bail!("exact indexers consume RouterEvents, not CKF Relay frames")
+            }
         }
     }
 
@@ -111,6 +149,9 @@ impl Indexer {
                 for indexer in lower_tier.all() {
                     indexer.remove_worker(worker_id).await;
                 }
+                primary.remove_worker(worker_id).await;
+            }
+            Indexer::CuckooNative { primary } | Indexer::CuckooTransposed { primary } => {
                 primary.remove_worker(worker_id).await;
             }
         }
@@ -136,6 +177,9 @@ impl Indexer {
                 }
                 primary.remove_worker_dp_rank(worker_id, dp_rank).await;
             }
+            Indexer::CuckooNative { primary } | Indexer::CuckooTransposed { primary } => {
+                primary.remove_worker_dp_rank(worker_id, dp_rank).await;
+            }
         }
     }
 
@@ -147,6 +191,9 @@ impl Indexer {
                 primary.find_matches(hashes).await.map_err(Into::into)
             }
             Indexer::Concurrent { primary, .. } => {
+                primary.find_matches(hashes).await.map_err(Into::into)
+            }
+            Indexer::CuckooNative { primary } | Indexer::CuckooTransposed { primary } => {
                 primary.find_matches(hashes).await.map_err(Into::into)
             }
         }
@@ -182,6 +229,15 @@ impl Indexer {
                     lower_tier: lt,
                 })
             }
+            Indexer::CuckooNative { primary } | Indexer::CuckooTransposed { primary } => {
+                Ok(TieredMatchDetails {
+                    device: MatchDetails {
+                        overlap_scores: primary.find_matches(sequence).await?,
+                        last_matched_hashes: Default::default(),
+                    },
+                    lower_tier: Default::default(),
+                })
+            }
         }
     }
 
@@ -209,6 +265,9 @@ impl Indexer {
                 primary.dump_events().await.map_err(anyhow::Error::from)?,
                 lower_tier.entries(),
             ),
+            Indexer::CuckooNative { primary } | Indexer::CuckooTransposed { primary } => {
+                return primary.dump_events().await.map_err(anyhow::Error::from);
+            }
         };
 
         let mut out = primary_events;
@@ -300,6 +359,34 @@ mod tests {
     use super::*;
     use crate::indexer::KvIndexerInterface;
     use crate::protocols::{LocalBlockHash, StorageTier, WorkerWithDpRank};
+
+    #[test]
+    fn cuckoo_factory_selects_native_and_transposed_variants() {
+        let producer = crate::indexer::cuckoo::SnapshotProducer::new(
+            0,
+            64,
+            crate::indexer::cuckoo::DEFAULT_FILTER_SEED,
+        );
+        let config = CuckooIndexerConfig {
+            mode: CuckooIndexerMode::Native,
+            event_threads: 1,
+            block_size: 16,
+            dcs: vec![crate::indexer::cuckoo::CuckooConsumerSession {
+                dc_worker_id: 0,
+                relay_instance_id: 10,
+                num_buckets: producer.num_buckets(),
+                seed: crate::indexer::cuckoo::DEFAULT_FILTER_SEED,
+            }],
+        };
+        assert!(matches!(
+            create_indexer_with_kind(16, 1, IndexerKind::CuckooNative(config.clone())).unwrap(),
+            Indexer::CuckooNative { .. }
+        ));
+        assert!(matches!(
+            create_indexer_with_kind(16, 1, IndexerKind::CuckooTransposed(config)).unwrap(),
+            Indexer::CuckooTransposed { .. }
+        ));
+    }
 
     /// Apply a Device store and a HostPinned store anchored on it. The tiered
     /// query must surface both tier hits, and the device-tier `find_matches`
@@ -488,13 +575,55 @@ pub fn create_indexer(block_size: u32, num_threads: usize) -> Indexer {
     )
 }
 
+pub fn create_indexer_with_kind(
+    block_size: u32,
+    num_threads: usize,
+    kind: IndexerKind,
+) -> anyhow::Result<Indexer> {
+    create_indexer_with_metrics_and_kind(
+        block_size,
+        num_threads,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+        kind,
+    )
+}
+
 pub fn create_indexer_with_metrics(
     block_size: u32,
     num_threads: usize,
     metrics: Arc<KvIndexerMetrics>,
 ) -> Indexer {
+    create_indexer_with_metrics_and_kind(block_size, num_threads, metrics, IndexerKind::Exact)
+        .expect("exact indexer construction is infallible")
+}
+
+pub fn create_indexer_with_metrics_and_kind(
+    block_size: u32,
+    num_threads: usize,
+    metrics: Arc<KvIndexerMetrics>,
+    kind: IndexerKind,
+) -> anyhow::Result<Indexer> {
+    match kind {
+        IndexerKind::CuckooNative(mut config) => {
+            config.mode = CuckooIndexerMode::Native;
+            config.block_size = block_size;
+            config.event_threads = num_threads;
+            return Ok(Indexer::CuckooNative {
+                primary: CuckooFrameIndexer::new(config)?,
+            });
+        }
+        IndexerKind::CuckooTransposed(mut config) => {
+            config.mode = CuckooIndexerMode::Transposed;
+            config.block_size = block_size;
+            config.event_threads = num_threads;
+            return Ok(Indexer::CuckooTransposed {
+                primary: CuckooFrameIndexer::new(config)?,
+            });
+        }
+        IndexerKind::Exact => {}
+    }
     if num_threads > 1 {
-        Indexer::Concurrent {
+        Ok(Indexer::Concurrent {
             primary: Arc::new(ThreadPoolIndexer::new_with_metrics(
                 ConcurrentRadixTreeCompressed::new(),
                 num_threads,
@@ -502,9 +631,9 @@ pub fn create_indexer_with_metrics(
                 Some(metrics),
             )),
             lower_tier: LowerTierIndexers::new(num_threads, block_size),
-        }
+        })
     } else {
-        Indexer::Single {
+        Ok(Indexer::Single {
             primary: KvIndexer::new_with_pruning(
                 CancellationToken::new(),
                 block_size,
@@ -512,6 +641,6 @@ pub fn create_indexer_with_metrics(
                 None,
             ),
             lower_tier: LowerTierIndexers::new(1, block_size),
-        }
+        })
     }
 }
