@@ -34,6 +34,14 @@ from torch.cuda import device_count
 from transformers import AutoConfig
 
 import dynamo.nixl_connect as nixl_connect
+
+try:
+    import nixl._api  # noqa: F401
+
+    _NIXL_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    _NIXL_AVAILABLE = False
+
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
@@ -467,17 +475,24 @@ async def init_llm_worker(
         )
     )
     if needs_nixl:
-        try:
-            logging.info("Initializing NIXL Connect.")
-            connector = nixl_connect.Connector()
-            await connector._create_connection()
-        except Exception:
+        if not _NIXL_AVAILABLE:
             logging.warning(
-                "Failed to initialize NIXL Connect; "
-                "KV-cache transfer will be unavailable.",
-                exc_info=True,
+                "nixl python binding is not installed; skipping NIXL Connect initialization. "
+                "Encoder embedding transfer will be unavailable."
             )
             connector = None
+        else:
+            try:
+                logging.info("Initializing NIXL Connect.")
+                connector = nixl_connect.Connector()
+                await connector._create_connection()
+            except Exception:
+                logging.warning(
+                    "Failed to initialize NIXL Connect; "
+                    "KV-cache transfer will be unavailable.",
+                    exc_info=True,
+                )
+                connector = None
     else:
         logging.info("Skipping NIXL Connect initialization (aggregated mode).")
 
