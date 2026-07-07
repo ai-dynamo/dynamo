@@ -57,6 +57,11 @@ def test_supervisor_terminates_siblings_when_child_exits():
     assert server._supervise(processes) == 17
     assert processes[1].terminated
 
+    # A clean exit (poll() returning 0) is an exit, not "still running".
+    clean = [_Process(exit_code=0), _Process()]
+    assert server._supervise(clean) == 0
+    assert clean[1].terminated
+
 
 def test_parse_args_defaults_to_one_config_per_production_tag(monkeypatch):
     # get_socket_path queries the GPU UUID through NVML; stub the hardware.
@@ -78,25 +83,78 @@ def test_parse_args_defaults_to_one_config_per_production_tag(monkeypatch):
     (config,) = parse_args(["--device", "3", "--tag", "kv_cache"])
     assert config.tag == "kv_cache"
 
-    with pytest.raises(SystemExit):
-        # --socket-path cannot name one socket for multiple tags.
-        parse_args(["--device", "3", "--socket-path", "/tmp/gms.sock"])
 
+def test_parse_args_single_tag_honors_explicit_socket_path():
+    (config,) = parse_args(
+        ["--device", "3", "--tag", "weights", "--socket-path", "/run/gms.sock"]
+    )
+
+    assert config.socket_path == "/run/gms.sock"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--device", "3", "--tag", "weight"],
+        ["--device", "3", "--tag", "weights", "--tag", "bogus"],
+    ],
+)
+def test_parse_args_rejects_unknown_tags(argv, capsys):
     with pytest.raises(SystemExit):
-        # Tags outside GMS_TAGS are rejected.
-        parse_args(["--device", "3", "--tag", "weight"])
+        parse_args(argv)
+
+    assert "invalid choice" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # Default tags: one socket path cannot serve both listeners.
+        ["--device", "3", "--socket-path", "/run/gms.sock"],
+        # Explicit multiple tags with one socket path.
+        [
+            "--device",
+            "3",
+            "--tag",
+            "weights",
+            "--tag",
+            "kv_cache",
+            "--socket-path",
+            "/run/gms.sock",
+        ],
+    ],
+)
+def test_parse_args_rejects_socket_path_for_multiple_tags(argv, capsys):
+    with pytest.raises(SystemExit):
+        parse_args(argv)
+
+    assert "requires exactly one --tag" in capsys.readouterr().err
+
+
+def test_parse_args_rejects_duplicate_tags(capsys):
+    with pytest.raises(SystemExit):
+        parse_args(["--device", "3", "--tag", "weights", "--tag", "weights"])
+
+    assert "must be unique" in capsys.readouterr().err
 
 
 @pytest.mark.timeout(10)
 @pytest.mark.asyncio
-async def test_server_failure_cancels_other_listener():
+@pytest.mark.parametrize(
+    ("crash", "match"),
+    [
+        pytest.param(True, "listener failed", id="listener-crash"),
+        pytest.param(False, "stopped unexpectedly", id="clean-stop"),
+    ],
+)
+async def test_server_stop_cancels_other_listener(crash, match):
     both_started = asyncio.Event()
     started = 0
     sibling_cancelled = asyncio.Event()
 
-    class FailingServer:
-        def __init__(self, fails: bool) -> None:
-            self.fails = fails
+    class Server:
+        def __init__(self, stops: bool) -> None:
+            self.stops = stops
 
         async def serve(self) -> None:
             nonlocal started
@@ -104,17 +162,17 @@ async def test_server_failure_cancels_other_listener():
             if started == 2:
                 both_started.set()
             await both_started.wait()
-            if self.fails:
-                raise RuntimeError("listener failed")
+            if self.stops:
+                if crash:
+                    raise RuntimeError("listener failed")
+                return  # A clean return must still be fail-closed.
             try:
                 await asyncio.Future()
             except asyncio.CancelledError:
                 sibling_cancelled.set()
                 raise
 
-    with pytest.raises(RuntimeError, match="listener failed"):
-        await runner.run_servers(
-            [FailingServer(fails=True), FailingServer(fails=False)]
-        )
+    with pytest.raises(RuntimeError, match=match):
+        await runner.run_servers([Server(stops=True), Server(stops=False)])
 
     assert sibling_cancelled.is_set()
