@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"archive/tar"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -201,6 +202,106 @@ func TestCaptureDeletedFiles(t *testing.T) {
 			t.Fatal("expected found=false for empty upperDir")
 		}
 	})
+}
+
+func TestApplyDeletedFilesWithStats(t *testing.T) {
+	checkpointDir := t.TempDir()
+	targetRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(targetRoot, "remove-me"), nil, 0644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	deletedFiles := []string{"remove-me", "missing", "", "../outside"}
+	data, err := json.Marshal(deletedFiles)
+	if err != nil {
+		t.Fatalf("marshal deleted files: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(checkpointDir, deletedFilesFilename), data, 0644); err != nil {
+		t.Fatalf("write deleted files: %v", err)
+	}
+
+	stats, err := ApplyDeletedFilesWithStats(checkpointDir, targetRoot, testr.New(t))
+	if err != nil {
+		t.Fatalf("ApplyDeletedFilesWithStats: %v", err)
+	}
+	if stats.SizeBytes != int64(len(data)) {
+		t.Errorf("SizeBytes = %d, want %d", stats.SizeBytes, len(data))
+	}
+	if stats.Entries != len(deletedFiles) {
+		t.Errorf("Entries = %d, want %d", stats.Entries, len(deletedFiles))
+	}
+	if stats.Removed != 1 {
+		t.Errorf("Removed = %d, want 1", stats.Removed)
+	}
+	if stats.Skipped != 3 {
+		t.Errorf("Skipped = %d, want 3", stats.Skipped)
+	}
+	if stats.ReadDuration <= 0 || stats.ParseDuration <= 0 || stats.RemoveDuration <= 0 {
+		t.Errorf("expected positive phase durations, got %+v", stats)
+	}
+}
+
+func TestApplyRootfsDiffWithStatsMissingArchive(t *testing.T) {
+	stats, err := ApplyRootfsDiffWithStats(t.TempDir(), t.TempDir(), testr.New(t))
+	if err != nil {
+		t.Fatalf("ApplyRootfsDiffWithStats: %v", err)
+	}
+	if stats.SizeBytes != 0 || stats.ExtractDuration != 0 {
+		t.Errorf("unexpected stats for missing archive: %+v", stats)
+	}
+	if stats.StatDuration <= 0 {
+		t.Errorf("expected positive stat duration, got %+v", stats)
+	}
+}
+
+func TestApplyRootfsDiffWithStats(t *testing.T) {
+	checkpointDir := t.TempDir()
+	targetRoot := t.TempDir()
+	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
+	archive, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatalf("create archive: %v", err)
+	}
+	tarWriter := tar.NewWriter(archive)
+	const content = "restored"
+	if err := tarWriter.WriteHeader(&tar.Header{
+		Name: "cache/result",
+		Mode: 0644,
+		Size: int64(len(content)),
+	}); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+	if _, err := tarWriter.Write([]byte(content)); err != nil {
+		t.Fatalf("write tar content: %v", err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatalf("close archive: %v", err)
+	}
+	archiveInfo, err := os.Stat(archivePath)
+	if err != nil {
+		t.Fatalf("stat archive: %v", err)
+	}
+
+	stats, err := ApplyRootfsDiffWithStats(checkpointDir, targetRoot, testr.New(t))
+	if err != nil {
+		t.Fatalf("ApplyRootfsDiffWithStats: %v", err)
+	}
+	if stats.SizeBytes != archiveInfo.Size() {
+		t.Errorf("SizeBytes = %d, want %d", stats.SizeBytes, archiveInfo.Size())
+	}
+	if stats.StatDuration <= 0 || stats.ExtractDuration <= 0 {
+		t.Errorf("expected positive phase durations, got %+v", stats)
+	}
+	data, err := os.ReadFile(filepath.Join(targetRoot, "cache", "result"))
+	if err != nil {
+		t.Fatalf("read extracted file: %v", err)
+	}
+	if string(data) != content {
+		t.Errorf("extracted content = %q, want %q", data, content)
+	}
 }
 
 func TestApplyDeletedFiles(t *testing.T) {

@@ -25,10 +25,51 @@ type RestoreOptions struct {
 }
 
 type RestoreInNamespaceResult struct {
-	RestoredPID            int           `json:"restoredPID"`
-	NSRestoreSetupDuration time.Duration `json:"nsrestoreSetupDuration"`
-	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
-	CUDADuration           time.Duration `json:"cudaDuration"`
+	RestoredPID            int                   `json:"restoredPID"`
+	NSRestoreSetupDuration time.Duration         `json:"nsrestoreSetupDuration"`
+	NSRestoreSetupTimings  NSRestoreSetupTimings `json:"nsrestoreSetupTimings"`
+	CRIURestoreDuration    time.Duration         `json:"criuRestoreDuration"`
+	CUDADuration           time.Duration         `json:"cudaDuration"`
+}
+
+// NSRestoreSetupTimings breaks down NSRestoreSetupDuration without changing it.
+type NSRestoreSetupTimings struct {
+	ManifestReadDuration          time.Duration `json:"manifestReadDuration"`
+	InetRemapDuration             time.Duration `json:"inetRemapDuration"`
+	BuildRestoreOptsDuration      time.Duration `json:"buildRestoreOptsDuration"`
+	RootfsDiffStatDuration        time.Duration `json:"rootfsDiffStatDuration"`
+	RootfsDiffSizeBytes           int64         `json:"rootfsDiffSizeBytes"`
+	RootfsDiffExtractDuration     time.Duration `json:"rootfsDiffExtractDuration"`
+	DeletedFilesReadDuration      time.Duration `json:"deletedFilesReadDuration"`
+	DeletedFilesParseDuration     time.Duration `json:"deletedFilesParseDuration"`
+	DeletedFilesRemoveDuration    time.Duration `json:"deletedFilesRemoveDuration"`
+	DeletedFilesDuration          time.Duration `json:"deletedFilesDuration"`
+	DeletedFilesSizeBytes         int64         `json:"deletedFilesSizeBytes"`
+	DeletedFilesEntries           int           `json:"deletedFilesEntries"`
+	DeletedFilesRemoved           int           `json:"deletedFilesRemoved"`
+	DeletedFilesSkipped           int           `json:"deletedFilesSkipped"`
+	DevShmUnmountDuration         time.Duration `json:"devShmUnmountDuration"`
+	ProcSysRemountReadWrite       time.Duration `json:"procSysRemountReadWriteDuration"`
+	SetupSubphasesDuration        time.Duration `json:"setupSubphasesDuration"`
+	SetupUnaccountedDuration      time.Duration `json:"setupUnaccountedDuration"`
+	ProcSysRemountReadOnlyOutside time.Duration `json:"procSysRemountReadOnlyOutsideSetupDuration"`
+}
+
+func (t *NSRestoreSetupTimings) finalize(total time.Duration) {
+	t.SetupSubphasesDuration = t.ManifestReadDuration +
+		t.InetRemapDuration +
+		t.BuildRestoreOptsDuration +
+		t.RootfsDiffStatDuration +
+		t.RootfsDiffExtractDuration +
+		t.DeletedFilesReadDuration +
+		t.DeletedFilesParseDuration +
+		t.DeletedFilesRemoveDuration +
+		t.DevShmUnmountDuration +
+		t.ProcSysRemountReadWrite
+	t.DeletedFilesDuration = t.DeletedFilesReadDuration +
+		t.DeletedFilesParseDuration +
+		t.DeletedFilesRemoveDuration
+	t.SetupUnaccountedDuration = total - t.SetupSubphasesDuration
 }
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
@@ -57,15 +98,19 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
 
-	// Phase 1: Configure — build CRIU opts from manifest
+	// Phase 1: Configure — build CRIU opts from manifest.
 	configureStart := time.Now()
+	inetRemapStart := time.Now()
 	if err := criu.ConfigureInetRemap(m, opts.TargetPodIP, log); err != nil {
 		return nil, err
 	}
+	inetRemapDuration := time.Since(inetRemapStart)
+	buildRestoreOptsStart := time.Now()
 	criuOpts, err := criu.BuildRestoreOpts(m, opts.CheckpointPath, opts.CgroupRoot, log)
 	if err != nil {
 		return nil, err
 	}
+	buildRestoreOptsDuration := time.Since(buildRestoreOptsStart)
 	configureDuration := time.Since(configureStart)
 
 	// Phase 2: Execute — rootfs, CRIU restore, CUDA restore
@@ -74,13 +119,45 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		return nil, err
 	}
 
+	setupDuration := manifestReadDuration + configureDuration + executeTimings.nsrestoreSetupDuration
+	setupTimings := executeTimings.nsrestoreSetupTimings
+	setupTimings.ManifestReadDuration = manifestReadDuration
+	setupTimings.InetRemapDuration = inetRemapDuration
+	setupTimings.BuildRestoreOptsDuration = buildRestoreOptsDuration
+	setupTimings.finalize(setupDuration)
 	result := &RestoreInNamespaceResult{
 		RestoredPID:            restoredPID,
-		NSRestoreSetupDuration: manifestReadDuration + configureDuration + executeTimings.nsrestoreSetupDuration,
+		NSRestoreSetupDuration: setupDuration,
+		NSRestoreSetupTimings:  setupTimings,
 		CRIURestoreDuration:    executeTimings.criuRestoreDuration,
 		CUDADuration:           executeTimings.cudaDuration,
 	}
-	log.V(1).Info("nsrestore timing summary",
+	log.Info("nsrestore setup timing breakdown",
+		"nsrestore_setup", map[string]any{
+			"duration":                      result.NSRestoreSetupDuration.String(),
+			"subphases_duration":            setupTimings.SetupSubphasesDuration.String(),
+			"unaccounted_duration":          setupTimings.SetupUnaccountedDuration.String(),
+			"manifest_read_duration":        setupTimings.ManifestReadDuration.String(),
+			"inet_remap_duration":           setupTimings.InetRemapDuration.String(),
+			"build_restore_opts_duration":   setupTimings.BuildRestoreOptsDuration.String(),
+			"rootfs_diff_stat_duration":     setupTimings.RootfsDiffStatDuration.String(),
+			"rootfs_diff_size_bytes":        setupTimings.RootfsDiffSizeBytes,
+			"rootfs_diff_extract_duration":  setupTimings.RootfsDiffExtractDuration.String(),
+			"deleted_files_read_duration":   setupTimings.DeletedFilesReadDuration.String(),
+			"deleted_files_parse_duration":  setupTimings.DeletedFilesParseDuration.String(),
+			"deleted_files_remove_duration": setupTimings.DeletedFilesRemoveDuration.String(),
+			"deleted_files_duration":        setupTimings.DeletedFilesDuration.String(),
+			"deleted_files_size_bytes":      setupTimings.DeletedFilesSizeBytes,
+			"deleted_files_entries":         setupTimings.DeletedFilesEntries,
+			"deleted_files_removed":         setupTimings.DeletedFilesRemoved,
+			"deleted_files_skipped":         setupTimings.DeletedFilesSkipped,
+			"dev_shm_unmount_duration":      setupTimings.DevShmUnmountDuration.String(),
+			"proc_sys_remount_rw_duration":  setupTimings.ProcSysRemountReadWrite.String(),
+			"proc_sys_remount_ro_duration":  setupTimings.ProcSysRemountReadOnlyOutside.String(),
+			"proc_sys_remount_ro_scope":     "outside_setup",
+		},
+	)
+	log.Info("nsrestore timing summary",
 		"restored_pid", restoredPID,
 		"nsrestore_setup_duration", result.NSRestoreSetupDuration,
 		"criu_restore_duration", result.CRIURestoreDuration,
@@ -92,6 +169,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 
 type nsrestorePhaseTimings struct {
 	nsrestoreSetupDuration time.Duration
+	nsrestoreSetupTimings  NSRestoreSetupTimings
 	criuRestoreDuration    time.Duration
 	cudaDuration           time.Duration
 }
@@ -101,27 +179,49 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	// Apply rootfs diff inside the namespace (target root is /)
 	nsrestoreSetupStart := time.Now()
-	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", log); err != nil {
+	rootfsStats, err := snapshotruntime.ApplyRootfsDiffWithStats(opts.CheckpointPath, "/", log)
+	timings.nsrestoreSetupTimings.RootfsDiffStatDuration = rootfsStats.StatDuration
+	timings.nsrestoreSetupTimings.RootfsDiffSizeBytes = rootfsStats.SizeBytes
+	timings.nsrestoreSetupTimings.RootfsDiffExtractDuration = rootfsStats.ExtractDuration
+	if err != nil {
 		return nil, 0, fmt.Errorf("rootfs diff failed: %w", err)
 	}
 
-	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
+	deletedStats, err := snapshotruntime.ApplyDeletedFilesWithStats(opts.CheckpointPath, "/", log)
+	timings.nsrestoreSetupTimings.DeletedFilesReadDuration = deletedStats.ReadDuration
+	timings.nsrestoreSetupTimings.DeletedFilesParseDuration = deletedStats.ParseDuration
+	timings.nsrestoreSetupTimings.DeletedFilesRemoveDuration = deletedStats.RemoveDuration
+	timings.nsrestoreSetupTimings.DeletedFilesSizeBytes = deletedStats.SizeBytes
+	timings.nsrestoreSetupTimings.DeletedFilesEntries = deletedStats.Entries
+	timings.nsrestoreSetupTimings.DeletedFilesRemoved = deletedStats.Removed
+	timings.nsrestoreSetupTimings.DeletedFilesSkipped = deletedStats.Skipped
+	if err != nil {
 		log.Error(err, "Failed to apply deleted files")
 	}
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
+	devShmUnmountStart := time.Now()
 	if err := syscall.Unmount("/dev/shm", 0); err != nil {
 		return nil, 0, fmt.Errorf("failed to unmount /dev/shm before restore: %w", err)
 	}
+	timings.nsrestoreSetupTimings.DevShmUnmountDuration = time.Since(devShmUnmountStart)
 
+	procSysRemountReadWriteStart := time.Now()
 	if err := snapshotruntime.RemountProcSys(true); err != nil {
 		return nil, 0, fmt.Errorf("failed to remount /proc/sys read-write for restore: %w", err)
 	}
+	timings.nsrestoreSetupTimings.ProcSysRemountReadWrite = time.Since(procSysRemountReadWriteStart)
 	timings.nsrestoreSetupDuration = time.Since(nsrestoreSetupStart)
 	defer func() {
+		procSysRemountReadOnlyStart := time.Now()
 		if err := snapshotruntime.RemountProcSys(false); err != nil {
 			log.Error(err, "Failed to remount /proc/sys read-only after restore")
 		}
+		timings.nsrestoreSetupTimings.ProcSysRemountReadOnlyOutside = time.Since(procSysRemountReadOnlyStart)
+		log.Info("Deferred /proc/sys read-only remount timing",
+			"duration", timings.nsrestoreSetupTimings.ProcSysRemountReadOnlyOutside,
+			"scope", "outside_nsrestore_setup",
+		)
 	}()
 
 	// CRIU restore
