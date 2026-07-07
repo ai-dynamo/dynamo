@@ -22,6 +22,15 @@ instances:
 
 title: NVIDIA Dynamo Documentation
 
+# Native language picker (header dropdown). Translated pages live at
+# fern/translations/<lang>/pages-dev/<path>, mirroring the base page at
+# docs/<path> (published as fern/pages-dev/<path> on docs-website).
+# Untranslated pages fall back to English under every locale.
+translations:
+  - lang: en
+    default: true
+  - lang: zh-CN
+
 agents:
   page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/latest/llms.txt. For section-specific indexes, append /llms.txt to any section URL."
 
@@ -180,7 +189,9 @@ redirects:
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/developing-with-tilt"
     destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/developing-with-tilt"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/inference-gateway-gaie"
-    destination: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+    destination: "/dynamo/dev/kubernetes-deployment/request-routing/gateway-api-inference-extension/overview"
+  - source: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+    destination: "/dynamo/dev/kubernetes-deployment/request-routing/gateway-api-inference-extension/overview"
   # SGLang HiCache doc: canonical URL under Integrations > KV Cache Integrations.
   - source: "/dynamo/dev/backends/sg-lang/hi-cache"
     destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
@@ -205,6 +216,34 @@ redirects:
     destination: "/dynamo/dev/digest/:slug*"
   - source: "/dynamo/blog"
     destination: "/dynamo/dev/digest"
+  # zh-CN pages moved from the hidden Additional Resources section to native
+  # localization locale URLs (published May-July 2026, linked from switchers)
+  - source: "/dynamo/dev/additional-resources/introduction-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/getting-started/introduction"
+  - source: "/dynamo/dev/additional-resources/quickstart-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/getting-started/quickstart"
+  - source: "/dynamo/dev/additional-resources/local-installation-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/getting-started/local-installation"
+  - source: "/dynamo/dev/additional-resources/building-from-source-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/getting-started/building-from-source"
+  - source: "/dynamo/dev/additional-resources/overall-architecture-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/design-docs/overall-architecture"
+  - source: "/dynamo/dev/additional-resources/disaggregated-serving-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/design-docs/disaggregated-serving"
+  - source: "/dynamo/dev/additional-resources/planner-design-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/design-docs/component-design/planner-design"
+  - source: "/dynamo/dev/additional-resources/router-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/components/router"
+  - source: "/dynamo/dev/additional-resources/kvbm-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/components/kvbm"
+  - source: "/dynamo/dev/additional-resources/planner-guide-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/components/planner/planner-guide"
+  - source: "/dynamo/dev/additional-resources/tool-calling-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/user-guides/parsing/tool-call-parsing-dynamo"
+  - source: "/dynamo/dev/additional-resources/contribution-guide-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/getting-started/contribution-guide"
+  - source: "/dynamo/dev/additional-resources/request-migration-simplified-chinese"
+    destination: "/dynamo/zh-CN/dev/user-guides/fault-tolerance/request-migration"
 
 # GitHub repository link in navbar
 navbar-links:

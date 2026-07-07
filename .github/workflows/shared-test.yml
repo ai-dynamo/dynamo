@@ -30,6 +30,16 @@ on:
         description: 'Target platforms to test as a JSON array'
         required: true
         type: string
+      container_workspace:
+        description: 'Workspace path inside the container where pytest should run'
+        required: false
+        type: string
+        default: '/workspace'
+      kvbm_mla_backend:
+        description: 'KVBM MLA attention backend exported for KVBM tests'
+        required: false
+        type: string
+        default: ''
       enable_coverage:
         description: 'Enable coverage collection (true/false)'
         required: false
@@ -151,14 +161,18 @@ jobs:
           MINIO_ROOT_PASSWORD: minioadmin
           MINIO_VOLUMES: /tmp/minio-data
           MINIO_CONSOLE_ADDRESS: ':9001'
-        ports:
-          - 9000:9000
-          - 9001:9001
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+      - name: Export KVBM MLA backend
+        if: ${{ inputs.kvbm_mla_backend != '' }}
+        shell: bash
+        env:
+          KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
+        run: |
+          echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
       # Experimental: trialing Datadog Test Visibility. Remove if not kept.
       - name: Configure Datadog Test Visibility
         continue-on-error: true
@@ -189,7 +203,7 @@ jobs:
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: ./.github/actions/pytest-local
         with:
-          container_workspace: /workspace
+          container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_cpu"
@@ -203,7 +217,7 @@ jobs:
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
         uses: ./.github/actions/pytest-local
         with:
-          container_workspace: /workspace
+          container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.gpu_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_gpu_parallel"
@@ -221,7 +235,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
         uses: ./.github/actions/pytest-local
         with:
-          container_workspace: /workspace
+          container_workspace: ${{ inputs.container_workspace }}
           # When the parallel stage runs, exclude profiled tests here so they don't run twice.
           pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}

@@ -114,25 +114,24 @@ impl SingleRuntime {
     fn enqueue_trace_arrivals(&mut self) {
         let mut ready_requests = Vec::new();
         match &mut self.admission {
-            AdmissionSource::Requests(pending) => loop {
-                let Some(next_arrival_ms) = pending
+            AdmissionSource::Requests(pending) => {
+                while let Some(next_arrival_ms) = pending
                     .front()
                     .and_then(|request| request.arrival_timestamp_ms)
-                else {
-                    break;
-                };
-                if next_arrival_ms > self.current_time_ms {
-                    break;
-                }
+                {
+                    if next_arrival_ms > self.current_time_ms {
+                        break;
+                    }
 
-                let request = pending
-                    .pop_front()
-                    .expect("front request must exist when arrival is available");
-                let arrival_ms = request
-                    .arrival_timestamp_ms
-                    .expect("trace replay requests must have an arrival timestamp");
-                ready_requests.push((request, arrival_ms));
-            },
+                    let request = pending
+                        .pop_front()
+                        .expect("front request must exist when arrival is available");
+                    let arrival_ms = request
+                        .arrival_timestamp_ms
+                        .expect("trace replay requests must have an arrival timestamp");
+                    ready_requests.push((request, arrival_ms));
+                }
+            }
             AdmissionSource::Workload(driver) => {
                 ready_requests.extend(
                     driver
@@ -331,7 +330,7 @@ mod tests {
     use super::*;
     use crate::common::protocols::EngineType;
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
-    use crate::replay::{TraceRequestStatsSnapshot, TraceSimulationReport};
+    use crate::replay::{ReplayTerminalStatus, TraceRequestStatsSnapshot, TraceSimulationReport};
     use rstest::rstest;
     use std::collections::{HashMap, VecDeque};
     use uuid::Uuid;
@@ -356,13 +355,10 @@ mod tests {
         collector: &mut TraceCollector,
         current_time_ms: f64,
     ) {
-        loop {
-            let Some(next_arrival_ms) = pending
-                .front()
-                .and_then(|request| request.arrival_timestamp_ms)
-            else {
-                break;
-            };
+        while let Some(next_arrival_ms) = pending
+            .front()
+            .and_then(|request| request.arrival_timestamp_ms)
+        {
             if next_arrival_ms > current_time_ms {
                 break;
             }
@@ -1005,6 +1001,47 @@ mod tests {
         assert_eq!(report.request_counts.num_requests, 2);
         assert_eq!(report.request_counts.completed_requests, 1);
         assert_eq!(report.request_counts.total_output_tokens, 4);
+    }
+
+    #[test]
+    fn max_model_len_reports_actual_output_and_preserves_requested_output() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let uuid = Uuid::from_u128(3);
+        let report = simulate_concurrency_single(
+            args,
+            vec![DirectRequest {
+                tokens: vec![1; 7],
+                max_output_tokens: 4,
+                uuid: Some(uuid),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            }],
+            1,
+            true,
+            None,
+            crate::replay::SlaThresholds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 1);
+        assert_eq!(report.request_counts.total_output_tokens, 1);
+        assert_eq!(report.per_request.len(), 1);
+        let record = &report.per_request[0];
+        assert_eq!(record.uuid, uuid.to_string());
+        assert_eq!(record.requested_output_length, 4);
+        assert_eq!(record.output_length, 1);
+        assert_eq!(record.terminal_status, ReplayTerminalStatus::Completed);
     }
 
     fn cap_request(uuid: u128, arrival_ms: f64) -> DirectRequest {

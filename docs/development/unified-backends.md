@@ -498,6 +498,58 @@ async def cleanup(self) -> None:
         self._engine = None
 ```
 
+#### Python: Metrics and Prometheus (optional)
+
+Unified backends have two metrics surfaces.
+
+Use `register_prometheus(metrics)` to bridge vendor-prefixed Prometheus
+families into the worker's `/metrics` output. The framework owns the
+`metrics` handle; do not retain it after the method returns.
+
+```python
+from dynamo.common.backend.metrics import register_global_registry
+
+async def register_prometheus(self, metrics):
+    register_global_registry(metrics, engine_prefix="vllm:")
+```
+
+Use `component_metrics_dp_ranks()` plus
+`attach_snapshot_publisher(publisher)` when the engine can push per-rank
+`ComponentSnapshot` values for `dynamo_component_*` gauges and the
+router's `kv_used_blocks` signal:
+
+```python
+from dynamo.common.backend.publisher import ComponentSnapshot
+
+def component_metrics_dp_ranks(self):
+    return [0]
+
+def attach_snapshot_publisher(self, publisher):
+    self._snapshot_publisher = publisher
+
+def _on_stats(self, used_blocks, total_blocks):
+    self._snapshot_publisher.publish(
+        0,
+        ComponentSnapshot(
+            kv_used_blocks=used_blocks,
+            kv_total_blocks=total_blocks,
+            gpu_cache_usage=used_blocks / total_blocks if total_blocks else 0.0,
+            dp_rank=0,
+        ),
+    )
+```
+
+Keep the rank list stable for the engine lifetime. `Worker` invokes
+`attach_snapshot_publisher()` only when the rank list is non-empty and
+`WorkerConfig.enable_kv_routing` is enabled. `register_prometheus()` still
+runs when `enable_kv_routing=False`.
+
+Use the in-tree backends as references: vLLM pushes snapshots from its
+stat logger and bridges `vllm:` / `lmcache:` metrics, SGLang pushes
+leader-node scheduler snapshots and bridges `sglang:` when
+`--enable-metrics` is set, and TRT-LLM pushes snapshots from its stats
+poll thread while bridging `trtllm_` metrics.
+
 #### Python: KV event publishing (optional)
 
 Unified backends declare KV event sources; the framework constructs and owns
@@ -1038,7 +1090,7 @@ inside `dynamo-runtime`:
 
    ```toml
    [toolchain]
-   channel = "1.93.1"
+   channel = "1.96.1"
    ```
 
    Older toolchains fail with `feature edition2024 is required`.

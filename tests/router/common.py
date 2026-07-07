@@ -9,6 +9,7 @@ import os
 import random
 import threading
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
@@ -153,7 +154,6 @@ def _test_router_basic(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     router_mode: str = "kv",
-    enforce_disagg: bool = False,
     min_initial_workers: int | None = None,
 ):
     """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
@@ -177,7 +177,6 @@ def _test_router_basic(
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: Request plane to use ("nats", "tcp"). Defaults to "nats".
         router_mode: Router mode ("kv", "round-robin", "random", "power-of-two", "direct"). Defaults to "kv".
-        enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
         min_initial_workers: Optional frontend startup worker gate. Defaults to None.
 
     Raises:
@@ -190,7 +189,6 @@ def _test_router_basic(
         frontend_port,
         engine_workers.namespace,
         store_backend,
-        enforce_disagg=enforce_disagg,
         request_plane=request_plane,
         router_mode=router_mode,
         min_initial_workers=min_initial_workers,
@@ -519,6 +517,151 @@ def _test_router_two_routers(
         # Clean up any remaining routers (in case of error before consumer verification)
         for kv_router in kv_routers:
             kv_router.__exit__(None, None, None)
+
+
+def _test_session_affinity(
+    engine_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict[str, Any],
+    store_backend: str = "etcd",
+):
+    """Verify one frontend keeps each session on its initially selected worker."""
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        store_backend,
+        router_mode="kv",
+        min_initial_workers=engine_workers.num_workers,
+        event_plane="nats",
+        session_affinity_ttl_secs=300,
+    ):
+        url = f"http://localhost:{frontend_port}/v1/chat/completions"
+
+        async def run_test() -> None:
+            runtime = get_runtime(store_backend, "nats")
+            endpoint = runtime.endpoint(
+                f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+            )
+            worker_ids = sorted(
+                await poll_for_worker_instances(endpoint, engine_workers.num_workers)
+            )
+            assert len(worker_ids) >= 2
+            worker_a, worker_b = worker_ids[:2]
+
+            await wait_for_frontend_ready(
+                frontend_url=f"http://localhost:{frontend_port}",
+                expected_num_workers=engine_workers.num_workers,
+                timeout=120,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+                request_plane="nats",
+            )
+
+            suffix = uuid.uuid4().hex
+            prefix_a = " ".join([f"affinity-alpha-{suffix}"] * (block_size * 2))
+            prefix_b = " ".join([f"affinity-beta-{suffix}"] * (block_size * 2))
+            session_a_headers = {
+                "x-dynamo-session-id": f"local-affinity-a-{uuid.uuid4()}"
+            }
+            session_b_headers = {
+                "x-dynamo-session-id": f"local-affinity-b-{uuid.uuid4()}"
+            }
+
+            def payload(content: str, *, query_only: bool = False) -> dict[str, Any]:
+                annotations = ["query_instance_id:"] if query_only else []
+                return {
+                    **test_payload,
+                    "messages": [{"role": "user", "content": content}],
+                    "stream": True,
+                    "max_tokens": 1,
+                    "nvext": {
+                        "annotations": annotations,
+                        "extra_fields": ["worker_id"],
+                    },
+                }
+
+            async def send(
+                client: aiohttp.ClientSession,
+                request_payload: dict[str, Any],
+                headers: dict[str, str] | None = None,
+            ) -> tuple[int, int]:
+                async with client.post(
+                    url, json=request_payload, headers=headers
+                ) as response:
+                    body = await response.text()
+                    assert response.status == 200, body
+
+                worker_info = None
+                for line in body.splitlines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        continue
+                    candidate = json.loads(data).get("nvext", {}).get("worker_id")
+                    if candidate:
+                        worker_info = candidate
+
+                assert worker_info is not None, body
+                return (
+                    worker_info["decode_worker_id"],
+                    worker_info["decode_dp_rank"],
+                )
+
+            async def wait_for_prefix_target(
+                client: aiohttp.ClientSession,
+                content: str,
+                expected: tuple[int, int],
+            ) -> None:
+                for _ in range(50):
+                    if (
+                        await send(client, payload(content, query_only=True))
+                        == expected
+                    ):
+                        return
+                    await asyncio.sleep(0.1)
+                raise AssertionError(
+                    f"KV events did not make prefix target {expected} visible"
+                )
+
+            proposal_a = {
+                **session_a_headers,
+                "x-dynamo-worker-instance-id": str(worker_a),
+                "x-dynamo-dp-rank": "0",
+            }
+            proposal_b = {
+                **session_b_headers,
+                "x-dynamo-worker-instance-id": str(worker_b),
+                "x-dynamo-dp-rank": "0",
+            }
+
+            async with aiohttp.ClientSession() as client:
+                assert await send(client, payload(prefix_a), proposal_a) == (
+                    worker_a,
+                    0,
+                )
+                assert await send(client, payload(prefix_b), proposal_b) == (
+                    worker_b,
+                    0,
+                )
+
+                await wait_for_prefix_target(client, prefix_a, (worker_a, 0))
+                await wait_for_prefix_target(client, prefix_b, (worker_b, 0))
+
+                assert await send(client, payload(prefix_b), session_a_headers) == (
+                    worker_a,
+                    0,
+                )
+                assert await send(client, payload(prefix_a), session_b_headers) == (
+                    worker_b,
+                    0,
+                )
+
+        asyncio.run(run_test())
 
 
 def _test_remote_indexer_decisions(
@@ -1120,8 +1263,8 @@ def _probe_overload_529_and_assert(
     """Send staggered streaming requests until the router rejects with 529.
 
     Shared core for the aggregated and disaggregated overload tests. The caller
-    is responsible for starting the frontend (with the desired thresholds and,
-    for disagg, ``enforce_disagg=True``) and for waiting until it is ready.
+    is responsible for starting the frontend with the desired thresholds and
+    waiting until it is ready.
 
     Sends unique (shuffled) prompts 0.1s apart until the router rejects, then
     asserts:
@@ -1335,11 +1478,10 @@ def _test_disagg_router_overload_529(
     """Verify disaggregated load-shedding: clients get 529 when the gated pool is busy.
 
     Assumes the prefill and decode workers are already running (kept alive by the
-    caller); this function owns the frontend (router) lifecycle. The frontend is
-    started with ``--enforce-disagg`` so prefill and decode are routed by separate
-    pools — and so the model only becomes ready (listed in ``/v1/models``) once the
-    prefill router has activated, meaning the readiness wait below already gates on
-    prefill registration.
+    caller); this function owns the frontend (router) lifecycle. Registered
+    prefill and decode worker types establish separate pools. The model only
+    becomes ready (listed in ``/v1/models``) once both worker types are available,
+    so the readiness wait below gates on prefill registration.
 
     Two configurations exercise the two pools (driven by the thresholds the
     caller passes):
@@ -1362,7 +1504,6 @@ def _test_disagg_router_overload_529(
         frontend_port=frontend_port,
         namespace=decode_workers.namespace,
         store_backend=store_backend,
-        enforce_disagg=True,
         blocks_threshold=blocks_threshold,
         tokens_threshold=tokens_threshold,
         tokens_threshold_frac=tokens_threshold_frac,
@@ -2183,7 +2324,6 @@ def _test_router_decisions_disagg(
         frontend_port,
         decode_workers.namespace,
         store_backend,
-        enforce_disagg=True,
         request_plane=request_plane,
         durable_kv_events=durable_kv_events,
         min_initial_workers=decode_workers.num_workers,
@@ -2383,7 +2523,6 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
         block_size,
         frontend_port,
         namespace=decode_workers.namespace,
-        enforce_disagg=True,
         request_plane=request_plane,
         min_initial_workers=decode_workers.num_workers,
     ):
@@ -2513,7 +2652,6 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
         frontend_port,
         decode_workers.namespace,
         store_backend,
-        enforce_disagg=True,
         request_plane=request_plane,
         router_mode="round-robin",
         min_initial_workers=decode_workers.num_workers,
@@ -3354,7 +3492,6 @@ def _test_disagg_direct_mode(
         BLOCK_SIZE,
         frontend_port,
         decode_workers.namespace,
-        enforce_disagg=True,
         request_plane=request_plane,
         router_mode="direct",
     ):

@@ -152,7 +152,7 @@ impl AffinityCoordinator {
     }
 
     #[cfg(test)]
-    pub async fn acquire(
+    pub(crate) async fn acquire(
         &self,
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
@@ -160,7 +160,7 @@ impl AffinityCoordinator {
         self.acquire_inner(session_id, requested_target, None).await
     }
 
-    pub async fn acquire_with_context(
+    pub(crate) async fn acquire_with_context(
         &self,
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
@@ -380,7 +380,7 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
     }
 }
 
-pub enum AffinityAcquire {
+pub(crate) enum AffinityAcquire {
     Initialize(AffinityInitialization),
     Bound {
         target: AffinityTarget,
@@ -389,14 +389,14 @@ pub enum AffinityAcquire {
 }
 
 impl AffinityAcquire {
-    pub fn target(&self) -> Option<AffinityTarget> {
+    pub(crate) fn target(&self) -> Option<AffinityTarget> {
         match self {
             Self::Initialize(_) => None,
             Self::Bound { target, .. } => Some(*target),
         }
     }
 
-    pub fn into_stream(
+    pub(crate) fn into_stream(
         self,
         selected_target: AffinityTarget,
         stream: ManyOut<LlmResponse>,
@@ -416,14 +416,14 @@ impl AffinityAcquire {
         }
     }
 
-    pub fn invalidate(self) {
+    pub(crate) fn invalidate(self) {
         if let Self::Bound { mut lease, .. } = self {
             lease.invalidate();
         }
     }
 }
 
-pub struct AffinityInitialization {
+pub(crate) struct AffinityInitialization {
     coordinator: Weak<AffinityCoordinatorInner>,
     session_id: String,
     revision: u64,
@@ -433,7 +433,7 @@ pub struct AffinityInitialization {
 }
 
 impl AffinityInitialization {
-    pub fn commit(mut self, target: AffinityTarget) -> Result<AffinityLease, Error> {
+    pub(crate) fn commit(mut self, target: AffinityTarget) -> Result<AffinityLease, Error> {
         validate_bound_target(&self.session_id, target, self.requested_target)?;
         let Some(inner) = self.coordinator.upgrade() else {
             return Err(anyhow::anyhow!("session affinity coordinator dropped"));
@@ -488,7 +488,7 @@ impl Drop for AffinityInitialization {
     }
 }
 
-pub struct AffinityLease {
+pub(crate) struct AffinityLease {
     coordinator: Weak<AffinityCoordinatorInner>,
     session_id: String,
     revision: u64,
@@ -496,7 +496,7 @@ pub struct AffinityLease {
 }
 
 impl AffinityLease {
-    pub fn into_stream(self, stream: ManyOut<LlmResponse>) -> ManyOut<LlmResponse> {
+    pub(crate) fn into_stream(self, stream: ManyOut<LlmResponse>) -> ManyOut<LlmResponse> {
         let context = stream.context();
         ResponseStream::new(
             Box::pin(AffinityTrackedStream {
