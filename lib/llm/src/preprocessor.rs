@@ -38,7 +38,13 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
-use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
+use std::{
+    any::Any,
+    borrow::Cow,
+    collections::HashMap,
+    pin::Pin,
+    sync::{Arc, LazyLock},
+};
 use tracing;
 
 #[cfg(feature = "mm-routing")]
@@ -112,6 +118,16 @@ fn encode_floats_to_base64(floats: &[f32]) -> String {
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
+
+// Tokenizers are CPU-bound. Tokio's blocking pool may be much larger than the process CPU
+// allocation, so admitting more encodes only oversubscribes the CPUs and retains prompt buffers.
+// This process-wide gate also covers deployments that create more than one preprocessor.
+static TOKENIZATION_ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> = LazyLock::new(|| {
+    let permits = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    Arc::new(tokio::sync::Semaphore::new(permits))
+});
 
 /// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
 /// frontend's timing/worker/token surfaces populate, then drop the field to keep it off the
@@ -1774,19 +1790,26 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> anyhow::Result<Encoding> {
         let encode_start = Instant::now();
-        // Offload the CPU-heavy BPE encode to the bounded blocking pool instead of running it on
-        // the async event loop. For long prompts at high concurrency, a synchronous encode here
-        // stalls the frontend tokio runtime for seconds, starving the I/O tasks that share the
-        // runtime. Own the prompt + clone the tokenizer (Arc) so the closure is 'static + Send;
-        // mirrors the embedding path's spawn_blocking offload.
-        let owned = if prompt.contains('\0') {
+        let prompt = if prompt.contains('\0') {
             tracing::debug!("Prompt contains null bytes; stripping to avoid tokenizer divergence");
-            prompt.replace('\0', "")
+            Cow::Owned(prompt.replace('\0', ""))
         } else {
-            prompt.to_string()
+            Cow::Borrowed(prompt)
         };
+        // Bound CPU work independently of Tokio's blocking-thread limit. Acquire before
+        // owning the prompt so waiters do not retain a second copy in the blocking queue.
+        let permit = TOKENIZATION_ADMISSION
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("tokenization admission semaphore is never closed");
+        let owned = prompt.into_owned();
         let tokenizer = self.tokenizer.clone();
-        let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
+        let encoding = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            tokenizer.encode(&owned)
+        })
+        .await??;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
