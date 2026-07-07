@@ -34,5 +34,5 @@ pub use prefill_load::{
     InvalidEffectivePrefillTokens, PrefillLoadEstimator, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
-pub use queue_admission::{QueueAdmissionConfig, SessionAwareConfig};
+pub use queue_admission::{DispatchIntent, QueueAdmissionConfig, SessionAwareConfig};
 pub use types::*;

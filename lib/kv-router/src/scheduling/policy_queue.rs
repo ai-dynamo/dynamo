@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
+use super::queue_admission::DispatchIntent;
+use crate::protocols::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueSnapshot {
@@ -129,11 +131,173 @@ impl<T> PartialOrd for PolicyQueueEntry<T> {
     }
 }
 
+struct AdmissionClassQueue<T> {
+    held_by_session: HashMap<String, PolicyQueueEntry<T>>,
+    ready_unpinned: BinaryHeap<PolicyQueueEntry<T>>,
+    ready_by_worker: HashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
+}
+
+impl<T> AdmissionClassQueue<T> {
+    fn new() -> Self {
+        Self {
+            held_by_session: HashMap::new(),
+            ready_unpinned: BinaryHeap::new(),
+            ready_by_worker: HashMap::new(),
+        }
+    }
+
+    fn push_ready(&mut self, intent: DispatchIntent, entry: PolicyQueueEntry<T>) {
+        match intent {
+            DispatchIntent::Any => self.ready_unpinned.push(entry),
+            DispatchIntent::Exact(worker) => {
+                self.ready_by_worker.entry(worker).or_default().push(entry);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.held_by_session.is_empty()
+            && self.ready_unpinned.is_empty()
+            && self.ready_by_worker.is_empty()
+    }
+
+    fn for_each_entry(&self, mut visit: impl FnMut(&PolicyQueueEntry<T>)) {
+        self.held_by_session.values().for_each(&mut visit);
+        self.ready_unpinned.iter().for_each(&mut visit);
+        self.ready_by_worker
+            .values()
+            .flat_map(|ready| ready.iter())
+            .for_each(visit);
+    }
+
+    fn candidate(
+        &self,
+        class_index: usize,
+        config: &PolicyClassConfig,
+        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+    ) -> Option<ClassCandidate> {
+        let mut best: Option<(CandidateLane, &PolicyQueueEntry<T>)> = None;
+        if let Some(entry) = self.ready_unpinned.peek()
+            && is_dispatchable(class_index, config, entry.payload())
+        {
+            best = Some((CandidateLane::Unpinned, entry));
+        }
+        for (&worker, ready) in &self.ready_by_worker {
+            if let Some(entry) = ready.peek()
+                && is_dispatchable(class_index, config, entry.payload())
+                && best.is_none_or(|(_, current)| entry > current)
+            {
+                best = Some((CandidateLane::Worker(worker), entry));
+            }
+        }
+        best.map(|(lane, entry)| ClassCandidate {
+            lane,
+            cost: entry.snapshot.scheduling_cost_tokens,
+        })
+    }
+
+    fn pop(&mut self, lane: CandidateLane) -> PolicyQueueEntry<T> {
+        match lane {
+            CandidateLane::Unpinned => self
+                .ready_unpinned
+                .pop()
+                .expect("queue admission unpinned head vanished"),
+            CandidateLane::Worker(worker) => {
+                let ready = self
+                    .ready_by_worker
+                    .get_mut(&worker)
+                    .expect("queue admission worker lane vanished");
+                let entry = ready.pop().expect("queue admission worker head vanished");
+                if ready.is_empty() {
+                    self.ready_by_worker.remove(&worker);
+                }
+                entry
+            }
+            CandidateLane::Ordered => unreachable!("ordered lane used for admission queue"),
+        }
+    }
+
+    fn best_ready_cost(&self) -> Option<usize> {
+        self.ready_unpinned
+            .peek()
+            .into_iter()
+            .chain(self.ready_by_worker.values().filter_map(BinaryHeap::peek))
+            .max()
+            .map(|entry| entry.snapshot.scheduling_cost_tokens)
+    }
+}
+
+enum ClassDiscipline<T> {
+    Ordered(BinaryHeap<PolicyQueueEntry<T>>),
+    Admission(AdmissionClassQueue<T>),
+}
+
+impl<T> ClassDiscipline<T> {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Ordered(pending) => pending.is_empty(),
+            Self::Admission(admission) => admission.is_empty(),
+        }
+    }
+
+    fn for_each_entry(&self, visit: impl FnMut(&PolicyQueueEntry<T>)) {
+        match self {
+            Self::Ordered(pending) => pending.iter().for_each(visit),
+            Self::Admission(admission) => admission.for_each_entry(visit),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CandidateLane {
+    Ordered,
+    Unpinned,
+    Worker(WorkerWithDpRank),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClassCandidate {
+    lane: CandidateLane,
+    cost: usize,
+}
+
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
-    pending: BinaryHeap<PolicyQueueEntry<T>>,
+    discipline: ClassDiscipline<T>,
     stats: PolicyQueueStats,
     deficit: usize,
+}
+
+impl<T> PolicyClassQueue<T> {
+    fn candidate(
+        &self,
+        class_index: usize,
+        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+    ) -> Option<ClassCandidate> {
+        match &self.discipline {
+            ClassDiscipline::Ordered(pending) => {
+                let entry = pending.peek()?;
+                is_dispatchable(class_index, &self.config, entry.payload()).then_some(
+                    ClassCandidate {
+                        lane: CandidateLane::Ordered,
+                        cost: entry.snapshot.scheduling_cost_tokens,
+                    },
+                )
+            }
+            ClassDiscipline::Admission(admission) => {
+                admission.candidate(class_index, &self.config, is_dispatchable)
+            }
+        }
+    }
+
+    fn best_ready_cost(&self) -> Option<usize> {
+        match &self.discipline {
+            ClassDiscipline::Ordered(pending) => pending
+                .peek()
+                .map(|entry| entry.snapshot.scheduling_cost_tokens),
+            ClassDiscipline::Admission(admission) => admission.best_ready_cost(),
+        }
+    }
 }
 
 pub struct PolicyQueue<T> {
@@ -141,7 +305,7 @@ pub struct PolicyQueue<T> {
     next_class: usize,
     next_enqueue_seq: u64,
     pending_count: usize,
-    dispatchable: Vec<bool>,
+    candidates: Vec<Option<ClassCandidate>>,
 }
 
 impl<T> PolicyQueue<T> {
@@ -152,17 +316,24 @@ impl<T> PolicyQueue<T> {
                 .classes()
                 .iter()
                 .cloned()
-                .map(|config| PolicyClassQueue {
-                    config,
-                    pending: BinaryHeap::new(),
-                    stats: PolicyQueueStats::default(),
-                    deficit: 0,
+                .map(|config| {
+                    let discipline = if config.queue_admission.is_some() {
+                        ClassDiscipline::Admission(AdmissionClassQueue::new())
+                    } else {
+                        ClassDiscipline::Ordered(BinaryHeap::new())
+                    };
+                    PolicyClassQueue {
+                        config,
+                        discipline,
+                        stats: PolicyQueueStats::default(),
+                        deficit: 0,
+                    }
                 })
                 .collect(),
             next_class: 0,
             next_enqueue_seq: 0,
             pending_count: 0,
-            dispatchable: vec![false; class_count],
+            candidates: vec![None; class_count],
         }
     }
 
@@ -183,11 +354,7 @@ impl<T> PolicyQueue<T> {
     }
 
     pub fn has_backlog(&self, class_index: usize) -> bool {
-        !self.classes[class_index].pending.is_empty()
-    }
-
-    pub fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
-        self.classes.iter().flat_map(|class| class.pending.iter())
+        !self.classes[class_index].discipline.is_empty()
     }
 
     /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
@@ -195,17 +362,25 @@ impl<T> PolicyQueue<T> {
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
         self.pending_count = 0;
         for class in &mut self.classes {
-            let pending = std::mem::take(&mut class.pending);
-            class.stats = PolicyQueueStats::default();
-            for entry in pending {
-                if !keep(entry.payload()) {
-                    continue;
+            match &mut class.discipline {
+                ClassDiscipline::Ordered(pending) => retain_heap(pending, &mut keep),
+                ClassDiscipline::Admission(admission) => {
+                    admission
+                        .held_by_session
+                        .retain(|_, entry| keep(entry.payload()));
+                    retain_heap(&mut admission.ready_unpinned, &mut keep);
+                    admission.ready_by_worker.retain(|_, ready| {
+                        retain_heap(ready, &mut keep);
+                        !ready.is_empty()
+                    });
                 }
-                add_stats(&mut class.stats, entry.snapshot);
-                class.pending.push(entry);
-                self.pending_count += 1;
             }
-            if class.pending.is_empty() {
+            class.stats = PolicyQueueStats::default();
+            class.discipline.for_each_entry(|entry| {
+                add_stats(&mut class.stats, entry.snapshot);
+                self.pending_count += 1;
+            });
+            if class.discipline.is_empty() {
                 class.deficit = 0;
             }
         }
@@ -224,33 +399,124 @@ impl<T> PolicyQueue<T> {
         strict_priority: u32,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
+        self.enqueue_ready(
+            class_index,
+            worker_count,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            DispatchIntent::Any,
+            payload,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_ready(
+        &mut self,
+        class_index: usize,
+        worker_count: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        intent: DispatchIntent,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
             return Err((rejection, payload));
         }
 
-        let policy_score = match class.config.queue_policy {
-            RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
-            RouterQueuePolicy::Wspt => {
-                (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
-            }
-            RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
-        };
-        let entry = PolicyQueueEntry {
+        let entry = make_entry(
             class_index,
-            priority: QueuePriority {
-                strict_priority,
-                policy_score: OrderedFloat(policy_score),
-            },
-            enqueue_seq: self.next_enqueue_seq,
             snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            class.config.queue_policy,
+            self.next_enqueue_seq,
             payload,
-        };
+        );
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
-        class.pending.push(entry);
+        match &mut class.discipline {
+            ClassDiscipline::Ordered(pending) => {
+                debug_assert_eq!(intent, DispatchIntent::Any);
+                pending.push(entry);
+            }
+            ClassDiscipline::Admission(admission) => admission.push_ready(intent, entry),
+        }
         self.pending_count += 1;
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_held(
+        &mut self,
+        class_index: usize,
+        worker_count: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        session_id: String,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
+        let class = &mut self.classes[class_index];
+        if let Some(rejection) = queue_rejection(class, worker_count) {
+            return Err((rejection, payload));
+        }
+        let ClassDiscipline::Admission(admission) = &mut class.discipline else {
+            panic!("held request requires a queue_admission class");
+        };
+        let entry = make_entry(
+            class_index,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            class.config.queue_policy,
+            self.next_enqueue_seq,
+            payload,
+        );
+        self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
+        assert!(
+            admission
+                .held_by_session
+                .insert(session_id, entry)
+                .is_none(),
+            "session already has a held request"
+        );
+        add_stats(&mut class.stats, snapshot);
+        self.pending_count += 1;
+        Ok(())
+    }
+
+    pub fn ready_held(
+        &mut self,
+        class_index: usize,
+        session_id: &str,
+        snapshot: QueueSnapshot,
+        priority_boost: f64,
+        intent: DispatchIntent,
+        prepare: impl FnOnce(&mut T, DispatchIntent),
+    ) -> bool {
+        let class = &mut self.classes[class_index];
+        let ClassDiscipline::Admission(admission) = &mut class.discipline else {
+            return false;
+        };
+        let Some(mut entry) = admission.held_by_session.remove(session_id) else {
+            return false;
+        };
+        subtract_stats(&mut class.stats, entry.snapshot);
+        entry.snapshot = snapshot;
+        entry.priority.policy_score =
+            OrderedFloat(entry.priority.policy_score.0 + priority_boost.max(0.0));
+        prepare(&mut entry.payload, intent);
+        add_stats(&mut class.stats, snapshot);
+        admission.push_ready(intent, entry);
+        true
     }
 
     /// Runs one DRR ring pass over dispatchable class heads. If no head has
@@ -264,32 +530,28 @@ impl<T> PolicyQueue<T> {
         }
 
         let class_count = self.classes.len();
-        self.dispatchable.fill(false);
+        self.candidates.fill(None);
         for offset in 0..class_count {
             // Rotate the starting point across calls so class vector order
             // cannot become a permanent scheduling preference.
             let class_index = (self.next_class + offset) % class_count;
             let class = &mut self.classes[class_index];
-            let Some(front) = class.pending.peek() else {
-                class.deficit = 0;
+            let Some(candidate) = class.candidate(class_index, &mut is_dispatchable) else {
+                if class.discipline.is_empty() {
+                    class.deficit = 0;
+                }
                 continue;
             };
-            if !is_dispatchable(class_index, &class.config, front.payload()) {
-                // A blocked class retains earned credit but does not accrue
-                // more until its head becomes dispatchable.
-                continue;
-            }
-
-            self.dispatchable[class_index] = true;
-            if front.snapshot.scheduling_cost_tokens <= class.deficit {
+            self.candidates[class_index] = Some(candidate);
+            if candidate.cost <= class.deficit {
                 // Quantum is granted per ring round, not per request. Spend
                 // carried credit before granting this class another quantum.
-                return Some(self.pop_class(class_index));
+                return Some(self.pop_class(class_index, candidate.lane));
             }
             class.deficit = class.deficit.saturating_add(class.config.quantum);
-            if front.snapshot.scheduling_cost_tokens <= class.deficit {
+            if candidate.cost <= class.deficit {
                 // The normal single-round visit made this head affordable.
-                return Some(self.pop_class(class_index));
+                return Some(self.pop_class(class_index, candidate.lane));
             }
         }
 
@@ -298,22 +560,19 @@ impl<T> PolicyQueue<T> {
         // for requests much larger than their class quantum. If every head was
         // blocked, `min()` returns `None` without changing any deficit.
         let rounds = self
-            .dispatchable
+            .candidates
             .iter()
             .enumerate()
-            .filter_map(|(class_index, dispatchable)| {
-                if !dispatchable {
-                    return None;
-                }
+            .filter_map(|(class_index, candidate)| {
+                let candidate = candidate.as_ref()?;
                 let class = &self.classes[class_index];
-                let cost = class.pending.peek()?.snapshot.scheduling_cost_tokens;
-                let missing = cost.saturating_sub(class.deficit);
+                let missing = candidate.cost.saturating_sub(class.deficit);
                 Some(missing.div_ceil(class.config.quantum))
             })
             .min()?;
 
-        for (class_index, dispatchable) in self.dispatchable.iter().copied().enumerate() {
-            if !dispatchable {
+        for (class_index, candidate) in self.candidates.iter().enumerate() {
+            if candidate.is_none() {
                 continue;
             }
             let class = &mut self.classes[class_index];
@@ -327,13 +586,10 @@ impl<T> PolicyQueue<T> {
         for offset in 0..class_count {
             let class_index = (self.next_class + offset) % class_count;
             let class = &self.classes[class_index];
-            if self.dispatchable[class_index]
-                && class
-                    .pending
-                    .peek()
-                    .is_some_and(|entry| entry.snapshot.scheduling_cost_tokens <= class.deficit)
+            if let Some(candidate) = self.candidates[class_index]
+                && candidate.cost <= class.deficit
             {
-                return Some(self.pop_class(class_index));
+                return Some(self.pop_class(class_index, candidate.lane));
             }
         }
 
@@ -341,14 +597,29 @@ impl<T> PolicyQueue<T> {
     }
 
     pub fn drain(self) -> impl Iterator<Item = PolicyQueueEntry<T>> {
-        self.classes
-            .into_iter()
-            .flat_map(|class| class.pending.into_iter())
+        let mut entries = Vec::with_capacity(self.pending_count);
+        for class in self.classes {
+            match class.discipline {
+                ClassDiscipline::Ordered(pending) => entries.extend(pending),
+                ClassDiscipline::Admission(admission) => {
+                    entries.extend(admission.held_by_session.into_values());
+                    entries.extend(admission.ready_unpinned);
+                    entries.extend(admission.ready_by_worker.into_values().flatten());
+                }
+            }
+        }
+        entries.into_iter()
     }
 
-    fn pop_class(&mut self, class_index: usize) -> PolicyQueueEntry<T> {
+    fn pop_class(&mut self, class_index: usize, lane: CandidateLane) -> PolicyQueueEntry<T> {
         let class = &mut self.classes[class_index];
-        let entry = class.pending.pop().expect("policy class front vanished");
+        let entry = match &mut class.discipline {
+            ClassDiscipline::Ordered(pending) => {
+                debug_assert!(matches!(lane, CandidateLane::Ordered));
+                pending.pop().expect("policy class front vanished")
+            }
+            ClassDiscipline::Admission(admission) => admission.pop(lane),
+        };
         class.deficit = class
             .deficit
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
@@ -357,13 +628,12 @@ impl<T> PolicyQueue<T> {
         // Empty classes discard stale credit. A class that can already afford
         // its next head keeps the cursor and spends its weighted burst;
         // otherwise the next call starts at the following class.
-        if class.pending.is_empty() {
+        if class.discipline.is_empty() {
             class.deficit = 0;
             self.next_class = (class_index + 1) % self.classes.len();
         } else if class
-            .pending
-            .peek()
-            .is_some_and(|next| next.snapshot.scheduling_cost_tokens <= class.deficit)
+            .best_ready_cost()
+            .is_some_and(|cost| cost <= class.deficit)
         {
             self.next_class = class_index;
         } else {
@@ -371,6 +641,44 @@ impl<T> PolicyQueue<T> {
         }
         entry
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_entry<T>(
+    class_index: usize,
+    snapshot: QueueSnapshot,
+    arrival_offset_secs: f64,
+    priority_jump: f64,
+    strict_priority: u32,
+    queue_policy: RouterQueuePolicy,
+    enqueue_seq: u64,
+    payload: T,
+) -> PolicyQueueEntry<T> {
+    let policy_score = match queue_policy {
+        RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
+        RouterQueuePolicy::Wspt => {
+            (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
+        }
+        RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
+    };
+    PolicyQueueEntry {
+        class_index,
+        priority: QueuePriority {
+            strict_priority,
+            policy_score: OrderedFloat(policy_score),
+        },
+        enqueue_seq,
+        snapshot,
+        payload,
+    }
+}
+
+fn retain_heap<T>(
+    pending: &mut BinaryHeap<PolicyQueueEntry<T>>,
+    keep: &mut impl FnMut(&T) -> bool,
+) {
+    let entries = std::mem::take(pending);
+    pending.extend(entries.into_iter().filter(|entry| keep(entry.payload())));
 }
 
 fn queue_rejection<T>(class: &PolicyClassQueue<T>, worker_count: usize) -> Option<QueueRejection> {
@@ -428,6 +736,25 @@ mod tests {
         RouterPolicyConfig::from_yaml(yaml)
             .unwrap()
             .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
+    }
+
+    fn admission_profile() -> PolicyProfile {
+        profile(
+            r#"
+default_policy_family: agents
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: agents
+    policy_family: agents
+    cache_bucket: all
+    queue_policy: fcfs
+    queue_admission:
+      type: session_aware
+    quantum: 10
+"#,
+        )
     }
 
     #[test]
@@ -497,6 +824,67 @@ policy_classes:
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "keep"
         );
+    }
+
+    #[test]
+    fn held_requests_are_counted_and_move_to_worker_lanes() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        queue
+            .enqueue_held(
+                0,
+                2,
+                QueueSnapshot::new(10, 0),
+                2.0,
+                0.0,
+                0,
+                "session-held".to_string(),
+                "held",
+            )
+            .unwrap();
+
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.class_stats(0).requests, 1);
+        assert!(queue.pop_next(|_, _, _| true).is_none());
+
+        let worker = WorkerWithDpRank::new(7, 1);
+        assert!(queue.ready_held(
+            0,
+            "session-held",
+            QueueSnapshot::new(10, 5),
+            1.0,
+            DispatchIntent::Exact(worker),
+            |_, _| {},
+        ));
+        assert_eq!(queue.class_stats(0).cached_tokens, 5);
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "held"
+        );
+    }
+
+    #[test]
+    fn blocked_worker_lane_does_not_block_another_lane() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        for (worker, payload) in [(1, "blocked"), (2, "ready")] {
+            queue
+                .enqueue_ready(
+                    0,
+                    2,
+                    QueueSnapshot::new(1, 0),
+                    worker as f64,
+                    0.0,
+                    0,
+                    DispatchIntent::Exact(WorkerWithDpRank::new(worker, 0)),
+                    payload,
+                )
+                .unwrap();
+        }
+
+        let candidate = queue
+            .pop_next(|_, _, payload| *payload != "blocked")
+            .unwrap();
+        assert_eq!(candidate.into_payload(), "ready");
+        assert_eq!(queue.pending_count(), 1);
     }
 
     #[test]
