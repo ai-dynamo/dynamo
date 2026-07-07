@@ -33,6 +33,7 @@ from dynamo.sglang.capacity import (
 )
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+SGLANG_HICACHE_CAPACITY_RUNTIME_KEY = "sglang_hicache_capacity"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
@@ -313,6 +314,42 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     }
 
 
+def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
+    """Whether to publish ``ModelRuntimeConfig.enable_eagle`` for this speculative algorithm.
+
+    Derived from sglang's ``SpeculativeAlgorithm.is_eagle()`` -- the SAME predicate the radix
+    cache uses to bigram-key its KV-event block hashes (``srt/managers/scheduler.py``). The KV
+    router uses ``enable_eagle`` to bigram-align the frontend's prompt-block hashes; deriving it
+    from ``is_eagle()`` (instead of a hand-maintained name set) keeps the two in lockstep and
+    covers every eagle variant -- currently EAGLE, EAGLE3, FROZEN_KV_MTP. (NEXTN/EAGLE are
+    normalized to EAGLE/FROZEN_KV_MTP in ServerArgs before we see them.)
+    """
+    try:
+        return SpeculativeAlgorithm.from_string(speculative_algorithm).is_eagle()
+    except Exception as e:
+        # Graceful degradation: registration must not crash on an unexpected speculative-algorithm
+        # value. ``from_string`` raises ValueError on unknown/unregistered names (and returns NONE for
+        # ``None``, so the default case does not raise); catch broadly -- matching the sibling
+        # ``_get_mooncake_runtime_data`` above, per python-guidelines.md -- so any future signature/enum
+        # change can't crash the worker either. Default to not enabling eagle bigram routing; the
+        # previous membership check ``in ("EAGLE", "NEXTN")`` never raised, so this preserves behavior.
+        logging.warning(
+            "Could not derive enable_eagle from speculative_algorithm %r: %s; leaving it disabled.",
+            speculative_algorithm,
+            e,
+        )
+        return False
+
+
+def _get_hicache_capacity_runtime_data(
+    scheduler_info: dict[str, Any],
+) -> Optional[dict[str, int]]:
+    host_total_tokens = scheduler_info.get("hicache_host_total_tokens")
+    if not isinstance(host_total_tokens, (int, float)) or host_total_tokens <= 0:
+        return None
+    return {"host_total_tokens": int(host_total_tokens)}
+
+
 async def _get_runtime_config(
     engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
@@ -393,7 +430,7 @@ async def _get_runtime_config(
     if base_capacity.max_num_batched_tokens is not None:
         runtime_config.max_num_batched_tokens = base_capacity.max_num_batched_tokens
 
-    if server_args.speculative_algorithm in ("EAGLE", "NEXTN"):
+    if _eagle_enabled_for(server_args.speculative_algorithm):
         runtime_config.enable_eagle = True
 
     spec_decode_runtime_data = get_spec_decode_runtime_data(server_args)
@@ -455,11 +492,26 @@ async def _get_runtime_config(
                 f"{unpublished} will not be published; SGLang will use its internal defaults."
             )
 
-        return runtime_config
-
     except Exception as e:
         logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
         return runtime_config
+
+    try:
+        hicache_capacity_runtime_data = _get_hicache_capacity_runtime_data(
+            scheduler_info
+        )
+        if hicache_capacity_runtime_data is not None:
+            runtime_config.set_engine_specific(
+                SGLANG_HICACHE_CAPACITY_RUNTIME_KEY,
+                json.dumps(hicache_capacity_runtime_data),
+            )
+            logging.info("Published SGLang HiCache capacity runtime metadata.")
+    except Exception as e:
+        logging.warning(
+            "Failed to attach SGLang HiCache capacity runtime metadata: %s", e
+        )
+
+    return runtime_config
 
 
 async def register_model_with_readiness_gate(
