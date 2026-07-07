@@ -277,6 +277,7 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 		fi; \
 	done
 	echo "Copying generated manager RBAC role to the operator Helm chart"
+	mkdir -p $(dir $(HELM_MANAGER_RBAC_ROLE))
 	cp config/rbac/role.yaml $(HELM_MANAGER_RBAC_ROLE)
 
 .PHONY: generate
