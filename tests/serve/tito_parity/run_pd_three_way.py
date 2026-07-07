@@ -350,6 +350,16 @@ def compare_three_way(
             dynamo_run_2_tokens_equal = choice_field_equal(
                 run_2, dynamo_body, "token_ids"
             )
+            request = requests_by_key[key]
+            run_1_missing_logprobs = parity.missing_requested_logprob_fields(
+                run_1, request
+            )
+            run_2_missing_logprobs = parity.missing_requested_logprob_fields(
+                run_2, request
+            )
+            dynamo_missing_logprobs = parity.missing_requested_logprob_fields(
+                dynamo_body, request
+            )
 
             checks = {
                 "all_http_200": all_http_200,
@@ -377,6 +387,13 @@ def compare_three_way(
                 "dynamo_run_2_prompt_logprobs_equal": response_field_equal(
                     run_2, dynamo_body, "prompt_logprobs"
                 ),
+                "upstream_run_1_requested_logprobs_populated": (
+                    not run_1_missing_logprobs
+                ),
+                "upstream_run_2_requested_logprobs_populated": (
+                    not run_2_missing_logprobs
+                ),
+                "dynamo_requested_logprobs_populated": not dynamo_missing_logprobs,
             }
             for count_name in counts:
                 if count_name != "total" and checks.get(count_name):
@@ -400,6 +417,16 @@ def compare_three_way(
                 failures.append(f"{key}: upstream P/D run 1 != run 2")
             if not dynamo_equals_run_1 or not dynamo_equals_run_2:
                 failures.append(f"{key}: Dynamo P/D != both upstream P/D runs")
+            for side, missing in (
+                ("upstream P/D run 1", run_1_missing_logprobs),
+                ("upstream P/D run 2", run_2_missing_logprobs),
+                ("Dynamo P/D", dynamo_missing_logprobs),
+            ):
+                if missing:
+                    failures.append(
+                        f"{key}: {side} omitted requested fields: "
+                        f"{', '.join(missing)}"
+                    )
 
     (output_dir / "summary.json").write_text(
         json.dumps(counts, indent=2, sort_keys=True) + "\n", encoding="utf-8"

@@ -139,6 +139,12 @@ def expanded_cases() -> list[Case]:
             sampling_overrides=(("prompt_logprobs", 1),),
         ),
         Case(
+            name="text-combined-logprobs",
+            kind="text",
+            prompt="Continue this sequence: 1, 1, 2, 3, 5,",
+            sampling_overrides=(("logprobs", 5), ("prompt_logprobs", 1)),
+        ),
+        Case(
             name="vlm-red-blue",
             kind="vlm",
             prompt="Report the colors from left to right.",
@@ -346,6 +352,38 @@ def normalize_response(body: dict[str, Any], key: str, side: str) -> dict[str, A
     return normalized
 
 
+def missing_requested_logprob_fields(
+    body: dict[str, Any] | None, request: dict[str, Any]
+) -> list[str]:
+    sampling_params = request.get("sampling_params")
+    if not isinstance(sampling_params, dict):
+        return ["sampling_params"]
+    if body is None:
+        return [
+            field
+            for field in ("logprobs", "prompt_logprobs")
+            if sampling_params.get(field) is not None
+        ]
+
+    missing = []
+    if sampling_params.get("prompt_logprobs") is not None:
+        if body.get("prompt_logprobs") is None:
+            missing.append("prompt_logprobs")
+
+    if sampling_params.get("logprobs") is not None:
+        choices = body.get("choices")
+        if (
+            not isinstance(choices, list)
+            or not choices
+            or any(
+                not isinstance(choice, dict) or choice.get("logprobs") is None
+                for choice in choices
+            )
+        ):
+            missing.append("logprobs")
+    return missing
+
+
 def compare_results(
     upstream: dict[str, HttpResult],
     dynamo: dict[str, HttpResult],
@@ -386,6 +424,13 @@ def compare_results(
 
             upstream_body = normalize_response(upstream_result.body, key, "upstream")
             dynamo_body = normalize_response(dynamo_result.body, key, "dynamo")
+            request = requests_by_key[key]
+            for side, body in (("upstream", upstream_body), ("dynamo", dynamo_body)):
+                missing = missing_requested_logprob_fields(body, request)
+                if missing:
+                    failures.append(
+                        f"{key}: {side} omitted requested fields: {', '.join(missing)}"
+                    )
             if upstream_body != dynamo_body:
                 before = json.dumps(
                     upstream_body, indent=2, sort_keys=True

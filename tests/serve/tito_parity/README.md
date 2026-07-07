@@ -37,10 +37,12 @@ same hybrid-state layout. The comparison matrix is:
 
 Prompt logprobs are composed at the P/D boundary: the prefill result supplies
 prompt logprobs, while decode supplies generated tokens and generated
-logprobs. Decode must not recompute prompt logprobs from transferred KV.
+logprobs. Decode must not recompute prompt logprobs from transferred KV. The
+full suite includes a request that enables both fields together and requires
+both to be populated before comparing their values exactly.
 
 The `full` suite runs the two-request smoke stage first, followed by two
-sequential repetitions of eight longer text/VLM cases. This is the exact-parity
+sequential repetitions of nine longer text/VLM cases. This is the exact-parity
 gate: the current Qwen hybrid kernels can change greedy tokens when batch
 composition changes, even within upstream vLLM itself.
 
