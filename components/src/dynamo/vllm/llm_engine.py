@@ -233,7 +233,7 @@ class VllmLLMEngine(LLMEngine):
         # don't re-parse (idempotent, but avoids a duplicate argparse + doubled
         # vLLM deprecation warnings at startup).
         if config is None:
-            config = parse_args(argv)
+            config = parse_args(argv, fpm_trace_relay_supported=False)
 
         if config.disaggregation_mode == DisaggregationMode.ENCODE:
             raise NotImplementedError(
