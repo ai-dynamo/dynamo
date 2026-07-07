@@ -43,6 +43,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 5x Blackwell (GB200/B200) | ✅ | ✅ | Prefill/Decode split | ❌ |
 | **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill, stable SGLang runtime image | ❌ |
+| **[GLM-5.2-NVFP4](glm-5.2/)** | SGLang | Disagg Prefill/Decode | 12x B200 | ✅ | ✅ | NVFP4 + FP8 KV, TP4 prefill + TP8 decode, NIXL/UCX, KV-aware routing, EAGLE, HiCache CPU offload, agentic trace profile | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | TP=8, single-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
