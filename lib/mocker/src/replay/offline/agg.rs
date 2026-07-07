@@ -7,7 +7,7 @@ pub(super) use super::components::ReplayMode;
 #[cfg(test)]
 use super::components::TrafficStats;
 use super::events::{SimulationEvent, SimulationWorkerStage};
-use super::planner_hook::{PlannerHook, PlannerTickMetrics};
+use super::planner_hook::{LatestFpmBuffer, PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
     next_timestamp as choose_next_timestamp, pop_ready_planner_tick, pop_ready_worker_completion,
@@ -81,8 +81,8 @@ pub(in crate::replay) struct AggRuntime {
     router: Option<OfflineReplayRouter>,
     progress: ReplayProgress,
     stats: AggRuntimeStats,
-    /// Forward pass metrics accumulated between planner ticks.
-    fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
+    /// Latest forward pass metric per worker/rank since the previous planner tick.
+    fpm_buffer: LatestFpmBuffer,
     /// Traffic statistics accumulated between planner ticks.
     traffic: TrafficAccumulator,
     /// Optional cap on simulated wall-clock time. When set, `run()` exits
@@ -93,9 +93,8 @@ pub(in crate::replay) struct AggRuntime {
     /// calls back into the planner at each tick (the unified replacement for the
     /// old Python-driven `advance_to` stepping loop).
     planner_hook: Option<Box<dyn PlannerHook>>,
-    /// Whether to retain per-pass FPM snapshots. Only the planner consumes them, so
-    /// the plain `run()` path leaves this `false` (otherwise the buffer grows
-    /// unbounded for the whole run with no reader — the leak this gating fixes).
+    /// Whether to retain the latest FPM snapshot per worker/rank. Only the planner
+    /// consumes them, so the plain `run()` path leaves this `false`.
     collect_fpm: bool,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
@@ -196,7 +195,7 @@ impl AggRuntime {
             stats: AggRuntimeStats::default(),
             #[cfg(not(test))]
             stats: AggRuntimeStats,
-            fpm_buffer: Vec::new(),
+            fpm_buffer: LatestFpmBuffer::default(),
             traffic: TrafficAccumulator::new(),
             max_sim_time_ms: None,
             planner_hook: None,
@@ -331,7 +330,7 @@ impl AggRuntime {
         })?;
         snapshot.worker_id = worker_id.to_string();
         snapshot.dp_rank = dp_rank;
-        self.fpm_buffer.push((worker_id, snapshot));
+        self.fpm_buffer.insert(worker_id, snapshot);
         Ok(())
     }
 
@@ -689,11 +688,6 @@ impl AggRuntime {
     }
 
     fn handle_engine_effects(&mut self, effects: EngineEffects) -> anyhow::Result<()> {
-        if self.collect_fpm {
-            for (rank_id, fpm) in effects.fpm_snapshots {
-                self.record_fpm(rank_id, fpm)?;
-            }
-        }
         self.apply_router_events(effects.pass_start_kv_events)?;
         for payload in effects.immediate_completions {
             let payload = self.engine.on_scheduled_completion(payload)?;
@@ -803,13 +797,14 @@ impl AggRuntime {
             if self.is_workload_done() {
                 continue;
             }
+            let active_decode_ids = self.engine.active_group_ids();
             let metrics = PlannerTickMetrics {
                 now_ms: self.now_ms,
                 prefill_fpm: Vec::new(),
-                decode_fpm: std::mem::take(&mut self.fpm_buffer),
+                decode_fpm: self.fpm_buffer.take(),
                 traffic: self.traffic.drain(self.now_ms),
-                active_prefill: 0,
-                active_decode: self.active_worker_count(),
+                active_prefill_ids: Vec::new(),
+                active_decode_ids,
                 total_prefill: 0,
                 total_decode: self.total_worker_count(),
             };
@@ -867,6 +862,7 @@ impl AggRuntime {
     }
 
     /// Number of active (non-pending-removal) workers.
+    #[cfg(test)]
     pub(in crate::replay) fn active_worker_count(&self) -> usize {
         self.engine.active_group_ids().len()
     }
@@ -1051,7 +1047,7 @@ impl AggRuntime {
 
     #[cfg(test)]
     fn drain_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
-        std::mem::take(&mut self.fpm_buffer)
+        self.fpm_buffer.take()
     }
 
     #[cfg(test)]

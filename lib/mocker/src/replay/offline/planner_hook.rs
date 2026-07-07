@@ -5,7 +5,7 @@
 //!
 //! A [`PlannerHook`] is invoked once per [`PlannerTick`](super::events::SimulationEventKind::PlannerTick)
 //! event inside the unified `run()` loop: it receives the metrics drained at the tick
-//! (per-pass FPM snapshots accumulated since the last tick, the traffic window, and worker
+//! (the latest FPM snapshot per worker/rank, the traffic window, and worker
 //! counts) and returns a scaling decision plus the time of the next tick. This replaces the
 //! old Python-driven `advance_to`/`apply_scaling` stepping loop — the planner's decision logic
 //! still lives in Python (via a PyO3 wrapper that implements this trait), but the simulation
@@ -13,8 +13,76 @@
 //!
 //! [`NoopPlannerHook`] is the inert stand-in for tests and the no-planner path.
 
+use std::collections::BTreeMap;
+
 use super::components::TrafficStats;
 use crate::common::protocols::ForwardPassSnapshot;
+
+/// Latest FPM snapshot for each logical worker and DP rank.
+#[derive(Debug, Default)]
+pub(super) struct LatestFpmBuffer {
+    snapshots: BTreeMap<(usize, u32), ForwardPassSnapshot>,
+}
+
+impl LatestFpmBuffer {
+    pub(super) fn insert(&mut self, worker_id: usize, snapshot: ForwardPassSnapshot) {
+        self.snapshots
+            .insert((worker_id, snapshot.dp_rank), snapshot);
+    }
+
+    pub(super) fn take(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
+        std::mem::take(&mut self.snapshots)
+            .into_iter()
+            .map(|((worker_id, _), snapshot)| (worker_id, snapshot))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LatestFpmBuffer;
+    use crate::common::protocols::ForwardPassSnapshot;
+
+    #[test]
+    fn latest_fpm_buffer_coalesces_each_worker_rank() {
+        let mut buffer = LatestFpmBuffer::default();
+        buffer.insert(
+            4,
+            ForwardPassSnapshot {
+                dp_rank: 0,
+                wall_time_secs: 1.0,
+                ..Default::default()
+            },
+        );
+        buffer.insert(
+            4,
+            ForwardPassSnapshot {
+                dp_rank: 0,
+                wall_time_secs: 2.0,
+                ..Default::default()
+            },
+        );
+        buffer.insert(
+            4,
+            ForwardPassSnapshot {
+                dp_rank: 1,
+                wall_time_secs: 3.0,
+                ..Default::default()
+            },
+        );
+
+        let snapshots = buffer.take();
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].0, 4);
+        assert_eq!(snapshots[0].1.dp_rank, 0);
+        assert_eq!(snapshots[0].1.wall_time_secs, 2.0);
+        assert_eq!(snapshots[1].0, 4);
+        assert_eq!(snapshots[1].1.dp_rank, 1);
+        assert_eq!(snapshots[1].1.wall_time_secs, 3.0);
+        assert!(buffer.take().is_empty());
+    }
+}
 
 /// Metrics handed to the planner at one tick. The runtime has already advanced the clock to
 /// `now_ms` and settled all same-timestamp work before this is built, so the planner observes a
@@ -23,18 +91,18 @@ use crate::common::protocols::ForwardPassSnapshot;
 pub struct PlannerTickMetrics {
     /// Simulated clock at this tick (equals the scheduled tick time).
     pub now_ms: f64,
-    /// Every prefill FPM snapshot accumulated since the previous tick (empty in agg mode,
-    /// which routes all passes through `decode_fpm`).
+    /// Latest prefill FPM snapshot per worker/rank observed since the previous tick (empty in
+    /// agg mode, which routes all passes through `decode_fpm`).
     pub prefill_fpm: Vec<(usize, ForwardPassSnapshot)>,
-    /// Every decode (agg: aggregated) FPM snapshot accumulated since the previous tick.
+    /// Latest decode (agg: aggregated) FPM snapshot per worker/rank observed since the previous
+    /// tick.
     pub decode_fpm: Vec<(usize, ForwardPassSnapshot)>,
     /// Traffic stats over `[previous tick, now]`. Drained every tick; the Python side merges
-    /// partial windows across ticks that don't consume traffic (mirrors how it already
-    /// accumulates FPM snapshots).
+    /// partial windows across ticks that don't consume traffic.
     pub traffic: TrafficStats,
-    /// Active (ready, non-draining) worker counts. Agg reports decode only (`active_prefill = 0`).
-    pub active_prefill: usize,
-    pub active_decode: usize,
+    /// Active (ready, non-draining) logical worker IDs. Agg reports decode only.
+    pub active_prefill_ids: Vec<usize>,
+    pub active_decode_ids: Vec<usize>,
     /// Total workers including pending startup + pending removal.
     pub total_prefill: usize,
     pub total_decode: usize,

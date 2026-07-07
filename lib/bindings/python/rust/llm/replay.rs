@@ -2466,8 +2466,8 @@ impl PlannerHook for PyPlannerHook {
             prefill_fpm,
             decode_fpm,
             traffic,
-            active_prefill,
-            active_decode,
+            active_prefill_ids,
+            active_decode_ids,
             total_prefill,
             total_decode,
         } = metrics;
@@ -2478,8 +2478,10 @@ impl PlannerHook for PyPlannerHook {
                 "now_ms": now_ms,
                 "prefill_fpm_snapshots": fpm_snapshots_to_json(prefill_fpm),
                 "decode_fpm_snapshots": fpm_snapshots_to_json(decode_fpm),
-                "active_prefill_count": active_prefill,
-                "active_decode_count": active_decode,
+                "active_prefill_count": active_prefill_ids.len(),
+                "active_decode_count": active_decode_ids.len(),
+                "active_prefill_ids": active_prefill_ids,
+                "active_decode_ids": active_decode_ids,
                 "total_prefill_count": total_prefill,
                 "total_decode_count": total_decode,
                 "traffic": {

@@ -80,13 +80,30 @@ def test_fpm_cache_keeps_all_ranks_for_each_active_worker():
         _snap("1", wall_time=1.0, dp_rank=1),
     ]
 
-    _update_fpm_cache(cache, snapshots, active_count=2)
+    _update_fpm_cache(cache, snapshots, active_worker_ids=[0, 1])
 
     assert set(cache) == {("0", 0), ("0", 1), ("1", 0), ("1", 1)}
 
-    _update_fpm_cache(cache, [], active_count=1)
+    _update_fpm_cache(cache, [], active_worker_ids=[0])
 
     assert set(cache) == {("0", 0), ("0", 1)}
+
+
+def test_fpm_cache_prunes_by_active_identity_after_worker_replacement():
+    cache = {}
+    _update_fpm_cache(
+        cache,
+        [_snap("0", wall_time=1.0), _snap("1", wall_time=1.0)],
+        active_worker_ids=[0, 1],
+    )
+
+    _update_fpm_cache(
+        cache,
+        [_snap("2", wall_time=2.0)],
+        active_worker_ids=[0, 2],
+    )
+
+    assert set(cache) == {("0", 0), ("2", 0)}
 
 
 def _orch_agg_config_sla() -> PlannerConfig:
@@ -127,6 +144,8 @@ def test_build_tick_input_maps_replay_accept_length():
         "now_ms": 1_000.0,
         "active_prefill_count": 0,
         "active_decode_count": 0,
+        "active_prefill_ids": [],
+        "active_decode_ids": [],
         "traffic": {
             "duration_s": 60.0,
             "num_req": 4,
@@ -167,6 +186,8 @@ def test_build_tick_input_keeps_only_latest_fpm_until_fpm_tick():
             "now_ms": 1_000.0,
             "active_prefill_count": 0,
             "active_decode_count": 1,
+            "active_prefill_ids": [],
+            "active_decode_ids": [0],
             "decode_fpm_snapshots": [
                 _snap("0", wall_time=1.0, dp_rank=0),
                 _snap("0", wall_time=1.0, dp_rank=1),
@@ -192,6 +213,8 @@ def test_build_tick_input_keeps_only_latest_fpm_until_fpm_tick():
             "now_ms": 7_000.0,
             "active_prefill_count": 0,
             "active_decode_count": 1,
+            "active_prefill_ids": [],
+            "active_decode_ids": [0],
             "decode_fpm_snapshots": [],
             "prefill_fpm_snapshots": [],
         },

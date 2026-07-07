@@ -113,20 +113,16 @@ def _build_fpm_from_dict(d: dict[str, Any]) -> ForwardPassMetrics:
 def _update_fpm_cache(
     cache: dict[tuple[str, int], ForwardPassMetrics],
     snapshots: list[dict[str, Any]],
-    active_count: int,
+    active_worker_ids: list[int],
 ) -> None:
     """Update a last-seen FPM cache with new snapshots and prune removed workers."""
     for snap in snapshots:
         fpm = _build_fpm_from_dict(snap)
         cache[(fpm.worker_id, fpm.dp_rank)] = fpm
 
-    # Prune by logical worker, retaining every DP-rank entry for each active
-    # worker. Workers are removed highest-ID-first during scale-down.
-    active_worker_ids = set(
-        sorted({worker_id for worker_id, _ in cache}, key=int)[:active_count]
-    )
+    active_worker_ids_as_str = {str(worker_id) for worker_id in active_worker_ids}
     for key in list(cache):
-        if key[0] not in active_worker_ids:
+        if key[0] not in active_worker_ids_as_str:
             del cache[key]
 
 
@@ -563,19 +559,18 @@ class ReplayPlannerAdapter:
             )
 
         fpm_observations = None
-        # The replay bridge may report multiple passes per callback. Collapse
-        # them to the latest value per worker/rank immediately so replay matches
-        # the live subscriber's latest-snapshot semantics and does not retain an
-        # unbounded intra-tick history.
+        # Merge each callback's latest worker/rank snapshots into the last-seen
+        # cache, then expose the cache only on FPM ticks. This matches the live
+        # subscriber's latest-snapshot semantics.
         _update_fpm_cache(
             self._prefill_fpm_cache,
             result.get("prefill_fpm_snapshots", []),
-            result["active_prefill_count"],
+            result["active_prefill_ids"],
         )
         _update_fpm_cache(
             self._decode_fpm_cache,
             result.get("decode_fpm_snapshots", []),
-            result["active_decode_count"],
+            result["active_decode_ids"],
         )
         if tick.need_worker_fpm:
             prefill_dict = (
