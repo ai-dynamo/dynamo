@@ -76,8 +76,10 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
 
 
 def test_hicache_publishes_native_offloading_capacity():
+    server_args = SimpleNamespace(hicache_write_policy="write_back")
     assert get_hicache_native_offloading_capacity(
-        SimpleNamespace(), {"hicache_host_total_tokens": 300}
+        server_args,
+        {"max_total_num_tokens": 100, "hicache_host_total_tokens": 300},
     ) == {"total_tokens": 300}
 
 
@@ -85,9 +87,11 @@ def test_hicache_publishes_native_offloading_capacity():
     "value", [None, False, 0, 0.5, -1, "300", float("inf"), float("nan")]
 )
 def test_hicache_native_offloading_capacity_ignores_invalid_values(value):
+    server_args = SimpleNamespace(hicache_write_policy="write_back")
     assert (
         get_hicache_native_offloading_capacity(
-            SimpleNamespace(), {"hicache_host_total_tokens": value}
+            server_args,
+            {"max_total_num_tokens": 100, "hicache_host_total_tokens": value},
         )
         is None
     )
@@ -108,12 +112,40 @@ def test_hicache_derives_ratio_based_write_back_capacity():
 
 
 @pytest.mark.parametrize(
+    "policy, expected",
+    [
+        ("write_back", 300),
+        ("write_through", 200),
+        ("write_through_selective", None),
+    ],
+)
+def test_hicache_capacity_accounts_for_write_policy(policy, expected):
+    result = get_hicache_native_offloading_capacity(
+        SimpleNamespace(hicache_write_policy=policy),
+        {"max_total_num_tokens": 100, "hicache_host_total_tokens": 300},
+    )
+
+    assert (result or {}).get("total_tokens") == expected
+
+
+def test_hicache_write_through_ignores_fully_overlapped_host_pool():
+    assert (
+        get_hicache_native_offloading_capacity(
+            SimpleNamespace(hicache_write_policy="write_through"),
+            {"max_total_num_tokens": 300, "hicache_host_total_tokens": 100},
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
     "overrides",
     [
         {"enable_hierarchical_cache": False},
         {"hicache_size": 16},
-        {"hicache_write_policy": "write_through"},
         {"hicache_write_policy": "write_through_selective"},
+        {"dcp_size": 2},
+        {"model_config": SimpleNamespace(is_deepseek_v4_arch=True)},
     ],
 )
 def test_hicache_does_not_derive_unsupported_capacity(overrides):

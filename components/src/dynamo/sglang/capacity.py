@@ -104,28 +104,58 @@ def get_spec_decode_runtime_data(server_args: Any) -> dict[str, Any] | None:
 def get_hicache_native_offloading_capacity(
     server_args: Any, scheduler_info: dict[str, Any]
 ) -> dict[str, int] | None:
-    """Return reported HiCache capacity, or derive ratio-based write-back capacity."""
-    if "hicache_host_total_tokens" in scheduler_info:
-        return native_offloading_capacity(scheduler_info["hicache_host_total_tokens"])
-
-    if (
-        not getattr(server_args, "enable_hierarchical_cache", False)
-        or (getattr(server_args, "hicache_size", 0) or 0) > 0
-        or getattr(server_args, "hicache_write_policy", None) != "write_back"
-    ):
-        return None
-
+    """Return HiCache capacity that is unique beyond the device KV pool."""
     device_capacity = native_offloading_capacity(
         scheduler_info.get("max_total_num_tokens")
     )
-    page_size = getattr(server_args, "page_size", None)
-    ratio = getattr(server_args, "hicache_ratio", None)
-    if device_capacity is None or not page_size:
+    if device_capacity is None:
         return None
 
-    try:
-        host_tokens = int(device_capacity["total_tokens"] * ratio)
-    except (TypeError, ValueError, OverflowError):
+    policy = getattr(server_args, "hicache_write_policy", None)
+    if policy == "write_through_selective":
         return None
 
-    return native_offloading_capacity((host_tokens // page_size + 1) * page_size)
+    host_capacity = None
+    if "hicache_host_total_tokens" in scheduler_info:
+        host_capacity = native_offloading_capacity(
+            scheduler_info["hicache_host_total_tokens"]
+        )
+        if host_capacity is None:
+            return None
+
+    if host_capacity is None:
+        if (
+            not getattr(server_args, "enable_hierarchical_cache", False)
+            or (getattr(server_args, "hicache_size", 0) or 0) > 0
+            or policy not in ("write_back", "write_through")
+            or (getattr(server_args, "dcp_size", 1) or 1) > 1
+            or getattr(
+                getattr(server_args, "model_config", None),
+                "is_deepseek_v4_arch",
+                False,
+            )
+        ):
+            return None
+
+        page_size = getattr(server_args, "page_size", None)
+        ratio = getattr(server_args, "hicache_ratio", None)
+        if not page_size:
+            return None
+
+        try:
+            host_tokens = int(device_capacity["total_tokens"] * ratio)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+        host_capacity = native_offloading_capacity(
+            (host_tokens // page_size + 1) * page_size
+        )
+        if host_capacity is None:
+            return None
+
+    host_tokens = host_capacity["total_tokens"]
+    if policy == "write_back":
+        return host_capacity
+    if policy == "write_through":
+        return native_offloading_capacity(host_tokens - device_capacity["total_tokens"])
+    return None
