@@ -1063,9 +1063,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
         # Aggregated partial encoder. The attribute is set here so cleanup() is
-        # always safe, but the encoder is loaded last in __init__ (it starts a
-        # thread) — see _load_custom_encoder below — so a failure in the rest of
-        # init does not leak the batcher thread.
+        # always safe; the encoder itself is loaded last in __init__ (it starts
+        # the actor thread) — see _load_custom_encoder below for why.
         self._custom_encoder: Optional[AsyncVisionEncoder] = None
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
@@ -1112,9 +1111,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # dyn://<namespace>.<component>.rl when --enable-rl / DYN_ENABLE_RL is set.
         self.rl_route_registry = RLRouteRegistry(self.runtime, logger_=logger)
 
-        # Load the custom encoder last: it starts a batcher thread, so deferring
-        # it until all other (fallible) setup is done means an earlier init
-        # failure cannot leave that thread orphaned.
+        # Load the custom encoder last. If a later init step raised, executor
+        # GC would eventually reap the idle actor thread — but only once the
+        # exception's traceback stops pinning `self` (unbounded while the
+        # failure is handled upstream), and GC never runs backend.close() or
+        # frees the encoder's GPU memory in the meantime. Ordering the encoder
+        # after all other fallible setup removes that window by construction.
         self._load_custom_encoder(config)
 
     def _load_custom_encoder(self, config: Config) -> None:
@@ -2419,7 +2421,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def cleanup(self):
         """Clean up resources including temporary directories."""
         if self._custom_encoder is not None:
-            # Stop the in-process encoder's batcher thread on teardown.
+            # Run backend.close() on the actor thread, then stop it — executor
+            # GC would only end the thread, never call close().
             self._custom_encoder.shutdown()
         for temp_dir in self.temp_dirs:
             try:
