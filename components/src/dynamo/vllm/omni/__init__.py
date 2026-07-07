@@ -3,13 +3,8 @@
 
 """vLLM-Omni integration for Dynamo."""
 
-from .version_check import check_vllm_omni_compatibility
-
-# Fail fast on a vLLM / vLLM-Omni version mismatch (else an opaque ImportError).
-check_vllm_omni_compatibility()
-
-from .base_handler import BaseOmniHandler  # noqa: E402
-from .omni_handler import OmniHandler  # noqa: E402
-from .realtime_handler import RealtimeOmniHandler  # noqa: E402
+from .base_handler import BaseOmniHandler
+from .omni_handler import OmniHandler
+from .realtime_handler import RealtimeOmniHandler
 
 __all__ = ["BaseOmniHandler", "OmniHandler", "RealtimeOmniHandler"]
