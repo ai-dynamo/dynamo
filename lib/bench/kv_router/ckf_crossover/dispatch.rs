@@ -70,6 +70,7 @@ struct QuerySamples {
 }
 
 struct UpdateMetrics {
+    drain_completed_at: Instant,
     queue: QueueMetrics,
     scheduled_to_enqueue_ns: Vec<u64>,
     enqueue_to_applied_ns: Vec<u64>,
@@ -261,13 +262,16 @@ pub async fn run_trial(
             .scheduled_to_completion_ns
             .extend(samples.scheduled_to_completion_ns);
     }
+    let query_drain_completed_at = Instant::now();
     let query_queue = QueueMetrics {
         at_stop: query_at_stop,
         maximum_depth: maximum_query_depth.load(Ordering::Relaxed),
         drain_ms: query_drain_started.elapsed().as_secs_f64() * 1000.0,
     };
     let update = update_handle.await??;
-    let total_elapsed = start.elapsed();
+    let total_elapsed = query_drain_completed_at
+        .max(update.drain_completed_at)
+        .saturating_duration_since(start);
 
     let accuracy = match &backend {
         Backend::Crtc(_) => AccuracyMetrics::default(),
@@ -401,6 +405,7 @@ async fn flush_updates(backend: &Backend) -> anyhow::Result<UpdateMetrics> {
             let (
                 queue,
                 CrtcCompletionMetrics {
+                    drain_completed_at,
                     scheduled_to_enqueue_ns,
                     enqueue_to_applied_ns,
                     scheduled_to_applied_ns,
@@ -408,6 +413,7 @@ async fn flush_updates(backend: &Backend) -> anyhow::Result<UpdateMetrics> {
                 },
             ) = crtc.flush().await?;
             Ok(UpdateMetrics {
+                drain_completed_at,
                 queue,
                 scheduled_to_enqueue_ns,
                 enqueue_to_applied_ns,
@@ -417,6 +423,7 @@ async fn flush_updates(backend: &Backend) -> anyhow::Result<UpdateMetrics> {
         }
         Backend::Ckf(ckf) => {
             let core_queue = ckf.flush_with_metrics()?;
+            let drain_completed_at = Instant::now();
             let queue = QueueMetrics {
                 at_stop: core_queue.at_stop,
                 maximum_depth: core_queue.maximum_depth,
@@ -426,6 +433,7 @@ async fn flush_updates(backend: &Backend) -> anyhow::Result<UpdateMetrics> {
                 ckf.take_update_latencies();
             let core_errors = ckf.stats_snapshot().errors;
             Ok(UpdateMetrics {
+                drain_completed_at,
                 queue,
                 scheduled_to_enqueue_ns,
                 enqueue_to_applied_ns,

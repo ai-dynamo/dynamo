@@ -44,6 +44,7 @@ pub struct CrtcBackend {
 }
 
 pub struct CrtcCompletionMetrics {
+    pub drain_completed_at: Instant,
     pub scheduled_to_enqueue_ns: Vec<u64>,
     pub enqueue_to_applied_ns: Vec<u64>,
     pub scheduled_to_applied_ns: Vec<u64>,
@@ -125,6 +126,7 @@ impl CrtcBackend {
             &*self.indexer,
         )
         .await;
+        let drain_completed_at = Instant::now();
         let drain_ms = started.elapsed().as_secs_f64() * 1000.0;
         let expected = self.stats.raw_events.load(Ordering::Relaxed) as usize;
         let mut scheduled_to_enqueue_ns = Vec::with_capacity(expected);
@@ -167,6 +169,7 @@ impl CrtcBackend {
                 drain_ms,
             },
             CrtcCompletionMetrics {
+                drain_completed_at,
                 scheduled_to_enqueue_ns,
                 enqueue_to_applied_ns,
                 scheduled_to_applied_ns,
