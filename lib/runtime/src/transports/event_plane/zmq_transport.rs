@@ -25,7 +25,7 @@ use tmq::{
     publish::{Publish, publish},
     subscribe::{Subscribe, subscribe},
 };
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
 /// Returns the process-wide shared ZMQ context.
 ///
@@ -199,7 +199,13 @@ impl EventTransportTx for ZmqPubTransport {
 /// Uses a background async reader to fan out frames to multiple local subscribers.
 pub struct ZmqSubTransport {
     broadcast_tx: broadcast::Sender<Bytes>,
-    _socket_pump_handle: tokio::task::JoinHandle<()>,
+    socket_pump_handle: tokio::task::JoinHandle<()>,
+    endpoint_tx: Option<mpsc::UnboundedSender<EndpointCommand>>,
+}
+
+enum EndpointCommand {
+    Connect(String, oneshot::Sender<Result<()>>),
+    Disconnect(String, oneshot::Sender<Result<()>>),
 }
 
 impl ZmqSubTransport {
@@ -222,7 +228,8 @@ impl ZmqSubTransport {
 
         Ok(Self {
             broadcast_tx,
-            _socket_pump_handle: pump_handle,
+            socket_pump_handle: pump_handle,
+            endpoint_tx: None,
         })
     }
 
@@ -265,8 +272,65 @@ impl ZmqSubTransport {
 
         Ok(Self {
             broadcast_tx,
-            _socket_pump_handle: pump_handle,
+            socket_pump_handle: pump_handle,
+            endpoint_tx: None,
         })
+    }
+
+    /// Create a subscriber whose single socket can be connected to and
+    /// disconnected from publisher endpoints as discovery changes.
+    pub async fn dynamic(topic: &str, channel_capacity: usize) -> Result<Self> {
+        // tmq only exposes builders that bind or connect. A SUB connect is
+        // asynchronous, so using then immediately disconnecting an unbound
+        // inproc endpoint gives us a configured socket without network I/O.
+        let placeholder = "inproc://dynamo-event-plane-dynamic-placeholder";
+        let ctx = shared_zmq_context();
+        let socket = configure_subscribe_builder(subscribe(&ctx))
+            .connect(placeholder)?
+            .subscribe(topic.as_bytes())?;
+        socket.get_socket().disconnect(placeholder)?;
+
+        let (broadcast_tx, _) = broadcast::channel(channel_capacity);
+        let (endpoint_tx, endpoint_rx) = mpsc::unbounded_channel();
+        let pump_handle =
+            Self::start_dynamic_socket_pump(socket, broadcast_tx.clone(), endpoint_rx);
+
+        Ok(Self {
+            broadcast_tx,
+            socket_pump_handle: pump_handle,
+            endpoint_tx: Some(endpoint_tx),
+        })
+    }
+
+    pub async fn connect_endpoint(&self, endpoint: &str) -> Result<()> {
+        self.send_endpoint_command(|response| {
+            EndpointCommand::Connect(endpoint.to_string(), response)
+        })
+        .await
+    }
+
+    pub async fn disconnect_endpoint(&self, endpoint: &str) -> Result<()> {
+        self.send_endpoint_command(|response| {
+            EndpointCommand::Disconnect(endpoint.to_string(), response)
+        })
+        .await
+    }
+
+    async fn send_endpoint_command(
+        &self,
+        command: impl FnOnce(oneshot::Sender<Result<()>>) -> EndpointCommand,
+    ) -> Result<()> {
+        let endpoint_tx = self
+            .endpoint_tx
+            .as_ref()
+            .ok_or_else(|| anyhow!("ZMQ subscriber does not support dynamic endpoints"))?;
+        let (response_tx, response_rx) = oneshot::channel();
+        endpoint_tx
+            .send(command(response_tx))
+            .map_err(|_| anyhow!("ZMQ socket pump stopped"))?;
+        response_rx
+            .await
+            .map_err(|_| anyhow!("ZMQ socket pump stopped before acknowledging endpoint"))?
     }
 
     fn start_socket_pump(
@@ -280,62 +344,112 @@ impl ZmqSubTransport {
                     break;
                 };
 
-                let frames = match result {
-                    Ok(frames) => multipart_message(frames),
+                let multipart = match result {
+                    Ok(frames) => frames,
                     Err(error) => {
                         tracing::error!(error = %error, "ZMQ receive error in socket pump");
                         break;
                     }
                 };
 
-                if frames.len() != 4 {
-                    tracing::warn!(
-                        frame_count = frames.len(),
-                        "Unexpected multipart frame count in socket pump"
-                    );
-                    continue;
-                }
-
-                let publisher_id_bytes = &frames[1];
-                if publisher_id_bytes.len() != 8 {
-                    tracing::warn!(
-                        actual = publisher_id_bytes.len(),
-                        "Invalid publisher_id frame in socket pump"
-                    );
-                    continue;
-                }
-                let publisher_id =
-                    u64::from_be_bytes(publisher_id_bytes.as_slice().try_into().unwrap());
-
-                let sequence_bytes = &frames[2];
-                if sequence_bytes.len() != 8 {
-                    tracing::warn!(
-                        actual = sequence_bytes.len(),
-                        "Invalid sequence frame in socket pump"
-                    );
-                    continue;
-                }
-                let sequence = u64::from_be_bytes(sequence_bytes.as_slice().try_into().unwrap());
-
-                tracing::trace!(
-                    publisher_id = publisher_id,
-                    sequence = sequence,
-                    "Socket pump received ZMQ message"
-                );
-
-                let frame_bytes = Bytes::from(frames[3].clone());
-                match Frame::decode(frame_bytes) {
-                    Ok(frame) => {
-                        let _ = broadcast_tx.send(frame.payload);
-                    }
-                    Err(error) => {
-                        tracing::warn!(error = %error, "Failed to decode ZMQ frame in socket pump");
-                    }
-                }
+                Self::forward_multipart(multipart, &broadcast_tx);
             }
 
             tracing::info!("ZMQ socket pump task terminated");
         })
+    }
+
+    fn start_dynamic_socket_pump(
+        mut socket: Subscribe,
+        broadcast_tx: broadcast::Sender<Bytes>,
+        mut endpoint_rx: mpsc::UnboundedReceiver<EndpointCommand>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    command = endpoint_rx.recv() => {
+                        let Some(command) = command else { break };
+                        match command {
+                            EndpointCommand::Connect(endpoint, response) => {
+                                let result = socket.get_socket().connect(&endpoint).map_err(Into::into);
+                                let _ = response.send(result);
+                            }
+                            EndpointCommand::Disconnect(endpoint, response) => {
+                                let result = socket.get_socket().disconnect(&endpoint).map_err(Into::into);
+                                let _ = response.send(result);
+                            }
+                        }
+                    }
+                    result = socket.next() => {
+                        let Some(result) = result else { break };
+                        match result {
+                            Ok(multipart) => Self::forward_multipart(multipart, &broadcast_tx),
+                            Err(error) => {
+                                tracing::error!(error = %error, "ZMQ receive error in dynamic socket pump");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::info!("Dynamic ZMQ socket pump task terminated");
+        })
+    }
+
+    fn forward_multipart(multipart: Multipart, broadcast_tx: &broadcast::Sender<Bytes>) {
+        let frames = multipart_message(multipart);
+
+        if frames.len() != 4 {
+            tracing::warn!(
+                frame_count = frames.len(),
+                "Unexpected multipart frame count in socket pump"
+            );
+            return;
+        }
+
+        let publisher_id_bytes = &frames[1];
+        if publisher_id_bytes.len() != 8 {
+            tracing::warn!(
+                actual = publisher_id_bytes.len(),
+                "Invalid publisher_id frame in socket pump"
+            );
+            return;
+        }
+        let publisher_id = u64::from_be_bytes(publisher_id_bytes.as_slice().try_into().unwrap());
+
+        let sequence_bytes = &frames[2];
+        if sequence_bytes.len() != 8 {
+            tracing::warn!(
+                actual = sequence_bytes.len(),
+                "Invalid sequence frame in socket pump"
+            );
+            return;
+        }
+        let sequence = u64::from_be_bytes(sequence_bytes.as_slice().try_into().unwrap());
+
+        tracing::trace!(
+            publisher_id = publisher_id,
+            sequence = sequence,
+            "Socket pump received ZMQ message"
+        );
+
+        let frame_bytes = Bytes::from(frames[3].clone());
+        match Frame::decode(frame_bytes) {
+            Ok(frame) => {
+                let _ = broadcast_tx.send(frame.payload);
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to decode ZMQ frame in socket pump");
+            }
+        }
+    }
+}
+
+impl Drop for ZmqSubTransport {
+    fn drop(&mut self) {
+        // Dropping a JoinHandle detaches the task. Explicitly abort it so the
+        // pump releases its ZMQ socket and all connection/file resources.
+        self.socket_pump_handle.abort();
     }
 }
 

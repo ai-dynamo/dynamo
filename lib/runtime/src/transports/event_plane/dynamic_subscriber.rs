@@ -57,10 +57,46 @@ impl DynamicSubscriber {
             .unwrap_or(100_000);
         let (event_tx, event_rx) = mpsc::channel::<Bytes>(channel_cap);
 
-        // Track active endpoint connections with instance ID to endpoint mapping
-        let active_endpoints: Arc<
-            RwLock<HashMap<DiscoveryInstanceId, (String, CancellationToken)>>,
-        > = Arc::new(RwLock::new(HashMap::new()));
+        // One SUB socket can connect to many PUB endpoints. Keep publisher
+        // identity in discovery/envelopes while avoiding one socket and one
+        // pump task per publisher/subscriber pair.
+        let sub_transport = Arc::new(ZmqSubTransport::dynamic(&self.topic, channel_cap).await?);
+        let mut zmq_stream = sub_transport.subscribe(&self.topic).await?;
+
+        // Keep the existing bounded handoff semantics. The transport's
+        // broadcast channel uses the same capacity, so both queues remain
+        // bounded under a slow consumer.
+        let forward_cancel = self.cancel_token.clone();
+        let event_tx_for_pump = event_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = forward_cancel.cancelled() => break,
+                    event = zmq_stream.next() => {
+                        match event {
+                            Some(Ok(bytes)) => match event_tx_for_pump.try_send(bytes) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    tracing::trace!("Event subscriber channel full; dropping event");
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => break,
+                            },
+                            Some(Err(error)) => {
+                                tracing::error!(%error, "Error receiving from dynamic ZMQ socket");
+                                break;
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        // Track active publisher identities separately from endpoint ownership.
+        // The endpoint refcount check preserves correctness even if discovery
+        // ever reports two identities for one transport endpoint.
+        let active_endpoints: Arc<RwLock<HashMap<DiscoveryInstanceId, String>>> =
+            Arc::new(RwLock::new(HashMap::new()));
 
         // Clone self for the spawned task
         let subscriber_clone = Arc::clone(&self);
@@ -72,6 +108,7 @@ impl DynamicSubscriber {
         let zmq_topic = self.topic.clone();
         let cancel_token = self.cancel_token.clone();
         let endpoints = Arc::clone(&active_endpoints);
+        let sub_transport_for_watch = Arc::clone(&sub_transport);
 
         tokio::spawn(async move {
             tracing::debug!(
@@ -94,12 +131,18 @@ impl DynamicSubscriber {
 
             tracing::info!(?query, "Started dynamic discovery watch for ZMQ publishers");
 
-            while let Some(event_result) = watch_stream.next().await {
+            loop {
+                let event_result = tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("Dynamic subscriber cancelled, stopping watch");
+                        break;
+                    }
+                    event = watch_stream.next() => {
+                        let Some(event) = event else { break };
+                        event
+                    }
+                };
                 tracing::debug!("Received discovery event: {:?}", event_result);
-                if cancel_token.is_cancelled() {
-                    tracing::info!("Dynamic subscriber cancelled, stopping watch");
-                    break;
-                }
 
                 match event_result {
                     Ok(DiscoveryEvent::Added(instance)) => {
@@ -108,49 +151,27 @@ impl DynamicSubscriber {
 
                         // Extract ZMQ endpoint from the instance
                         if let Some(endpoint) = Self::extract_zmq_endpoint(&instance, &zmq_topic) {
-                            let mut endpoints_guard = endpoints.write().await;
-
-                            // Skip if instance already tracked
-                            if endpoints_guard.contains_key(&instance_id) {
-                                tracing::debug!(endpoint = %endpoint, ?instance_id, "Already connected to ZMQ publisher");
-                                continue;
-                            }
-
-                            tracing::info!(endpoint = %endpoint, ?instance_id, "Connecting to new ZMQ publisher");
-
-                            // Create cancellation token for this endpoint's stream
-                            let endpoint_cancel = CancellationToken::new();
-                            endpoints_guard.insert(
-                                instance_id.clone(),
-                                (endpoint.clone(), endpoint_cancel.clone()),
-                            );
-                            drop(endpoints_guard);
-
-                            // Spawn task to handle this endpoint's stream
-                            let event_tx_clone = event_tx.clone();
-                            let zmq_topic_clone = zmq_topic.clone();
-                            let endpoint_clone = endpoint.clone();
-                            let endpoints_clone = Arc::clone(&endpoints);
-                            let instance_id_clone = instance_id.clone();
-
-                            tokio::spawn(async move {
-                                if let Err(e) = Self::consume_endpoint_stream(
-                                    &endpoint_clone,
-                                    &zmq_topic_clone,
-                                    event_tx_clone,
-                                    endpoint_cancel,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(
-                                        endpoint = %endpoint_clone,
-                                        error = %e,
-                                        "Error consuming ZMQ endpoint stream"
-                                    );
+                            let should_connect = {
+                                let mut endpoints_guard = endpoints.write().await;
+                                if endpoints_guard.contains_key(&instance_id) {
+                                    tracing::debug!(endpoint = %endpoint, ?instance_id, "Already connected to ZMQ publisher");
+                                    continue;
                                 }
-                                // Clean up on stream termination
-                                endpoints_clone.write().await.remove(&instance_id_clone);
-                            });
+                                let already_connected =
+                                    endpoints_guard.values().any(|value| value == &endpoint);
+                                endpoints_guard.insert(instance_id.clone(), endpoint.clone());
+                                !already_connected
+                            };
+
+                            if should_connect {
+                                tracing::info!(endpoint = %endpoint, ?instance_id, "Connecting shared ZMQ subscriber to publisher");
+                                if let Err(error) =
+                                    sub_transport_for_watch.connect_endpoint(&endpoint).await
+                                {
+                                    endpoints.write().await.remove(&instance_id);
+                                    tracing::warn!(%endpoint, %error, "Failed to connect shared ZMQ subscriber");
+                                }
+                            }
                         } else {
                             tracing::debug!(
                                 instance = ?instance,
@@ -174,17 +195,23 @@ impl DynamicSubscriber {
                             continue;
                         }
 
-                        tracing::info!(
-                            ?instance_id,
-                            "ZMQ publisher removed from discovery, cancelling endpoint stream"
-                        );
+                        let removed = {
+                            let mut endpoints_guard = endpoints.write().await;
+                            let endpoint = endpoints_guard.remove(&instance_id);
+                            endpoint.map(|endpoint| {
+                                let still_used =
+                                    endpoints_guard.values().any(|value| value == &endpoint);
+                                (endpoint, !still_used)
+                            })
+                        };
 
-                        // Cancel the endpoint's stream via its CancellationToken
-                        if let Some((_endpoint, cancel)) =
-                            endpoints.write().await.remove(&instance_id)
-                        {
-                            cancel.cancel();
-                            tracing::info!(?instance_id, "Cancelled endpoint stream");
+                        if let Some((endpoint, should_disconnect)) = removed {
+                            if should_disconnect
+                                && let Err(error) =
+                                    sub_transport_for_watch.disconnect_endpoint(&endpoint).await
+                            {
+                                tracing::warn!(%endpoint, %error, "Failed to disconnect removed ZMQ publisher");
+                            }
                         } else {
                             tracing::debug!(
                                 ?instance_id,
@@ -199,10 +226,17 @@ impl DynamicSubscriber {
                 }
             }
 
-            // Cancel all active endpoints on shutdown
-            let endpoints_guard = endpoints.write().await;
-            for (_id, (_endpoint, cancel)) in endpoints_guard.iter() {
-                cancel.cancel();
+            // Disconnect each endpoint once on shutdown.
+            let remaining: std::collections::HashSet<String> = endpoints
+                .write()
+                .await
+                .drain()
+                .map(|(_, endpoint)| endpoint)
+                .collect();
+            for endpoint in remaining {
+                if let Err(error) = sub_transport_for_watch.disconnect_endpoint(&endpoint).await {
+                    tracing::debug!(%endpoint, %error, "Failed to disconnect ZMQ endpoint during shutdown");
+                }
             }
             tracing::info!("Discovery watch stream ended");
         });
@@ -211,6 +245,7 @@ impl DynamicSubscriber {
         let stream = async_stream::stream! {
             // Keep subscriber_clone alive by capturing it in the stream
             let _subscriber = subscriber_clone;
+            let _sub_transport = sub_transport;
             let mut rx = event_rx;
             while let Some(bytes) = rx.recv().await {
                 yield Ok(bytes);
@@ -231,63 +266,6 @@ impl DynamicSubscriber {
             return Some(endpoint.clone());
         }
         None
-    }
-
-    /// Consume events from a single endpoint and forward to the merged channel.
-    async fn consume_endpoint_stream(
-        endpoint: &str,
-        zmq_topic: &str,
-        event_tx: mpsc::Sender<Bytes>,
-        cancel_token: CancellationToken,
-    ) -> Result<()> {
-        // Connect to the endpoint
-        let sub_transport = ZmqSubTransport::connect(endpoint, zmq_topic).await?;
-        let mut stream = sub_transport.subscribe(zmq_topic).await?;
-
-        tracing::info!(endpoint = %endpoint, topic = %zmq_topic, "Started consuming ZMQ endpoint stream");
-
-        loop {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    tracing::info!(endpoint = %endpoint, "Endpoint stream cancelled");
-                    break;
-                }
-
-                event = stream.next() => {
-                    match event {
-                        Some(Ok(bytes)) => {
-                            match event_tx.try_send(bytes) {
-                                Ok(()) => {}
-                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                    // Consumer is behind; drop to bound memory.
-                                    // Best-effort plane — a stale estimate
-                                    // self-corrects on subsequent events.
-                                    tracing::trace!(endpoint = %endpoint, "Event subscriber channel full; dropping event");
-                                }
-                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                    tracing::warn!(endpoint = %endpoint, "Event channel closed, stopping endpoint stream");
-                                    break;
-                                }
-                            }
-                        }
-                        Some(Err(e)) => {
-                            tracing::error!(
-                                endpoint = %endpoint,
-                                error = %e,
-                                "Error receiving from ZMQ endpoint"
-                            );
-                            break;
-                        }
-                        None => {
-                            tracing::info!(endpoint = %endpoint, "ZMQ endpoint stream ended");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// Stop watching and disconnect from all endpoints.
