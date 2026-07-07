@@ -1,5 +1,0 @@
-{
-  "retry_required": false,
-  "initial_iso_window_ms": 12000.0,
-  "retry_iso_window_ms": null
-}

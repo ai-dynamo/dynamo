@@ -99,11 +99,11 @@ Local runs validate correctness only and are not performance evidence.
 
 ## Prepare the full corpus
 
-Corpus preparation is untimed and should run on the same high-memory ComputeLab node used for the matrix:
+Corpus preparation is untimed and should run on the same high-memory machine used for the matrix:
 
 ```bash
 BIN=target/release/ckf_crtc_crossover
-RUN_ROOT=/path/to/verified/compute-node-visible/scratch/ckf-crtc-d16
+RUN_ROOT=/path/to/benchmark-storage/ckf-crtc-d16
 TRACE="$HOME/traces/mooncake-fast25/mooncake_trace.jsonl"
 mkdir -p "$RUN_ROOT/corpus"
 "$BIN" prepare \
@@ -127,9 +127,9 @@ The command writes:
 - `mooncake-d16.resident.msgpack`: resident-state-only image for fresh memory processes.
 - `mooncake-d16.manifest.json`: trace/corpus/filter metadata, checksums, and untimed Relay publisher build rates. Nondeterministic publisher timing stays in this sidecar so the versioned corpus bytes remain deterministic.
 
-## ComputeLab CPU/NUMA binding
+## CPU/NUMA binding
 
-Use one exclusive high-memory CPU node for every cell. Discover the live allocation and use one logical sibling per physical core from the allocated cpuset:
+Use one exclusive high-memory CPU machine for every cell. Discover its available CPU set and use one logical sibling per physical core:
 
 ```bash
 PYTHON=.venv/bin/python
@@ -218,13 +218,13 @@ The wide result table reports logical and ingress throughput, lookup and queue l
 
 Final-state CKF accuracy compares the optimized search with the untimed linear first-miss oracle after full drain. It reports inflation count/magnitude, under-reporting, full-map mismatch, and wrong best-DC selection. It does not compare asynchronous query answers with the newest producer state.
 
-This is an internal index benchmark. AIPerf cannot inject production `RouterEvent`s and serialized Relay CKF frames into these in-process consumers, so the Rust harness is the explicitly accepted alternative.
+This is a dedicated index benchmark. AIPerf cannot inject production `RouterEvent`s and serialized Relay CKF frames into these in-process consumers, so the Rust harness is used instead.
 
 ## Authoritative results
 
-Measured on `r6515-0048` at code `7d29b240c6632d78bf06b1e44ac0773f133a5e3b`. Corrected aggregate analysis uses `e8b9dbfb5aba89e922c71bbdd9b3e123003ef6c7`. Result artifacts were committed at `9ad940b0cad4f07115326da4adf96b7e3636d2ee`.
+Measured at code `7d29b240c6632d78bf06b1e44ac0773f133a5e3b`. Corrected aggregate analysis uses `e8b9dbfb5aba89e922c71bbdd9b3e123003ef6c7`. The corpus SHA-256 was `4056bc655ad04816545472cfdc9c877b727e221a141c413de4bd606d4e36da6c`: 472,160 requests, 2,144,651 complete events, and 79,576,739 logical block operations.
 
-Hardware was one exclusive AMD EPYC 7702P node: 64 physical cores/128 SMT threads, 1000 GiB allocation, Linux `6.14.0-29-generic`, Rust `1.96.1`, CPUs `0-63`, `interleave:0`, 64 Tokio workers, 8 event threads, and 16 query executors. The node did not expose cpufreq governor or AMD boost sysfs fields; the original manifest preserves that absence.
+Hardware was one exclusive AMD EPYC 7702P machine: 64 physical cores/128 SMT threads, 1000 GiB memory, Linux `6.14.0-29-generic`, Rust `1.96.1`, CPUs `0-63`, `interleave:0`, 64 Tokio workers, 8 event threads, and 16 query executors. The system did not expose cpufreq governor or AMD boost sysfs fields.
 
 Ranked findings:
 
@@ -250,13 +250,31 @@ Ranked findings:
 | Resident RSS | 50.461 GiB | 0.507 GiB | 1.007 GiB | Native 99.6× and transposed 50.1× smaller than CRTC |
 | Final-state inflation / under / wrong best | exact | 5 / 0 / 4 | 5 / 0 / 4 | Max inflation was one block |
 
-Artifacts:
+### Capacity grid
 
-- [One 51-column capacity/iso/memory table](ckf_crossover/results/d16-computelab-2026-07-07/aggregate/wide_results.md)
-- [Capacity table](ckf_crossover/results/d16-computelab-2026-07-07/aggregate/capacity_table.md)
-- [Corrected aggregate JSON](ckf_crossover/results/d16-computelab-2026-07-07/aggregate/aggregate_results.json)
-- [Run metadata and validity notes](ckf_crossover/results/d16-computelab-2026-07-07/RUN_METADATA.md)
-- [Corpus manifest](ckf_crossover/results/d16-computelab-2026-07-07/provenance/corpus_manifest.json) and [hardware manifest](ckf_crossover/results/d16-computelab-2026-07-07/provenance/hardware.json)
-- [Committed artifact checksums](ckf_crossover/results/d16-computelab-2026-07-07/artifact_checksums.sha256); the original 232-file node checksum manifest is retained under `provenance/`.
+Each row is the mean of five fresh processes. A ratio is eligible for a crossover claim only when both the CKF and paired CRTC cells are generator-valid.
+
+| Backend | Window ms | Offered block ops/s | Achieved block ops/s (95% CI) | All 5 keep up | Generator-valid | Ratio vs CRTC (95% CI) | Lookup p50 / p99 us |
+|---|---:|---:|---:|:---:|:---:|---:|---:|
+| CRTC | 24,000 | 3,315,697 | 3,315,314 [3,315,247, 3,315,381] | yes | yes | 1.000 [1.000, 1.000] | 2.42 / 10.24 |
+| CRTC | 12,000 | 6,631,395 | 6,629,986 [6,629,575, 6,630,398] | yes | yes | 1.000 [1.000, 1.000] | 2.40 / 10.26 |
+| CRTC | 6,000 | 13,262,790 | 13,255,174 [13,253,589, 13,256,759] | yes | yes | 1.000 [1.000, 1.000] | 2.31 / 9.44 |
+| CRTC | 3,000 | 26,525,580 | 16,415,667 [16,223,130, 16,608,204] | no | no | 1.000 [1.000, 1.000] | 2.30 / 9.42 |
+| CRTC | 1,500 | 53,051,159 | 16,425,788 [16,350,783, 16,500,793] | no | no | 1.000 [1.000, 1.000] | 2.30 / 9.50 |
+| CRTC | 750 | 106,102,319 | 16,270,955 [16,115,312, 16,426,598] | no | no | 1.000 [1.000, 1.000] | 2.31 / 9.60 |
+| Native CKF | 24,000 | 3,315,697 | 3,315,070 [3,315,016, 3,315,124] | yes | yes | 1.000 [1.000, 1.000] | 20.67 / 244.74 |
+| Native CKF | 12,000 | 6,631,395 | 6,629,013 [6,628,789, 6,629,237] | yes | yes | 1.000 [1.000, 1.000] | 22.36 / 239.99 |
+| Native CKF | 6,000 | 13,262,790 | 13,253,177 [13,251,375, 13,254,978] | yes | yes | 1.000 [1.000, 1.000] | 23.41 / 233.26 |
+| Native CKF | 3,000 | 26,525,580 | 26,479,650 [26,467,344, 26,491,956] | yes | yes | 1.613 [1.594, 1.632] | 25.02 / 215.11 |
+| Native CKF | 1,500 | 53,051,159 | 32,119,755 [31,665,023, 32,574,486] | no | yes | 1.955 [1.923, 1.988] | 23.68 / 152.70 |
+| Native CKF | 750 | 106,102,319 | 32,561,550 [32,154,540, 32,968,560] | no | no | 2.001 [1.976, 2.027] | 23.83 / 152.51 |
+| Transposed CKF | 24,000 | 3,315,697 | 3,315,084 [3,315,039, 3,315,130] | yes | yes | 1.000 [1.000, 1.000] | 23.29 / 388.19 |
+| Transposed CKF | 12,000 | 6,631,395 | 6,628,717 [6,628,471, 6,628,963] | yes | yes | 1.000 [1.000, 1.000] | 25.84 / 387.54 |
+| Transposed CKF | 6,000 | 13,262,790 | 13,253,594 [13,252,573, 13,254,614] | yes | yes | 1.000 [1.000, 1.000] | 29.40 / 381.16 |
+| Transposed CKF | 3,000 | 26,525,580 | 26,484,479 [26,470,527, 26,498,431] | yes | yes | 1.613 [1.595, 1.632] | 37.23 / 374.00 |
+| Transposed CKF | 1,500 | 53,051,159 | 44,405,521 [44,225,075, 44,585,967] | no | yes | 2.703 [2.684, 2.723] | 22.89 / 341.91 |
+| Transposed CKF | 750 | 106,102,319 | 44,823,529 [41,839,095, 47,807,962] | no | no | 2.752 [2.547, 2.973] | 25.54 / 329.56 |
+
+Raw per-trial and aggregate artifacts are intentionally not committed. This README is the single checked-in source for the harness setup, reproduction procedure, measurement provenance, headline results, and capacity/latency/memory tables.
 
 Do not post these results to DEP #11225 or Slack without separate approval.

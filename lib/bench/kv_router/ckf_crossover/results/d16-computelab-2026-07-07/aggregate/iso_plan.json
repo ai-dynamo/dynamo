@@ -1,8 +1,0 @@
-{
-  "crtc_keepup_ceiling_block_ops_s": 13262789.833333334,
-  "transposed_keepup_ceiling_block_ops_s": 26525579.666666668,
-  "iso_block_ops_s": 6631394.916666667,
-  "iso_window_ms": 12000.0,
-  "native_crossover_block_ops_s": null,
-  "transposed_crossover_block_ops_s": null
-}
