@@ -10,7 +10,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../../common/launch_utils.sh"
 
-MODEL="${DYN_MODEL_NAME:-Qwen/Qwen-Image}"
+MODEL="${DYN_MODEL_NAME:-stabilityai/stable-diffusion-xl-base-1.0}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}"
 TP_SIZE="${DYN_TENSOR_PARALLEL_SIZE:-1}"
@@ -28,11 +28,11 @@ while [[ $# -gt 0 ]]; do
 Usage: $0 [--model <model_name>] [-- EXTRA_OMNI_ARGS]
 
 Options:
-  --model <model_name>  Base omni model to serve (default: Qwen/Qwen-Image)
+  --model <model_name>  Base omni model to serve (default: stabilityai/stable-diffusion-xl-base-1.0)
   -h, --help            Show help
 
 Environment variables:
-  DYN_MODEL_NAME            Base model name (default: Qwen/Qwen-Image)
+  DYN_MODEL_NAME            Base model name (default: stabilityai/stable-diffusion-xl-base-1.0)
   DYN_HTTP_PORT             Frontend HTTP port (default: 8000)
   DYN_SYSTEM_PORT           Omni system/admin port (default: 8081)
   DYN_TENSOR_PARALLEL_SIZE  Tensor parallel size (default: 1)

@@ -14,7 +14,7 @@ cd examples/backends/vllm/launch/lora/omni
 ./omni_lora_agg.sh
 ```
 
-Default model is `Qwen/Qwen-Image`.
+Default model is `stabilityai/stable-diffusion-xl-base-1.0`.
 
 ## Load a LoRA Adapter
 
@@ -22,7 +22,7 @@ Default model is `Qwen/Qwen-Image`.
 curl -s -X POST http://localhost:8081/v1/loras \
   -H "Content-Type: application/json" \
   -d '{
-    "lora_name": "qwen-lora",
+    "lora_name": "sdxl-lora",
     "source": {
       "uri": "file:///path/to/adapter"
     }
@@ -39,27 +39,27 @@ PROMPT="A red fox sitting on a snow-covered mountain at sunset, photorealistic"
 curl -sS -X POST http://localhost:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -d "{
-    \"model\": \"qwen-lora\",
+    \"model\": \"sdxl-lora\",
     \"prompt\": \"${PROMPT}\",
     \"size\": \"1024x1024\",
     \"nvext\": {\"num_inference_steps\": 20, \"seed\": 42}
   }" \
 | jq -e -r '.data[0].b64_json' \
-| base64 -d > qwen.png
+| base64 -d > sdxl_lora.png
 
 curl -sS -X POST http://localhost:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -d "{
-    \"model\": \"Qwen/Qwen-Image\",
+    \"model\": \"stabilityai/stable-diffusion-xl-base-1.0\",
     \"prompt\": \"${PROMPT}\",
     \"size\": \"1024x1024\",
     \"nvext\": {\"num_inference_steps\": 20, \"seed\": 42}
   }" \
 | jq -e -r '.data[0].b64_json' \
-| base64 -d > qwen_base.png
+| base64 -d > sdxl_base.png
 
-sha256sum qwen.png qwen_base.png
-cmp -s qwen.png qwen_base.png; echo "cmp_exit=$?"
+sha256sum sdxl_lora.png sdxl_base.png
+cmp -s sdxl_lora.png sdxl_base.png; echo "cmp_exit=$?"
 ```
 
 `cmp_exit=0` means identical bytes; `cmp_exit=1` means different outputs.
@@ -68,14 +68,14 @@ cmp -s qwen.png qwen_base.png; echo "cmp_exit=$?"
 
 ```bash
 curl -s http://localhost:8081/v1/loras | jq .
-curl -s -X DELETE http://localhost:8081/v1/loras/qwen-lora | jq .
+curl -s -X DELETE http://localhost:8081/v1/loras/sdxl-lora | jq .
 ```
 
 ## Configuration
 
 Environment variables:
 
-- `DYN_MODEL_NAME`: Base model (default `Qwen/Qwen-Image`)
+- `DYN_MODEL_NAME`: Base model (default `stabilityai/stable-diffusion-xl-base-1.0`)
 - `DYN_HTTP_PORT`: Frontend port (default `8000`)
 - `DYN_SYSTEM_PORT`: Omni system/admin port (default `8081`)
 - `DYN_TENSOR_PARALLEL_SIZE`: Tensor parallel size (default `1`)
@@ -116,5 +116,5 @@ Run full end-to-end LoRA lifecycle tests with a real adapter path:
 Optional arguments:
 
 ```bash
-./validate_omni_lora_agg.sh --frontend-port 8000 --system-port 8081 --base-model Qwen/Qwen-Image
+./validate_omni_lora_agg.sh --frontend-port 8000 --system-port 8081 --base-model stabilityai/stable-diffusion-xl-base-1.0
 ```

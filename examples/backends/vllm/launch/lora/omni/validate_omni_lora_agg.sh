@@ -23,9 +23,10 @@ LORA_PATH=""
 LORA_NAME="test-omni-lora"
 PROMPT="Portrait of a woman in a neon alley, mixed-media stylization, oil paint strokes, watercolor edges, ink outlines, posterized color blocks, cinematic contrast, surreal fashion editorial"
 SIZE="1024x1024"
-STEPS=20
+STEPS=50
 SEED=42
 CURL_TIMEOUT=90
+GUIDANCE_SCALE=7.5
 PASS=0
 FAIL=0
 SKIP=0
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
         --prompt) PROMPT=$2; shift 2 ;;
         --size) SIZE=$2; shift 2 ;;
         --steps) STEPS=$2; shift 2 ;;
+        --guidance-scale) GUIDANCE_SCALE=$2; shift 2 ;;
         --seed) SEED=$2; shift 2 ;;
         --timeout) CURL_TIMEOUT=$2; shift 2 ;;
         -h|--help)
@@ -55,7 +57,8 @@ Options:
   --lora-name <name>      LoRA name used for load test (default: test-omni-lora)
   --prompt <text>         Prompt for generation checks
   --size <WxH>            Image size for generation (default: 1024x1024)
-  --steps <int>           num_inference_steps (default: 20)
+  --steps <int>           num_inference_steps (default: 50)
+  --guidance-scale <float> Guidance scale for generation (default: 7.5)
   --seed <int>            Seed for deterministic checks (default: 42)
   --timeout <seconds>     Curl timeout per request (default: 90)
   -h, --help              Show this help message
@@ -104,6 +107,7 @@ gen_image() {
           \"size\": \"$SIZE\",
           \"nvext\": {
             \"num_inference_steps\": $STEPS,
+            \"guidance_scale\": $GUIDANCE_SCALE,
             \"seed\": $SEED
           }
         }" || echo '{"error":"request_failed"}')
@@ -152,7 +156,7 @@ fi
 if [[ -n "$BASE_MODEL" ]]; then
     pass "Detected base model: $BASE_MODEL"
 else
-    BASE_MODEL="${DYN_MODEL_NAME:-Qwen/Qwen-Image}"
+    BASE_MODEL="${DYN_MODEL_NAME:-stabilityai/stable-diffusion-xl-base-1.0}"
     pass "Using fallback base model: $BASE_MODEL"
 fi
 
