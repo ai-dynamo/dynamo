@@ -38,10 +38,10 @@ fn shared_zmq_context() -> Context {
             let context = Context::new();
             // A single default I/O thread becomes a bottleneck for bursty
             // fan-in once all sockets share this context. Keep the pool
-            // bounded, while allowing up to four connections to make progress
+            // bounded, while allowing up to eight connections to make progress
             // concurrently on hosts with enough CPUs.
             let io_threads = std::thread::available_parallelism()
-                .map(|count| count.get().min(4))
+                .map(|count| count.get().min(8))
                 .unwrap_or(1) as i32;
             context
                 .set_io_threads(io_threads)
