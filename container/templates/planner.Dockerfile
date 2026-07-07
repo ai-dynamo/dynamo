@@ -10,7 +10,7 @@
 # - install deps in a slim builder stage that has git/git-lfs available
 # - ship only the runtime artifacts in a distroless final stage
 
-FROM ${PLANNER_BUILD_IMAGE}:${PLANNER_BUILD_IMAGE_TAG} AS pre_planner
+FROM ${PLANNER_BUILD_IMAGE}:${PLANNER_BUILD_IMAGE_TAG} AS planner_builder
 
 ARG PYTHON_VERSION
 ARG TARGETARCH
@@ -97,15 +97,15 @@ COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 
 FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 
-COPY --from=pre_planner /etc/group /etc/passwd /etc/
-COPY --from=pre_planner /bin/dash /bin/sh
-COPY --from=pre_planner /bin/uv /bin/uvx /usr/local/bin/
-COPY --chown=1000:0 --from=pre_planner /home/dynamo /home/dynamo
-COPY --chown=1000:0 --from=pre_planner /opt/dynamo/venv /opt/dynamo/venv
-COPY --from=pre_planner /usr/lib/*-linux-gnu/libgomp.so.1* /opt/dynamo/lib/
-COPY --from=pre_planner /usr/local/bin/etcd /usr/local/bin/etcd
-COPY --from=pre_planner /usr/local/bin/nats-server /usr/local/bin/nats-server
-COPY --chown=1000:0 --from=pre_planner /workspace /workspace
+COPY --from=planner_builder /etc/group /etc/passwd /etc/
+COPY --from=planner_builder /bin/dash /bin/sh
+COPY --from=planner_builder /bin/uv /bin/uvx /usr/local/bin/
+COPY --chown=1000:0 --from=planner_builder /home/dynamo /home/dynamo
+COPY --chown=1000:0 --from=planner_builder /opt/dynamo/venv /opt/dynamo/venv
+COPY --from=planner_builder /usr/lib/*-linux-gnu/libgomp.so.1* /opt/dynamo/lib/
+COPY --from=planner_builder /usr/local/bin/etcd /usr/local/bin/etcd
+COPY --from=planner_builder /usr/local/bin/nats-server /usr/local/bin/nats-server
+COPY --chown=1000:0 --from=planner_builder /workspace /workspace
 COPY --from=licenses /legal /legal
 
 ARG DYNAMO_COMMIT_SHA
