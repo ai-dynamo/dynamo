@@ -15,6 +15,7 @@ from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
+    pytest.mark.multimodal,
     pytest.mark.pre_merge,
     pytest.mark.gpu_1,
     pytest.mark.profiled_vram_gib(0),
