@@ -367,7 +367,7 @@ jobs:
             echo "::warning::sccache prerequisites missing (bucket or IRSA token); EPP Rust build will run without sccache"
           fi
 
-          make -C deploy/inference-gateway/epp image-multiarch-push \
+          make -C deploy/inference-gateway/ext-proc image-multiarch-push \
             IMAGE_REPO="${EPP_IMAGE_REPO}" \
             GIT_TAG="${EPP_IMAGE_TAG}" \
             DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \

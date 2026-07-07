@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Dynamo Rust EPP Dockerfile
+# Dynamo EPP Dockerfile
 # 2-stage build: Rust binary → Ubuntu runtime
 #
-# Unlike the Go EPP which requires Rust → Go CGO linking, this is a pure
-# Rust binary with no CGO bridge. Single compile step.
+# Pure Rust binary with no CGO bridge. Single compile step.
 #
 # Build via Makefile (recommended):
 #   make image-load
@@ -13,7 +12,7 @@
 # Build manually:
 #   docker buildx build \
 #     --build-context dynamo=../../.. \
-#     -t dynamo/dynamo-rust-epp:dev .
+#     -t dynamo/dynamo-epp:dev .
 
 ARG RUST_IMAGE=rust:1.96.1
 ARG BASE_IMAGE=ubuntu:24.04
@@ -25,7 +24,7 @@ FROM ${RUST_IMAGE} AS builder
 
 ARG TARGETARCH
 
-# sccache configuration (matches Go EPP pattern)
+# sccache configuration (matches other Dynamo image builds)
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
@@ -72,12 +71,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
     --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-rust-epp-${TARGETARCH}}" && \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-epp-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cargo build --release -p dynamo-ext-proc && \
-    cp target/release/dynamo-ext-proc /dynamo-ext-proc && \
+    cp target/release/dynamo-ext-proc /epp && \
     if [ "$USE_SCCACHE" = "true" ]; then /tmp/use-sccache.sh show-stats "dynamo-ext-proc" || true; fi
 
 # =============================================================================
@@ -92,9 +91,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /
 
-COPY --from=builder /dynamo-ext-proc /dynamo-ext-proc
+COPY --from=builder /epp /epp
 
 RUN useradd -r -u 65532 -g nogroup nonroot
 USER 65532:65534
 
-ENTRYPOINT ["/dynamo-ext-proc"]
+ENTRYPOINT ["/epp"]

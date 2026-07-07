@@ -629,9 +629,8 @@ pub type RouterHandlesPtr = *mut RouterHandles;
 /// Result codes for query router C FFI.
 ///
 /// Numbering is append-only. Existing variants must keep their integer
-/// values so out-of-tree consumers (notably
-/// `deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer`, which pins
-/// these integers in a Go shim) keep working without recompilation. When
+/// values so out-of-tree consumers (notably the Rust EPP in
+/// `deploy/inference-gateway/ext-proc`) keep working without recompilation. When
 /// adding a new variant, use the next free integer at the end.
 #[repr(u32)]
 pub enum QueryRouterResult {

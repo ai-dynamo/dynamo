@@ -266,14 +266,7 @@ The frontend image is a specialized container that includes the Dynamo component
 
 **Build EPP Image**
 ```bash
-sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
-curl --retry 5 --retry-delay 3 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-. "$HOME/.cargo/env"
-cargo install cbindgen
-
-pushd deploy/inference-gateway/epp
-make all
-popd
+make -C deploy/inference-gateway/ext-proc all
 
 EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
 EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
@@ -287,9 +280,8 @@ docker build -t dynamo:frontend --build-arg EPP_IMAGE=${EPP_IMAGE} -f container/
 ```
 
 The build process automatically:
-1. Builds the Dynamo static library for EPP KV-aware routing
-2. Builds the custom EPP Docker image using `make all` from `deploy/inference-gateway/epp/Makefile`
-3. Builds the frontend image with the EPP binary and Dynamo runtime components
+1. Builds the native Rust EPP Docker image using `make all` from `deploy/inference-gateway/ext-proc/Makefile`
+2. Builds the frontend image with the EPP binary and Dynamo runtime components
 
 For more details, see [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md).
 
