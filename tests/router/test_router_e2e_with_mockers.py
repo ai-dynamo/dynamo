@@ -692,7 +692,7 @@ def test_indexers_sync(
         engine_process_kwargs={
             "num_mockers": NUM_MOCKERS,
             "store_backend": store_backend,
-            "zmq_kv_events": True,
+            "raw_kv_events": True,
             "zmq_replay": True,
             "standalone_indexer": True,
             "model_name": MODEL_NAME,
@@ -739,28 +739,31 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events,zmq_kv_events,use_remote_indexer,router_predicted_ttl_secs",
+    "durable_kv_events,use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,event_plane",
     [
-        (True, True, False, False, None),  # JetStream mode with KV events
+        (True, True, False, False, None, None),  # JetStream mode with KV events
         (
             False,
             True,
             False,
             False,
+            None,
             None,
         ),  # NATS Core mode with local indexer (default)
-        (False, True, False, False, 5.0),  # NATS Core mode with local side indexer
-        (False, True, False, True, None),  # NATS Core mode with a served remote indexer
-        (False, True, False, True, 5.0),  # Remote indexer plus local side indexer
-        (False, False, False, False, None),  # Approximate mode (--no-kv-events)
+        (False, True, False, False, 5.0, None),  # NATS Core with local side indexer
+        (False, True, False, True, None, None),  # NATS Core with remote indexer
+        (False, True, False, True, 5.0, None),  # Remote plus local side indexer
+        (False, False, False, False, None, None),  # Approximate (--no-kv-events)
         (
             False,
             False,
             False,
             True,
             None,
+            None,
         ),  # Approximate mode with a singleton served remote indexer
-        (False, True, True, False, None),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
+        # Raw engine ZMQ → relay → ZMQ event plane, with no NATS service.
+        (False, True, True, False, None, "zmq"),
     ],
     ids=[
         "jetstream",
@@ -770,9 +773,9 @@ def test_query_instance_id_returns_worker_and_tokens(
         "nats_core_remote_predict_on_route",
         "no_kv_events",
         "no_kv_events_remote",
-        "zmq",
+        "zmq_nats_free",
     ],
-    indirect=["durable_kv_events"],
+    indirect=["durable_kv_events", "event_plane"],
 )
 def test_router_decisions(
     request,
@@ -781,9 +784,10 @@ def test_router_decisions(
     durable_kv_events,
     use_kv_events,
     request_plane,
-    zmq_kv_events,
+    raw_kv_events,
     use_remote_indexer,
     router_predicted_ttl_secs,
+    event_plane,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
@@ -794,14 +798,21 @@ def test_router_decisions(
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
       based on routing decisions with TTL-based expiration and pruning
     - Approximate mode with a singleton served remote indexer
+    - NATS-free ZMQ mode: raw engine and Dynamo event-plane hops both use ZMQ
     """
+    if event_plane == "zmq":
+        nats_process, _ = runtime_services_dynamic_ports
+        assert nats_process is None
+        assert "NATS_SERVER" not in os.environ
+
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        "Starting test router decisions: durable_kv_events=%s, use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s",
+        "Starting test router decisions: durable_kv_events=%s, use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, event_plane=%s",
         durable_kv_events,
         use_kv_events,
         use_remote_indexer,
         router_predicted_ttl_secs,
+        event_plane,
     )
 
     # Create mocker args dictionary with dp_size=4
@@ -815,9 +826,9 @@ def test_router_decisions(
 
     process_kwargs = {
         "num_mockers": NUM_MOCKERS,
-        "zmq_kv_events": zmq_kv_events,
-        "standalone_indexer": zmq_kv_events,
-        "standalone_selector": zmq_kv_events,
+        "raw_kv_events": raw_kv_events,
+        "standalone_indexer": raw_kv_events,
+        "standalone_selector": raw_kv_events,
         "model_name": MODEL_NAME,
     }
     if use_remote_indexer:
