@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- $managerRules := required "generated manager RBAC rules are missing" (.Files.Get "files/manager-rules.yaml") }}
+{{- $managerRoleFile := required "generated manager RBAC role is missing" (.Files.Get "files/manager-role.yaml") }}
+{{- $managerRole := $managerRoleFile | fromYaml }}
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.namespaceRestriction.enabled }}
 kind: Role
@@ -27,7 +28,7 @@ metadata:
   labels:
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
-{{- $managerRules | nindent 0 }}
+{{- $managerRole.rules | toYaml | nindent 0 }}
 # These chart-managed permissions preserve existing grants that controller-gen
 # does not emit. Audit them separately from controller reconciliation RBAC.
 - apiGroups:
