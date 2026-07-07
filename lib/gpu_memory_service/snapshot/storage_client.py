@@ -16,7 +16,8 @@ from dataclasses import asdict
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.client.session import GMSClientSession
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.snapshot.disk import (
     DeviceToFileWriter,
@@ -78,17 +79,41 @@ class GMSStorageClient:
             socket_path = get_socket_path(device)
         self._socket_path = socket_path
 
-    def save(self, max_workers: int = 4) -> SaveManifest:
-        """Connect to GMS in RO mode and save all allocations + metadata to disk."""
-        if self.output_dir is None:
-            raise ValueError(
-                "output_dir must be set to call save(); pass it to GMSStorageClient()"
-            )
-        output_dir, shard_dirs, use_absolute_shard_paths = self._prepare_output_dir()
+    def save(
+        self,
+        max_workers: int = 4,
+        *,
+        session: Optional[GMSClientSession] = None,
+    ) -> SaveManifest:
+        """Save all allocations and metadata under one GMS RO lease.
 
-        mm = GMSClientMemoryManager(self._socket_path, device=self.device)
+        If ``session`` is provided, ownership transfers to this method on entry.
+        It must be a connected RO session for this client's socket. The memory
+        manager adopts that exact lease instead of reconnecting, allowing
+        callers to acquire it before CUDA initialization. Every exit closes the
+        lease exactly once, including validation and adoption failures.
+        """
+        owned_session = session
+        mm: Optional[GMSClientMemoryManager] = None
         try:
-            mm.connect(RequestedLockType.RO, timeout_ms=self._timeout_ms)
+            if self.output_dir is None:
+                raise ValueError(
+                    "output_dir must be set to call save(); "
+                    "pass it to GMSStorageClient()"
+                )
+
+            mm = GMSClientMemoryManager(self._socket_path, device=self.device)
+            if session is None:
+                mm.connect(RequestedLockType.RO, timeout_ms=self._timeout_ms)
+            else:
+                if session.lock_type != GrantedLockType.RO:
+                    raise ValueError("Snapshot save requires a GMS RO session")
+                mm.adopt_session(session)
+                owned_session = None
+
+            output_dir, shard_dirs, use_absolute_shard_paths = (
+                self._prepare_output_dir()
+            )
             layout_hash = mm.get_memory_layout_hash()
             if not layout_hash:
                 raise RuntimeError(
@@ -108,31 +133,34 @@ class GMSStorageClient:
                 use_absolute_shard_paths=use_absolute_shard_paths,
             )
             metadata = self._save_metadata(mm)
-        except Exception:
-            mm.close()
-            raise
-
-        with open(
-            os.path.join(output_dir, "gms_metadata.json"),
-            "w",
-            encoding="utf-8",
-        ) as handle:
-            json.dump(metadata, handle, indent=2)
-        manifest = SaveManifest(
-            timestamp=time.time(),
-            layout_hash=layout_hash,
-            device=self.device,
-            allocations=entries,
-        )
-        with open(
-            os.path.join(output_dir, "manifest.json"),
-            "w",
-            encoding="utf-8",
-        ) as handle:
-            json.dump(asdict(manifest), handle, indent=2)
-        logger.info("Wrote manifest with %d allocations", len(entries))
-
-        mm.close()
+            with open(
+                os.path.join(output_dir, "gms_metadata.json"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump(metadata, handle, indent=2)
+            manifest = SaveManifest(
+                timestamp=time.time(),
+                layout_hash=layout_hash,
+                device=self.device,
+                allocations=entries,
+            )
+            with open(
+                os.path.join(output_dir, "manifest.json"),
+                "w",
+                encoding="utf-8",
+            ) as handle:
+                json.dump(asdict(manifest), handle, indent=2)
+            logger.info("Wrote manifest with %d allocations", len(entries))
+        finally:
+            try:
+                if mm is not None and owned_session is None:
+                    mm.close()
+            finally:
+                # adopt_session() is transactional, so a non-None value here
+                # means transfer never completed and save() still owns it.
+                if owned_session is not None:
+                    owned_session.close()
 
         return manifest
 

@@ -34,6 +34,7 @@ if HAS_PYNVML:
     import pynvml
 
 from gpu_memory_service.client import memory_manager as client_memory_manager
+from gpu_memory_service.client import GMSClientSession
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     StaleMemoryLayoutError,
@@ -51,6 +52,8 @@ from gpu_memory_service.server import allocations as server_allocations
 from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.fsm import ServerState
 from gpu_memory_service.server.rpc import GMSRPCServer
+from gpu_memory_service.snapshot.model import AllocationEntry
+from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -445,6 +448,124 @@ def test_committed_layout_is_replaced_when_new_writer_connects(running_gms):
             second_writer.close()
     finally:
         first_writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_snapshot_adopts_ro_lease_and_blocks_generation_replacement(
+    running_gms,
+    monkeypatch,
+    tmp_path,
+):
+    server, socket_path = running_gms
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+    va = writer.create_mapping(size=4096, tag="weights")
+    allocation_id = writer.mappings[va].allocation_id
+    writer.metadata_put("tensor.0", allocation_id, 0, b"generation-one")
+    assert writer.commit()
+
+    lease = GMSClientSession(socket_path, RequestedLockType.RO, None)
+    close_calls = 0
+    close_lease = lease.close
+
+    def count_close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        close_lease()
+
+    monkeypatch.setattr(lease, "close", count_close)
+    saved_hash = lease.get_memory_layout_hash()
+    save_started = threading.Event()
+    finish_save = threading.Event()
+    save_result: dict[str, object] = {}
+    waiting_writer_result: dict[str, object] = {}
+    storage = GMSStorageClient(
+        str(tmp_path / "snapshot"),
+        socket_path=socket_path,
+        device=0,
+    )
+
+    def block_shard_write(
+        _shard_dirs,
+        allocations_info,
+        _va_list,
+        **_kwargs,
+    ):
+        assert [item.allocation_id for item in allocations_info] == [allocation_id]
+        save_started.set()
+        assert finish_save.wait(timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS)
+        assert lease.is_connected
+        assert lease.get_memory_layout_hash() == saved_hash
+        assert lease.metadata_get("tensor.0") == (
+            allocation_id,
+            0,
+            b"generation-one",
+        )
+        return [
+            AllocationEntry(
+                allocation_id=allocation_id,
+                size=4096,
+                aligned_size=4096,
+                tag="weights",
+                tensor_file="shards/shard_0000.bin",
+                tensor_offset=0,
+            )
+        ]
+
+    monkeypatch.setattr(storage, "_write_shards", block_shard_write)
+
+    def save() -> None:
+        try:
+            save_result["manifest"] = storage.save(session=lease)
+        except BaseException as exc:
+            save_result["error"] = exc
+
+    save_thread = threading.Thread(target=save)
+    save_thread.start()
+    assert save_started.wait(timeout=_DEFAULT_WAIT_TIMEOUT_SECONDS)
+
+    def replace_generation() -> None:
+        try:
+            waiting_writer_result["session"] = GMSClientSession(
+                socket_path,
+                RequestedLockType.RW,
+                None,
+            )
+        except BaseException as exc:
+            waiting_writer_result["error"] = exc
+
+    waiting_writer_thread = threading.Thread(target=replace_generation)
+    waiting_writer_thread.start()
+    _wait_for_waiting_writers(server, 1)
+
+    try:
+        assert save_thread.is_alive()
+        assert waiting_writer_thread.is_alive()
+        assert server.state == ServerState.RO
+        assert server._gms._sessions.snapshot().ro_session_count == 1
+        assert server._gms.allocation_count == 1
+        assert lease.get_memory_layout_hash() == saved_hash
+    finally:
+        finish_save.set()
+        save_thread.join(timeout=_BLOCKED_WRITER_JOIN_TIMEOUT_SECONDS)
+        waiting_writer_thread.join(timeout=_BLOCKED_WRITER_JOIN_TIMEOUT_SECONDS)
+
+    assert not save_thread.is_alive()
+    assert "error" not in save_result
+    assert close_calls == 1
+    manifest = save_result["manifest"]
+    assert manifest.layout_hash == saved_hash
+    assert [entry.allocation_id for entry in manifest.allocations] == [allocation_id]
+
+    waiting_writer = waiting_writer_result.get("session")
+    assert isinstance(waiting_writer, GMSClientSession)
+    try:
+        assert waiting_writer.lock_type == GrantedLockType.RW
+        assert waiting_writer.list_allocations() == []
+    finally:
+        waiting_writer.close()
+        writer.close()
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)

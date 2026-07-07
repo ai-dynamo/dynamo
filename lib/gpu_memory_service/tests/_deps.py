@@ -9,6 +9,7 @@ import importlib.util
 
 HAS_PYNVML = importlib.util.find_spec("pynvml") is not None
 HAS_TORCH = importlib.util.find_spec("torch") is not None
+HAS_VLLM = importlib.util.find_spec("vllm") is not None
 
 
 def _check_gms_usable() -> bool:

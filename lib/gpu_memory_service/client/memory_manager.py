@@ -34,7 +34,7 @@ import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from gpu_memory_service.client.session import _GMSClientSession
+from gpu_memory_service.client.session import GMSClientSession
 from gpu_memory_service.common.cuda_utils import (
     align_to_granularity,
     cuda_ensure_initialized,
@@ -172,7 +172,7 @@ class GMSClientMemoryManager:
         self.tag = tag
         self.scratch_size = scratch_size
 
-        self._client: Optional[_GMSClientSession] = None
+        self._client: Optional[GMSClientSession] = None
 
         # Two disjoint VA registries keyed by base VA:
         #   _mappings           — server-backed allocations (VA <-> LocalMapping).
@@ -253,24 +253,57 @@ class GMSClientMemoryManager:
                 self.socket_path = new_path
             self._aborted = False
 
-        self._client = _GMSClientSession(
+        session = GMSClientSession(
             self.socket_path,
             lock_type=lock_type,
             timeout_ms=timeout_ms,
         )
-        self._granted_lock_type = self._client.lock_type
-        if self._granted_lock_type == GrantedLockType.RW:
-            self._last_memory_layout_hash = ""
-            return
-        # Preserve the pre-unmap hash across reconnects so remap_all_vas can
-        # detect that another writer changed the committed layout while this
-        # process was disconnected.
-        if self._client.committed and (
-            not self._va_preserved or not self._last_memory_layout_hash
+        try:
+            self.adopt_session(session)
+        except BaseException:
+            try:
+                session.close()
+            except BaseException:
+                logger.exception("Failed to close an unadopted GMS session")
+            raise
+
+    def adopt_session(self, session: GMSClientSession) -> None:
+        """Adopt an already-acquired GMS lease without reconnecting.
+
+        Ownership transfers only when this method returns successfully. On
+        failure, the caller still owns the session. This is useful when a caller
+        must acquire a lock before CUDA initialization, then construct mappings
+        under that exact lease.
+        """
+        if self._client is not None:
+            raise RuntimeError("Memory manager is already connected")
+        if not session.is_connected:
+            raise RuntimeError("Cannot adopt a disconnected GMS session")
+        if session.socket_path != self.socket_path:
+            raise ValueError(
+                "Session socket path does not match memory manager: "
+                f"{session.socket_path} != {self.socket_path}"
+            )
+
+        granted_lock_type = session.lock_type
+        last_memory_layout_hash = self._last_memory_layout_hash
+        if granted_lock_type == GrantedLockType.RW:
+            last_memory_layout_hash = ""
+        # Fetch the hash before taking ownership so an RPC failure leaves the
+        # session with the caller.
+        elif session.committed and (
+            not self._va_preserved or not last_memory_layout_hash
         ):
-            self._last_memory_layout_hash = self._client.get_memory_layout_hash()
+            last_memory_layout_hash = session.get_memory_layout_hash()
         elif not self._va_preserved:
-            self._last_memory_layout_hash = ""
+            last_memory_layout_hash = ""
+
+        # No fallible work may follow this assignment: returning transfers
+        # ownership and close() becomes responsible for the session.
+        self._client = session
+        self._aborted = False
+        self._granted_lock_type = granted_lock_type
+        self._last_memory_layout_hash = last_memory_layout_hash
 
     def abort(self) -> None:
         """Drop the GMS session.
@@ -586,8 +619,7 @@ class GMSClientMemoryManager:
                 )
             if str(alloc_info.tag) != mapping.tag:
                 raise StaleMemoryLayoutError(
-                    f"Layout rank {rank} tag changed: "
-                    f"{mapping.tag} vs {alloc_info.tag}"
+                    f"Layout rank {rank} tag changed: {mapping.tag} vs {alloc_info.tag}"
                 )
 
             fd = self.export_handle(alloc_info.allocation_id)
@@ -817,29 +849,35 @@ class GMSClientMemoryManager:
                 cuda-checkpoint may have torn down the device context
                 (cuda_synchronize calls os._exit via fail()).
         """
-        if best_effort:
-            try:
-                self.abort()
-            except Exception:
-                pass
-            self._mappings.clear()
-            self._inverse_mapping.clear()
-            self._scratch_mappings.clear()
-        else:
-            cuda_synchronize()
-            for base_va in list(self._scratch_mappings.keys()):
-                self.destroy_scratch_mapping(base_va)
-            for va in list(self._mappings.keys()):
-                self.unmap_va(va)
-                self.free_va(va)
-            self.abort()
-        self._unmapped = False
-        self._va_preserved = False
-        from gpu_memory_service.client.torch.allocator import (
-            evict_gms_client_memory_manager,
-        )
+        try:
+            if best_effort:
+                try:
+                    self.abort()
+                except Exception:
+                    pass
+                self._mappings.clear()
+                self._inverse_mapping.clear()
+                self._scratch_mappings.clear()
+            else:
+                try:
+                    cuda_synchronize()
+                    for base_va in list(self._scratch_mappings.keys()):
+                        self.destroy_scratch_mapping(base_va)
+                    for va in list(self._mappings.keys()):
+                        self.unmap_va(va)
+                        self.free_va(va)
+                finally:
+                    # The session owns the server lease independently of CUDA
+                    # cleanup and must be released even when cleanup fails.
+                    self.abort()
+        finally:
+            self._unmapped = False
+            self._va_preserved = False
+            from gpu_memory_service.client.torch.allocator import (
+                evict_gms_client_memory_manager,
+            )
 
-        evict_gms_client_memory_manager(self)
+            evict_gms_client_memory_manager(self)
 
     def __enter__(self) -> "GMSClientMemoryManager":
         return self
@@ -850,7 +888,7 @@ class GMSClientMemoryManager:
     # ==================== Internals ====================
 
     @property
-    def _client_rpc(self) -> _GMSClientSession:
+    def _client_rpc(self) -> GMSClientSession:
         """Get connected client or raise."""
         if self._client is None:
             if self._unmapped:

@@ -226,6 +226,8 @@ def materialize_module_from_gms(
 def rebind_nonparameter_tensors(
     gms_client_memory_manager: "GMSClientMemoryManager",
     model: torch.nn.Module,
+    *,
+    retain_gms_tensors: list[torch.Tensor] | None = None,
 ) -> int:
     """Re-bind GMS-resident non-parameter tensors to private clones.
 
@@ -244,6 +246,9 @@ def rebind_nonparameter_tensors(
 
     Returns the number of bytes rebound, i.e. how much memory is duplicated
     between the read-only GMS copies and the private clones.
+
+    If ``retain_gms_tensors`` is provided, original GMS tensors are appended
+    to it so a deferred writer can keep their allocations alive until commit.
     """
     mappings = gms_client_memory_manager.mappings
     rebound_bytes = 0
@@ -290,6 +295,8 @@ def rebind_nonparameter_tensors(
                 logger.debug("[GMS] Skipping property attribute %r", name)
                 continue
             setattr(mod, attr, tensor.detach().clone())
+        if retain_gms_tensors is not None:
+            retain_gms_tensors.append(tensor)
         rebound_bytes += tensor.numel() * tensor.element_size()
 
     return rebound_bytes

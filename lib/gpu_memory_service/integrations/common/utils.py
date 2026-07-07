@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -28,6 +28,76 @@ GMS_TAGS = ("weights", "kv_cache")
 class GMSCommittedMemoryStats:
     committed_bytes: int
     pruned_bytes: int
+
+
+@dataclass
+class PreparedGMSWrite:
+    """A registered and pruned GMS write awaiting publication."""
+
+    allocator: "GMSClientMemoryManager"
+    model: torch.nn.Module
+    stats: GMSCommittedMemoryStats
+    pruned_count: int
+    rebound_bytes: int = 0
+    _state: str = field(default="prepared", init=False, repr=False)
+    _nonparameters_rebound: bool = field(default=False, init=False, repr=False)
+    _retained_gms_tensors: list[torch.Tensor] = field(
+        default_factory=list, init=False, repr=False
+    )
+
+    def rebind_nonparameter_tensors(self) -> int:
+        """Move mutable model tensors to private memory once."""
+        if self._state in ("aborted", "failed"):
+            raise RuntimeError(f"Cannot rebind a {self._state} GMS write")
+        if self._nonparameters_rebound:
+            return self.rebound_bytes
+
+        retain_gms_tensors = (
+            self._retained_gms_tensors if self._state == "prepared" else None
+        )
+        self.rebound_bytes = rebind_nonparameter_tensors(
+            self.allocator,
+            self.model,
+            retain_gms_tensors=retain_gms_tensors,
+        )
+        self._nonparameters_rebound = True
+        return self.rebound_bytes
+
+    def publish(self) -> GMSCommittedMemoryStats:
+        """Commit the write, reconnect read-only, and restore stable VAs."""
+        if self._state == "published":
+            return self.stats
+        if self._state != "prepared":
+            raise RuntimeError(f"Cannot publish a {self._state} GMS write")
+
+        self._state = "publishing"
+        try:
+            self.allocator.commit()
+            self.allocator.connect(RequestedLockType.RO)
+            self.allocator.remap_all_vas()
+        except BaseException:
+            self._state = "failed"
+            raise
+
+        self._state = "published"
+        self._retained_gms_tensors.clear()
+        return self.stats
+
+    def abort(self) -> None:
+        """Release an unpublished writer without invoking CUDA cleanup."""
+        if self._state == "aborted":
+            return
+        if self._state == "published":
+            raise RuntimeError("Cannot abort a published GMS write")
+
+        self._state = "aborted"
+        try:
+            # Profiling failures may leave CUDA in an error state where normal
+            # close synchronizes and calls os._exit. Release the RPC lease
+            # first and only clear local bookkeeping.
+            self.allocator.close(best_effort=True)
+        finally:
+            self._retained_gms_tensors.clear()
 
 
 def get_gms_lock_mode(extra_config: dict):
@@ -78,27 +148,18 @@ def setup_meta_tensor_workaround() -> None:
         pass
 
 
-def finalize_gms_write(
+def prepare_gms_write(
     allocator: "GMSClientMemoryManager",
     model: torch.nn.Module,
-) -> GMSCommittedMemoryStats:
-    """Finalize GMS write mode: register tensors, commit, reconnect in read mode.
-
-    Flow: register tensors -> sync -> unmap + commit -> connect(RO) -> remap
-    -> rebind non-parameter tensors to private clones
-
-    The rebind mirrors the importer binding semantics from
-    ``materialize_module_from_gms``: after publish, the read-only GMS
-    mapping backs parameters only, while buffers and tensor attributes that
-    may be written later (fp8 KV scale re-initialization on wake,
-    quantization range updates) live in ordinary CUDA memory.
+) -> PreparedGMSWrite:
+    """Register model tensors and prune unreferenced allocations.
 
     Args:
         allocator: The GMS client memory manager in write mode.
         model: The loaded model with weights to register.
 
     Returns:
-        Committed/pruned byte stats.
+        A prepared write that retains the RW lock until published or aborted.
     """
     referenced_allocation_ids = register_module_tensors(allocator, model)
     before_prune_bytes = allocator.total_bytes
@@ -115,25 +176,39 @@ def finalize_gms_write(
     pruned_bytes = before_prune_bytes - total_bytes
     pruned_count = before_prune_count - len(allocator.mappings)
 
-    allocator.commit()
+    return PreparedGMSWrite(
+        allocator=allocator,
+        model=model,
+        stats=GMSCommittedMemoryStats(
+            committed_bytes=int(total_bytes),
+            pruned_bytes=int(pruned_bytes),
+        ),
+        pruned_count=pruned_count,
+    )
 
-    allocator.connect(RequestedLockType.RO)
-    allocator.remap_all_vas()
 
-    rebound_bytes = rebind_nonparameter_tensors(allocator, model)
+def finalize_gms_write(
+    allocator: "GMSClientMemoryManager",
+    model: torch.nn.Module,
+) -> GMSCommittedMemoryStats:
+    """Eagerly register, publish, and rebind a GMS-backed model.
+
+    Existing eager integrations rely on this ordering:
+    register -> prune -> commit -> reconnect RO -> remap -> rebind.
+    """
+    prepared = prepare_gms_write(allocator, model)
+    stats = prepared.publish()
+    rebound_bytes = prepared.rebind_nonparameter_tensors()
 
     logger.info(
         "[GMS] Committed %.2f GiB, switched to read mode with %d mappings "
         "(pruned %d allocations / %.2f GiB before commit; rebound %.2f MiB "
         "of non-parameter tensors to private memory)",
-        total_bytes / (1 << 30),
+        stats.committed_bytes / (1 << 30),
         len(allocator.mappings),
-        pruned_count,
-        pruned_bytes / (1 << 30),
+        prepared.pruned_count,
+        stats.pruned_bytes / (1 << 30),
         rebound_bytes / (1 << 20),
     )
 
-    return GMSCommittedMemoryStats(
-        committed_bytes=int(total_bytes),
-        pruned_bytes=int(pruned_bytes),
-    )
+    return stats

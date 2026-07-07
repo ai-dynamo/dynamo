@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Internal GPU Memory Service client session."""
+"""Lightweight GPU Memory Service client session."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ from gpu_memory_service.common.protocol.messages import (
 logger = logging.getLogger(__name__)
 
 
-class _GMSClientSession:
+class GMSClientSession:
     """Connected GMS client session with granted lock state."""
 
     def __init__(
@@ -81,6 +81,10 @@ class _GMSClientSession:
                 pass
             raise
         self._initialize_from_handshake(response)
+
+    @property
+    def socket_path(self) -> str:
+        return self._transport.socket_path
 
     def _initialize_from_handshake(self, response: HandshakeResponse) -> None:
         if not response.success:
@@ -215,8 +219,12 @@ class _GMSClientSession:
         self._transport.close()
         logger.info("Closed %s connection", self._granted_lock_type.value)
 
-    def __enter__(self) -> "_GMSClientSession":
+    def __enter__(self) -> "GMSClientSession":
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
+
+
+# Backward-compatible alias for existing internal users.
+_GMSClientSession = GMSClientSession

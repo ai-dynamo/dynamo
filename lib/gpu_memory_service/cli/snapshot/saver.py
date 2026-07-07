@@ -16,7 +16,9 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from gpu_memory_service.client import GMSClientSession
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
     device_sharded_ssd_roots,
@@ -55,17 +57,32 @@ def _save_device(
         ",".join(shard_roots) or "-",
     )
     t0 = time.monotonic()
-    # This runs on a ThreadPoolExecutor thread; bind its CUDA device before
-    # any device work, mirroring the loader's _load_device.
-    cuda_utils.cuda_runtime_set_device(device)
-    GMSStorageClient(
-        output_dir,
-        socket_path=get_socket_path(device),
-        device=device,
-        timeout_ms=lock_timeout_ms,
-        shard_size_bytes=shard_size_bytes,
-        sharded_ssd_roots=shard_roots,
-    ).save(max_workers=max_workers)
+    socket_path = get_socket_path(device)
+    # Acquire the generation lease before initializing CUDA, then pass that
+    # exact lease into the storage client so a waiting writer cannot replace
+    # the committed layout during the snapshot.
+    session = GMSClientSession(socket_path, RequestedLockType.RO, lock_timeout_ms)
+    try:
+        # This runs on a ThreadPoolExecutor thread; bind its CUDA device before
+        # any storage-client device work, as required by its CUDA VMM mappings.
+        cuda_utils.cuda_runtime_set_device(device)
+        storage = GMSStorageClient(
+            output_dir,
+            socket_path=socket_path,
+            device=device,
+            timeout_ms=lock_timeout_ms,
+            shard_size_bytes=shard_size_bytes,
+            sharded_ssd_roots=shard_roots,
+        )
+    except BaseException:
+        # save() takes ownership on entry; failures before that transfer remain
+        # this caller's responsibility.
+        try:
+            session.close()
+        except BaseException:
+            logger.exception("Failed to close GMS snapshot lease")
+        raise
+    storage.save(max_workers=max_workers, session=session)
     elapsed = time.monotonic() - t0
     logger.info("GMS checkpoint saved: device=%d elapsed=%.2fs", device, elapsed)
 
