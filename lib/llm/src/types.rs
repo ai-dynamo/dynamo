@@ -5,6 +5,22 @@ use crate::protocols;
 
 pub use protocols::{Annotated, TokenIdType};
 
+pub mod inference {
+    use super::*;
+    use dynamo_runtime::pipeline::ServerStreamingEngine;
+
+    pub mod generate {
+        use super::*;
+        use crate::protocols::common::llm_backend::LLMEngineOutput;
+
+        pub use crate::protocols::inference::generate::GenerateRequest;
+
+        /// Internal server-streaming engine used by both unary and SSE HTTP modes.
+        pub type GenerateStreamingEngine =
+            ServerStreamingEngine<GenerateRequest, Annotated<LLMEngineOutput>>;
+    }
+}
+
 pub mod openai {
     use super::*;
     use dynamo_runtime::pipeline::{ServerStreamingEngine, UnaryEngine};
@@ -42,24 +58,6 @@ pub mod openai {
             NvCreateChatCompletionRequest,
             Annotated<NvCreateChatCompletionStreamResponse>,
         >;
-    }
-
-    pub mod generate {
-        use super::*;
-        use crate::protocols::common::llm_backend::LLMEngineOutput;
-        use crate::protocols::common::preprocessor::PreprocessedRequest;
-
-        pub use protocols::openai::generate::{GenerateRequest, GenerateResponse};
-
-        /// A [`ServerStreamingEngine`] implementation for the token-in/token-out
-        /// `Generate` API.
-        ///
-        /// The registered engine is **raw**: it consumes a preprocessed
-        /// [`PreprocessedRequest`] and streams [`LLMEngineOutput`] directly, with
-        /// no Backend/decoder in between. The handler is responsible for
-        /// accumulating engine output into a `GenerateResponse`.
-        pub type GenerateStreamingEngine =
-            ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>;
     }
 
     pub mod embeddings {

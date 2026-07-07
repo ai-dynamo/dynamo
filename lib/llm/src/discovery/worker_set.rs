@@ -16,12 +16,13 @@ use crate::{
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
+        inference::generate::GenerateStreamingEngine,
         openai::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
-            embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
-            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -135,7 +136,7 @@ impl WorkerSet {
 
     /// Whether this set has any decode engine (chat or completions)
     pub fn has_decode_engine(&self) -> bool {
-        self.has_chat_engine() || self.has_completions_engine()
+        self.has_chat_engine() || self.has_completions_engine() || self.has_generate_engine()
     }
 
     /// Whether this set has any engine capable of producing output for an
@@ -144,6 +145,7 @@ impl WorkerSet {
     /// new modalities don't need to be added in multiple readiness predicates.
     pub fn has_any_serving_engine(&self) -> bool {
         self.has_chat_engine()
+            || self.has_generate_engine()
             || self.has_completions_engine()
             || self.has_embeddings_engine()
             || self.has_images_engine()
@@ -151,7 +153,6 @@ impl WorkerSet {
             || self.has_videos_engine()
             || self.has_audios_engine()
             || self.has_realtime_engine()
-            || self.has_generate_engine()
     }
 
     /// Whether this set tracks an Encode worker. Encode WorkerSets carry
@@ -210,8 +211,6 @@ impl WorkerSet {
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
-    use crate::protocols::common::llm_backend::LLMEngineOutput;
-    use crate::protocols::common::preprocessor::PreprocessedRequest;
     use crate::types::Annotated;
     use crate::types::generic::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
     use crate::types::openai::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
@@ -311,6 +310,15 @@ mod tests {
             "chat"
         );
         check!(
+            generate_engine,
+            has_generate_engine,
+            StubEngine::<
+                crate::protocols::inference::generate::GenerateRequest,
+                crate::protocols::common::llm_backend::LLMEngineOutput,
+            >::new(),
+            "generate"
+        );
+        check!(
             completions_engine,
             has_completions_engine,
             StubEngine::<NvCreateCompletionRequest, NvCreateCompletionResponse>::new(),
@@ -351,12 +359,6 @@ mod tests {
             has_realtime_engine,
             Arc::new(crate::engines::EchoBidirectionalEngine),
             "realtime"
-        );
-        check!(
-            generate_engine,
-            has_generate_engine,
-            StubEngine::<PreprocessedRequest, LLMEngineOutput>::new(),
-            "generate"
         );
     }
 

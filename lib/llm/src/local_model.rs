@@ -191,6 +191,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn enable_engine_apis(&mut self, enabled: bool) -> &mut Self {
+        self.frontend_api_config.set_engine_api_enabled(enabled);
+        self
+    }
+
     pub fn enable_streaming_tool_dispatch(&mut self, enabled: bool) -> &mut Self {
         self.frontend_api_config
             .streaming_dispatch_mut()
@@ -500,6 +505,10 @@ impl LocalModel {
 
     pub fn strip_anthropic_preamble(&self) -> bool {
         self.frontend_api_config.anthropic().strip_preamble()
+    }
+
+    pub fn engine_api_enabled(&self) -> bool {
+        self.frontend_api_config.engine_api_enabled()
     }
 
     pub fn enable_streaming_tool_dispatch(&self) -> bool {

@@ -57,6 +57,26 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
         DynamoVllmConfig.validate(self)
 
 
+def _load_engine_config_json(
+    path: str, parser: FlexibleArgumentParser
+) -> argparse.Namespace:
+    with open(path, encoding="utf-8") as stream:
+        values = json.load(stream)
+    if not isinstance(values, dict):
+        raise ValueError("--engine-config-json must contain a JSON object")
+
+    valid_keys = {
+        action.dest for action in parser._actions if action.dest != argparse.SUPPRESS
+    }
+    unknown = sorted(set(values) - valid_keys)
+    if unknown:
+        raise ValueError(
+            "Unknown vLLM engine argument(s) in --engine-config-json: "
+            + ", ".join(unknown)
+        )
+    return argparse.Namespace(**values)
+
+
 @register_encoder(Config)
 def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
     """Convert Config object to dictionary for encoding."""
@@ -107,7 +127,12 @@ def parse_args(
     # Validate arguments
     dynamo_config.validate()
 
-    vllm_args = vllm_parser.parse_args(unknown)
+    engine_namespace = None
+    if dynamo_config.engine_config_json is not None:
+        engine_namespace = _load_engine_config_json(
+            dynamo_config.engine_config_json, vllm_parser
+        )
+    vllm_args = vllm_parser.parse_args(unknown, namespace=engine_namespace)
     # Set the model name from the command line arguments
     # model is defined in AsyncEngineArgs, but when AsyncEngineArgs.from_cli_args is called,
     # vllm will update the model name to the full path of the model, which will break the dynamo logic,

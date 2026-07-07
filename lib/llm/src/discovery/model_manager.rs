@@ -35,12 +35,13 @@ use crate::{
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
+        inference::generate::GenerateStreamingEngine,
         openai::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
-            embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
-            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -506,22 +507,6 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_completions_engine_with_parsing()
-    }
-
-    pub fn get_generate_engine_with_parsing(
-        &self,
-        model: &str,
-    ) -> Result<
-        (
-            GenerateStreamingEngine,
-            crate::protocols::openai::ParsingOptions,
-        ),
-        ModelManagerError,
-    > {
-        self.models
-            .get(model)
-            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_generate_engine_with_parsing()
     }
 
     // -- Convenience methods for in-process models (http.rs, grpc.rs) --

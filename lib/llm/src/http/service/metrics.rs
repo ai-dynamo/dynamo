@@ -433,6 +433,9 @@ pub struct InflightGuard {
 /// This will include llamastack in the future
 #[derive(Clone, Copy)]
 pub enum Endpoint {
+    /// Engine-native token generation
+    InferenceGenerate,
+
     /// OAI Completions
     Completions,
 
@@ -459,9 +462,6 @@ pub enum Endpoint {
 
     /// Tensor
     Tensor,
-
-    /// Generate (token-in/token-out)
-    Generate,
 }
 
 /// Metrics for the HTTP service
@@ -1406,6 +1406,7 @@ impl Drop for InflightGuard {
 impl std::fmt::Display for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Endpoint::InferenceGenerate => write!(f, "inference_generate"),
             Endpoint::Completions => write!(f, "completions"),
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
@@ -1415,7 +1416,6 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
-            Endpoint::Generate => write!(f, "generate"),
         }
     }
 }
@@ -1423,6 +1423,7 @@ impl std::fmt::Display for Endpoint {
 impl Endpoint {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Endpoint::InferenceGenerate => "inference_generate",
             Endpoint::Completions => "completions",
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
@@ -1432,7 +1433,6 @@ impl Endpoint {
             Endpoint::Responses => "responses",
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
-            Endpoint::Generate => "generate",
         }
     }
 }
