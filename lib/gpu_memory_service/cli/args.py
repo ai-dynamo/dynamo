@@ -41,6 +41,7 @@ def parse_args(argv: Optional[list[str]] = None) -> list[Config]:
         "--tag",
         type=str,
         action="append",
+        choices=GMS_TAGS,
         help="Logical GMS tag to serve; may be repeated. Defaults to all "
         f"production tags ({', '.join(GMS_TAGS)}), each on its own socket.",
     )

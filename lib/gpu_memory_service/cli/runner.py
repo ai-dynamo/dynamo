@@ -5,9 +5,9 @@
 
 This module provides the CLI runner for the GPU Memory Service server,
 which manages GPU memory allocations with connection-based RW/RO locking.
-By default one process serves every production tag (weights and kv_cache)
-on independent sockets; the instances share only process-wide CUDA
-initialization. Pass --tag to serve a subset.
+By default one process serves every production GMS tag on independent
+sockets; the instances share only process-wide CUDA initialization. Pass
+--tag to serve a subset.
 
 Usage:
     python -m gpu_memory_service --device 0

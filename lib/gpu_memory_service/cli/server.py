@@ -3,10 +3,10 @@
 
 """GMS server entry point.
 
-Launches one GMS server process per GPU serving both the weights and kv_cache
-tags, then supervises them: terminates the rest if any child exits, and
-propagates the first non-zero exit code. Runs until SIGTERM (pod termination
-kills it) or until a child exits.
+Launches one GMS server process per GPU serving every production GMS tag,
+then supervises them: terminates the rest if any child exits, and propagates
+the first non-zero exit code. Runs until SIGTERM (pod termination kills it)
+or until a child exits.
 """
 
 from __future__ import annotations

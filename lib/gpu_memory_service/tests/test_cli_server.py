@@ -82,6 +82,10 @@ def test_parse_args_defaults_to_one_config_per_production_tag(monkeypatch):
         # --socket-path cannot name one socket for multiple tags.
         parse_args(["--device", "3", "--socket-path", "/tmp/gms.sock"])
 
+    with pytest.raises(SystemExit):
+        # Tags outside GMS_TAGS are rejected.
+        parse_args(["--device", "3", "--tag", "weight"])
+
 
 @pytest.mark.timeout(10)
 @pytest.mark.asyncio
