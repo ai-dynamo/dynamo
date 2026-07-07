@@ -21,7 +21,7 @@
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$
 ^https://etcd\.io/docs/v3\.5/install/?$
-^https://cert-manager\.io/docs/?$
+^https://book\.kubebuilder\.io/cronjob-tutorial/webhook-implementation\.html$
 
 # Intermittently times out from GitHub runners; loads normally elsewhere.
-^https://book\.kubebuilder\.io/cronjob-tutorial/webhook-implementation\.html$
+^https://cert-manager\.io/docs/?$
