@@ -222,7 +222,7 @@ This is an internal index benchmark. AIPerf cannot inject production `RouterEven
 
 ## Authoritative results
 
-Measured on `r6515-0048` at code `7d29b240c6632d78bf06b1e44ac0773f133a5e3b`. Corrected aggregate analysis uses `e8b9dbfb5aba89e922c71bbdd9b3e123003ef6c7`. The result-artifact commit is recorded in the follow-up documentation commit.
+Measured on `r6515-0048` at code `7d29b240c6632d78bf06b1e44ac0773f133a5e3b`. Corrected aggregate analysis uses `e8b9dbfb5aba89e922c71bbdd9b3e123003ef6c7`. Result artifacts were committed at `9ad940b0cad4f07115326da4adf96b7e3636d2ee`.
 
 Hardware was one exclusive AMD EPYC 7702P node: 64 physical cores/128 SMT threads, 1000 GiB allocation, Linux `6.14.0-29-generic`, Rust `1.96.1`, CPUs `0-63`, `interleave:0`, 64 Tokio workers, 8 event threads, and 16 query executors. The node did not expose cpufreq governor or AMD boost sysfs fields; the original manifest preserves that absence.
 
