@@ -556,8 +556,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
-	// ProfilingResults contains the output of the profiling process including
-	// Pareto-optimal configurations and the selected deployment configuration.
+	// ProfilingResults contains the selected deployment configuration produced by profiling.
+	// Deprecated compatibility fields may remain on objects created by older releases.
 	// +optional
 	ProfilingResults *ProfilingResultsStatus `json:"profilingResults,omitempty"`
 

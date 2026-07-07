@@ -344,7 +344,7 @@ class DynamoGraphDeploymentRequestStatus(BaseModel):
     )
     profilingResults: Optional[ProfilingResultsStatus] = Field(
         default=None,
-        description="ProfilingResults contains the output of the profiling process including Pareto-optimal configurations and the selected deployment configuration.",
+        description="ProfilingResults contains the selected deployment configuration produced by profiling. Deprecated compatibility fields may remain on objects created by older releases.",
     )
     deploymentInfo: Optional[DeploymentInfoStatus] = Field(
         default=None,

@@ -2255,7 +2255,7 @@ _Appears in:_
 | `dgdName` _string_ | DGDName is the name of the generated or created DynamoGraphDeployment. |  | Optional: \{\} <br /> |
 | `profilingJobName` _string_ | ProfilingJobName is the name of the Kubernetes Job running the profiler. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady. |  | Optional: \{\} <br /> |
-| `profilingResults` _[ProfilingResultsStatus](#profilingresultsstatus)_ | ProfilingResults contains the output of the profiling process including<br />Pareto-optimal configurations and the selected deployment configuration. |  | Optional: \{\} <br /> |
+| `profilingResults` _[ProfilingResultsStatus](#profilingresultsstatus)_ | ProfilingResults contains the selected deployment configuration produced by profiling.<br />Deprecated compatibility fields may remain on objects created by older releases. |  | Optional: \{\} <br /> |
 | `deploymentInfo` _[DeploymentInfoStatus](#deploymentinfostatus)_ | DeploymentInfo tracks the state of the deployed DynamoGraphDeployment.<br />Populated when a DGD has been created (either via autoApply or manually). |  | Optional: \{\} <br /> |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
 

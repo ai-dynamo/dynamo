@@ -9396,8 +9396,8 @@ spec:
                   type: string
                 profilingResults:
                   description: |-
-                    ProfilingResults contains the output of the profiling process including
-                    Pareto-optimal configurations and the selected deployment configuration.
+                    ProfilingResults contains the selected deployment configuration produced by profiling.
+                    Deprecated compatibility fields may remain on objects created by older releases.
                   properties:
                     pareto:
                       description: |-
