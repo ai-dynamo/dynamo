@@ -580,9 +580,6 @@ impl<
             let popped = {
                 let configs = self.workers_with_configs.borrow();
                 self.pending.pop_next(|_, class, queued| {
-                    // TODO: This preserves head-of-line blocking within each policy
-                    // class. A blocked constrained head can stall later entries in
-                    // that class until a bounded non-HOL strategy is introduced.
                     !Self::all_workers_prefill_busy_with(
                         &active_tokens,
                         &configs,
@@ -2302,7 +2299,7 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_pinned_head_blocks_class_backlog_despite_other_worker_capacity() {
+    async fn test_pinned_head_does_not_block_dispatchable_class_backlog() {
         let (queue, slots) = make_queue(2, 16, 256, Some(0.0));
 
         let (mut first, first_rx) = make_request("pinned-1", 256);
@@ -2326,11 +2323,12 @@ policy_classes:
 
         queue.update().await;
 
-        assert_eq!(queue.pending_count(), 2);
-        assert!(
-            unpinned_rx.try_recv().is_err(),
-            "unpinned request should remain queued behind the pinned head"
-        );
+        assert_eq!(queue.pending_count(), 1);
+        let unpinned_resp = unpinned_rx
+            .try_recv()
+            .expect("unpinned request should bypass the blocked pinned head");
+        let unpinned_resp = unpinned_resp.expect("scheduling returned error");
+        assert_eq!(unpinned_resp.best_worker, WorkerWithDpRank::new(0, 0));
         assert!(
             second_rx.try_recv().is_err(),
             "pinned request should still be queued"
@@ -2347,12 +2345,6 @@ policy_classes:
             .expect("pinned request should have been scheduled");
         let second_resp = second_resp.expect("scheduling returned error");
         assert_eq!(second_resp.best_worker, WorkerWithDpRank::new(1, 0));
-
-        let unpinned_resp = unpinned_rx
-            .try_recv()
-            .expect("unpinned request should have been scheduled");
-        let unpinned_resp = unpinned_resp.expect("scheduling returned error");
-        assert_eq!(unpinned_resp.best_worker, WorkerWithDpRank::new(0, 0));
         assert_eq!(queue.pending_count(), 0);
     }
 

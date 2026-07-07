@@ -511,6 +511,8 @@ navigation:
             contents:
               - page: Router Design
                 path: design-docs/router-design.md
+              - page: Request-Level Dispatch Policies
+                path: design-docs/request-level-dispatch-policies.md
               - page: KVBM Design
                 path: design-docs/kvbm-design.md
               - page: Planner Design
