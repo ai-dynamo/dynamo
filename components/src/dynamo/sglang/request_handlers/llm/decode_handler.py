@@ -24,6 +24,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     VIDEO_URL_KEY,
     build_disagg_mm_kwargs,
     extract_media_urls,
+    raise_if_unextracted_multimodal,
 )
 
 _SAMPLING_OPTION_FIELDS = (
@@ -355,6 +356,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             logging.debug(f"Request {context.id()} will use LoRA adapter: {lora_path}")
 
         if self.serving_mode == DisaggregationMode.DECODE:
+            raise_if_unextracted_multimodal(request)
+
             # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
 
@@ -392,12 +395,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
-                **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )
-
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     decode,
@@ -417,6 +418,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     yield out
         else:
+            raise_if_unextracted_multimodal(request)
+
             # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
             mm_data = request.get("multi_modal_data", {})
@@ -459,7 +462,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
-                **self._session_kwargs(request),
                 lora_path=lora_path,
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
@@ -577,18 +579,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
                     out["engine_data"] = {"routed_experts": routed_experts}
                 if finish_reason:
-                    input_tokens = meta_info["prompt_tokens"]
-                    completion_tokens = meta_info["completion_tokens"]
-                    cached_tokens = meta_info["cached_tokens"]
+                    input_tokens = meta_info.get("prompt_tokens")
+                    completion_tokens = meta_info.get("completion_tokens")
+                    cached_tokens = meta_info.get("cached_tokens")
                     prefill_prompt_tokens_details = None
                     if cached_tokens is not None and cached_tokens > 0:
                         prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    out["completion_usage"] = {
-                        "prompt_tokens": input_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": input_tokens + completion_tokens,
-                        "prompt_tokens_details": prefill_prompt_tokens_details,
-                    }
+                    if input_tokens is not None and completion_tokens is not None:
+                        completion_usage = {
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": input_tokens + completion_tokens,
+                        }
+                        if prefill_prompt_tokens_details is not None:
+                            completion_usage[
+                                "prompt_tokens_details"
+                            ] = prefill_prompt_tokens_details
+                        out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:
                             await metadata_uploader.upload_choice(output_idx, meta_info)

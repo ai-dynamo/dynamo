@@ -3,30 +3,48 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use super::{bus, config};
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
 
+/// One combined audit record per chat completion: the request, plus the response
+/// when it completed (`response = None` on client cancel / timeout / aggregation
+/// failure, so those stay auditable).
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AuditRecord {
     pub schema_version: u32,
     pub request_id: String,
     pub requested_streaming: bool,
     pub model: String,
+    /// Request arrival time, captured at handle creation. Used as the OTLP
+    /// `LogRecord` Timestamp; `#[serde(skip)]` since it is record metadata, not
+    /// audited payload, and only `OtelSink` reads it.
+    #[serde(skip, default = "std::time::SystemTime::now")]
+    pub event_time: SystemTime,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request: Option<Arc<NvCreateChatCompletionRequest>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<Arc<NvCreateChatCompletionResponse>>,
+    /// `true` on a complete record. Today only `OtelSink` can set it `false`, on
+    /// the oversize marker where it drops the payload; the other sinks never
+    /// truncate, so it is always `true` for them. A future bus-level size cap
+    /// would make `false` reachable for every sink.
+    pub audit_complete: bool,
+    /// Why the record is incomplete (e.g. `otel_payload_too_large:...`); omitted
+    /// when `audit_complete` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_drop_reason: Option<String>,
 }
 
 pub struct AuditHandle {
     requested_streaming: bool,
     request_id: String,
     model: String,
-    req_full: Option<Arc<NvCreateChatCompletionRequest>>,
-    resp_full: Option<Arc<NvCreateChatCompletionResponse>>,
+    event_time: SystemTime,
+    request: Arc<NvCreateChatCompletionRequest>,
 }
 
 impl AuditHandle {
@@ -34,22 +52,25 @@ impl AuditHandle {
         self.requested_streaming
     }
 
-    pub fn set_request(&mut self, req: Arc<NvCreateChatCompletionRequest>) {
-        self.req_full = Some(req);
-    }
-    pub fn set_response(&mut self, resp: Arc<NvCreateChatCompletionResponse>) {
-        self.resp_full = Some(resp);
+    pub fn request_id(&self) -> &str {
+        &self.request_id
     }
 
-    /// Emit exactly once (publishes to the bus; sinks do I/O).
-    pub fn emit(self) {
+    /// Publish the combined audit record on the bus. Consumes the handle to
+    /// enforce exactly one record per request. `response` is `None` on client
+    /// cancel / gateway timeout / aggregation failure — the record still
+    /// carries the request so those cases remain auditable.
+    pub fn emit(self, response: Option<Arc<NvCreateChatCompletionResponse>>) {
         let rec = AuditRecord {
             schema_version: 1,
             request_id: self.request_id,
             requested_streaming: self.requested_streaming,
             model: self.model,
-            request: self.req_full,
-            response: self.resp_full,
+            event_time: self.event_time,
+            request: Some(self.request),
+            response,
+            audit_complete: true,
+            audit_drop_reason: None,
         };
         bus::publish(rec);
     }
@@ -57,7 +78,15 @@ impl AuditHandle {
 
 pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> Option<AuditHandle> {
     let policy = config::policy();
-    create_handle_with_config(req, request_id, policy.enabled, policy.force_logging)
+    // `capture_enabled()` is `policy.enabled && CAPTURE_ACTIVE`: it additionally
+    // requires the audit subsystem to have been initialized, so a stale handle
+    // can't be created before/after the audit lifecycle.
+    create_handle_with_config(
+        req,
+        request_id,
+        config::capture_enabled(),
+        policy.force_logging,
+    )
 }
 
 fn create_handle_with_config(
@@ -80,8 +109,11 @@ fn create_handle_with_config(
         requested_streaming,
         request_id: request_id.to_string(),
         model,
-        req_full: None,
-        resp_full: None,
+        // Snapshot the pristine inbound request (before the preprocessor
+        // overrides stream/usage) and stamp arrival time on the producing
+        // thread, so the record reflects what the client sent and when.
+        event_time: SystemTime::now(),
+        request: Arc::new(req.clone()),
     })
 }
 
@@ -99,17 +131,14 @@ mod tests {
         serde_json::from_value(json).expect("Failed to create test request")
     }
 
-    fn create_test_request_with_agent_context() -> NvCreateChatCompletionRequest {
+    fn create_test_request_with_nvext() -> NvCreateChatCompletionRequest {
         let json = serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "test"}],
             "store": true,
             "nvext": {
-                "agent_context": {
-                    "session_type_id": "deep_research",
-                    "session_id": "run-123",
-                    "trajectory_id": "run-123:researcher",
-                    "parent_trajectory_id": "run-123:planner"
+                "agent_hints": {
+                    "priority": 5
                 }
             }
         });
@@ -134,43 +163,128 @@ mod tests {
         serde_json::from_value(json).expect("Failed to create test response")
     }
 
+    struct AuditPolicyResetGuard;
+
+    impl Drop for AuditPolicyResetGuard {
+        fn drop(&mut self) {
+            crate::audit::config::clear_policy_override_for_test();
+        }
+    }
+
     /// Test that DYN_AUDIT_FORCE_LOGGING=true bypasses store=false
     /// When force logging is enabled, audit handle should be created even when store=false
     #[test]
+    #[serial_test::serial]
     fn test_force_logging_bypasses_store() {
-        let request = create_test_request("test-model", false);
-        let handle = create_handle_with_config(&request, "test-id", true, true);
+        temp_env::with_vars(
+            [
+                ("DYN_AUDIT_SINKS", Some("stderr")),
+                ("DYN_AUDIT_FORCE_LOGGING", Some("true")),
+            ],
+            || {
+                crate::audit::config::override_policy_from_env_for_test();
+                crate::audit::config::mark_capture_active();
+                let _reset_guard = AuditPolicyResetGuard;
 
-        assert!(
-            handle.is_some(),
-            "force logging should create a handle even with store=false"
+                let request = create_test_request("test-model", false);
+                let handle = create_handle(&request, "test-id");
+
+                assert!(
+                    handle.is_some(),
+                    "When DYN_AUDIT_FORCE_LOGGING=true, handle should be created even with store=false"
+                );
+            },
         );
     }
 
     #[test]
-    fn audit_record_serializes_agent_context_and_response_content() {
+    fn audit_record_serializes_nvext_and_response_content() {
         let record = AuditRecord {
             schema_version: 1,
             request_id: "req-123".to_string(),
             requested_streaming: true,
             model: "test-model".to_string(),
-            request: Some(Arc::new(create_test_request_with_agent_context())),
+            event_time: SystemTime::now(),
+            request: Some(Arc::new(create_test_request_with_nvext())),
             response: Some(Arc::new(create_test_response("final answer"))),
+            audit_complete: true,
+            audit_drop_reason: None,
         };
 
         let value = serde_json::to_value(record).unwrap();
 
-        assert_eq!(
-            value["request"]["nvext"]["agent_context"]["session_id"],
-            "run-123"
-        );
-        assert_eq!(
-            value["request"]["nvext"]["agent_context"]["trajectory_id"],
-            "run-123:researcher"
-        );
+        assert_eq!(value["request"]["nvext"]["agent_hints"]["priority"], 5);
         assert_eq!(
             value["response"]["choices"][0]["message"]["content"],
             "final answer"
         );
+        // The combined record carries no event_type discriminator.
+        assert!(value.get("event_type").is_none());
+    }
+
+    #[test]
+    fn audit_record_omits_response_when_absent() {
+        // Cancel/timeout case: the record still carries the request, response
+        // is omitted via skip_serializing_if.
+        let record = AuditRecord {
+            schema_version: 1,
+            request_id: "req-456".to_string(),
+            requested_streaming: false,
+            model: "test-model".to_string(),
+            event_time: SystemTime::now(),
+            request: Some(Arc::new(create_test_request("test-model", true))),
+            response: None,
+            audit_complete: true,
+            audit_drop_reason: None,
+        };
+
+        let value = serde_json::to_value(&record).unwrap();
+        assert!(value["request"].is_object());
+        assert!(value.get("response").is_none());
+    }
+
+    /// Test-only constructor. `create_handle` gates on env vars + a cached
+    /// `OnceLock` policy, which is too brittle for a focused bus-roundtrip test.
+    impl AuditHandle {
+        pub(crate) fn for_test(request_id: &str, model: &str, streaming: bool) -> Self {
+            Self {
+                requested_streaming: streaming,
+                request_id: request_id.to_string(),
+                model: model.to_string(),
+                event_time: SystemTime::now(),
+                request: Arc::new(create_test_request(model, true)),
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn emit_publishes_one_combined_record_with_and_without_response() {
+        // Exercises the contract: `emit` publishes exactly one record. With a
+        // response present the record carries both request and response; with
+        // `None` (cancel/timeout) it carries the request only.
+        bus::init(8);
+        let mut rx = bus::subscribe();
+
+        AuditHandle::for_test("req-ok", "test-model", true)
+            .emit(Some(Arc::new(create_test_response("hello"))));
+        AuditHandle::for_test("req-cancel", "test-model", true).emit(None);
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("first record arrives before timeout")
+            .expect("first record receives ok");
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("second record arrives before timeout")
+            .expect("second record receives ok");
+
+        assert_eq!(first.request_id, "req-ok");
+        assert!(first.request.is_some());
+        assert!(first.response.is_some());
+
+        assert_eq!(second.request_id, "req-cancel");
+        assert!(second.request.is_some());
+        assert!(second.response.is_none());
     }
 }

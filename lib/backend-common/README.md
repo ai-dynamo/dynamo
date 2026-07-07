@@ -35,7 +35,7 @@ LLMEngine (trait)              <-- engine boundary (engine.rs)
     |   - start(worker_id) -> Result<EngineConfig, DynamoError>
     |   - generate(request, ctx) -> Result<BoxStream<...>, DynamoError>
     |   - abort(ctx)                            (optional, default no-op)
-    |   - drain() -> Result<(), DynamoError>    (optional, default no-op)
+    |   - is_quiescent() -> Result<Option<bool>, DynamoError> (optional, default Ok(None))
     |   - cleanup() -> Result<(), DynamoError>
     |
     +-- MockerBackend          <-- examples/mocker/src/engine.rs
@@ -48,7 +48,7 @@ Worker (concrete, non-generic)  <-- runtime integration (worker.rs)
     - calls engine.start(worker_id), registers model with discovery
     - serves the generate endpoint with cancellation monitoring
     - on shutdown: discovery unregister -> grace period
-                   -> engine.drain() -> engine.cleanup()
+                   -> drain loop (poll engine.is_quiescent()) -> engine.cleanup()
                    -> 3-phase distributed-runtime teardown
 
 run(engine, config)             <-- src/run.rs
@@ -278,6 +278,23 @@ async fn my_engine_passes_conformance() {
     .expect("conformance");
 }
 ```
+
+Encode-role engines use the narrower handoff contract:
+
+```rust
+#[tokio::test]
+async fn my_encoder_passes_conformance() {
+    dynamo_backend_common::testing::run_encode_conformance(MyEncoder::new_for_test)
+        .await
+        .expect("encode conformance");
+}
+```
+
+`run_encode_conformance` sends a multimodal request and requires one terminal
+`FinishReason::Stop` chunk, empty `token_ids`, and an object-shaped
+`encoder_result`. When terminal usage is provided, it must consistently report
+zero completion tokens. The suite also applies the same KV source, metrics,
+concurrency, cancellation, and cleanup checks as token-engine conformance.
 
 The kit asserts:
 

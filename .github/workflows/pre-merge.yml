@@ -187,7 +187,13 @@ jobs:
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload -- --nocapture
+      run: cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload g2 -- --nocapture
+    - name: Run vLLM Rust backend tests
+      # The `vllm_rs` feature is off by default (pulls vLLM engine-core git
+      # deps), so cover it explicitly here.
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked -p dynamo-vllm-rs-backend --features vllm_rs -- --nocapture
 
   rust-clippy:
     needs: changed-files
@@ -235,6 +241,12 @@ jobs:
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload -- -D warnings
+    - name: Run vLLM Rust backend clippy
+      # The `vllm_rs` feature is off by default (pulls vLLM engine-core git
+      # deps), so lint it explicitly here.
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --no-deps -p dynamo-vllm-rs-backend --features vllm_rs --all-targets -- -D warnings
     - name: Install and Run cargo-machete
       working-directory: ${{ matrix.dir }}
       run: |

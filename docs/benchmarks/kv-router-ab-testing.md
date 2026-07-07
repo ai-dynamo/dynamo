@@ -121,7 +121,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           env:
             - name: POD_UID
               valueFrom:
@@ -145,7 +145,7 @@ spec:
                       values:
                         - gpu-h100-sxm  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           workingDir: /workspace
           command:
             - /bin/sh
@@ -210,7 +210,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           env:
             - name: POD_UID
               valueFrom:
@@ -237,7 +237,7 @@ spec:
                       values:
                         - gpu-h100-sxm  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           workingDir: /workspace
           command:
             - /bin/sh
@@ -442,7 +442,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: benchmark
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
         securityContext:
           runAsUser: 0  # Required: apt-get and pip install need root in ephemeral benchmark pod
         command:
@@ -450,7 +450,7 @@ spec:
           - -lc
           - |
             apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1
-            pip install -q aiperf==0.8.0
+            pip install -q aiperf==0.10.0
             echo "Benchmark pod ready (tmux + aiperf installed)."
             sleep infinity
         imagePullPolicy: IfNotPresent

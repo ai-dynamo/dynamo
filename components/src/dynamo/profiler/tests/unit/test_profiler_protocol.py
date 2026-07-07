@@ -178,6 +178,101 @@ def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
     assert args[args.index("--cuda-graph-bs") + 1] == "2"
 
 
+def test_vllm_mamba_align_raises_max_num_batched_tokens() -> None:
+    """vLLM Mamba align requires the scheduler token cap to cover block size."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    args = [
+        "--enable-prefix-caching",
+        "--mamba-cache-mode",
+        "align",
+        "--max-num-batched-tokens",
+        "1024",
+    ]
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size",
+        return_value=8320,
+    ):
+        result = modifier._apply_mamba_cache_align_token_floor(args, "nemotron")
+
+    assert result[result.index("--max-num-batched-tokens") + 1] == "8320"
+
+
+def test_vllm_mamba_align_skips_without_explicit_align_mode() -> None:
+    """Do not probe model metadata for ordinary prefix-caching decode workers."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    args = [
+        "--enable-prefix-caching",
+        "--max-num-batched-tokens",
+        "1024",
+    ]
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size"
+    ) as mock_floor:
+        result = modifier._apply_mamba_cache_align_token_floor(args, "llama")
+
+    mock_floor.assert_not_called()
+    assert result == args
+
+
+def test_vllm_model_runtime_constraints_update_decode_config() -> None:
+    """Candidate-level vLLM postprocessing fixes generated decode worker args."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    config = {
+        "metadata": {"name": "test"},
+        "spec": {
+            "services": {
+                "Frontend": {},
+                "VllmDecodeWorker": {
+                    "subComponentType": "decode",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "args": [
+                                "--mamba-cache-mode",
+                                "align",
+                                "--max-num-batched-tokens",
+                                "1024",
+                            ]
+                        }
+                    },
+                },
+            }
+        },
+    }
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size",
+        return_value=8320,
+    ):
+        result = modifier.apply_model_runtime_constraints(config, "nemotron")
+
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args[args.index("--max-num-batched-tokens") + 1] == "8320"
+
+
+def test_vllm_model_runtime_constraints_skip_partial_decode_config() -> None:
+    """Final DGD postprocessing should tolerate partial mocked configs."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    config = {
+        "metadata": {"name": "test"},
+        "spec": {
+            "services": {
+                "Frontend": {},
+                "VllmDecodeWorker": {"subComponentType": "decode"},
+            }
+        },
+    }
+
+    result = modifier.apply_model_runtime_constraints(config, "nemotron")
+
+    decode_service = result["spec"]["services"]["VllmDecodeWorker"]
+    assert decode_service["subComponentType"] == "decode"
+    assert decode_service["extraPodSpec"] is None
+
+
 def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:
     """Single instances that exceed node capacity still get multinode config."""
     modifier = CONFIG_MODIFIERS["sglang"]
@@ -648,10 +743,117 @@ def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
             continue
         args = svc.get("extraPodSpec", {}).get("mainContainer", {}).get("args", [])
         flat_args = " ".join(args) if args else ""
-        assert model_path in flat_args, (
-            f"Worker '{svc_name}' should use PVC model path '{model_path}'. "
-            f"args={args}"
-        )
+        assert (
+            model_path in flat_args
+        ), f"Worker '{svc_name}' should use PVC model path '{model_path}'. args={args}"
+        assert args[args.index("--served-model-name") + 1] == model_name
+
+
+@pytest.mark.parametrize(
+    "backend,model_arg",
+    [("vllm", "--model"), ("sglang", "--model-path"), ("trtllm", "--model-path")],
+)
+def test_update_model_from_pvc_canonicalizes_duplicate_model_args(
+    backend, model_arg
+) -> None:
+    """PVC model updates leave exactly one logical name and runtime path."""
+    modifier = CONFIG_MODIFIERS[backend]
+    model_name = "Qwen/Qwen3-32B"
+    mount_path = "/opt/model-cache"
+    model_path = f"{mount_path}/qwen3-32b"
+    dgd_config = modifier.build_dgd_config(
+        mode="agg",
+        model_name="stale/model",
+        image=f"example/{backend}:test",
+        agg_cli_args=[],
+        agg_replicas=1,
+        agg_gpus=1,
+    )
+
+    services = dgd_config["spec"]["services"]
+    worker = next(
+        service
+        for name, service in services.items()
+        if name not in BaseConfigModifier._NON_WORKER_SERVICES
+    )
+    worker_args = worker["extraPodSpec"]["mainContainer"]["args"]
+    worker_args.extend(
+        [
+            f"{model_arg}=/stale/equal-form",
+            model_arg,
+            "/stale/split-form",
+            "--served-model-name=stale-equal",
+            "--served-model-name",
+            "stale-split",
+        ]
+    )
+
+    frontend_container = services["Frontend"]["extraPodSpec"]["mainContainer"]
+    frontend_container["args"] = frontend_container.get("args") or []
+    frontend_args = frontend_container["args"]
+    frontend_args.extend(
+        [
+            "--model-name=stale-equal",
+            "--model-name",
+            "stale-split",
+            "--model-path=/stale/equal-form",
+            "--model-path",
+            "/stale/split-form",
+        ]
+    )
+
+    result = modifier.update_model_from_pvc(
+        dgd_config,
+        model_name=model_name,
+        pvc_name="model-cache",
+        pvc_mount_path=mount_path,
+        pvc_path="qwen3-32b",
+    )
+
+    result_services = result["spec"]["services"]
+    result_worker = next(
+        service
+        for name, service in result_services.items()
+        if name not in BaseConfigModifier._NON_WORKER_SERVICES
+    )
+    result_worker_args = result_worker["extraPodSpec"]["mainContainer"]["args"]
+    assert [
+        arg
+        for arg in result_worker_args
+        if arg == model_arg or arg.startswith(f"{model_arg}=")
+    ] == [model_arg]
+    assert result_worker_args[result_worker_args.index(model_arg) + 1] == model_path
+    assert [
+        arg
+        for arg in result_worker_args
+        if arg == "--served-model-name" or arg.startswith("--served-model-name=")
+    ] == ["--served-model-name"]
+    assert (
+        result_worker_args[result_worker_args.index("--served-model-name") + 1]
+        == model_name
+    )
+
+    result_frontend_args = result_services["Frontend"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ]
+    assert [
+        arg
+        for arg in result_frontend_args
+        if arg == "--model-name" or arg.startswith("--model-name=")
+    ] == ["--model-name"]
+    assert [
+        arg
+        for arg in result_frontend_args
+        if arg == "--model-path" or arg.startswith("--model-path=")
+    ] == ["--model-path"]
+    assert (
+        result_frontend_args[result_frontend_args.index("--model-name") + 1]
+        == model_name
+    )
+    assert (
+        result_frontend_args[result_frontend_args.index("--model-path") + 1]
+        == model_path
+    )
 
 
 def test_build_dgd_config_pvc_without_model_path_sets_hf_home() -> None:

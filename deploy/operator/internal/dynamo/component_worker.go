@@ -131,25 +131,45 @@ const (
 	topologyMountPath  = "/etc/dynamo/topology"
 )
 
-// TopologyLabelVolume returns a Downward API volume that projects a pod label
-// into a file. The volume updates dynamically when the label is added or
-// changed, so the runtime can poll until the file has content.
-func TopologyLabelVolume(policy *v1beta1.KvTransferPolicy) corev1.Volume {
+// TopologyLabelVolume returns a Downward API volume that projects topology pod
+// labels into files. The volume updates dynamically when labels are added or
+// changed, so the runtime can poll until the files have content.
+func TopologyLabelVolume(policy *v1beta1.KvTransferPolicy, groveClusterTopologyDomains []v1beta1.TopologyDomain) corev1.Volume {
 	return corev1.Volume{
 		Name: topologyVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			DownwardAPI: &corev1.DownwardAPIVolumeSource{
-				Items: []corev1.DownwardAPIVolumeFile{
-					{
-						Path: string(policy.Domain),
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: fmt.Sprintf("metadata.labels['%s']", policy.LabelKey),
-						},
-					},
-				},
+				Items: topologyLabelVolumeItems(policy, groveClusterTopologyDomains),
 			},
 		},
 	}
+}
+
+func topologyLabelVolumeItems(policy *v1beta1.KvTransferPolicy, groveClusterTopologyDomains []v1beta1.TopologyDomain) []corev1.DownwardAPIVolumeFile {
+	if policy == nil {
+		return nil
+	}
+	if policy.LabelKey != "" {
+		return []corev1.DownwardAPIVolumeFile{
+			{
+				Path: string(policy.Domain),
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: fmt.Sprintf("metadata.labels['%s']", policy.LabelKey),
+				},
+			},
+		}
+	}
+
+	items := make([]corev1.DownwardAPIVolumeFile, 0, len(groveClusterTopologyDomains))
+	for _, domain := range groveClusterTopologyDomains {
+		items = append(items, corev1.DownwardAPIVolumeFile{
+			Path: string(domain),
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: fmt.Sprintf("metadata.labels['%s']", commonconsts.DynamoTopologyLabelKey(string(domain))),
+			},
+		})
+	}
+	return items
 }
 
 // TopologyLabelVolumeMount returns the volume mount for the topology label volume.

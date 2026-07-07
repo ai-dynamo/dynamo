@@ -15,7 +15,7 @@ use dynamo_runtime::{
     },
 };
 use prometheus::{
-    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+    Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 use serde::Serialize;
 use std::{
@@ -25,6 +25,10 @@ use std::{
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
+use crate::protocols::{
+    common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
+    openai::chat_completions::NvCreateChatCompletionStreamResponse,
+};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
 use dynamo_runtime::error::ErrorType as DynamoErrorType;
@@ -34,6 +38,13 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     const REJECTION: &[DynamoErrorType] = &[DynamoErrorType::ResourceExhausted];
     const NON_REJECTION: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
+}
+
+/// Check whether an error chain indicates that no backend worker is available.
+pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool {
+    const UNAVAILABLE: &[DynamoErrorType] = &[DynamoErrorType::Unavailable];
+    const AVAILABLE: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
 }
 
 /// Check whether an error chain indicates the request was cancelled.
@@ -114,6 +125,110 @@ pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometh
     registry.register(Box::new(WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.clone()))?;
     registry.register(Box::new(WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.clone()))?;
     registry.register(Box::new(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.clone()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// LoRA allocation metrics (updated by LoraController each tick)
+// ---------------------------------------------------------------------------
+
+pub static LORA_REPLICA_FACTOR_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_REPLICA_FACTOR),
+            "Number of replicas allocated for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_replica_factor gauge")
+});
+
+pub static LORA_IS_ACTIVE_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_IS_ACTIVE),
+            "Whether a LoRA adapter is active (1) or inactive (0)",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_is_active gauge")
+});
+
+pub static LORA_RAW_ARRIVAL_COUNT_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "dynamo_frontend_{}",
+                frontend_service::LORA_RAW_ARRIVAL_COUNT
+            ),
+            "Raw arrival count (windowed rate counter) for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_raw_arrival_count gauge")
+});
+
+pub static LORA_ESTIMATED_LOAD_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_ESTIMATED_LOAD),
+            "Estimated load (windowed request count) for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_estimated_load gauge")
+});
+
+pub static LORA_ACTIVE_REQUESTS_GAUGE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            format!("dynamo_frontend_{}", frontend_service::LORA_ACTIVE_REQUESTS),
+            "Number of in-flight requests for a LoRA adapter",
+        ),
+        &["lora"],
+    )
+    .expect("Failed to create lora_active_requests gauge")
+});
+
+pub static LORA_CHURN_LOADS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        format!(
+            "dynamo_frontend_{}",
+            frontend_service::LORA_CHURN_LOADS_TOTAL
+        ),
+        "Total LoRA loads (new placements) this tick",
+    )
+    .expect("Failed to create lora_churn_loads gauge")
+});
+
+pub static LORA_CHURN_UNLOADS_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        format!(
+            "dynamo_frontend_{}",
+            frontend_service::LORA_CHURN_UNLOADS_TOTAL
+        ),
+        "Total LoRA unloads (removed placements) this tick",
+    )
+    .expect("Failed to create lora_churn_unloads gauge")
+});
+
+pub static LORA_OVERFLOW_COUNT_GAUGE: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::new(
+        format!("dynamo_frontend_{}", frontend_service::LORA_OVERFLOW_COUNT),
+        "MCF solver overflow count (unplaceable replicas)",
+    )
+    .expect("Failed to create lora_overflow_count gauge")
+});
+
+pub fn register_lora_allocation_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(LORA_REPLICA_FACTOR_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_IS_ACTIVE_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_RAW_ARRIVAL_COUNT_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_ESTIMATED_LOAD_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_ACTIVE_REQUESTS_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_CHURN_LOADS_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_CHURN_UNLOADS_GAUGE.clone()))?;
+    registry.register(Box::new(LORA_OVERFLOW_COUNT_GAUGE.clone()))?;
     Ok(())
 }
 
@@ -344,6 +459,9 @@ pub enum Endpoint {
 
     /// Tensor
     Tensor,
+
+    /// Generate (token-in/token-out)
+    Generate,
 }
 
 /// Metrics for the HTTP service
@@ -378,8 +496,10 @@ pub enum ErrorType {
     Validation,
     /// Model or resource not found (404)
     NotFound,
-    /// Service overloaded, too many requests (503)
+    /// Service overloaded or rate limited (429 or 529)
     Overload,
+    /// Service unavailable because no backend worker can serve the request
+    Unavailable,
     /// Request cancelled by client or timeout
     Cancelled,
     /// Backend accepted the request but stopped responding (response inactivity timeout)
@@ -494,11 +614,16 @@ impl Metrics {
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
+        Self::new_with_prefix(std::env::var(env_metrics::DYN_METRICS_PREFIX).ok())
+    }
+
+    /// Create Metrics with an explicit optional prefix. `None` uses the standard
+    /// frontend prefix and does not read environment variables.
+    pub fn new_with_prefix(metrics_prefix: Option<String>) -> Self {
         // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
         // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
-        let raw_prefix = std::env::var(env_metrics::DYN_METRICS_PREFIX)
-            .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
+        let raw_prefix = metrics_prefix.unwrap_or_else(|| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
         if prefix != raw_prefix {
             tracing::warn!(
@@ -1247,6 +1372,7 @@ impl Drop for InflightGuard {
                     ErrorType::Validation => "invalid request parameters",
                     ErrorType::NotFound => "model or resource not found",
                     ErrorType::Overload => "service overloaded or rate limited",
+                    ErrorType::Unavailable => "no backend worker available",
                     ErrorType::NotImplemented => "requested feature not implemented",
                     ErrorType::None => "unknown error",
                 };
@@ -1289,6 +1415,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
+            Endpoint::Generate => write!(f, "generate"),
         }
     }
 }
@@ -1305,6 +1432,7 @@ impl Endpoint {
             Endpoint::Responses => "responses",
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
+            Endpoint::Generate => "generate",
         }
     }
 }
@@ -1340,6 +1468,7 @@ impl ErrorType {
             ErrorType::Validation => frontend_service::error_type::VALIDATION,
             ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
             ErrorType::Overload => frontend_service::error_type::OVERLOAD,
+            ErrorType::Unavailable => frontend_service::error_type::UNAVAILABLE,
             ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
             ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
@@ -1622,35 +1751,28 @@ pub fn process_response_and_observe_metrics<T>(
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
 ) {
-    use crate::preprocessor::LLMMetricAnnotation;
-
-    // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_cached_tokens(metrics.cached_tokens);
-        response_collector.observe_tokenize_latencies(
-            metrics.tokenize_latency,
-            metrics.detokenize_total_latency,
-            metrics.detokenize_count,
-        );
-        response_collector.set_worker_info(
-            metrics.prefill_worker_id,
-            metrics.prefill_dp_rank,
-            metrics.prefill_worker_type,
-            metrics.decode_worker_id,
-            metrics.decode_dp_rank,
-            metrics.decode_worker_type,
-        );
+        observe_llm_metrics(&metrics, response_collector, http_queue_guard);
+    }
+}
 
-        // Drop http_queue_guard on first token for non-streaming (same as streaming)
-        if response_collector.is_first_token()
-            && metrics.chunk_tokens > 0
-            && let Some(guard) = http_queue_guard.take()
-        {
-            drop(guard);
-        }
-
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+/// Process streaming metrics for chat-derived responses.
+///
+/// The typed metrics field is the hot path. Annotation parsing remains as a compatibility
+/// fallback for legacy/generated annotation frames.
+pub fn process_chat_response_and_observe_metrics(
+    annotated: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) {
+    if let Some(metrics) = annotated
+        .data
+        .as_ref()
+        .and_then(|data| data.llm_metrics.as_ref())
+    {
+        observe_llm_metrics(metrics, response_collector, http_queue_guard);
+    } else {
+        process_response_and_observe_metrics(annotated, response_collector, http_queue_guard);
     }
 }
 
@@ -1670,57 +1792,53 @@ fn sse_json_data<T: Serialize>(event: Event, data: &T) -> Result<Event, axum::Er
     Ok(event.data(json))
 }
 
-/// Process streaming response with event conversion for SSE
-///
-/// This function handles metrics collection, http_queue_guard management, and converts
-/// annotated responses to SSE events for streaming responses.
-///
-/// Returns None for metrics annotation events (events without SSE data payload).
-pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
-    annotated: EventConverter<T>,
+fn observe_llm_metrics(
+    metrics: &LLMMetricAnnotation,
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
-) -> Result<Option<Event>, axum::Error> {
-    use crate::preprocessor::LLMMetricAnnotation;
+) {
+    response_collector.observe_current_osl(metrics.output_tokens);
+    response_collector.observe_cached_tokens(metrics.cached_tokens);
+    response_collector.observe_tokenize_latencies(
+        metrics.tokenize_latency,
+        metrics.detokenize_total_latency,
+        metrics.detokenize_count,
+    );
+    response_collector.set_worker_info(
+        metrics.prefill_worker_id,
+        metrics.prefill_dp_rank,
+        metrics.prefill_worker_type.clone(),
+        metrics.decode_worker_id,
+        metrics.decode_dp_rank,
+        metrics.decode_worker_type.clone(),
+    );
 
-    let mut annotated = annotated.0;
-
-    // update metrics
-    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_cached_tokens(metrics.cached_tokens);
-        response_collector.observe_tokenize_latencies(
-            metrics.tokenize_latency,
-            metrics.detokenize_total_latency,
-            metrics.detokenize_count,
-        );
-        response_collector.set_worker_info(
-            metrics.prefill_worker_id,
-            metrics.prefill_dp_rank,
-            metrics.prefill_worker_type,
-            metrics.decode_worker_id,
-            metrics.decode_dp_rank,
-            metrics.decode_worker_type,
-        );
-
-        // Drop http_queue_guard on first token for streaming
-        if response_collector.is_first_token()
-            && metrics.chunk_tokens > 0
-            && let Some(guard) = http_queue_guard.take()
-        {
-            drop(guard);
-        }
-
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
-
-        // Chomp the LLMMetricAnnotation so it's not returned in the response stream
-        // TODO: add a flag to control what is returned in the SSE stream
-        if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS) {
-            annotated.event = None;
-            annotated.comment = None;
-        }
+    if response_collector.is_first_token()
+        && metrics.chunk_tokens > 0
+        && let Some(guard) = http_queue_guard.take()
+    {
+        drop(guard);
     }
 
+    response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+}
+
+fn observe_annotation_metrics<T>(
+    annotated: &crate::types::Annotated<T>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) -> bool {
+    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
+        observe_llm_metrics(&metrics, response_collector, http_queue_guard);
+        true
+    } else {
+        false
+    }
+}
+
+fn annotated_to_sse_event<T: Serialize>(
+    annotated: crate::types::Annotated<T>,
+) -> Result<Option<Event>, axum::Error> {
     let mut event = Event::default();
 
     if let Some(ref data) = annotated.data {
@@ -1761,6 +1879,77 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     } else {
         Ok(Some(event))
     }
+}
+
+/// Process streaming response with event conversion for SSE
+///
+/// This function handles metrics collection, http_queue_guard management, and converts
+/// annotated responses to SSE events for streaming responses.
+///
+/// Returns None for metrics annotation events (events without SSE data payload).
+pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
+    annotated: EventConverter<T>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) -> Result<Option<Event>, axum::Error> {
+    let mut annotated = annotated.0;
+
+    if observe_annotation_metrics(&annotated, response_collector, http_queue_guard) {
+        // Preserve the previous SSE behavior: observe legacy metrics annotation
+        // frames internally, then strip them before building the outbound event.
+        if annotated.event.as_deref() == Some(ANNOTATION_LLM_METRICS) {
+            annotated.event = None;
+            annotated.comment = None;
+        }
+    }
+
+    // ANNOTATION_AUDIT_USAGE is audit-only and must never reach the client SSE
+    // stream (the audit DeltaAggregator consumed its usage upstream).
+    if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_AUDIT_USAGE) {
+        annotated.event = None;
+        annotated.comment = None;
+        annotated.data = None;
+    }
+
+    annotated_to_sse_event(annotated)
+}
+
+/// Process chat-derived streaming responses with typed metrics before SSE conversion.
+///
+/// If the typed field is absent, this falls back to the same legacy annotation
+/// frame parsing and stripping behavior as `process_response_using_event_converter_and_observe_metrics`.
+pub fn process_chat_response_using_event_converter_and_observe_metrics(
+    annotated: EventConverter<NvCreateChatCompletionStreamResponse>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) -> Result<Option<Event>, axum::Error> {
+    let mut annotated = annotated.0;
+
+    if let Some(metrics) = annotated
+        .data
+        .as_ref()
+        .and_then(|data| data.llm_metrics.as_ref())
+    {
+        observe_llm_metrics(metrics, response_collector, http_queue_guard);
+    } else if observe_annotation_metrics(&annotated, response_collector, http_queue_guard)
+        && annotated.event.as_deref() == Some(ANNOTATION_LLM_METRICS)
+    {
+        // Legacy compatibility path: annotation frames were never emitted as
+        // client-visible SSE payloads after metrics collection.
+        annotated.event = None;
+        annotated.comment = None;
+    }
+
+    // ANNOTATION_AUDIT_USAGE is audit-only: the audit DeltaAggregator already
+    // consumed its usage upstream, so strip the whole chunk — it must never
+    // reach the client SSE stream.
+    if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_AUDIT_USAGE) {
+        annotated.event = None;
+        annotated.comment = None;
+        annotated.data = None;
+    }
+
+    annotated_to_sse_event(annotated)
 }
 
 /// Create a new router with optional DRT metrics integration.
@@ -2389,6 +2578,224 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn metrics_annotations_stripped_from_client_sse() {
+        // PR #9390: two metric annotations must never leak to the client SSE.
+        // (1) Per-chunk `llm_metrics` rides on a content chunk: the content delta
+        //     must reach the client, but the metrics event/comment must be stripped.
+        // (2) The audit-only `audit_usage` chunk must be dropped entirely (the audit
+        //     DeltaAggregator already consumed its usage upstream).
+        use crate::preprocessor::{ANNOTATION_AUDIT_USAGE, LLMMetricAnnotation};
+        use crate::types::Annotated;
+        use axum::response::IntoResponse;
+        use axum::response::sse::Sse;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let mut collector = metrics.clone().create_response_collector("test-model");
+
+        let llm_metrics = LLMMetricAnnotation {
+            input_tokens: 7,
+            output_tokens: 3,
+            chunk_tokens: 1,
+            cached_tokens: Some(2),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: None,
+            detokenize_total_latency: None,
+            detokenize_count: None,
+        };
+        let metrics_comment = llm_metrics.to_annotation::<()>().unwrap().comment;
+        let metrics_json = metrics_comment.as_ref().expect("metrics comment present")[0].clone();
+
+        // (1) Per-chunk metrics on a content chunk (event = llm_metrics).
+        let content: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model",
+                "choices": [{"index": 0, "delta": {"content": "hello"}}]
+            }))
+            .unwrap();
+        let per_chunk = Annotated {
+            id: None,
+            data: Some(content),
+            event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
+            comment: metrics_comment.clone(),
+            error: None,
+        };
+
+        let mut http_queue_guard = None;
+        let event = process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(per_chunk),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+        .expect("conversion ok")
+        .expect("content chunk should yield a client event");
+
+        let sse = Sse::new(futures::stream::once(async move {
+            Ok::<_, std::convert::Infallible>(event)
+        }));
+        let body = sse.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let wire = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            wire.contains("hello"),
+            "content delta should reach the client: {wire}"
+        );
+        assert!(
+            !wire.contains(&metrics_json)
+                && !wire.contains("chunk_tokens")
+                && !wire.contains("input_tokens"),
+            "internal metrics leaked to client SSE: {wire}"
+        );
+
+        // (2) Audit-only usage chunk (event = audit_usage, carries usage data).
+        let usage: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model", "choices": [],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+            }))
+            .unwrap();
+        let audit_usage = Annotated {
+            id: None,
+            data: Some(usage),
+            event: Some(ANNOTATION_AUDIT_USAGE.to_string()),
+            comment: metrics_comment,
+            error: None,
+        };
+
+        let mut http_queue_guard = None;
+        let result = process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(audit_usage),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+        .expect("conversion ok");
+        assert!(
+            result.is_none(),
+            "audit_usage chunk must not be forwarded to the client SSE stream"
+        );
+    }
+
+    #[test]
+    fn test_chat_typed_metrics_fast_path_observes_without_annotation() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
+        let mut collector = metrics.clone().create_response_collector(model);
+        let mut annotated = make_chat_stream_annotated("hello");
+        annotated.data.as_mut().unwrap().llm_metrics = Some(LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 20,
+            chunk_tokens: 5,
+            cached_tokens: Some(15),
+            prefill_worker_id: Some(11),
+            prefill_dp_rank: Some(1),
+            prefill_worker_type: Some(WORKER_TYPE_PREFILL.to_string()),
+            decode_worker_id: Some(22),
+            decode_dp_rank: Some(2),
+            decode_worker_type: Some(WORKER_TYPE_DECODE.to_string()),
+            tokenize_latency: Some(Duration::from_millis(8)),
+            detokenize_total_latency: Some(Duration::from_micros(100)),
+            detokenize_count: Some(2),
+        });
+
+        assert!(annotated.event.is_none());
+        assert!(annotated.comment.is_none());
+
+        let mut http_queue_guard = Some(metrics.clone().create_http_queue_guard(model));
+        let result = process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        );
+
+        assert!(
+            http_queue_guard.is_none(),
+            "first positive chunk should release HTTP queue guard"
+        );
+        let event = result
+            .unwrap()
+            .expect("typed metrics data chunk should still produce an SSE event");
+        let json = extract_sse_data_json(event);
+        assert!(
+            json.get("llm_metrics").is_none(),
+            "typed metrics must be skipped on the SSE wire"
+        );
+
+        drop(collector);
+
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_tokenizer_metric_name)
+            .expect("histogram should be registered");
+        let tokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "tokenize"))
+            .expect("tokenize metric should exist");
+        assert_eq!(tokenize_metric.get_histogram().get_sample_count(), 1);
+        assert!(
+            (tokenize_metric.get_histogram().get_sample_sum() - 8.0).abs() < 0.001,
+            "tokenize latency should be 8.0ms"
+        );
+    }
+
+    #[test]
+    fn test_chat_stream_typed_metrics_are_skipped_in_json() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let without_metrics = make_chat_stream_annotated("hello").data.unwrap();
+        let mut with_metrics = without_metrics.clone();
+        with_metrics.llm_metrics = Some(LLMMetricAnnotation {
+            input_tokens: 1,
+            output_tokens: 2,
+            chunk_tokens: 1,
+            cached_tokens: Some(1),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: None,
+            detokenize_total_latency: None,
+            detokenize_count: None,
+        });
+
+        let without_json = serde_json::to_value(&without_metrics).unwrap();
+        let with_json = serde_json::to_value(&with_metrics).unwrap();
+
+        assert_eq!(with_json, without_json);
+        assert!(with_json.get("llm_metrics").is_none());
+    }
+
     #[test]
     fn test_non_streaming_path_observes_cached_tokens() {
         use crate::preprocessor::LLMMetricAnnotation;
@@ -2487,6 +2894,7 @@ mod tests {
         assert_eq!(ErrorType::Validation.as_str(), "validation");
         assert_eq!(ErrorType::NotFound.as_str(), "not_found");
         assert_eq!(ErrorType::Overload.as_str(), "overload");
+        assert_eq!(ErrorType::Unavailable.as_str(), "unavailable");
         assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
         assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
@@ -2727,6 +3135,7 @@ mod tests {
             ErrorType::Validation,
             ErrorType::NotFound,
             ErrorType::Overload,
+            ErrorType::Unavailable,
             ErrorType::Cancelled,
             ErrorType::ResponseTimeout,
             ErrorType::Internal,
@@ -2859,7 +3268,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
         let mut http_queue_guard: Option<HttpQueueGuard> = None;
-        process_response_using_event_converter_and_observe_metrics(
+        process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(annotated),
             &mut collector,
             &mut http_queue_guard,
@@ -2906,6 +3315,7 @@ mod tests {
                         service_tier: None,
                     },
                     nvext: None,
+                    llm_metrics: None,
                 },
             ),
             event: None,

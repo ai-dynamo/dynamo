@@ -224,6 +224,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_b64(["green"]),
                         extra_script_args=["--frontend-decoding"],
                         marks=[pytest.mark.post_merge],
+                        timeout_s=900,
                     ),
                 ],
             ),

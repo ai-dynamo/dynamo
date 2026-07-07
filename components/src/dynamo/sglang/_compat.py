@@ -22,7 +22,7 @@ Runtime data-contract notes (not code-level shims):
 
 import inspect
 import logging
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,49 @@ def ensure_sglang_top_level_exports() -> None:
 
 
 ensure_sglang_top_level_exports()
+
+
+def ensure_sglang_tensor_image_size() -> None:
+    """Allow SGLang's image-token resolver to handle decoded image tensors.
+
+    SGLang 0.5.13 and 0.5.14 assume every decoded image exposes the PIL
+    ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
+    CHW tensor, causing multimodal requests to fall back to retokenization.
+
+    Remove this compatibility override once the minimum supported SGLang
+    release handles tensor image dimensions itself.
+    """
+    import torch
+    from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
+
+    original = getattr(BaseMultimodalProcessor, "resolve_image_token_counts", None)
+    if original is None or getattr(
+        original, "_dynamo_tensor_image_size_support", False
+    ):
+        return
+
+    @wraps(original)
+    def resolve_image_token_counts(self: Any, images: list[Any]) -> list[int]:
+        if not any(isinstance(image, torch.Tensor) for image in images):
+            return original(self, images)
+
+        image_sizes: list[tuple[int, int]] = []
+        for image in images:
+            if isinstance(image, torch.Tensor):
+                if image.ndim < 2:
+                    raise ValueError(f"Invalid image tensor shape: {image.shape}")
+                height, width = image.shape[-2:]
+            else:
+                height, width = image.height, image.width
+            image_sizes.append((int(height), int(width)))
+
+        token_counts = self._processor._get_num_multimodal_tokens(
+            image_sizes=image_sizes
+        ).num_image_tokens
+        return [int(count) for count in token_counts]
+
+    resolve_image_token_counts._dynamo_tensor_image_size_support = True  # type: ignore[attr-defined]
+    BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
 
 
 @lru_cache(maxsize=32)
@@ -108,36 +151,47 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
-def get_scheduler_info(engine: Any) -> dict:
-    """Return the scheduler-info dict for rank-0 of an ``sgl.Engine``.
+@lru_cache(maxsize=32)
+def _start_profile_accepts_request_object(start_profile: Any) -> bool:
+    """Return whether TokenizerManager.start_profile expects a ProfileReq."""
+    try:
+        signature = inspect.signature(start_profile)
+    except (TypeError, ValueError):
+        logger.debug(
+            "Could not inspect SGLang TokenizerManager.start_profile signature; "
+            "using the legacy keyword-argument API"
+        )
+        return False
 
-    SGLang exposes per-rank scheduler stats (``max_total_num_tokens``,
-    ``max_req_input_len``, ...) on the ``Engine`` via ``_scheduler_init_result``.
-    We return the rank-0 dict, or ``{}`` if it is not reachable on this build.
+    return "req" in signature.parameters
 
-    Covers:
-      - sglang 0.5.10+: ``engine._scheduler_init_result.scheduler_infos[0]``
-        (canonical; also what ``Engine.get_server_info`` reads internally).
-      - Older probed attributes (``engine.scheduler_info``,
-        ``engine.tokenizer_manager.scheduler_info``) as a best-effort fallback
-        for forks/experimental branches that surfaced the dict directly.
+
+def _build_profile_request(body: dict[str, Any]) -> Any:
+    from sglang.srt.managers.io_struct import ProfileReq
+
+    return ProfileReq(**body)
+
+
+async def start_profile_compat(tokenizer_manager: Any, body: dict[str, Any]) -> None:
+    """Start profiling across SGLang's old and new control APIs.
+
+    SGLang 0.5.11 accepts profiling fields as keyword arguments. Newer builds
+    accept one ``ProfileReq`` object instead.
     """
-    result = getattr(engine, "_scheduler_init_result", None)
-    if result is not None:
-        infos = getattr(result, "scheduler_infos", None)
-        if infos:
-            return infos[0]
+    start_profile = tokenizer_manager.start_profile
+    signature_source = getattr(start_profile, "__func__", start_profile)
 
-    direct = getattr(engine, "scheduler_info", None)
-    if direct:
-        return direct
+    try:
+        accepts_request_object = _start_profile_accepts_request_object(signature_source)
+    except TypeError:
+        accepts_request_object = _start_profile_accepts_request_object.__wrapped__(
+            signature_source
+        )
 
-    tm = getattr(engine, "tokenizer_manager", None)
-    tm_info = getattr(tm, "scheduler_info", None) if tm is not None else None
-    if tm_info:
-        return tm_info
-
-    return {}
+    if accepts_request_object:
+        await start_profile(_build_profile_request(body))
+    else:
+        await start_profile(**body)
 
 
 def enable_disjoint_streaming_output(server_args: Any) -> None:
@@ -165,7 +219,8 @@ def disable_skip_tokenizer_init(server_args: Any) -> None:
 __all__ = [
     "disable_skip_tokenizer_init",
     "enable_disjoint_streaming_output",
+    "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
-    "get_scheduler_info",
+    "start_profile_compat",
 ]
