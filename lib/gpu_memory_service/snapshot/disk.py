@@ -18,6 +18,8 @@ from gpu_memory_service.snapshot.backends.pinned_host import (
 from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
 
 _SAVE_COPY_BUFFERS = 1
+LAYOUT_METADATA_FILENAME = "gms_layout_metadata.json"
+LAYOUT_METADATA_FORMAT_VERSION = 1
 
 
 class _NullLogger:
@@ -169,7 +171,13 @@ def load_manifest_and_metadata(
             AllocationEntry(**allocation)
             for allocation in manifest_payload.get("allocations", [])
         ],
+        layout_metadata_file=manifest_payload.get("layout_metadata_file"),
     )
+    if manifest.layout_metadata_file not in (None, LAYOUT_METADATA_FILENAME):
+        raise ValueError(
+            "Unsupported layout metadata snapshot file: "
+            f"{manifest.layout_metadata_file!r}"
+        )
 
     metadata_path = os.path.join(input_dir, "gms_metadata.json")
     raw_meta: Dict[str, Any] = {}
@@ -186,3 +194,73 @@ def load_manifest_and_metadata(
         for key, entry in raw_meta.items()
     }
     return manifest, metadata
+
+
+def load_layout_metadata(
+    input_dir: str,
+    *,
+    required: bool = False,
+) -> Dict[Tuple[str, str], bytes]:
+    """Load optional, allocation-independent metadata from a GMS snapshot."""
+    metadata_path = os.path.join(input_dir, LAYOUT_METADATA_FILENAME)
+    if not os.path.exists(metadata_path):
+        if required:
+            raise FileNotFoundError(
+                "Snapshot manifest requires missing layout metadata file: "
+                f"{metadata_path}"
+            )
+        return {}
+
+    with open(metadata_path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid {LAYOUT_METADATA_FILENAME}: expected an object")
+    format_version = payload.get("format_version")
+    if format_version != LAYOUT_METADATA_FORMAT_VERSION:
+        raise ValueError(
+            f"Unsupported {LAYOUT_METADATA_FILENAME} format_version: {format_version!r}"
+        )
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError(f"Invalid {LAYOUT_METADATA_FILENAME}: entries must be a list")
+
+    result: Dict[Tuple[str, str], bytes] = {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"Invalid {LAYOUT_METADATA_FILENAME} entry {index}: expected an object"
+            )
+        namespace = entry.get("namespace")
+        key = entry.get("key")
+        encoded_value = entry.get("value")
+        if not isinstance(namespace, str) or not namespace:
+            raise ValueError(
+                f"Invalid {LAYOUT_METADATA_FILENAME} entry {index}: "
+                "namespace must be a non-empty string"
+            )
+        if not isinstance(key, str) or not key:
+            raise ValueError(
+                f"Invalid {LAYOUT_METADATA_FILENAME} entry {index}: "
+                "key must be a non-empty string"
+            )
+        if not isinstance(encoded_value, str):
+            raise ValueError(
+                f"Invalid {LAYOUT_METADATA_FILENAME} entry {index}: "
+                "value must be a base64 string"
+            )
+
+        identity = (namespace, key)
+        if identity in result:
+            raise ValueError(
+                f"Duplicate {LAYOUT_METADATA_FILENAME} entry: "
+                f"namespace={namespace!r}, key={key!r}"
+            )
+        try:
+            result[identity] = base64.b64decode(encoded_value, validate=True)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid {LAYOUT_METADATA_FILENAME} entry {index}: "
+                "value is not valid base64"
+            ) from exc
+    return result

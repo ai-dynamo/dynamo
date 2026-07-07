@@ -19,7 +19,10 @@ from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.snapshot.disk import (
+    LAYOUT_METADATA_FILENAME,
+    LAYOUT_METADATA_FORMAT_VERSION,
     DeviceToFileWriter,
+    load_layout_metadata,
     load_manifest_and_metadata,
     plan_shard_layout,
 )
@@ -108,6 +111,7 @@ class GMSStorageClient:
                 use_absolute_shard_paths=use_absolute_shard_paths,
             )
             metadata = self._save_metadata(mm)
+            layout_metadata = self._save_layout_metadata(mm)
         except Exception:
             mm.close()
             raise
@@ -118,11 +122,18 @@ class GMSStorageClient:
             encoding="utf-8",
         ) as handle:
             json.dump(metadata, handle, indent=2)
+        with open(
+            os.path.join(output_dir, LAYOUT_METADATA_FILENAME),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(layout_metadata, handle, indent=2)
         manifest = SaveManifest(
             timestamp=time.time(),
             layout_hash=layout_hash,
             device=self.device,
             allocations=entries,
+            layout_metadata_file=LAYOUT_METADATA_FILENAME,
         )
         with open(
             os.path.join(output_dir, "manifest.json"),
@@ -257,6 +268,13 @@ class GMSStorageClient:
 
         try:
             manifest, saved_metadata = load_manifest_and_metadata(input_dir)
+            if manifest.layout_metadata_file is None:
+                saved_layout_metadata = {}
+            else:
+                saved_layout_metadata = load_layout_metadata(
+                    input_dir,
+                    required=True,
+                )
             sources = build_file_transfer_sources(input_dir, manifest.allocations)
             session = backend.start_restore(sources)
             with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
@@ -273,6 +291,7 @@ class GMSStorageClient:
                 )
 
                 self._restore_metadata(mm, saved_metadata, id_map)
+                self._restore_layout_metadata(mm, saved_layout_metadata)
                 if not mm.commit():
                     raise RuntimeError("GMS commit failed after restore")
         finally:
@@ -281,9 +300,11 @@ class GMSStorageClient:
             backend.close()
 
         logger.info(
-            "load_to_gms complete: %d allocations, %d metadata keys",
+            "load_to_gms complete: %d allocations, %d tensor metadata keys, "
+            "%d layout metadata keys",
             len(id_map),
             len(saved_metadata),
+            len(saved_layout_metadata),
         )
         return id_map
 
@@ -316,3 +337,42 @@ class GMSStorageClient:
                 "value": base64.b64encode(value).decode("ascii"),
             }
         return result
+
+    def _restore_layout_metadata(
+        self,
+        mm: Any,
+        saved_layout_metadata: Mapping[Tuple[str, str], bytes],
+    ) -> None:
+        for (namespace, key), value in saved_layout_metadata.items():
+            if not mm.layout_metadata_put(namespace, key, value):
+                raise RuntimeError(
+                    "Failed to write layout metadata "
+                    f"namespace={namespace!r}, key={key!r}"
+                )
+        logger.info(
+            "Restored %d layout metadata keys",
+            len(saved_layout_metadata),
+        )
+
+    def _save_layout_metadata(self, mm: Any) -> Dict[str, Any]:
+        entries = []
+        for item in mm.layout_metadata_list():
+            value = mm.layout_metadata_get(item.namespace, item.key)
+            if value is None:
+                logger.warning(
+                    "Layout metadata key disappeared during dump: namespace=%r, key=%r",
+                    item.namespace,
+                    item.key,
+                )
+                continue
+            entries.append(
+                {
+                    "namespace": item.namespace,
+                    "key": item.key,
+                    "value": base64.b64encode(value).decode("ascii"),
+                }
+            )
+        return {
+            "format_version": LAYOUT_METADATA_FORMAT_VERSION,
+            "entries": entries,
+        }
