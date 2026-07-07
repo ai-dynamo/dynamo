@@ -332,6 +332,9 @@ Design Docs, Documentation, Hidden Pages. To place a page, match the nearest exi
 - **Versioned navs.** Author only against `docs/` on `main` (the `pages-dev` set). When a release is
   cut, the publish step builds `pages-vX.Y.Z/` from the tagged `docs/` tree and rewrites nav paths —
   **never** edit a `pages-vX.Y.Z/` directory by hand. Write portable paths so the rewrite stays clean.
+  Translation mirrors snapshot the same way (`fern/translations/<lang>/pages-vX.Y.Z/` from the tag's
+  `pages-dev` mirror, links resolved under the tag's version slug); tags cut from branches without
+  `fern/translations` skip the snapshot.
 ### Redirects and the version model
 
 The site serves the same nav under three prefixes: **`dev`** (slug `dev`, tracks `main`, regenerated on
