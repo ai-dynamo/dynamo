@@ -11,7 +11,10 @@ from dynamo.common.snapshot.constants import (
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
 )
-from dynamo.common.snapshot.lifecycle import SnapshotConfig
+from dynamo.common.snapshot.lifecycle import (
+    SnapshotConfig,
+    configure_snapshot_capture_env,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -29,6 +32,16 @@ class _PauseController:
 
     def mark_resumed(self) -> None:
         pass
+
+
+def test_snapshot_mode_preserves_explicit_nccl_p2p_policy(monkeypatch):
+    monkeypatch.setenv("NCCL_P2P_DISABLE", "1")
+    monkeypatch.setenv("NCCL_SHM_DISABLE", "0")
+
+    configure_snapshot_capture_env()
+
+    assert os.environ["NCCL_P2P_DISABLE"] == "1"
+    assert os.environ["NCCL_SHM_DISABLE"] == "0"
 
 
 async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tmp_path):

@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The companion script is mounted from a ConfigMap created from
+# flashinfer-pynccl-shm-preflight.py.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fi-pynccl-shm-preflight-build-run
+  labels:
+    app.kubernetes.io/created-by: pi-relay
+    app.kubernetes.io/name: flashinfer-pynccl-shm-preflight
+    e2e.ai-dynamo.io/run: fi-pynccl-shm-build-run
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: flashinfer-pynccl-shm-preflight
+        e2e.ai-dynamo.io/run: fi-pynccl-shm-build-run
+    spec:
+      restartPolicy: Never
+      runtimeClassName: nvidia
+      imagePullSecrets:
+        - name: acr-token-secret
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.count: "8"
+        nvidia.com/gpu.present: "true"
+        nvidia.com/gpu.product: NVIDIA-B200
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: preflight
+          image: RUNTIME_IMAGE_TO_BE_PINNED_AFTER_BUILD
+          imagePullPolicy: Always
+          command:
+            - torchrun
+            - --standalone
+            - --nproc-per-node=8
+            - /preflight/preflight.py
+          env:
+            - name: EXPECTED_DYNAMO_SHA
+              value: BUILD_SOURCE_SHA
+            - name: EXPECTED_VLLM_SHA
+              value: bb7610592e7df0e3fdd9fd7ef7dd024e0ab8ffa8
+            - name: VLLM_ALLREDUCE_USE_FLASHINFER
+              value: "1"
+            - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+              value: trtllm
+            - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+              value: "0"
+            - name: VLLM_USE_NCCL_SYMM_MEM
+              value: "0"
+            - name: VLLM_DISTRIBUTED_USE_SPLIT_GROUP
+              value: "0"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            - name: NCCL_P2P_DISABLE
+              value: "1"
+            - name: NCCL_SHM_DISABLE
+              value: "0"
+            - name: NCCL_IB_DISABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "0"
+            - name: NCCL_CUMEM_ENABLE
+              value: "0"
+            - name: NCCL_RAS_ENABLE
+              value: "0"
+            - name: NCCL_DEBUG
+              value: INFO
+            - name: NCCL_DEBUG_SUBSYS
+              value: INIT,GRAPH,P2P,SHM,NET
+          resources:
+            requests:
+              memory: 64Gi
+              nvidia.com/gpu: "8"
+            limits:
+              memory: 256Gi
+              nvidia.com/gpu: "8"
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - SYS_PTRACE
+          volumeMounts:
+            - name: preflight
+              mountPath: /preflight
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: preflight
+          configMap:
+            name: fi-pynccl-shm-preflight-build-run
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi

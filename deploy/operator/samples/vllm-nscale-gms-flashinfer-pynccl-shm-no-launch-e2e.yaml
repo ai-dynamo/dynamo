@@ -1,0 +1,188 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# GMS-enabled variant of the known-good FlashInfer-collectives Dynamo Snapshot
+# E2E (fi-nemotron-overlay-28563286276). Weights live in GMS; gms-saver writes
+# them to the snapshot PVC at checkpoint, gms-loader streams them back on
+# restore, so the CRIU artifact should shrink accordingly.
+#
+# Prereqs (nscale-dev, ns schwinns): operator with DYN_OPERATOR_ALLOW_GMS_SNAPSHOT=1,
+# snapshot-agent DaemonSet, snapshot-pvc, shared-model-cache, hf-token-secret.
+# EXPERIMENTAL/NON-PR: the matching branch disables operator launch-job wrapping.
+# Fill in: RUNTIME_DIGEST / PLACEHOLDER_DIGEST from the new BoD, and the
+# DRA-enabled B200 node hostname (+ any DRA taint tolerations).
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: fi-nemotron-gms   # keep short: checkpoint name feeds a 63-char label
+  annotations:
+    nvidia.com/enable-grove: "false"
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: shared-model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: RUNTIME_IMAGE_TO_BE_PINNED_AFTER_BUILD
+          command: [python3, -m, dynamo.frontend]
+          args: [--http-port, "8000"]
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 5
+    VllmDecodeWorker:
+      componentType: worker
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        requests: {memory: 128Gi, gpu: "8"}
+        limits: {memory: 1536Gi, gpu: "8"}
+      sharedMemory:
+        size: 64Gi
+      gpuMemoryService:
+        enabled: true        # operator swaps gpu resources for a DRA claim
+        mode: intraPod       # and injects the gms-server init sidecar
+        extraClientContainers: [gms-loader]   # wire GMS sockets into the loader sidecar
+      checkpoint:
+        enabled: true
+        startupPolicy: WaitForCheckpoint
+        deletionPolicy: Retain
+        targetContainerName: main
+        job:
+          gmsClientContainers: [gms-saver]    # operator wires GMS sockets/claim into the saver
+          podTemplate:
+            spec:
+              containers:
+                # Saver: waits for committed weights (RO lock), writes them to the
+                # snapshot PVC, then exits so the checkpoint Job can complete.
+                # Reuses the operator-injected checkpoint-storage volume: adding a
+                # second volume entry for the same PVC wedges kubelet volume
+                # processing ("failed to process volumes=[gms-ckpt-storage]:
+                # context deadline exceeded").
+                - name: gms-saver
+                  image: PLACEHOLDER_IMAGE_TO_BE_PINNED_AFTER_BUILD
+                  command: [python3, -m, gpu_memory_service.cli.snapshot.saver]
+                  args:
+                    - --checkpoint-dir
+                    - /checkpoints/gms/fi-nemotron-gms/versions/1
+                  volumeMounts:
+                    - {name: checkpoint-storage, mountPath: /checkpoints}
+                # Note: the worker's gms-loader sidecar is NOT inherited by the
+                # checkpoint Job pod template (verified: a partial override here
+                # was appended as a new container), so no neutralization needed.
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-s2877
+        securityContext: {fsGroup: 1000, fsGroupChangePolicy: OnRootMismatch}
+        tolerations:
+          - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+          - {key: dra, operator: Exists, effect: NoSchedule}
+          - {key: schwinns.ai-dynamo.io/gms-bench, operator: Exists, effect: NoSchedule}
+          - {key: autopilot/2026-05-29-qwen06b-tp2-p2p-reserved, operator: Exists, effect: NoSchedule}
+        volumes:
+          - name: hf-cache
+            persistentVolumeClaim: {claimName: shared-model-cache}
+          - name: criu-work
+            emptyDir: {}
+          - name: no-allgather-evidence
+            configMap:
+              name: fi-pynccl-shm-no-allgather-build-run
+        containers:
+          # Loader: streams saved weights from the snapshot PVC into the fresh
+          # GMS server (overlapping CRIU restore), commits, then idles so the
+          # restored engine's RO reconnect can proceed. On failure it exits and
+          # kubelet retries it.
+          - name: gms-loader
+            image: PLACEHOLDER_IMAGE_TO_BE_PINNED_AFTER_BUILD
+            command: [/bin/sh, -c]
+            args:
+              - >-
+                python3 -m gpu_memory_service.cli.snapshot.loader
+                --checkpoint-dir /checkpoints/gms/fi-nemotron-gms/versions/1
+                --transfer-backend nixl
+                && sleep infinity
+            volumeMounts:
+              # restore shaping injects the checkpoint-storage volume into every
+              # restore-shaped worker pod (add-if-missing, restore.go)
+              - {name: checkpoint-storage, mountPath: /checkpoints}
+        mainContainer:
+          name: main
+          image: PLACEHOLDER_IMAGE_TO_BE_PINNED_AFTER_BUILD
+          command: [python3, -m, dynamo.vllm]
+          args:
+            - --model
+            - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+            - --trust-remote-code
+            - --load-format
+            - gms
+            - --tensor-parallel-size
+            - "1"
+            - --data-parallel-size
+            - "8"
+            - --data-parallel-size-local
+            - "8"
+            - --data-parallel-backend
+            - mp
+            - --distributed-executor-backend
+            - mp
+            - --enable-expert-parallel
+            - --moe-backend
+            - flashinfer_trtllm
+            - --all2all-backend
+            - flashinfer_nvlink_one_sided
+            - --enable-flashinfer-autotune
+            - --disable-custom-all-reduce
+            - --disable-nccl-for-dp-synchronization
+            - --max-model-len
+            - "4096"
+            - --max-num-seqs
+            - "16"
+            - --max-num-batched-tokens
+            - "4096"
+            - --gpu-memory-utilization
+            - "0.80"
+            - --kv-cache-dtype
+            - fp8
+          env:
+            - {name: HF_HOME, value: /home/dynamo/.cache/huggingface}
+            - {name: HF_HUB_OFFLINE, value: "1"}
+            - {name: TRANSFORMERS_OFFLINE, value: "1"}
+            - {name: GLOO_SOCKET_IFNAME, value: eth0}
+            - {name: PYTHONPATH, value: /no-allgather-evidence}
+            - {name: VLLM_ENGINE_READY_TIMEOUT_S, value: "7200"}
+            # PyNCCL idle over host SHM; no non-checkpointable NCCL features
+            - {name: NCCL_P2P_DISABLE, value: "1"}
+            - {name: NCCL_SHM_DISABLE, value: "0"}
+            - {name: NCCL_IB_DISABLE, value: "1"}
+            - {name: NCCL_NVLS_ENABLE, value: "0"}
+            - {name: NCCL_CUMEM_ENABLE, value: "0"}
+            - {name: NCCL_RAS_ENABLE, value: "0"}
+            - {name: NCCL_DEBUG, value: INFO}
+            - {name: NCCL_DEBUG_SUBSYS, value: "INIT,GRAPH,P2P,SHM,NET"}
+            - {name: VLLM_ALLREDUCE_USE_SYMM_MEM, value: "0"}
+            - {name: VLLM_USE_NCCL_SYMM_MEM, value: "0"}
+            - {name: VLLM_DISTRIBUTED_USE_SPLIT_GROUP, value: "0"}
+          ports:
+            - {name: system, containerPort: 9090}
+          startupProbe:
+            httpGet: {path: /health, port: 9090}
+            periodSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet: {path: /health, port: 9090}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /live, port: 9090}
+            periodSeconds: 5
+            failureThreshold: 1
+          securityContext:
+            runAsUser: 0
+            capabilities: {add: [SYS_PTRACE]}
+          volumeMounts:
+            - {name: hf-cache, mountPath: /home/dynamo/.cache/huggingface}
+            - {name: criu-work, mountPath: /var/criu-work}
+            - {name: no-allgather-evidence, mountPath: /no-allgather-evidence, readOnly: true}
