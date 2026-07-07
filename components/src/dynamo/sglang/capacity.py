@@ -111,48 +111,13 @@ def get_hicache_native_offloading_capacity(
     if device_capacity is None:
         return None
 
-    policy = getattr(server_args, "hicache_write_policy", None)
-    if policy == "write_through_selective":
+    host_capacity = native_offloading_capacity(
+        scheduler_info.get("hicache_host_total_tokens")
+    )
+    if host_capacity is None:
         return None
 
-    host_capacity = None
-    if "hicache_host_total_tokens" in scheduler_info:
-        host_capacity = native_offloading_capacity(
-            scheduler_info["hicache_host_total_tokens"]
-        )
-        if host_capacity is None:
-            return None
-
-    if host_capacity is None:
-        if (
-            not getattr(server_args, "enable_hierarchical_cache", False)
-            or (getattr(server_args, "hicache_size", 0) or 0) > 0
-            or policy not in ("write_back", "write_through")
-            or (getattr(server_args, "dcp_size", 1) or 1) > 1
-            or getattr(
-                getattr(server_args, "model_config", None),
-                "is_deepseek_v4_arch",
-                False,
-            )
-        ):
-            return None
-
-        page_size = getattr(server_args, "page_size", None)
-        ratio = getattr(server_args, "hicache_ratio", None)
-        if not page_size:
-            return None
-
-        try:
-            host_tokens = int(device_capacity["total_tokens"] * ratio)
-        except (TypeError, ValueError, OverflowError):
-            return None
-
-        host_capacity = native_offloading_capacity(
-            (host_tokens // page_size + 1) * page_size
-        )
-        if host_capacity is None:
-            return None
-
+    policy = getattr(server_args, "hicache_write_policy", None)
     host_tokens = host_capacity["total_tokens"]
     if policy == "write_back":
         return host_capacity

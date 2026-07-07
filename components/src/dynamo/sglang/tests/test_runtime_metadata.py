@@ -97,18 +97,14 @@ def test_hicache_native_offloading_capacity_ignores_invalid_values(value):
     )
 
 
-def test_hicache_derives_ratio_based_write_back_capacity():
-    server_args = SimpleNamespace(
-        enable_hierarchical_cache=True,
-        hicache_size=0,
-        hicache_write_policy="write_back",
-        hicache_ratio=4.0,
-        page_size=16,
+def test_hicache_requires_reported_host_capacity():
+    assert (
+        get_hicache_native_offloading_capacity(
+            SimpleNamespace(hicache_write_policy="write_back"),
+            {"max_total_num_tokens": 100},
+        )
+        is None
     )
-
-    assert get_hicache_native_offloading_capacity(
-        server_args, {"max_total_num_tokens": 416_864}
-    ) == {"total_tokens": 1_667_472}
 
 
 @pytest.mark.parametrize(
@@ -133,34 +129,6 @@ def test_hicache_write_through_ignores_fully_overlapped_host_pool():
         get_hicache_native_offloading_capacity(
             SimpleNamespace(hicache_write_policy="write_through"),
             {"max_total_num_tokens": 300, "hicache_host_total_tokens": 100},
-        )
-        is None
-    )
-
-
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {"enable_hierarchical_cache": False},
-        {"hicache_size": 16},
-        {"hicache_write_policy": "write_through_selective"},
-        {"dcp_size": 2},
-        {"model_config": SimpleNamespace(is_deepseek_v4_arch=True)},
-    ],
-)
-def test_hicache_does_not_derive_unsupported_capacity(overrides):
-    values = {
-        "enable_hierarchical_cache": True,
-        "hicache_size": 0,
-        "hicache_write_policy": "write_back",
-        "hicache_ratio": 4.0,
-        "page_size": 16,
-    }
-    values.update(overrides)
-
-    assert (
-        get_hicache_native_offloading_capacity(
-            SimpleNamespace(**values), {"max_total_num_tokens": 416_864}
         )
         is None
     )
