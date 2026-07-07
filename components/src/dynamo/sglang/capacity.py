@@ -119,6 +119,8 @@ def get_hicache_native_offloading_capacity(
 
     policy = getattr(server_args, "hicache_write_policy", None)
     host_tokens = host_capacity["total_tokens"]
+    # The router already counts device capacity: write-back adds the disjoint host
+    # pool, write-through subtracts its device mirror, and selective overlap is dynamic.
     if policy == "write_back":
         return host_capacity
     if policy == "write_through":
