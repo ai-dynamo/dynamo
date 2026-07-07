@@ -439,6 +439,23 @@ func main() {
 		runtimeConfig.LWSEnabled = false
 	}
 
+	switch {
+	case operatorCfg.Orchestrators.VolcanoScheduler.Enabled == nil:
+		runtimeConfig.VolcanoSchedulerEnabled = false
+	case *operatorCfg.Orchestrators.VolcanoScheduler.Enabled:
+		if !volcanoDetected {
+			setupLog.Error(nil,
+				"Volcano scheduler integration is explicitly enabled in config but "+
+					"the Volcano API group was not detected in the cluster",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.VolcanoSchedulerEnabled = true
+	default:
+		setupLog.Info("Volcano scheduler integration is explicitly disabled via config override")
+		runtimeConfig.VolcanoSchedulerEnabled = false
+	}
+
 	// Detect Kai-scheduler availability using discovery client
 	setupLog.Info("Detecting Kai-scheduler availability...")
 	kaiSchedulerDetected := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
@@ -502,6 +519,7 @@ func main() {
 		"grove", runtimeConfig.GroveEnabled,
 		"lws", runtimeConfig.LWSEnabled,
 		"volcano", volcanoDetected,
+		"volcano-scheduler", runtimeConfig.VolcanoSchedulerEnabled,
 		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
 		"dra", runtimeConfig.DRAEnabled,
 		"istio", runtimeConfig.IstioEnabled,

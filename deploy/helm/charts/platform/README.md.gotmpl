@@ -134,13 +134,29 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 |-----------------|---------------|-------|
 | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
+| 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.11 |
+| 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.11 |
+
+Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x and 1.4.x expect the `ClusterTopologyBinding` API.
 
 After installing them separately, enable Dynamo integration:
+
+Kai Scheduler:
 
 ```yaml
 global:
   kai-scheduler:
     enabled: true   # Enables queue creation and schedulerName injection
+  grove:
+    enabled: true   # Enables multinode orchestration via PodCliqueSets
+```
+
+Volcano:
+
+```yaml
+global:
+  volcano-scheduler:
+    enabled: true   # EXPERIMENTAL: Enables Volcano schedulerName injection for Grove PodCliqueSets
   grove:
     enabled: true   # Enables multinode orchestration via PodCliqueSets
 ```

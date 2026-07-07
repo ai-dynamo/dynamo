@@ -336,6 +336,76 @@ func TestInjectKaiSchedulerIfEnabled(t *testing.T) {
 	}
 }
 
+func TestInjectVolcanoSchedulerIfEnabled(t *testing.T) {
+	tests := []struct {
+		name              string
+		runtimeConfig     *controller_common.RuntimeConfig
+		initialScheduler  string
+		expectedScheduler string
+	}{
+		{
+			name: "grove disabled - no injection",
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            false,
+				VolcanoSchedulerEnabled: true,
+			},
+			expectedScheduler: "",
+		},
+		{
+			name: "volcano scheduler disabled - no injection",
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            true,
+				VolcanoSchedulerEnabled: false,
+			},
+			expectedScheduler: "",
+		},
+		{
+			name: "manual scheduler set - no injection",
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            true,
+				VolcanoSchedulerEnabled: true,
+			},
+			initialScheduler:  "manual-scheduler",
+			expectedScheduler: "manual-scheduler",
+		},
+		{
+			name: "both enabled, no manual scheduler - inject",
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            true,
+				VolcanoSchedulerEnabled: true,
+			},
+			expectedScheduler: commonconsts.VolcanoSchedulerName,
+		},
+		{
+			name: "volcano scheduler already set - preserve",
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            true,
+				VolcanoSchedulerEnabled: true,
+			},
+			initialScheduler:  commonconsts.VolcanoSchedulerName,
+			expectedScheduler: commonconsts.VolcanoSchedulerName,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clique := &grovev1alpha1.PodCliqueTemplateSpec{
+				Spec: grovev1alpha1.PodCliqueSpec{
+					PodSpec: corev1.PodSpec{
+						SchedulerName: tt.initialScheduler,
+					},
+				},
+			}
+
+			injectVolcanoSchedulerIfEnabled(clique, tt.runtimeConfig)
+
+			if clique.Spec.PodSpec.SchedulerName != tt.expectedScheduler {
+				t.Errorf("expected schedulerName %v, got %v", tt.expectedScheduler, clique.Spec.PodSpec.SchedulerName)
+			}
+		})
+	}
+}
+
 func TestEnsureQueueExists(t *testing.T) {
 	tests := []struct {
 		name          string
