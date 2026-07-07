@@ -263,3 +263,111 @@ class TestPrefillRegistrationContract:
         if route_to_encoder:
             expected_needs_set.append(WorkerType.Encode)
         assert captured["needs"] == [expected_needs_set]
+
+
+@pytest.mark.asyncio
+class TestEmbeddingRegistrationContract:
+    """The embedding worker's ModelInput mirrors the chat/completion split:
+
+    - `--use-vllm-tokenizer` (True) registers `ModelInput.Text`, so the Rust
+      frontend forwards the raw OpenAI `/v1/embeddings` request and vLLM
+      tokenizes internally (the historical behavior).
+    - The default (False) registers `ModelInput.Tokens`, routing through the
+      Rust `OpenAIPreprocessor` so tokenization happens off the engine
+      process.
+
+    Either way the surface is `ModelType.Embedding` with
+    `WorkerType.Aggregated` and no peer dependencies.
+    """
+
+    @pytest.mark.parametrize(
+        "use_vllm_tokenizer,expected_input",
+        [(True, ModelInput.Text), (False, ModelInput.Tokens)],
+    )
+    async def test_embedding_registers_input_from_tokenizer_flag(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        use_vllm_tokenizer: bool,
+        expected_input: ModelInput,
+    ) -> None:
+        captured: dict = {}
+        stop_after_register = RuntimeError("stop-after-register")
+
+        async def fake_register_vllm_model(
+            model_input,
+            model_type,
+            endpoint,
+            config,
+            engine_client,
+            vllm_config,
+            worker_type,
+            needs,
+        ) -> None:
+            captured["model_input"] = model_input
+            captured["model_type"] = model_type
+            captured["worker_type"] = worker_type
+            captured["needs"] = needs
+            raise stop_after_register
+
+        engine_client = Mock()
+        vllm_config = Mock()
+        vllm_config.additional_config = {}
+        engine_tuple: EngineSetupResult = (
+            engine_client,
+            vllm_config,
+            Mock(),
+            "/tmp/prom",
+            Mock(),
+        )
+
+        factory = WorkerFactory(
+            setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+            setup_kv_event_publisher_fn=Mock(return_value=None),
+            register_vllm_model_fn=fake_register_vllm_model,
+            setup_fpm_relay_fn=Mock(return_value=None),
+            setup_metrics_collection_fn=Mock(),
+        )
+
+        # Avoid the real handler (spawns VllmEngineMonitor background tasks)
+        # and StatLoggerFactory wiring; neither is under test here.
+        monkeypatch.setattr(
+            "dynamo.vllm.worker_factory.EmbeddingWorkerHandler",
+            Mock(return_value=Mock()),
+        )
+        monkeypatch.setattr(
+            "dynamo.vllm.worker_factory.StatLoggerFactory",
+            Mock(return_value=Mock()),
+        )
+
+        config = _make_config(
+            disaggregation_mode=DisaggregationMode.AGGREGATED,
+            embedding_worker=True,
+            use_vllm_tokenizer=use_vllm_tokenizer,
+            namespace="dyn",
+            component="embed",
+            endpoint="generate",
+            served_model_name="m",
+            model="m",
+        )
+
+        # generate_endpoint.serve_endpoint is awaited concurrently with the
+        # register call via asyncio.gather, so it must be awaitable; the
+        # register failure is what stops the flow.
+        generate_endpoint = Mock()
+        generate_endpoint.connection_id = Mock(return_value="cid")
+        generate_endpoint.serve_endpoint = AsyncMock()
+        runtime = Mock()
+        runtime.endpoint.return_value = generate_endpoint
+
+        with pytest.raises(RuntimeError, match="stop-after-register"):
+            await factory._create_embedding_worker(
+                runtime,
+                config,
+                asyncio.Event(),
+                [],
+            )
+
+        assert captured["model_input"] == expected_input
+        assert captured["model_type"] == ModelType.Embedding
+        assert captured["worker_type"] == WorkerType.Aggregated
+        assert captured["needs"] == []

@@ -133,7 +133,9 @@ class VllmEmbeddingHealthCheckPayload(HealthCheckPayload):
     cycle.
     """
 
-    def __init__(self, model_name: Optional[str] = None):
+    def __init__(
+        self, model_name: Optional[str] = None, use_text_input: bool = False
+    ):
         """
         Args:
             model_name: served model name to put on ``request["model"]``.
@@ -142,8 +144,21 @@ class VllmEmbeddingHealthCheckPayload(HealthCheckPayload):
                 absent. Passing it keeps the probe self-describing in
                 worker logs; omit when the caller doesn't have a
                 specific name to advertise.
+            use_text_input: match the worker's ModelInput contract
+                (``config.use_vllm_tokenizer``). When True (ModelInput.Text)
+                the handler expects the raw OpenAI ``{input}`` shape; when
+                False (ModelInput.Tokens) it expects a preprocessed
+                ``{token_ids}`` shape (a list of token-id lists). Sending the
+                wrong shape makes the probe raise "missing required field"
+                and the canary never turns healthy.
         """
-        self.default_payload: dict[str, Any] = {"input": "probe"}
+        if use_text_input:
+            self.default_payload: dict[str, Any] = {"input": "probe"}
+        else:
+            # A single benign token id (matches the chat probe's bos default).
+            # Shape mirrors PreprocessedEmbeddingRequest.token_ids: one
+            # token-id list per input.
+            self.default_payload = {"token_ids": [[1]]}
         if model_name is not None:
             self.default_payload["model"] = model_name
         super().__init__()

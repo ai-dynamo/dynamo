@@ -307,10 +307,12 @@ class WorkerFactory:
             engine=engine_client,
             config=config,
             shutdown_event=shutdown_event,
+            use_vllm_tokenizer=config.use_vllm_tokenizer,
         )
 
         embedding_health_check_payload = VllmEmbeddingHealthCheckPayload(
-            model_name=config.served_model_name or config.model
+            model_name=config.served_model_name or config.model,
+            use_text_input=config.use_vllm_tokenizer,
         ).to_dict()
 
         logger.info("Starting to serve the embedding worker endpoint...")
@@ -322,7 +324,14 @@ class WorkerFactory:
                     health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
-                    ModelInput.Text,
+                    # Mirror the chat/completion workers' contract selection:
+                    # --use-vllm-tokenizer (Text) forwards the raw OpenAI
+                    # request so vLLM tokenizes; the default (Tokens) routes
+                    # through Dynamo's Rust OpenAIPreprocessor, which tokenizes
+                    # off the engine process.
+                    ModelInput.Text
+                    if config.use_vllm_tokenizer
+                    else ModelInput.Tokens,
                     ModelType.Embedding,
                     generate_endpoint,
                     config,

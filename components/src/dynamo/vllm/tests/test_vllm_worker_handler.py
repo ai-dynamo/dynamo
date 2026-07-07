@@ -1300,9 +1300,16 @@ class TestEmbeddingWorkerHandlerCancellation:
     before propagating the failure to the frontend.
     """
 
-    def _make_embedding_handler(self) -> "mod.EmbeddingWorkerHandler":
+    def _make_embedding_handler(
+        self, use_vllm_tokenizer: bool = True
+    ) -> "mod.EmbeddingWorkerHandler":
         """Construct an ``EmbeddingWorkerHandler`` with the engine monitor
         stubbed so it does not spawn a real background task during the test.
+
+        Defaults to ``use_vllm_tokenizer=True`` (ModelInput.Text) so the
+        tests below that send ``{"input": ...}`` and expect the OpenAI
+        ``{"data": ...}`` shape exercise the text path. Tokens-path tests
+        pass ``use_vllm_tokenizer=False`` explicitly.
         """
         with patch.object(mod, "VllmEngineMonitor"):
             handler = mod.EmbeddingWorkerHandler(
@@ -1310,6 +1317,7 @@ class TestEmbeddingWorkerHandlerCancellation:
                 engine=MagicMock(),
                 config=MagicMock(served_model_name="test-model"),
                 shutdown_event=None,
+                use_vllm_tokenizer=use_vllm_tokenizer,
             )
         # Replace the engine client wholesale: each test installs its own
         # ``encode`` async generator behaviour. ``abort`` may be called by
@@ -1511,6 +1519,127 @@ class TestEmbeddingWorkerHandlerCancellation:
         with pytest.raises(ValueError, match="exceeds model embedding dimension"):
             async for _ in handler.generate(request, context):
                 pass
+
+
+class TestEmbeddingWorkerHandlerTokensMode:
+    """Tests for the ModelInput.Tokens path (``use_vllm_tokenizer=False``).
+
+    Here the Rust ``OpenAIPreprocessor`` has already tokenized the text, so
+    the handler receives a ``PreprocessedEmbeddingRequest`` shape
+    (``{"token_ids": [[int], ...]}``) and returns the raw
+    ``EmbeddingsEngineOutput`` shape (``{"embeddings", "prompt_tokens",
+    "total_tokens"}``) rather than the OpenAI ``{"data": ...}`` response --
+    the Rust postprocessor formats the OpenAI response and applies base64.
+    """
+
+    def _make_embedding_handler(self) -> "mod.EmbeddingWorkerHandler":
+        with patch.object(mod, "VllmEngineMonitor"):
+            handler = mod.EmbeddingWorkerHandler(
+                runtime=MagicMock(),
+                engine=MagicMock(),
+                config=MagicMock(served_model_name="test-model"),
+                shutdown_event=None,
+                use_vllm_tokenizer=False,
+            )
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        return handler
+
+    def _make_context(self) -> MagicMock:
+        context = MagicMock()
+        context.id.return_value = "test-req"
+        context.async_killed_or_stopped.return_value = (
+            asyncio.get_event_loop().create_future()
+        )
+        return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_token_ids_bypass_tokenizer_and_return_raw_embeddings(self):
+        """The handler wraps each ``token_ids`` list in a ``TokensPrompt``
+        (so vLLM skips its tokenizer) and yields the raw engine-output shape
+        with floats, not base64 and not the OpenAI ``data`` wrapper.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        seen_prompts: list = []
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            seen_prompts.append(prompt)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [10, 11, 12]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"token_ids": [[10, 11, 12], [20, 21]], "model": "test-model"}
+        responses = [r async for r in handler.generate(request, context)]
+
+        assert len(responses) == 1
+        response = responses[0]
+        # Raw EmbeddingsEngineOutput shape -- no OpenAI "object"/"data" keys.
+        assert set(response.keys()) == {
+            "embeddings",
+            "prompt_tokens",
+            "total_tokens",
+        }
+        assert response["embeddings"] == [
+            pytest.approx([0.1, 0.2, 0.3]),
+            pytest.approx([0.1, 0.2, 0.3]),
+        ]
+        assert response["prompt_tokens"] == 6  # 3 tokens per input, 2 inputs
+        assert response["total_tokens"] == 6
+        # Both inputs were forwarded as TokensPrompt (token ids), not strings.
+        assert len(seen_prompts) == 2
+        for p in seen_prompts:
+            assert isinstance(p, mod.TokensPrompt)
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_missing_token_ids_raises(self):
+        """An empty/absent ``token_ids`` field is a clear error rather than a
+        silent empty response.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            yield MagicMock()
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"model": "test-model"}
+        with pytest.raises(ValueError, match="missing required 'token_ids' field"):
+            async for _ in handler.generate(request, context):
+                pass
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_dimensions_forwarded_in_tokens_mode(self):
+        """``dimensions`` is still forwarded to ``PoolingParams`` on the
+        tokens path.
+        """
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: dict = {}
+        vec = [i * 0.01 for i in range(128)]
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured["pooling_params"] = pooling_params
+            output = MagicMock()
+            output.outputs.data = torch.tensor(vec)
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"token_ids": [[1, 2, 3]], "model": "test-model", "dimensions": 128}
+        responses = [r async for r in handler.generate(request, context)]
+
+        assert captured["pooling_params"].task == "embed"
+        assert captured["pooling_params"].dimensions == 128
+        assert responses[0]["embeddings"][0] == pytest.approx(vec)
 
 
 class TestPadMmHashesTo64:

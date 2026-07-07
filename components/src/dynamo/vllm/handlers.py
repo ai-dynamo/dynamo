@@ -3856,17 +3856,32 @@ class EmbeddingWorkerHandler:
         engine: Any,
         config: Config,
         shutdown_event: Optional[asyncio.Event] = None,
+        use_vllm_tokenizer: bool = False,
     ) -> None:
         self.runtime = runtime
         self.engine_client = engine
         self.config = config
         self.shutdown_event = shutdown_event
+        # Selects the frontend<->worker contract, mirroring the chat/completion
+        # workers' ModelInput.Text vs ModelInput.Tokens split:
+        #   - True  (ModelInput.Text):   the Rust frontend forwards the raw
+        #     OpenAI request; this handler receives ``{model, input, ...}`` and
+        #     vLLM tokenizes internally. Returns the full OpenAI response shape.
+        #   - False (ModelInput.Tokens): the Rust OpenAIPreprocessor tokenizes
+        #     text and forwards a ``PreprocessedEmbeddingRequest`` (``token_ids``
+        #     is a list of token-id lists). This handler skips vLLM's tokenizer
+        #     and returns the raw ``EmbeddingsEngineOutput`` shape; the Rust
+        #     postprocessor formats the OpenAI response (incl. base64).
+        self.use_vllm_tokenizer = use_vllm_tokenizer
         # Dead-engine detection: VllmEngineMonitor polls AsyncLLM and triggers
         # shutdown_event + process exit on EngineDeadError. Without this, a
         # crashed pooling engine leaves the endpoint registered and serves
         # failures.
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
-        logger.info("Embedding worker handler initialized")
+        logger.info(
+            "Embedding worker handler initialized (use_vllm_tokenizer=%s)",
+            use_vllm_tokenizer,
+        )
 
     def cleanup(self) -> None:
         """Release resources owned by this handler.
@@ -3965,51 +3980,32 @@ class EmbeddingWorkerHandler:
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncIterator[Dict[str, Any]]:
-        """Handle one OpenAI /v1/embeddings request.
+        """Handle one /v1/embeddings request.
 
-        The Rust frontend forwards the request dict directly. Expected keys:
-        ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``.
-        Optional ``dimensions`` (Matryoshka dimensionality reduction):
-        forwarded to vLLM's pooler, which truncates to N dims and
-        re-normalizes; vLLM requires the model to declare Matryoshka support.
-        Optional ``encoding_format`` (``"float"`` -- default -- or
-        ``"base64"``); when ``"base64"`` is requested, each per-input vector is
-        serialized as a base64-encoded string of little-endian ``f32`` bytes
-        per the OpenAI spec, so the byte count matches the (possibly reduced)
-        dimensionality.
+        Dispatches on ``use_vllm_tokenizer`` (i.e. the model's ModelInput):
+
+        - ``True``  (ModelInput.Text):   the Rust frontend forwards the raw
+          OpenAI request. See ``_generate_text_mode``.
+        - ``False`` (ModelInput.Tokens): the Rust OpenAIPreprocessor already
+          tokenized the text. See ``_generate_tokens_mode``.
         """
-        model_name = request.get("model") or self.config.served_model_name or ""
-        input_field = request.get("input")
-        if input_field is None:
-            raise ValueError("Embedding request missing required 'input' field")
+        if self.use_vllm_tokenizer:
+            async for out in self._generate_text_mode(request, context):
+                yield out
+        else:
+            async for out in self._generate_tokens_mode(request, context):
+                yield out
 
-        # Per OpenAI spec, `input` can be:
-        #   - str           : single text prompt
-        #   - list[str]     : batch of text prompts
-        #   - list[int]     : single pre-tokenized prompt (token IDs)
-        #   - list[list[int]]: batch of pre-tokenized prompts
-        # Token-id forms must be passed to vLLM as TokensPrompt so the engine
-        # skips its own tokenizer; the previous str()-coercion path turned
-        # `[1, 2, 3]` into three text prompts ("1", "2", "3") instead of one.
-        prompts: list[Any] = _classify_embedding_input(input_field)
+    async def _run_encode(
+        self, prompts: list[Any], dimensions: Optional[int], context: Context
+    ) -> list[Any]:
+        """Run the pooling forward pass for ``prompts`` and return outputs.
 
-        dimensions = request.get("dimensions")
-        if dimensions is not None and (
-            not isinstance(dimensions, int) or isinstance(dimensions, bool)
-        ):
-            raise TypeError(
-                f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
-            )
-        if dimensions is not None and dimensions < 1:
-            raise ValueError(f"dimensions must be >= 1, got {dimensions}")
-
-        encoding_format = request.get("encoding_format", "float")
-        if encoding_format not in ("float", "base64"):
-            raise ValueError(
-                f"Invalid 'encoding_format' value {encoding_format!r}; "
-                "expected 'float' or 'base64'"
-            )
-
+        Shared by both the text and token paths. ``prompts`` elements are
+        either ``str`` (text mode) or ``list[int]`` (token mode); token-id
+        lists are wrapped in ``TokensPrompt`` so the engine skips its own
+        tokenizer. Results are returned in input order.
+        """
         # Request the pooled sentence embedding. With no task, vLLM's
         # encode() resolves to per-token output (the full ``n_tokens x
         # hidden`` hidden-state matrix), so the OpenAI ``/v1/embeddings``
@@ -4081,6 +4077,49 @@ class EmbeddingWorkerHandler:
                 t.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+        return outputs
+
+    async def _generate_text_mode(
+        self, request: dict, context: Context
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """ModelInput.Text path: raw OpenAI request in, OpenAI response out.
+
+        The Rust frontend forwards the request dict directly. Expected keys:
+        ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``.
+        Optional ``dimensions`` (Matryoshka dimensionality reduction):
+        forwarded to vLLM's pooler, which truncates to N dims and
+        re-normalizes; vLLM requires the model to declare Matryoshka support.
+        Optional ``encoding_format`` (``"float"`` -- default -- or
+        ``"base64"``); when ``"base64"`` is requested, each per-input vector is
+        serialized as a base64-encoded string of little-endian ``f32`` bytes
+        per the OpenAI spec, so the byte count matches the (possibly reduced)
+        dimensionality.
+        """
+        model_name = request.get("model") or self.config.served_model_name or ""
+        input_field = request.get("input")
+        if input_field is None:
+            raise ValueError("Embedding request missing required 'input' field")
+
+        # Per OpenAI spec, `input` can be:
+        #   - str           : single text prompt
+        #   - list[str]     : batch of text prompts
+        #   - list[int]     : single pre-tokenized prompt (token IDs)
+        #   - list[list[int]]: batch of pre-tokenized prompts
+        # Token-id forms must be passed to vLLM as TokensPrompt so the engine
+        # skips its own tokenizer; the previous str()-coercion path turned
+        # `[1, 2, 3]` into three text prompts ("1", "2", "3") instead of one.
+        prompts: list[Any] = _classify_embedding_input(input_field)
+
+        dimensions = _parse_embedding_dimensions(request)
+
+        encoding_format = request.get("encoding_format", "float")
+        if encoding_format not in ("float", "base64"):
+            raise ValueError(
+                f"Invalid 'encoding_format' value {encoding_format!r}; "
+                "expected 'float' or 'base64'"
+            )
+
+        outputs = await self._run_encode(prompts, dimensions, context)
 
         embedding_objects: list[Dict[str, Any]] = []
         prompt_tokens = 0
@@ -4089,20 +4128,7 @@ class EmbeddingWorkerHandler:
             # (truncate + re-normalize) inside the pooler, so this is the
             # final per-input vector -- no post-hoc truncation here.
             embedding = _pooling_output_to_list(final_output.outputs.data)
-
-            # vLLM rejects an unsupported ``dimensions`` for models that
-            # declare a ``matryoshka_dimensions`` list, but a model enabled
-            # via ``--hf-overrides '{"is_matryoshka": true}'`` (no explicit
-            # list) is only validated for ``dimensions >= 1`` -- the pooler
-            # then silently clamps an oversized request to the model's native
-            # size (``embeddings[..., :dimensions]``). Surface the same clear
-            # error the old post-hoc path raised instead of returning a
-            # shorter-than-requested vector.
-            if dimensions is not None and len(embedding) < dimensions:
-                raise ValueError(
-                    f"dimensions={dimensions} exceeds model embedding "
-                    f"dimension {len(embedding)}"
-                )
+            _check_embedding_dimensions(embedding, dimensions)
 
             # Always emit base64 over the worker->frontend wire format. The
             # Rust frontend decodes back to float when the client's
@@ -4130,6 +4156,91 @@ class EmbeddingWorkerHandler:
                 "total_tokens": prompt_tokens,
             },
         }
+
+    async def _generate_tokens_mode(
+        self, request: dict, context: Context
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """ModelInput.Tokens path: PreprocessedEmbeddingRequest in, EmbeddingsEngineOutput out.
+
+        The Rust ``OpenAIPreprocessor`` already tokenized the text (or passed
+        through client-supplied token ids), so ``request["token_ids"]`` is a
+        list of token-id lists (one per input). This handler skips vLLM's
+        tokenizer and returns the raw engine output shape
+        (``{embeddings, prompt_tokens, total_tokens}``); the Rust
+        postprocessor formats the OpenAI response, including any base64
+        encoding, so nothing is base64-encoded here.
+        """
+        token_ids = request.get("token_ids")
+        if not token_ids:
+            raise ValueError(
+                "Embedding request missing required 'token_ids' field "
+                "(ModelInput.Tokens path)"
+            )
+
+        # PreprocessedEmbeddingRequest.token_ids is Vec<Vec<TokenIdType>>: one
+        # token-id list per input text. Copy each into a plain list[int] so
+        # TokensPrompt gets the shape it expects.
+        prompts: list[Any] = [list(ids) for ids in token_ids]
+
+        dimensions = _parse_embedding_dimensions(request)
+
+        outputs = await self._run_encode(prompts, dimensions, context)
+
+        embeddings: list[list[float]] = []
+        prompt_tokens = 0
+        for final_output in outputs:
+            embedding = _pooling_output_to_list(final_output.outputs.data)
+            _check_embedding_dimensions(embedding, dimensions)
+            embeddings.append(embedding)
+            out_token_ids = getattr(final_output, "prompt_token_ids", None) or []
+            prompt_tokens += len(out_token_ids)
+
+        # Matches Rust EmbeddingsEngineOutput (lib/llm/src/protocols/common/
+        # llm_backend.rs): the frontend's transform_embedding_postprocessor_stream
+        # turns this into the OpenAI response and applies encoding_format.
+        yield {
+            "embeddings": embeddings,
+            "prompt_tokens": prompt_tokens,
+            "total_tokens": prompt_tokens,
+        }
+
+
+def _parse_embedding_dimensions(request: dict) -> Optional[int]:
+    """Validate and return the optional ``dimensions`` field from a request.
+
+    Shared by the text and token embedding paths so both reject the same
+    invalid inputs (non-int, bool, < 1) identically.
+    """
+    dimensions = request.get("dimensions")
+    if dimensions is None:
+        return None
+    if not isinstance(dimensions, int) or isinstance(dimensions, bool):
+        raise TypeError(
+            f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
+        )
+    if dimensions < 1:
+        raise ValueError(f"dimensions must be >= 1, got {dimensions}")
+    return dimensions
+
+
+def _check_embedding_dimensions(
+    embedding: list[float], dimensions: Optional[int]
+) -> None:
+    """Raise if a requested ``dimensions`` exceeds the model's native size.
+
+    vLLM rejects an unsupported ``dimensions`` for models that declare a
+    ``matryoshka_dimensions`` list, but a model enabled via
+    ``--hf-overrides '{"is_matryoshka": true}'`` (no explicit list) is only
+    validated for ``dimensions >= 1`` -- the pooler then silently clamps an
+    oversized request to the model's native size. Surface the same clear
+    error the old post-hoc path raised instead of returning a
+    shorter-than-requested vector.
+    """
+    if dimensions is not None and len(embedding) < dimensions:
+        raise ValueError(
+            f"dimensions={dimensions} exceeds model embedding "
+            f"dimension {len(embedding)}"
+        )
 
 
 def _is_token_id(x: Any) -> bool:
