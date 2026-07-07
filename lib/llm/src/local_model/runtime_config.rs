@@ -292,8 +292,8 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
 
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
         self.runtime_data
-            .get("sglang_hicache_capacity")?
-            .get("host_total_tokens")?
+            .get("native_offloading_capacity")?
+            .get("total_tokens")?
             .as_u64()
     }
 
@@ -646,14 +646,14 @@ mod tests {
     }
 
     #[test]
-    fn sglang_hicache_exposes_native_offloading_capacity() {
+    fn native_offloading_capacity_is_backend_neutral() {
         use dynamo_kv_router::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
         config
             .set_engine_specific(
-                "sglang_hicache_capacity",
-                serde_json::json!({"host_total_tokens": 300}),
+                "native_offloading_capacity",
+                serde_json::json!({"total_tokens": 300}),
             )
             .unwrap();
 

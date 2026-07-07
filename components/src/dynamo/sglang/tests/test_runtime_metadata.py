@@ -72,20 +72,23 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
     assert _eagle_enabled_for(speculative_algorithm) is expected
 
 
-def test_hicache_capacity_runtime_data_uses_scheduler_capacity():
-    from dynamo.sglang.register import _get_hicache_capacity_runtime_data
+def test_hicache_publishes_native_offloading_capacity():
+    from dynamo.sglang.register import _get_hicache_native_offloading_capacity
 
-    assert _get_hicache_capacity_runtime_data({"hicache_host_total_tokens": 300}) == {
-        "host_total_tokens": 300
-    }
+    assert _get_hicache_native_offloading_capacity(
+        {"hicache_host_total_tokens": 300}
+    ) == {"total_tokens": 300}
 
 
-@pytest.mark.parametrize("value", [None, 0, -1, "300"])
-def test_hicache_capacity_runtime_data_ignores_invalid_values(value):
-    from dynamo.sglang.register import _get_hicache_capacity_runtime_data
+@pytest.mark.parametrize(
+    "value", [None, False, 0, 0.5, -1, "300", float("inf"), float("nan")]
+)
+def test_hicache_native_offloading_capacity_ignores_invalid_values(value):
+    from dynamo.sglang.register import _get_hicache_native_offloading_capacity
 
     assert (
-        _get_hicache_capacity_runtime_data({"hicache_host_total_tokens": value}) is None
+        _get_hicache_native_offloading_capacity({"hicache_host_total_tokens": value})
+        is None
     )
 
 
@@ -127,7 +130,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     original_set = register.ModelRuntimeConfig.set_engine_specific
 
     def fail_hicache_publish(self, key, value):
-        if key == register.SGLANG_HICACHE_CAPACITY_RUNTIME_KEY:
+        if key == register.NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY:
             raise RuntimeError("publish failed")
         return original_set(self, key, value)
 
@@ -141,4 +144,6 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
 
     assert runtime_config.total_kv_blocks == 64
     assert runtime_config.max_num_batched_tokens == 1024
-    assert "Failed to attach SGLang HiCache capacity runtime metadata" in caplog.text
+    assert (
+        "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
+    )

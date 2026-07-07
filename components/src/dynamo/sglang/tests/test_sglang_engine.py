@@ -121,8 +121,11 @@ async def _check_runtime_data_includes_worker_group(monkeypatch):
         lambda server_args: "dist_init:tcp://10.0.0.1:2345",
     )
 
-    assert llm_engine_mod._get_runtime_data(object()) == {
-        SGLANG_WORKER_GROUP_ID_KEY: "dist_init:tcp://10.0.0.1:2345"
+    assert llm_engine_mod._get_runtime_data(
+        object(), {"hicache_host_total_tokens": 300}
+    ) == {
+        SGLANG_WORKER_GROUP_ID_KEY: "dist_init:tcp://10.0.0.1:2345",
+        "native_offloading_capacity": {"total_tokens": 300},
     }
 
 
