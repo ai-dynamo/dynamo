@@ -79,6 +79,7 @@
 
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
 /examples/backends/vllm/                                                     @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/backend/vllm-remote/                                                    @ai-dynamo/dynamo-backend-vllm-codeowners
 /lib/vllm-rs-backend/src/                                                    @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/                                                 @ai-dynamo/dynamo-backend-vllm-codeowners
 /lib/vllm-rs-backend/Cargo.toml                                              @ai-dynamo/dynamo-backend-vllm-codeowners
