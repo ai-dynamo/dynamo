@@ -376,15 +376,13 @@ impl GenerateChoiceAcc {
             let content = logprobs.ok_or_else(|| {
                 anyhow::anyhow!("generate choice {index} requested logprobs but returned none")
             })?;
-            Some({
-                anyhow::ensure!(
-                    content.len() == token_ids.len(),
-                    "generate choice {index} returned {} logprob positions for {} tokens",
-                    content.len(),
-                    token_ids.len()
-                );
-                serde_json::json!({"content": content})
-            })
+            anyhow::ensure!(
+                content.len() == token_ids.len(),
+                "generate choice {index} returned {} logprob positions for {} tokens",
+                content.len(),
+                token_ids.len()
+            );
+            Some(serde_json::json!({"content": content}))
         } else {
             None
         };

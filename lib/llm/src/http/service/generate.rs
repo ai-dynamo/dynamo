@@ -40,7 +40,7 @@ use crate::protocols::openai::generate::{
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct GenerateRequestContext {
     request_id: String,
     data_parallel_rank: Option<u32>,
@@ -247,7 +247,7 @@ async fn handler_generate(
         return response.into_response();
     }
 
-    let (engine, _parsing) = match state.manager().get_generate_engine_with_parsing(&model) {
+    let engine = match state.manager().get_generate_engine(&model) {
         Ok(engine) => engine,
         Err(error) => {
             let (status, error_type) = match error {
