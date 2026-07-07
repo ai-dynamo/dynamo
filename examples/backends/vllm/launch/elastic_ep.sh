@@ -1,47 +1,87 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# NOTE: This script requires ray to be installed: pip install "ray>=2.55.0"
+#
+# Elastic Expert Parallelism (ePLB) on the unified vLLM backend.
+#
+# Brings up a single head-node backend with the Ray DP backend so the live
+# `scale_elastic_ep` control can spin DP-worker Ray actors up/down without a
+# pod restart. Elastic EP requires `--data-parallel-backend ray` (vLLM asserts
+# nnodes == 1 for the ray backend); for multi-node, join secondary nodes to the
+# Ray cluster out-of-band with `ray start --address=<head>` before launching.
+#
+# Scale at runtime (control surface is served on DYN_SYSTEM_PORT):
+#   curl -X POST localhost:${DYN_SYSTEM_PORT:-8081}/engine/control/scale_elastic_ep \
+#        -H 'Content-Type: application/json' \
+#        -d '{"new_data_parallel_size": 4}'
 
-cat << 'EOF'
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
 
-DEPRECATED: Ray Backend
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"    # build_vllm_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
-This script demonstrates the Ray backend for Elastic Expert Parallelism (Elastic EP).
-The Ray backend is no longer recommended and is maintained for backward compatibility only.
+# ---- Tunables (override via env vars) ----
+MODEL="${MODEL:-Qwen/Qwen3-30B-A3B}"
+DP_SIZE="${DP_SIZE:-2}"
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}"
 
-RECOMMENDED APPROACH:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+   case $1 in
+      --model)
+         MODEL="$2"
+         shift 2
+         ;;
+      --dp-size)
+         DP_SIZE="$2"
+         shift 2
+         ;;
+      -h|--help)
+         echo "Usage: $0 [OPTIONS]"
+         echo "Options:"
+         echo "  --model <name>     Model (default: $MODEL)"
+         echo "  --dp-size <n>      Initial data-parallel size (default: $DP_SIZE)"
+         echo "  -h, --help         Show this help message"
+         echo ""
+         echo "Any additional options are passed through to unified_main."
+         exit 0
+         ;;
+      *)
+         EXTRA_ARGS+=("$1")
+         shift
+         ;;
+   esac
+done
 
-For data parallel and expert parallelism deployments, use the PyTorch multiprocessing
-(mp) backend instead. This is the officially recommended approach and provides better
-integration with vLLM's distributed execution model.
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
-Use this example instead:
-   bash launch/dep.sh
+print_launch_banner "Launching Elastic EP / ePLB (unified, DP=$DP_SIZE)" "$MODEL" "$HTTP_PORT"
 
-This provides MP-based data parallelism with expert parallelism support and works
-seamlessly with Dynamo's distributed deployment infrastructure.
+# Elastic EP requires vLLM's Ray DP backend (--data-parallel-backend ray).
+# If ray is not already installed in the active environment, install it with:
+#   pip install "ray>=2.55.0"
+python3 -c 'import ray' 2>/dev/null || { echo 'ray not found. Install it with: pip install "ray>=2.55.0"'; exit 1; }
 
-For expert parallelism and dynamic scaling features, see:
-   - docs/backends/vllm/vllm-examples.md
-   - launch/dep.sh
+# run ingress
+python -m dynamo.frontend --router-mode kv &
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Elastic-EP head node on the unified backend.
+# --data-parallel-backend ray is required for scale_elastic_ep.
+DYN_SYSTEM_PORT="$SYSTEM_PORT" \
+python3 -m dynamo.vllm.unified_main \
+   --model "$MODEL" \
+   --data-parallel-backend ray \
+   --data-parallel-size "$DP_SIZE" \
+   --enable-expert-parallel \
+   --enable-eplb \
+   --enable-elastic-ep \
+   --enforce-eager \
+   $GPU_MEM_ARGS \
+   "${EXTRA_ARGS[@]}" &
 
-Ray Backend Notes (Legacy):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-If you need to use the Ray backend for advanced use cases:
-
-1. Ensure Ray is installed:
-   pip install "ray>=2.55.0"
-
-2. Refer to the vLLM documentation for Ray-based distributed execution:
-   https://docs.vllm.ai/en/latest/serving/distributed_serving.html
-
-3. Contact NVIDIA support for guidance on Ray backend deployments.
-
-EOF
-
-exit 1
+echo "All workers starting. (press Ctrl+C to stop)..."
+wait_any_exit

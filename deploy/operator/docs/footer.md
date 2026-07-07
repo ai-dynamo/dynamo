@@ -149,10 +149,9 @@ The operator automatically applies distributed execution configuration based on 
 - **All nodes**: Run vLLM with proper `--nnodes`, `--node-rank`, `--master-addr` flags injected
 - **Probes**: Worker probes adjusted; leader probes remain active
 
-**Legacy Ray Backend** (not recommended):
-- For advanced use cases only or backward compatibility with existing Ray-based deployments
-- If needed, install with `pip install "ray>=2.55.0"` and configure `--distributed-executor-backend ray`
-- Contact NVIDIA support for Ray backend deployments
+**Ray Backend**:
+- Used for use cases such as Elastic EP
+- Install with `pip install "ray>=2.55.0"` and configure `--distributed-executor-backend ray`
 
 **Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -316,7 +315,7 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Master Port**: 6379 (for PyTorch distributed multinode TP/PP deployments with mp backend)
+- **MP Head Port**: 6379 (for PyTorch distributed multinode TP/PP deployments with mp backend)
 - **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang

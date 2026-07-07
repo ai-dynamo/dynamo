@@ -101,7 +101,7 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/dep.sh
 ```
 
-This uses the recommended PyTorch multiprocessing (mp) backend for distributed execution, providing better performance and operational simplicity compared to legacy approaches.
+This uses the recommended PyTorch multiprocessing (mp) backend for distributed execution.
 
 <Tip>
 Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.

@@ -12,4 +12,3 @@
 --no-binary imageio-ffmpeg
 
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
-ray>=2.55.0

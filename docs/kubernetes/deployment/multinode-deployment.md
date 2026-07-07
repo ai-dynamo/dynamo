@@ -194,7 +194,7 @@ For vLLM multinode deployments, the operator automatically selects and configure
 
 #### Recommended Approach: PyTorch Distributed (mp)
 
-For multi-node tensor/pipeline parallelism, **the `mp` (multiprocessing) backend is the recommended approach**. This aligns with vLLM's current architectural direction and provides better integration with PyTorch's native distributed execution model.
+For multi-node tensor/pipeline parallelism, **the `mp` (multiprocessing) backend is the recommended approach**.
 
 **When used**: When `world_size > GPUs_per_node` where `world_size = tensor_parallel_size × pipeline_parallel_size`
 
@@ -222,14 +222,16 @@ For multi-node tensor/pipeline parallelism, **the `mp` (multiprocessing) backend
 
 **Note**: The operator intelligently injects these flags into your command regardless of command structure (direct Python commands or shell wrappers)
 
-#### Legacy: Ray Backend (Optional)
+#### Ray Backend
 
-The Ray backend is available for advanced use cases but is not recommended for new deployments. Ray support is maintained for backward compatibility with existing workloads.
+The Ray backend is available for use cases such as Elastic EP.
 
 **To use Ray for multi-node deployments:**
 1. Ensure Ray is installed in your container: `pip install "ray>=2.55.0"`
 2. Configure your vLLM launch with: `--distributed-executor-backend ray --data-parallel-backend ray`
-3. Contact NVIDIA support for guidance on Ray-based deployments
+
+For an Elastic EP example that uses Ray, see [vLLM examples: Data Parallel / Expert Parallelism](../../backends/vllm/vllm-examples.md#data-parallel--expert-parallelism).
+
 
 The `mp` backend is the official recommendation and should be used for all new deployments.
 
