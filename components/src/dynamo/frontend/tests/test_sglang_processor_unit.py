@@ -664,9 +664,7 @@ def test_minimax_m3_force_reasoning_uses_thinking_mode():
 def test_mistral_force_reasoning_uses_reasoning_effort(request_data, expected):
     """Mistral follows SGLang's explicit non-none reasoning-effort rule."""
     assert (
-        resolve_request_force_reasoning(
-            request_data, "mistral", template_default=False
-        )
+        resolve_request_force_reasoning(request_data, "mistral", template_default=False)
         is expected
     )
 
