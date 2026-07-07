@@ -295,6 +295,9 @@ async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
 async def test_unified_llm_engine_forwards_cache_salt_to_prompt():
     pytest.importorskip("vllm.usage.usage_lib")
     from dynamo.vllm.llm_engine import VllmLLMEngine
+    from dynamo.vllm.multimodal_utils.request_processor import (
+        VllmMultimodalRequestProcessor,
+    )
 
     engine = VllmLLMEngine.__new__(VllmLLMEngine)
     engine.engine_client = _FakeEngineClient([])
@@ -302,6 +305,10 @@ async def test_unified_llm_engine_forwards_cache_salt_to_prompt():
     engine._model_max_len = None
     engine.disaggregation_mode = DisaggregationMode.AGGREGATED
     engine.enable_rl = False
+    engine._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model="test-model",
+        enable_multimodal=False,
+    )
     engine._dp_range = None
 
     request = {
