@@ -23,16 +23,19 @@ GitHub CODEOWNERS semantics implemented here:
   * ``*``                  -- catch-all.
   * ``/foo/``              -- anchored directory subtree.
   * ``/foo`` (no wildcards)-- exact anchored path.
-  * ``/foo/*.rs``          -- anchored fnmatch glob.
+  * ``/foo/*.rs``          -- anchored glob; ``*``/``?`` stop at ``/``,
+    ``**`` crosses directories (as GitHub resolves them).
   * ``foo/``               -- unanchored directory; matches any subtree named
     ``foo/`` at any depth.
-  * ``*.md`` / ``Dockerfile`` (no slash) -- basename or full-path fnmatch.
-  * any with ``/`` and wildcards -- full-path fnmatch.
+  * ``*.md`` / ``Dockerfile`` (no slash) -- basename glob at any depth.
+  * any with ``/`` and wildcards -- full-path glob, same ``*`` semantics.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import functools
+import re
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -105,6 +108,7 @@ class ResolvedModel:
     filetype_shared: list[FiletypeShared]
     filetype_advisory: list[FiletypeRule]
     auto_classified: list[tuple[str, str]] = field(default_factory=list)
+    keyword_coowned: list[SharedSpec] = field(default_factory=list)
     meta: dict = field(default_factory=dict)
 
     def label_to_team(self) -> dict[str, str]:
@@ -115,8 +119,9 @@ class ResolvedModel:
 
         The set used by the coverage gate -- if some pattern here matches a
         path, the path is "owned" and won't be reported as catch-all-only.
-        Mirrors what ``emit_codeowners.py`` will route, so gate and artifact
-        can't disagree.
+        Globs are anchored exactly as ``emit_codeowners.py`` anchors them at
+        emission, so gate and artifact can't disagree: an unanchored
+        ``README.md`` must not silently cover ``foo/README.md``.
         """
         pats: list[str] = []
         for area in self.areas:
@@ -125,7 +130,7 @@ class ResolvedModel:
             pats.append(s["glob"])
         for fs in self.filetype_shared:
             pats.append(fs.glob)
-        return pats
+        return [anchor(p) for p in pats]
 
     def unmatched_paths(self, tree: Iterable[str]) -> list[str]:
         """Paths in ``tree`` that fall through to the catch-all only."""
@@ -136,6 +141,53 @@ class ResolvedModel:
 # ----------------------------------------------------------------------
 # Matching primitives (S1)
 # ----------------------------------------------------------------------
+
+
+def _glob_to_re(pattern: str) -> str:
+    """Translate a CODEOWNERS glob to a regex: ``*``/``?`` stop at ``/``,
+    ``**`` crosses directories. fnmatch is wrong here -- its ``*`` greedily
+    crosses path separators, which GitHub's resolver does not."""
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "*":
+            if pattern[i : i + 2] == "**":
+                out.append(".*")
+                i += 2
+                continue
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[":
+            j = i + 1
+            if j < len(pattern) and pattern[j] in "!^":
+                j += 1
+            if j < len(pattern) and pattern[j] == "]":
+                j += 1
+            while j < len(pattern) and pattern[j] != "]":
+                j += 1
+            if j >= len(pattern):
+                out.append(re.escape(c))
+            else:
+                cls = pattern[i + 1 : j]
+                if cls.startswith("!"):
+                    cls = "^" + cls[1:]
+                out.append("[" + cls + "]")
+                i = j
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return "".join(out)
+
+
+@functools.lru_cache(maxsize=None)
+def _compiled(pattern: str) -> re.Pattern[str]:
+    return re.compile(_glob_to_re(pattern))
+
+
+def _glob_match(pattern: str, path: str) -> bool:
+    return _compiled(pattern).fullmatch(path) is not None
 
 
 def match(pattern: str, filepath: str) -> bool:
@@ -152,14 +204,14 @@ def match(pattern: str, filepath: str) -> bool:
         if body.endswith("/"):
             return filepath.startswith(body)
         if any(c in body for c in "*?["):
-            return fnmatch.fnmatch(filepath, body)
+            return _glob_match(body, filepath)
         return filepath == body
     if pattern.endswith("/"):
         return ("/" + pattern) in ("/" + filepath) or filepath.startswith(pattern)
     if "/" not in pattern:
         base = filepath.rsplit("/", 1)[-1]
-        return fnmatch.fnmatch(base, pattern) or fnmatch.fnmatch(filepath, pattern)
-    return fnmatch.fnmatch(filepath, pattern)
+        return _glob_match(pattern, base) or _glob_match(pattern, filepath)
+    return _glob_match(pattern, filepath)
 
 
 def resolve_owners(rules: list[tuple[str, list[str]]], filepath: str) -> list[str]:
@@ -229,7 +281,9 @@ def _auto_classify(
     """
     if not keyword_rules:
         return []
-    initial_patterns = [g for gs in area_globs.values() for g in gs]
+    # Anchor like the generator does, so "unmatched" here agrees with the
+    # coverage gate and the emitted file.
+    initial_patterns = [anchor(g) for gs in area_globs.values() for g in gs]
     unmatched = [p for p in tree if not _is_covered(p, initial_patterns)]
     if not unmatched:
         return []
@@ -246,6 +300,73 @@ def _auto_classify(
                 audit.append((d, lbl))
                 break
     return audit
+
+
+def _keyword_coownership(
+    tree: list[str],
+    area_globs: dict[str, set[str]],
+    keyword_rules: list[dict],
+    label_by: dict[str, str],
+    existing_shared: list[SharedSpec],
+) -> list[SharedSpec]:
+    """Keyword-level co-ownership: rules that declare ``coowner``.
+
+    A directory whose path mentions the keyword gets ``[enclosing_area,
+    coowner]`` shared ownership -- same shape as filetype co-ownership, so
+    the area stays in the review loop. Runs after auto-classify so promoted
+    dirs (rules with both ``area`` and ``coowner``) resolve their own area
+    as the enclosing owner. Dirs with no enclosing area are skipped -- the
+    coverage gate flags those instead of a coowner-only row masking them.
+    First matching rule wins per directory. A dir with a hand-declared
+    ``shared:`` entry keeps it (explicit beats implicit), and a subtree
+    already co-owned by an ancestor with the same owner set is not
+    re-emitted.
+    """
+    rules = [r for r in keyword_rules if r.get("coowner")]
+    if not rules:
+        return []
+    enc_pairs = sorted(
+        ((g, lbl) for lbl, s in area_globs.items() for g in s),
+        key=lambda kv: -len(kv[0]),
+    )
+
+    def enclosing(path: str) -> str | None:
+        for g, lbl in enc_pairs:
+            gg = g.rstrip("/")
+            if path == gg or path.startswith(gg + "/"):
+                return lbl
+        return None
+
+    explicit_dirs = {s["glob"].rstrip("/") for s in existing_shared}
+    emitted: list[tuple[str, frozenset[str]]] = [
+        (s["glob"].rstrip("/"), frozenset(s["owners"])) for s in existing_shared
+    ]
+    all_dirs = sorted(
+        {"/".join(p.split("/")[:i]) for p in tree for i in range(1, len(p.split("/")))}
+    )
+    out: list[SharedSpec] = []
+    for d in all_dirs:
+        if d in explicit_dirs:
+            continue
+        pl = ("/" + d + "/").lower()
+        for r in rules:
+            needle = r.get("match", "").lower()
+            if not needle or needle not in pl:
+                continue
+            coowner = label_by.get(r["coowner"], r["coowner"])
+            enc = enclosing(d)
+            if enc is None or enc == coowner:
+                break
+            owners = frozenset((enc, coowner))
+            if any(
+                (d == top or d.startswith(top + "/")) and owners == prev
+                for top, prev in emitted
+            ):
+                break
+            emitted.append((d, owners))
+            out.append({"glob": d + "/", "owners": [enc, coowner]})
+            break
+    return out
 
 
 def _filetype_coownership(
@@ -284,7 +405,13 @@ def _filetype_coownership(
             if not fnmatch.fnmatch(base, pattern):
                 continue
             enc = enclosing(path)
-            owners = [enc] if enc and enc != coowner else []
+            if enc is None:
+                # No subsystem owns this directory yet. Emitting a
+                # coowner-only row would count as explicit coverage and
+                # let the strict gate pass a tree nobody owns -- skip, so
+                # the file stays catch-all-only and the gate flags it.
+                continue
+            owners = [enc] if enc != coowner else []
             owners.append(coowner)
             out.append(FiletypeShared(glob=path, owners=owners))
     return out
@@ -309,7 +436,11 @@ def compute_resolution(spec: dict, tree: list[str]) -> ResolvedModel:
         a["label"]: set(a.get("path_globs", []) or []) for a in raw_areas
     }
 
+    spec_shared: list[SharedSpec] = spec.get("shared", []) or []
     audit = _auto_classify(tree, area_globs, keyword_rules, label_by)
+    keyword_shared = _keyword_coownership(
+        tree, area_globs, keyword_rules, label_by, spec_shared
+    )
     filetype_shared = _filetype_coownership(tree, area_globs, filetype_rules)
 
     areas = [
@@ -325,11 +456,12 @@ def compute_resolution(spec: dict, tree: list[str]) -> ResolvedModel:
     return ResolvedModel(
         catch_all=catch_all,
         areas=areas,
-        shared=spec.get("shared", []) or [],
+        shared=spec_shared + keyword_shared,
         advisory=spec.get("advisory", []) or [],
         filetype_shared=filetype_shared,
         filetype_advisory=filetype_advisory,
         auto_classified=audit,
+        keyword_coowned=keyword_shared,
         meta=dict(spec.get("meta", {})),
     )
 

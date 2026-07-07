@@ -58,6 +58,9 @@ def main() -> int:
     print(f"auto-classified new dirs: {len(model.auto_classified)}")
     for d, lbl in model.auto_classified[:20]:
         print(f"    {d} -> {lbl}")
+    print(f"keyword co-owned dirs: {len(model.keyword_coowned)}")
+    for s in model.keyword_coowned[:20]:
+        print(f"    {s['glob']} -> {' + '.join(s['owners'])}")
     if unmatched:
         print("catch-all-only sample (add an area or classify rule to cover these):")
         print("   ", unmatched[:15])

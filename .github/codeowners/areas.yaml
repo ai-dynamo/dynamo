@@ -74,7 +74,7 @@ areas:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
-  - lib/vllm-rs-backend/Cargo.toml/
+  - lib/vllm-rs-backend/Cargo.toml
   - lib/vllm-rs-backend/src/
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-trtllm-codeowners'
@@ -484,16 +484,16 @@ areas:
   - benchmarks/burstgpt_loadgen/
   - benchmarks/frontend/
   - benchmarks/incluster/
-  - benchmarks/mocker/README.md/
-  - benchmarks/mocker/bench_aic_concurrency.py/
-  - benchmarks/mocker/bench_aic_rust_callback.py/
+  - benchmarks/mocker/README.md
+  - benchmarks/mocker/bench_aic_concurrency.py
+  - benchmarks/mocker/bench_aic_rust_callback.py
   - benchmarks/nat_trace/
   - benchmarks/prefix_data_generator/
   - benchmarks/pyproject.toml
-  - benchmarks/request_trace/README.md/
-  - benchmarks/request_trace/__init__.py/
-  - benchmarks/request_trace/convert_to_perfetto.py/
-  - benchmarks/request_trace/validate_convert_to_perfetto.py/
+  - benchmarks/request_trace/README.md
+  - benchmarks/request_trace/__init__.py
+  - benchmarks/request_trace/convert_to_perfetto.py
+  - benchmarks/request_trace/validate_convert_to_perfetto.py
   - benchmarks/router/
   - benchmarks/sin_load_generator/
   - components/src/dynamo/mocker/
@@ -938,7 +938,7 @@ shared:
   owners:
   - ops
   - runtime
-- glob: dev/nats-server.conf/
+- glob: dev/nats-server.conf
   owners:
   - ops
   - runtime

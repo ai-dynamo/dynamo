@@ -62,7 +62,14 @@ def advisory_for(
 
 
 def changed_files(repo: str, base: str) -> list[str]:
-    """Files changed vs ``base`` (merge-base diff), falling back to plain diff."""
+    """Files changed vs ``base`` (merge-base diff), falling back to plain diff.
+
+    Returns ``[]`` only when a diff actually succeeded and was empty. If every
+    fallback fails (not a git checkout, unknown base), the last git error is
+    surfaced instead of masquerading as "no changed files".
+    """
+    last_err: subprocess.CalledProcessError | None = None
+    any_ok = False
     for args in ([f"{base}...HEAD"], [base], []):
         try:
             out = subprocess.check_output(
@@ -70,11 +77,18 @@ def changed_files(repo: str, base: str) -> list[str]:
                 text=True,
                 stderr=subprocess.DEVNULL,
             )
-            files = [p for p in out.splitlines() if p.strip()]
-            if files:
-                return files
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as err:
+            last_err = err
             continue
+        any_ok = True
+        files = [p for p in out.splitlines() if p.strip()]
+        if files:
+            return files
+    if not any_ok and last_err is not None:
+        raise SystemExit(
+            f"git diff failed in {repo!r} (not a checkout, or base "
+            f"{base!r} unavailable): {last_err}"
+        )
     return []
 
 

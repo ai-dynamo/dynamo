@@ -64,10 +64,17 @@ class TestMatchAnchoredFile:
     def test_anchored_file_with_glob(self) -> None:
         assert match("/lib/*.rs", "lib/foo.rs")
         assert match("/lib/*.rs", "lib/bar.rs")
-        # fnmatch treats `*` as not crossing path separators only loosely; with
-        # `/lib/*.rs` an explicit path like `lib/sub/foo.rs` would be matched
-        # by fnmatch (greedy `*`). We document the canonical behavior here.
-        assert match("/lib/*.rs", "lib/sub/foo.rs")
+        # GitHub CODEOWNERS `*` stays within one path segment (docs/* matches
+        # docs/getting-started.md but NOT docs/build-app/troubleshooting.md).
+        # Nested files need a recursive `**` pattern.
+        assert not match("/lib/*.rs", "lib/sub/foo.rs")
+        assert match("/lib/**.rs", "lib/sub/foo.rs")
+        assert match("/lib/**/foo.rs", "lib/a/b/foo.rs")
+
+    def test_question_mark_stays_in_segment(self) -> None:
+        assert match("/lib/?.rs", "lib/a.rs")
+        assert not match("/lib/?.rs", "lib/ab.rs")
+        assert not match("/lib/?.rs", "lib/a/b.rs")
 
 
 class TestMatchBasenameGlob:
@@ -314,6 +321,72 @@ class TestComputeResolution:
         model = compute_resolution(self._spec(), self._tree())
         sh = [s for s in model.shared if s["glob"] == "lib/llm/shared/"]
         assert sh and sh[0]["owners"] == ["runtime", "kvbm"]
+
+    def test_coverage_is_anchored_like_the_generator(self) -> None:
+        # An area glob `README.md` is emitted anchored (`/README.md`), so the
+        # coverage gate must not let a nested `foo/README.md` ride on it.
+        spec = self._spec()
+        spec["areas"][2]["path_globs"] = ["docs/", "README.md"]
+        tree = self._tree() + ["foo/README.md"]
+        model = compute_resolution(spec, tree)
+        unmatched = model.unmatched_paths(tree)
+        assert "README.md" not in unmatched
+        assert "foo/README.md" in unmatched
+
+    def test_filetype_rule_skips_files_outside_any_area(self) -> None:
+        # A blocking filetype rule must not count as coverage for a tree
+        # nobody owns -- the file stays catch-all-only so --strict flags it.
+        spec = self._spec()
+        spec["classify"]["filetype_rules"] = [
+            {"pattern": "Dockerfile", "coowner": "docs", "advisory": False},
+        ]
+        tree = self._tree() + ["lib/llm/Dockerfile", "stray/Dockerfile"]
+        model = compute_resolution(spec, tree)
+        globs = {fs.glob for fs in model.filetype_shared}
+        assert "lib/llm/Dockerfile" in globs  # enclosed by runtime: co-owned
+        assert "stray/Dockerfile" not in globs  # no enclosing area: skipped
+        assert "stray/Dockerfile" in model.unmatched_paths(tree)
+
+    def test_keyword_coowner_rule_emits_shared_dir(self) -> None:
+        # A keyword rule with only `coowner` co-owns matching dirs with the
+        # enclosing area instead of being silently inert.
+        spec = self._spec()
+        spec["classify"]["keyword_rules"].append(
+            {"match": "metrics", "coowner": "docs"}
+        )
+        tree = self._tree() + ["lib/llm/metrics/gauge.rs"]
+        model = compute_resolution(spec, tree)
+        assert {"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]} in (
+            model.keyword_coowned
+        )
+        assert model.keyword_coowned[-1] in model.shared
+
+    def test_keyword_coowner_defers_to_explicit_shared(self) -> None:
+        # A hand-declared shared: entry for the same dir wins -- the keyword
+        # rule must not emit a duplicate (or conflicting) row.
+        spec = self._spec()
+        spec["classify"]["keyword_rules"].append(
+            {"match": "metrics", "coowner": "docs"}
+        )
+        spec["shared"].append(
+            {"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]}
+        )
+        tree = self._tree() + ["lib/llm/metrics/gauge.rs"]
+        model = compute_resolution(spec, tree)
+        assert model.keyword_coowned == []
+        rows = [s for s in model.shared if s["glob"] == "lib/llm/metrics/"]
+        assert len(rows) == 1
+
+    def test_keyword_coowner_skips_unowned_dirs(self) -> None:
+        # No enclosing area -> no co-ownership row; the gate flags the dir.
+        spec = self._spec()
+        spec["classify"]["keyword_rules"].append(
+            {"match": "metrics", "coowner": "docs"}
+        )
+        tree = self._tree() + ["orphan/metrics/gauge.rs"]
+        model = compute_resolution(spec, tree)
+        assert not any("orphan" in s["glob"] for s in model.keyword_coowned)
+        assert "orphan/metrics/gauge.rs" in model.unmatched_paths(tree)
 
 
 # ------------------------------------------------------------------
