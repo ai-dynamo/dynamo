@@ -33,7 +33,22 @@ use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 /// share one. `zmq::Context` is reference-counted; clones drive the same context.
 fn shared_zmq_context() -> Context {
     static CONTEXT: OnceLock<Context> = OnceLock::new();
-    CONTEXT.get_or_init(Context::new).clone()
+    CONTEXT
+        .get_or_init(|| {
+            let context = Context::new();
+            // A single default I/O thread becomes a bottleneck for bursty
+            // fan-in once all sockets share this context. Keep the pool
+            // bounded, while allowing up to four connections to make progress
+            // concurrently on hosts with enough CPUs.
+            let io_threads = std::thread::available_parallelism()
+                .map(|count| count.get().min(4))
+                .unwrap_or(1) as i32;
+            context
+                .set_io_threads(io_threads)
+                .expect("set I/O threads before creating ZMQ sockets");
+            context
+        })
+        .clone()
 }
 
 /// High Water Mark (HWM) for ZMQ sockets.
