@@ -50,7 +50,7 @@ inputs:
     required: false
     default: ''
   sccache_bucket:
-    description: 'SCCACHE S3 bucket — must equal what the build passed so wheel_builder_base''s SCCACHE_* ARGs/ENV match and the heavy Rust layer cache-hits (the extract does NOT re-run sccache; it only needs the build-arg VALUES to line up).'
+    description: 'SCCACHE S3 bucket — must equal what the build passed so wheel_builder_base''s SCCACHE_* ARGs/ENV match and the heavy Rust layer cache-hits. Normally the extract never runs sccache (everything cache-hits), but when the shared builder has evicted layers a stage re-runs here for real, so the extract also passes the IRSA secrets (see the buildx steps) to let that sccache authenticate.'
     required: false
     default: ''
   sccache_region:
@@ -123,8 +123,28 @@ runs:
         #   - DYNAMO_COMMIT_SHA: pre_runtime does ENV DYNAMO_COMMIT_SHA=...; licenses
         #     (and compliance_artifact) are FROM pre_runtime.
         #   - USE_SCCACHE/SCCACHE_*: wheel_builder_base bakes them into an ENV, and
-        #     pre_runtime COPYs from wheel_builder. We pass the same VALUES (not to
-        #     run sccache — the layer cache-hits — but so the cache key lines up).
+        #     pre_runtime COPYs from wheel_builder. We pass the same VALUES so the
+        #     cache key lines up and the warm layers cache-hit.
+        # The warm cache is best-effort though: the shared buildkit pods GC under
+        # concurrent load, so a stage can legitimately re-run here (seen post-merge
+        # 2026-07-02). Pass the same IRSA secrets docker-remote-build passes so a
+        # re-run stage's sccache can still authenticate to S3 — without them
+        # `sccache --start-server` fails and the NIXL stage dies in meson's nvcc
+        # sanity check (meson wraps nvcc with the sccache it finds on PATH,
+        # sidestepping use-sccache.sh's no-server fallback). Secret values are not
+        # part of BuildKit's cache key, so this never invalidates the fast path.
+        # Only forward the credentials when S3 sccache is actually configured
+        # (bucket set) — a bucket-less caller's build has no use for them.
+        SECRET_ARGS=""
+        if [ -n "${SCCACHE_BUCKET:-}" ]; then
+          TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
+          if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
+            SECRET_ARGS+=" --secret id=aws-web-identity-token,src=${TOKEN_FILE}"
+            SECRET_ARGS+=" --secret id=aws-role-arn,env=AWS_ROLE_ARN"
+          else
+            echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
+          fi
+        fi
         docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
@@ -136,6 +156,7 @@ runs:
             --output type=local,dest=/tmp/compliance \
             --progress=plain \
             -f ${{ steps.render.outputs.rendered }} \
+            $SECRET_ARGS \
             .
 
     # Name the OSRB CSV + CycloneDX per-arch: osrb-<image>-<arch>-<sha8>.{csv,cdx.json}.
@@ -319,7 +340,18 @@ runs:
         mkdir -p /tmp/sources
         # ENABLE_SOURCE_ARCHIVAL=true to actually run sources_collect; the other
         # build-args match the build so this shares the warm cache (same reason
-        # as the compliance_artifact extract above).
+        # as the compliance_artifact extract above). Same IRSA secrets too, so a
+        # cache-missed stage rebuild can still authenticate sccache (see above).
+        SECRET_ARGS=""
+        if [ -n "${SCCACHE_BUCKET:-}" ]; then
+          TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
+          if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
+            SECRET_ARGS+=" --secret id=aws-web-identity-token,src=${TOKEN_FILE}"
+            SECRET_ARGS+=" --secret id=aws-role-arn,env=AWS_ROLE_ARN"
+          else
+            echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
+          fi
+        fi
         docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
@@ -332,6 +364,7 @@ runs:
             --output type=local,dest=/tmp/sources \
             --progress=plain \
             -f ${{ steps.render.outputs.rendered }} \
+            $SECRET_ARGS \
             .
 
     - name: Upload compliance artifact (NOTICES + CSV + CycloneDX)

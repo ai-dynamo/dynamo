@@ -93,16 +93,15 @@ func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle p
 		return nil, fmt.Errorf("Dynamo FFI init for decode scorer failed: %w", err)
 	}
 
-	enforceDisagg := getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
-	return NewDynDecodeScorer(handle.Context(), enforceDisagg).WithName(name), nil
+	warnDeprecatedEnforceDisagg(log.Log.WithName(DynDecodeScorerType))
+	return NewDynDecodeScorer(handle.Context()).WithName(name), nil
 }
 
 // NewDynDecodeScorer initializes a new DynDecodeScorer.
-func NewDynDecodeScorer(ctx context.Context, enforceDisagg bool) *DynDecodeScorer {
+func NewDynDecodeScorer(ctx context.Context) *DynDecodeScorer {
 	return &DynDecodeScorer{
-		typedName:     plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
-		pluginState:   plugins.NewPluginState(ctx),
-		enforceDisagg: enforceDisagg,
+		typedName:   plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
+		pluginState: plugins.NewPluginState(ctx),
 	}
 }
 
@@ -110,7 +109,6 @@ func NewDynDecodeScorer(ctx context.Context, enforceDisagg bool) *DynDecodeScore
 type DynDecodeScorer struct {
 	typedName      plugins.TypedName
 	pluginState    *plugins.PluginState
-	enforceDisagg  bool
 	firstTokenSeen sync.Map
 }
 
@@ -172,9 +170,6 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 		if prefillID, ok := req.Headers[PrefillWorkerIDHeader]; ok {
 			logger.V(logutil.DEFAULT).Info("DynDecodeScorer: prefill worker header present",
 				"prefillWorkerID", prefillID)
-		} else if s.enforceDisagg {
-			logger.V(logutil.DEFAULT).Error(nil,
-				"DynDecodeScorer: prefill worker header missing and enforce_disagg=true")
 		} else {
 			logger.V(logutil.DEFAULT).Error(nil,
 				"DynDecodeScorer: x-dynamo-prefill-instance-id header missing — DynPrefillScorer did not set it")

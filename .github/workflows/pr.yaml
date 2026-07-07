@@ -813,9 +813,7 @@ jobs:
     needs: [changed-files, frontend-build]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.frontend-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -830,9 +828,7 @@ jobs:
     needs: [changed-files, vllm-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -880,9 +876,7 @@ jobs:
     needs: [changed-files, sglang-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -1007,9 +1001,7 @@ jobs:
     name: vLLM DynamoCheckpoint Operator Setup
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
@@ -1039,9 +1031,7 @@ jobs:
     name: SGLang DynamoCheckpoint Operator Setup
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
@@ -1072,9 +1062,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-vllm, snapshot-agent]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-operator-checkpoint-vllm.result == 'success' &&
       needs.snapshot-agent.result == 'success'
     runs-on: prod-deploy-tester-v1
@@ -1121,9 +1109,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-sglang, snapshot-agent]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-operator-checkpoint-sglang.result == 'success' &&
       needs.snapshot-agent.result == 'success'
     runs-on: prod-deploy-tester-v1
@@ -1170,9 +1156,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-snapshot-agent-checkpoint-vllm.result == 'success' &&
       needs.snapshot-placeholder-vllm.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
@@ -1237,9 +1221,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-snapshot-agent-checkpoint-sglang.result == 'success' &&
       needs.snapshot-placeholder-sglang.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
@@ -1318,9 +1300,7 @@ jobs:
     name: vLLM DynamoCheckpoint Cleanup
     if: |
       always() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, deploy-test-checkpoint-vllm]
     runs-on: prod-deploy-tester-v1
     steps:
@@ -1335,9 +1315,7 @@ jobs:
     name: SGLang DynamoCheckpoint Cleanup
     if: |
       always() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, deploy-test-checkpoint-sglang]
     runs-on: prod-deploy-tester-v1
     steps:

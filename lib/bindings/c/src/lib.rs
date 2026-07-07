@@ -641,7 +641,7 @@ pub enum QueryRouterResult {
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `enforce_disagg`: If true, requires prefill workers to be present at init time
+/// - `enforce_disagg`: Deprecated compatibility parameter. The value is ignored.
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -655,6 +655,12 @@ pub unsafe extern "C" fn create_routers(
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     initialize_tracing();
+
+    if enforce_disagg {
+        tracing::warn!(
+            "enforce_disagg is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+        );
+    }
 
     if namespace.is_null() || out_handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
@@ -813,7 +819,6 @@ pub unsafe extern "C" fn create_routers(
             block_size,
             Some(prefill_config),
             None,
-            enforce_disagg,
             None,
             model_name.clone(),
             actual_namespace.clone(),
@@ -1151,7 +1156,11 @@ unsafe fn preprocess_request(
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
-        let (token_ids, _) = match preprocessor.gather_tokens(&request, None, None) {
+        let (token_ids, _) = match handles
+            .runtime
+            .secondary()
+            .block_on(preprocessor.gather_tokens(&request, None, None))
+        {
             Ok(tokens) => tokens,
             Err(e) => {
                 tracing::error!(error = ?e, "Failed to collect completion prompt tokens");
