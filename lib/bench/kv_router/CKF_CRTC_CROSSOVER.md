@@ -186,7 +186,7 @@ lib/bench/kv_router/ckf_crossover/run_matrix.sh \
   "$RUN_ROOT/matrix"
 ```
 
-The runner executes 90 capacity processes, derives `R_iso = 0.5 × min(CRTC ceiling, transposed ceiling)`, executes 15 common-load latency processes, and performs the one allowed half-rate retry if a headline backend fails the no-backlog criteria. It then runs four separate resident-state-only memory processes. All cells are sequential.
+The runner executes 90 capacity processes, derives `R_iso` as half the lower of the highest all-five generator-valid offered grid points for CRTC and transposed CKF, executes 15 common-load latency processes, and performs the one allowed half-rate retry if a headline backend fails the no-backlog criteria. It then runs four separate resident-state-only memory processes. All cells are sequential.
 
 Expected counts:
 
@@ -210,7 +210,7 @@ Analysis can also be rerun independently with project Python:
 
 ## Metrics and validity
 
-Capacity keep-up requires total replay plus final drain within `1.10 × window`, a generator-valid issue span, and no pipeline/correctness error. Peak achieved throughput is selected from all six cells. CKF/CRTC claims use paired per-repetition log throughput ratios with two-sided Student-t 95% CIs.
+Capacity keep-up requires total replay plus final drain within `1.10 × window`, a generator-valid issue span, and no pipeline/correctness error. The highest all-five generator-valid offered grid point is a discrete demonstrated load, not an estimate of the backend's true saturation threshold. Peak achieved throughput is selected from all six cells. CKF/CRTC claims use paired per-repetition log throughput ratios with two-sided Student-t 95% CIs.
 
 Headline p50/p99 comes only from the common-load run. CRTC and transposed CKF must each achieve at least 99.9% of offered throughput, stop with at most one in-flight update per event thread and one query per query executor, drain both queues in at most 0.1% of the replay window, and have no generator, epoch, desync, insertion, or application error. Native CKF is an ablation and may be labelled diagnostic without lowering the common load.
 
@@ -228,7 +228,7 @@ Hardware was one exclusive AMD EPYC 7702P machine: 64 physical cores/128 SMT thr
 
 Ranked findings:
 
-1. CKF doubled the tested keep-up grid ceiling: 26.53M block ops/s for native and transposed CKF versus 13.26M for CRTC. However, there is **no supported CKF-over-CRTC crossover in the generator-valid grid**. The first cells with paired-ratio CIs above one occur at 26.53M offered block ops/s, where the CRTC dispatcher is already generator-limited; those ratios are diagnostic only.
+1. CKF's highest all-five generator-valid offered grid point was 26.53M block ops/s versus 13.26M for CRTC, so CKF demonstrated a valid point at 2× CRTC's last valid point. **This does not establish that CKF's true maximum throughput is 2× CRTC's.** CRTC's 26.53M cell was generator-limited, so its backend-only saturation boundary was not resolved. CKF's true boundary is also only bracketed by the tested grid. There is **no supported CKF-over-CRTC crossover in the generator-valid grid** and the true capacity ratio remains unknown.
 2. At the valid common 6.63M block ops/s iso load, CRTC lookup service remained much faster. Native CKF was 9.3× slower at p50 and 23.9× at p99; transposed CKF was 10.8× and 37.7× slower. Scheduled-to-completion p99 was nearly tied for native and 11.0% slower for transposed because CRTC had higher issue/update delay while CKF had higher query service/queue delay.
 3. CKF updates were faster at the router. Iso update-apply p99 was 1.31 ms native and 1.48 ms transposed versus 7.09 ms CRTC. Every headline backend achieved at least 99.95% of offered load, stopped with zero queued work, drained in at most 3.88 ms, was generator-valid, and reported zero pipeline errors.
 4. CKF memory was dramatically lower under the synthetic 160M-membership resident state: 0.507 GiB native and 1.007 GiB transposed versus 50.461 GiB CRTC, or 99.6× and 50.1× smaller respectively. Relay producer state was 2.764 GiB.
@@ -238,7 +238,7 @@ Ranked findings:
 
 | Metric | CRTC | Native CKF | Transposed CKF | Interpretation |
 |---|---:|---:|---:|---|
-| Keep-up ceiling, block ops/s | 13.26M | 26.53M | 26.53M | CKF is 2.0× on the tested grid |
+| Highest all-five generator-valid offered grid point, block ops/s | 13.26M | 26.53M | 26.53M | CKF demonstrated a valid point 2.0× higher; the true ceiling ratio is unknown |
 | Peak achieved mean, block ops/s | 16.43M | 32.56M | 44.82M | Selected from all cells; the native/transposed peak cells and CRTC comparison are generator-limited |
 | Iso offered/achieved, block ops/s | 6.631M / 6.630M | 6.631M / 6.629M | 6.631M / 6.629M | All pass the no-backlog gate |
 | Iso lookup service p50 / p99 | 2.38 / 10.12 us | 22.09 / 241.55 us | 25.69 / 381.85 us | CRTC wins lookup latency decisively |
@@ -253,6 +253,8 @@ Ranked findings:
 ### Capacity grid
 
 Each row is the mean of five fresh processes. A ratio is eligible for a crossover claim only when both the CKF and paired CRTC cells are generator-valid.
+
+> **Throughput interpretation:** `26.53M / 13.26M = 2.0×` compares the highest demonstrated valid grid points. It is not a measurement of the ratio between the backends' true maximum throughputs. CRTC's next grid point was generator-limited, so the experiment cannot locate its backend-only capacity boundary or establish a throughput crossover. A finer sweep with a separately provisioned load generator would be required.
 
 | Backend | Window ms | Offered block ops/s | Achieved block ops/s (95% CI) | All 5 keep up | Generator-valid | Ratio vs CRTC (95% CI) | Lookup p50 / p99 us |
 |---|---:|---:|---:|:---:|:---:|---:|---:|
