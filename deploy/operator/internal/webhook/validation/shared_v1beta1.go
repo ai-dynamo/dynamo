@@ -66,10 +66,7 @@ func (v *SharedSpecValidatorV1Beta1) Validate(ctx context.Context) (admission.Wa
 	if err := v.validateMinAvailable(); err != nil {
 		errs = append(errs, err)
 	}
-	if err := v.validatePodTemplate(); err != nil {
-		errs = append(errs, err)
-	}
-	if err := v.validateCompilationCache(); err != nil {
+	if err := v.validateFrontendSidecar(); err != nil {
 		errs = append(errs, err)
 	}
 	if err := v.validateSharedMemory(); err != nil {
@@ -79,9 +76,6 @@ func (v *SharedSpecValidatorV1Beta1) Validate(ctx context.Context) (admission.Wa
 		errs = append(errs, err)
 	}
 	if err := v.validateGMSClientContainerNames(); err != nil {
-		errs = append(errs, err)
-	}
-	if err := v.validatePodTemplateAnnotations(); err != nil {
 		errs = append(errs, err)
 	}
 	if err := v.validateEPPConfig(ctx); err != nil {
@@ -119,7 +113,7 @@ func (v *SharedSpecValidatorV1Beta1) validateMinAvailable() error {
 	return nil
 }
 
-func (v *SharedSpecValidatorV1Beta1) validatePodTemplate() error {
+func (v *SharedSpecValidatorV1Beta1) validateFrontendSidecar() error {
 	if v.spec.PodTemplate == nil {
 		if v.spec.FrontendSidecar != nil {
 			return fmt.Errorf("%s.frontendSidecar requires podTemplate.spec.containers", v.fieldPath)
@@ -146,30 +140,6 @@ func (v *SharedSpecValidatorV1Beta1) validatePodTemplate() error {
 		}
 	}
 
-	for i := range containers {
-		container := containers[i]
-		if container.Name != consts.MainContainerName && container.Image == "" {
-			return fmt.Errorf("%s.podTemplate.spec.containers[%d].image is required for sidecar container %q",
-				v.fieldPath, i, container.Name)
-		}
-	}
-	for i := range v.spec.PodTemplate.Spec.InitContainers {
-		container := v.spec.PodTemplate.Spec.InitContainers[i]
-		if container.Image == "" {
-			return fmt.Errorf("%s.podTemplate.spec.initContainers[%d].image is required for init container %q",
-				v.fieldPath, i, container.Name)
-		}
-	}
-	return nil
-}
-
-func (v *SharedSpecValidatorV1Beta1) validateCompilationCache() error {
-	if v.spec.CompilationCache == nil {
-		return nil
-	}
-	if v.spec.CompilationCache.PVCName == "" {
-		return fmt.Errorf("%s.compilationCache.pvcName is required", v.fieldPath)
-	}
 	return nil
 }
 
@@ -250,11 +220,6 @@ func (v *SharedSpecValidatorV1Beta1) validateGMSClientContainerNames() error {
 		return fmt.Errorf("%s.experimental.gpuMemoryService.extraClientPods is reserved for inter-pod GMS and is not implemented yet", v.fieldPath)
 	}
 	return nil
-}
-
-func (v *SharedSpecValidatorV1Beta1) validatePodTemplateAnnotations() error {
-	annotations := dynamo.GetPodTemplateAnnotations(v.spec)
-	return validateVLLMDistributedExecutorBackendAnnotation(v.fieldPath+".podTemplate.metadata.annotations", annotations)
 }
 
 func (v *SharedSpecValidatorV1Beta1) validateEPPConfig(ctx context.Context) error {

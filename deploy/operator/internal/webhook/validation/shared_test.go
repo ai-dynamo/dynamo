@@ -19,14 +19,131 @@ package validation
 
 import (
 	"context"
+	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	crdvalidation "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/validation"
+	apiextensionsvalidation "k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
+	apitest "k8s.io/apiextensions-apiserver/pkg/test"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
+
+type crdRequestValidator struct {
+	schemaValidator apiextensionsvalidation.SchemaValidator
+	celValidator    apitest.CELValidateFunc
+}
+
+func requestValidatorsFromCRD(t *testing.T, crdFilename string) map[string]*crdRequestValidator {
+	t.Helper()
+	_, thisFile, _, ok := goruntime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed")
+	}
+	crdPath := filepath.Join(filepath.Dir(thisFile), "../../../config/crd/bases", crdFilename)
+	crd := apitest.MustLoadManifest[apiextensionsv1.CustomResourceDefinition](t, crdPath)
+	internalCRD := &apiextensions.CustomResourceDefinition{}
+	if err := apiextensionsv1.Convert_v1_CustomResourceDefinition_To_apiextensions_CustomResourceDefinition(crd, internalCRD, nil); err != nil {
+		t.Fatalf("convert CRD %s: %v", crdFilename, err)
+	}
+
+	internalCRD.Spec.Conversion.WebhookClientConfig.Service.Port = 443
+	for _, version := range internalCRD.Spec.Versions {
+		if version.Storage {
+			internalCRD.Status.StoredVersions = append(internalCRD.Status.StoredVersions, version.Name)
+		}
+	}
+	if errs := crdvalidation.ValidateCustomResourceDefinition(t.Context(), internalCRD); len(errs) != 0 {
+		t.Fatalf("validate CRD %s: %v", crdFilename, errs)
+	}
+
+	celValidators := apitest.VersionValidatorsFromFile(t, crdPath)
+	validators := make(map[string]*crdRequestValidator, len(crd.Spec.Versions))
+	for _, version := range crd.Spec.Versions {
+		var internalSchema apiextensions.JSONSchemaProps
+		if err := apiextensionsv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(
+			version.Schema.OpenAPIV3Schema,
+			&internalSchema,
+			nil,
+		); err != nil {
+			t.Fatalf("convert %s schema for %s: %v", crdFilename, version.Name, err)
+		}
+		schemaValidator, _, err := apiextensionsvalidation.NewSchemaValidator(&internalSchema)
+		if err != nil {
+			t.Fatalf("compile %s schema validator for %s: %v", crdFilename, version.Name, err)
+		}
+		validators[version.Name] = &crdRequestValidator{
+			schemaValidator: schemaValidator,
+			celValidator:    celValidators[version.Name],
+		}
+	}
+	return validators
+}
+
+func (v *crdRequestValidator) validateSchema(current, old map[string]any) field.ErrorList {
+	if old == nil {
+		return apiextensionsvalidation.ValidateCustomResource(nil, current, v.schemaValidator)
+	}
+	return apiextensionsvalidation.ValidateCustomResourceUpdate(nil, current, old, v.schemaValidator)
+}
+
+func admissionUnstructured(t *testing.T, deployment runtime.Object) map[string]any {
+	t.Helper()
+	request, err := runtime.DefaultUnstructuredConverter.ToUnstructured(deployment)
+	if err != nil {
+		t.Fatalf("convert %T to unstructured: %v", deployment, err)
+	}
+	delete(request, "status")
+	return request
+}
+
+func admissionSourceVersion(t *testing.T, object runtime.Object) string {
+	t.Helper()
+	if version := object.GetObjectKind().GroupVersionKind().Version; version != "" {
+		return version
+	}
+	switch object.(type) {
+	case *nvidiacomv1alpha1.DynamoGraphDeployment, *nvidiacomv1alpha1.DynamoComponentDeployment:
+		return nvidiacomv1alpha1.GroupVersion.Version
+	case *nvidiacomv1beta1.DynamoGraphDeployment, *nvidiacomv1beta1.DynamoComponentDeployment:
+		return nvidiacomv1beta1.GroupVersion.Version
+	default:
+		t.Fatalf("unsupported admission object type %T", object)
+		return ""
+	}
+}
+
+func assertRequestValidationError(t *testing.T, got field.ErrorList, want string) {
+	t.Helper()
+	if len(got) != 1 {
+		t.Fatalf("request errors = %v, want exactly %q", got, want)
+	}
+	if got[0].Error() != want {
+		t.Fatalf("request error = %q, want %q", got[0], want)
+	}
+}
+
+func assertWebhookError(t *testing.T, got error, want string) {
+	t.Helper()
+	if want == "" {
+		if got != nil {
+			t.Fatalf("webhook error = %v, want none", got)
+		}
+		return
+	}
+	if got == nil || !strings.Contains(got.Error(), want) {
+		t.Fatalf("webhook error = %v, want one containing %q", got, want)
+	}
+}
 
 // ptr is a helper function to create a pointer to a string
 func ptr(s string) *string {
