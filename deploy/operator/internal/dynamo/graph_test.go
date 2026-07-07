@@ -6385,6 +6385,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 		expectError    bool
 		expectedPVCs   []string
 		expectedMounts []corev1.VolumeMount
+		expectedInit   []corev1.VolumeMount
 	}{
 		{
 			name: "valid volumeMounts",
@@ -6405,7 +6406,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 			},
 		},
 		{
-			name: "volumeMounts keep generated PVC when podTemplate has other volumes",
+			name: "volumeMounts compose with extra main container mounts",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeFrontend,
 				VolumeMounts: []v1alpha1.VolumeMount{
@@ -6416,6 +6417,14 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				},
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					PodSpec: &corev1.PodSpec{
+						InitContainers: []corev1.Container{
+							{
+								Name: "init",
+								VolumeMounts: []corev1.VolumeMount{
+									{Name: "test-pvc", MountPath: "/data"},
+								},
+							},
+						},
 						Volumes: []corev1.Volume{
 							{
 								Name: "config",
@@ -6427,13 +6436,22 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 							},
 						},
 					},
+					MainContainer: &corev1.Container{
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "config", MountPath: "/config"},
+						},
+					},
 				},
 			},
 			expectError:  false,
 			expectedPVCs: []string{"test-pvc"},
 			expectedMounts: []corev1.VolumeMount{
+				{Name: "config", MountPath: "/config"},
 				{Name: "test-pvc", MountPath: "/data"},
 				{Name: "shared-memory", MountPath: "/dev/shm"},
+			},
+			expectedInit: []corev1.VolumeMount{
+				{Name: "test-pvc", MountPath: "/data"},
 			},
 		},
 		{
@@ -6538,6 +6556,10 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				if !found {
 					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", expectedMount)
 				}
+			}
+			if tt.expectedInit != nil {
+				require.NotEmpty(t, podSpec.InitContainers)
+				assert.Equal(t, tt.expectedInit, podSpec.InitContainers[0].VolumeMounts)
 			}
 		})
 	}
