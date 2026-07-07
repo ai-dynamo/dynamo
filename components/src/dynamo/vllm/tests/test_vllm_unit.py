@@ -362,6 +362,8 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
         headless=False,
         component="backend",
+        route_to_encoder=False,
+        enable_multimodal=False,
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
     )
@@ -419,6 +421,10 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     engine.engine_client = SimpleNamespace(generate=fake_generate)
     engine._default_sampling_params = {}
     engine._model_max_len = 4096
+    engine._multimodal_request_processor = llm_engine.VllmMultimodalRequestProcessor(
+        model="test-model",
+        enable_multimodal=False,
+    )
 
     monkeypatch.setattr(llm_engine, "build_sampling_params", fake_build_sampling_params)
 

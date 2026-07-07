@@ -82,12 +82,19 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
+mod python_payload;
 
-type JsonServerStreamingIngress =
-    Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+type PythonServerStreamingIngress = Ingress<
+    SingleIn<python_payload::PythonPayload>,
+    ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
 
-type JsonBidirectionalIngress =
-    Ingress<rs::pipeline::ManyIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+type PythonBidirectionalIngress = Ingress<
+    rs::pipeline::ManyIn<python_payload::PythonPayload>,
+    ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
 
 static INIT: OnceCell<()> = OnceCell::new();
 
@@ -1152,7 +1159,12 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
+        let network_engine = Arc::new(engine.network_engine());
+        let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
+            network_engine,
+            python_payload::PythonIngressPayloadAdapter,
+        )
+        .map_err(to_pyerr)?;
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -1204,10 +1216,9 @@ impl Endpoint {
     /// `async def generate(request_stream, context)` coroutine that
     /// returns an async generator. `request_stream` is a
     /// [`PyAsyncRequestStream`] yielding inbound frames as plain Python
-    /// objects (dicts/lists/etc., the depythonization of
-    /// `serde_json::Value`). The generator yields response frames as
-    /// plain Python objects that are then pythonized back to JSON values
-    /// on the wire.
+    /// objects (dicts/lists/etc.) decoded directly from the configured
+    /// request-plane payload codec. The generator yields plain Python
+    /// response objects that are serialized directly to that codec.
     ///
     /// Request-stream end (when `__anext__` raises `StopAsyncIteration`)
     /// is *not* a cancellation signal: the caller has merely stopped
@@ -1225,8 +1236,9 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress: Arc<JsonBidirectionalIngress> =
-            Ingress::for_engine(engine).map_err(to_pyerr)?;
+        let ingress: Arc<PythonBidirectionalIngress> =
+            Ingress::for_engine_with_adapter(engine, python_payload::PythonIngressPayloadAdapter)
+                .map_err(to_pyerr)?;
 
         let builder = self
             .inner
@@ -1692,11 +1704,10 @@ impl AsyncResponseStream {
 }
 
 /// Python-visible inbound iterator for bidirectional engines. Wraps an
-/// mpsc receiver of pre-pythonized request frames; `__anext__` is a thin
+/// mpsc receiver of Python-owned request frames; `__anext__` is a thin
 /// `.recv()` that returns the next `PyObject` directly, with no per-frame
-/// GIL acquisition on the consumer side. The producer (the forwarder
-/// spawned by `PythonBidirectionalEngine::generate`) acquires the GIL
-/// once per frame and pushes the converted `PyObject` onto the channel.
+/// GIL acquisition or value conversion on the consumer side. The producer
+/// moves the object decoded by the ingress adapter onto the channel.
 ///
 /// Termination follows the same shape as `AsyncResponseStream`: when the
 /// channel returns `None`, `__anext__` raises `PyStopAsyncIteration` and
@@ -1725,7 +1736,7 @@ impl PyAsyncRequestStream {
     }
 
     /// Required by the `AsyncIterator` protocol. Returns an awaitable
-    /// resolving to the next pre-pythonized frame, or raises
+    /// resolving to the next Python-owned frame, or raises
     /// `StopAsyncIteration` when the inbound channel is closed.
     #[pyo3(name = "__anext__")]
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
