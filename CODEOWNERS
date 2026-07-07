@@ -264,6 +264,7 @@
 /tests/deploy/                                                                                @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /benchmarks/router/                                                                           @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/audit/                                                                           @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
+/deploy/power-agent/                                                                          @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners
 /lib/llm/src/mocker/                                                                          @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
 /dev/nats-server.conf                                                                         @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/bench/kv_router/                                                                         @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners

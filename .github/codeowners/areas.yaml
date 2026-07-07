@@ -930,6 +930,10 @@ shared:
   owners:
   - observability
   - planner
+- glob: deploy/power-agent/
+  owners:
+  - operator
+  - planner
 - glob: deploy/operator/internal/gpu/discovery.go
   owners:
   - operator
