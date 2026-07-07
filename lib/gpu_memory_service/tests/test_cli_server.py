@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 from _deps import HAS_GMS
@@ -18,7 +19,7 @@ if not HAS_GMS:
 
 from gpu_memory_service.cli import args as cli_args
 from gpu_memory_service.cli import runner, server
-from gpu_memory_service.cli.args import Config, parse_args
+from gpu_memory_service.cli.args import parse_args
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -28,9 +29,18 @@ pytestmark = [
 ]
 
 
+def test_child_command_launches_default_multi_tag_runner():
+    assert server._child_command(3) == [
+        sys.executable,
+        "-m",
+        "gpu_memory_service",
+        "--device",
+        "3",
+    ]
+
+
 class _Process:
-    def __init__(self, pid: int, exit_code: int | None = None) -> None:
-        self.pid = pid
+    def __init__(self, exit_code: int | None = None) -> None:
         self.exit_code = exit_code
         self.terminated = False
 
@@ -41,47 +51,15 @@ class _Process:
         self.terminated = True
 
 
-def test_supervisor_starts_one_multi_tag_child_per_device(monkeypatch):
-    commands: list[list[str]] = []
-    processes: list[_Process] = []
+def test_supervisor_terminates_siblings_when_child_exits():
+    processes = [_Process(exit_code=17), _Process()]
 
-    def popen(command: list[str]) -> _Process:
-        commands.append(command)
-        process = _Process(1000 + len(processes))
-        processes.append(process)
-        return process
-
-    monkeypatch.setattr(server.subprocess, "Popen", popen)
-    monkeypatch.setattr(server.sys, "executable", "/venv/bin/python")
-
-    assert server._start_processes([0, 1, 2]) == processes
-    assert commands == [
-        [
-            "/venv/bin/python",
-            "-m",
-            "gpu_memory_service",
-            "--device",
-            str(device),
-        ]
-        for device in range(3)
-    ]
-
-
-def test_supervisor_terminates_siblings_when_child_exits(monkeypatch):
-    processes = [_Process(1000, exit_code=17), _Process(1001)]
-
-    monkeypatch.setattr(server, "list_devices", lambda: [0, 1])
-    monkeypatch.setattr(server, "_start_processes", lambda _devices: processes)
-    monkeypatch.setattr(server.signal, "signal", lambda *_args: None)
-
-    with pytest.raises(SystemExit) as exc_info:
-        server.main()
-
-    assert exc_info.value.code == 17
+    assert server._supervise(processes) == 17
     assert processes[1].terminated
 
 
 def test_parse_args_defaults_to_one_config_per_production_tag(monkeypatch):
+    # get_socket_path queries the GPU UUID through NVML; stub the hardware.
     monkeypatch.setattr(
         cli_args,
         "get_socket_path",
@@ -105,27 +83,16 @@ def test_parse_args_defaults_to_one_config_per_production_tag(monkeypatch):
         parse_args(["--device", "3", "--socket-path", "/tmp/gms.sock"])
 
 
-def _config(tag: str, socket_path: str) -> Config:
-    return Config(
-        device=0,
-        tag=tag,
-        socket_path=socket_path,
-        alloc_retry_interval=0.5,
-        alloc_retry_timeout=60.0,
-        verbose=False,
-    )
-
-
 @pytest.mark.timeout(10)
 @pytest.mark.asyncio
-async def test_server_failure_cancels_other_listener(monkeypatch):
+async def test_server_failure_cancels_other_listener():
     both_started = asyncio.Event()
     started = 0
     sibling_cancelled = asyncio.Event()
 
     class FailingServer:
-        def __init__(self, socket_path: str, **_kwargs) -> None:
-            self.socket_path = socket_path
+        def __init__(self, fails: bool) -> None:
+            self.fails = fails
 
         async def serve(self) -> None:
             nonlocal started
@@ -133,7 +100,7 @@ async def test_server_failure_cancels_other_listener(monkeypatch):
             if started == 2:
                 both_started.set()
             await both_started.wait()
-            if self.socket_path == "weights":
+            if self.fails:
                 raise RuntimeError("listener failed")
             try:
                 await asyncio.Future()
@@ -141,10 +108,9 @@ async def test_server_failure_cancels_other_listener(monkeypatch):
                 sibling_cancelled.set()
                 raise
 
-    monkeypatch.setattr(runner, "GMSRPCServer", FailingServer)
-    configs = [_config(tag, tag) for tag in ("weights", "kv_cache")]
-
     with pytest.raises(RuntimeError, match="listener failed"):
-        await runner.serve_configs(configs)
+        await runner.run_servers(
+            [FailingServer(fails=True), FailingServer(fails=False)]
+        )
 
     assert sibling_cancelled.is_set()
