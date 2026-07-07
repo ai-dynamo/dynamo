@@ -927,7 +927,8 @@ func restoreSharedPreservedFlatVolumeMounts(dst, preserved *DynamoComponentDeplo
 	if !volumeMountsEqual(dst.VolumeMounts, visiblePreservedVolumeMountProjection(src, preserved.VolumeMounts)) {
 		return
 	}
-	dst.VolumeMounts = mergePreservedCompilationCacheVolumeMounts(preserved.VolumeMounts, dst.VolumeMounts)
+	restorablePreserved := restorablePreservedCompilationCacheMounts(src, preserved)
+	dst.VolumeMounts = mergePreservedCompilationCacheVolumeMounts(restorablePreserved, dst.VolumeMounts)
 }
 
 func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.CompilationCacheConfig, mounts []VolumeMount) bool {
@@ -935,11 +936,42 @@ func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.Compilation
 		if !mount.UseAsCompilationCache {
 			continue
 		}
-		return compilationCache != nil &&
-			compilationCache.PVCName == mount.Name &&
-			compilationCache.MountPath == mount.MountPoint
+		return compilationCacheMatchesVolumeMount(compilationCache, mount)
 	}
 	return compilationCache == nil
+}
+
+func compilationCacheMatchesVolumeMount(compilationCache *v1beta1.CompilationCacheConfig, mount VolumeMount) bool {
+	return compilationCache != nil &&
+		compilationCache.PVCName == mount.Name &&
+		compilationCache.MountPath == mount.MountPoint
+}
+
+func restorablePreservedCompilationCacheMounts(src *v1beta1.DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) []VolumeMount {
+	main, mainPresent := sharedMainContainer(src)
+	secondaryMountsProjected := mainPresent || hasPodTemplateContent(preserved, false)
+	firstCompilationCacheSeen := false
+	live := make([]VolumeMount, 0, len(preserved.VolumeMounts))
+	for _, mount := range preserved.VolumeMounts {
+		if !mount.UseAsCompilationCache {
+			continue
+		}
+		if !firstCompilationCacheSeen {
+			firstCompilationCacheSeen = true
+			if compilationCacheMatchesVolumeMount(src.CompilationCache, mount) {
+				live = append(live, mount)
+			}
+			continue
+		}
+		// Secondary cache flags have no beta field. When alpha content creates a
+		// beta main container, its matching mount is their observable
+		// representation and absence means deletion. Cache-only alpha objects do
+		// not create a pod template, so those flags remain sparse-preserved state.
+		if !secondaryMountsProjected || nativeVolumeMountHasNamePath(main.VolumeMounts, mount.Name, mount.MountPoint) {
+			live = append(live, mount)
+		}
+	}
+	return live
 }
 
 func visiblePreservedVolumeMountProjection(src *v1beta1.DynamoComponentDeploymentSharedSpec, mounts []VolumeMount) []VolumeMount {

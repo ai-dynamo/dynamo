@@ -18,6 +18,7 @@
 package v1alpha1
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -362,7 +363,94 @@ func TestBugDGD_ChangedCompilationCacheDoesNotRestoreStaleVolumeMounts(t *testin
 	}
 }
 
-func TestBugDGD_PodTemplateMountSurvivesMultipleCompilationCacheRestore(t *testing.T) {
+func TestBugDGD_DeletedSecondaryCompilationCacheDoesNotRestore(t *testing.T) {
+	in := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "secondary-cache-deleted", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					VolumeMounts: []VolumeMount{
+						{Name: "model-cache", MountPoint: "/models", UseAsCompilationCache: true},
+						{Name: "compile-cache", MountPoint: "/compile", UseAsCompilationCache: true},
+					},
+					ExtraPodSpec: &ExtraPodSpec{
+						PodSpec: &corev1.PodSpec{
+							Volumes: []corev1.Volume{{
+								Name: "config",
+								VolumeSource: corev1.VolumeSource{
+									ConfigMap: &corev1.ConfigMapVolumeSource{},
+								},
+							}},
+						},
+						MainContainer: &corev1.Container{
+							VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/config"}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := in.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if len(hub.Spec.Components) != 1 || hub.Spec.Components[0].PodTemplate == nil {
+		t.Fatalf("expected one hub component with a podTemplate, got %#v", hub.Spec.Components)
+	}
+	mainFound := false
+	secondaryCacheDeleted := false
+	for i := range hub.Spec.Components[0].PodTemplate.Spec.Containers {
+		main := &hub.Spec.Components[0].PodTemplate.Spec.Containers[i]
+		if main.Name != mainContainerName {
+			continue
+		}
+		mainFound = true
+		main.VolumeMounts = slices.DeleteFunc(main.VolumeMounts, func(mount corev1.VolumeMount) bool {
+			deleted := mount.Name == "compile-cache" && mount.MountPath == "/compile"
+			secondaryCacheDeleted = secondaryCacheDeleted || deleted
+			return deleted
+		})
+	}
+	if !mainFound || !secondaryCacheDeleted {
+		t.Fatalf("expected to delete compile-cache from the hub main container, got %#v", hub.Spec.Components[0].PodTemplate.Spec.Containers)
+	}
+
+	assertDeletedCacheAbsent := func(stage string, got *DynamoGraphDeployment) {
+		t.Helper()
+		service := got.Spec.Services["worker"]
+		if service == nil || service.ExtraPodSpec == nil || service.ExtraPodSpec.MainContainer == nil {
+			t.Fatalf("%s: expected worker with extra main container, got %#v", stage, service)
+		}
+		wantServiceMounts := []VolumeMount{{Name: "model-cache", MountPoint: "/models", UseAsCompilationCache: true}}
+		if diff := cmp.Diff(wantServiceMounts, service.VolumeMounts); diff != "" {
+			t.Fatalf("%s: deleted compilation cache was restored in service mounts (-want +got):\n%s", stage, diff)
+		}
+		wantExtraMounts := []corev1.VolumeMount{{Name: "config", MountPath: "/config"}}
+		if diff := cmp.Diff(wantExtraMounts, service.ExtraPodSpec.MainContainer.VolumeMounts); diff != "" {
+			t.Fatalf("%s: deleted compilation cache was restored in extra main-container mounts (-want +got):\n%s", stage, diff)
+		}
+	}
+
+	out := &DynamoGraphDeployment{}
+	if err := out.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	assertDeletedCacheAbsent("first round-trip", out)
+
+	hubAgain := &v1beta1.DynamoGraphDeployment{}
+	if err := out.ConvertTo(hubAgain); err != nil {
+		t.Fatalf("second ConvertTo() error = %v", err)
+	}
+	outAgain := &DynamoGraphDeployment{}
+	if err := outAgain.ConvertFrom(hubAgain); err != nil {
+		t.Fatalf("second ConvertFrom() error = %v", err)
+	}
+	assertDeletedCacheAbsent("second round-trip", outAgain)
+}
+
+func TestBugDGD_PodTemplateEditPreservesLiveMountsOnly(t *testing.T) {
 	in := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "multi-cache-edited-pod-template", Namespace: "ns"},
 		Spec: DynamoGraphDeploymentSpec{
@@ -397,7 +485,6 @@ func TestBugDGD_PodTemplateMountSurvivesMultipleCompilationCacheRestore(t *testi
 	}
 	want := []VolumeMount{
 		{Name: "model-cache", MountPoint: "/models", UseAsCompilationCache: true},
-		{Name: "compile-cache", MountPoint: "/compile", UseAsCompilationCache: true},
 		{Name: "runtime-cache", MountPoint: "/runtime"},
 	}
 	if diff := cmp.Diff(want, out.Spec.Services["worker"].VolumeMounts); diff != "" {
