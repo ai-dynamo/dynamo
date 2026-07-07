@@ -515,6 +515,16 @@ impl DisaggRuntime {
     /// planner via recurring `PlannerTick` events (one `on_tick` callback per tick).
     pub(in crate::replay) fn with_planner_hook(mut self, hook: Box<dyn PlannerHook>) -> Self {
         self.collect_fpm = true;
+        let prefill_dp_size = self.prefill_engine.dp_size();
+        for worker_id in self.prefill_engine.active_group_ids() {
+            self.prefill_fpm_buffer
+                .activate_worker(worker_id, prefill_dp_size, self.now_ms);
+        }
+        let decode_dp_size = self.decode_engine.dp_size();
+        for worker_id in self.decode_engine.active_group_ids() {
+            self.decode_fpm_buffer
+                .activate_worker(worker_id, decode_dp_size, self.now_ms);
+        }
         self.planner_hook = Some(hook);
         self
     }
@@ -1495,7 +1505,8 @@ impl DisaggRuntime {
                     if self.collect_fpm
                         && let Some(fpm) = payload.fpm
                     {
-                        self.prefill_fpm_buffer.insert(payload.worker_idx, fpm);
+                        self.prefill_fpm_buffer
+                            .insert(payload.worker_idx, fpm, self.now_ms);
                     }
                     self.process_prefill_pass(
                         payload.worker_idx,
@@ -1511,7 +1522,8 @@ impl DisaggRuntime {
                     if self.collect_fpm
                         && let Some(fpm) = payload.fpm
                     {
-                        self.decode_fpm_buffer.insert(payload.worker_idx, fpm);
+                        self.decode_fpm_buffer
+                            .insert(payload.worker_idx, fpm, self.now_ms);
                     }
                     self.process_decode_pass(
                         payload.output_signals,
@@ -1604,7 +1616,8 @@ impl DisaggRuntime {
             if self.collect_fpm
                 && let Some(fpm) = payload.fpm
             {
-                self.prefill_fpm_buffer.insert(payload.worker_idx, fpm);
+                self.prefill_fpm_buffer
+                    .insert(payload.worker_idx, fpm, self.now_ms);
             }
             self.process_prefill_pass(
                 payload.worker_idx,
@@ -1664,7 +1677,8 @@ impl DisaggRuntime {
             if self.collect_fpm
                 && let Some(fpm) = payload.fpm
             {
-                self.decode_fpm_buffer.insert(payload.worker_idx, fpm);
+                self.decode_fpm_buffer
+                    .insert(payload.worker_idx, fpm, self.now_ms);
             }
             self.process_decode_pass(
                 payload.output_signals,
@@ -1687,6 +1701,13 @@ impl DisaggRuntime {
             match stage {
                 SimulationWorkerStage::Prefill => {
                     if self.prefill_engine.mark_worker_ready(worker_id) {
+                        if self.collect_fpm {
+                            self.prefill_fpm_buffer.activate_worker(
+                                worker_id,
+                                self.prefill_engine.dp_size(),
+                                self.now_ms,
+                            );
+                        }
                         if let Some(router) = self.prefill_router.as_mut() {
                             router.add_worker(worker_id)?;
                             let effects = router.try_drain_pending(self.now_ms)?;
@@ -1698,6 +1719,13 @@ impl DisaggRuntime {
                 }
                 SimulationWorkerStage::Decode => {
                     if self.decode_engine.mark_worker_ready(worker_id) {
+                        if self.collect_fpm {
+                            self.decode_fpm_buffer.activate_worker(
+                                worker_id,
+                                self.decode_engine.dp_size(),
+                                self.now_ms,
+                            );
+                        }
                         if let Some(router) = self.decode_router.as_mut() {
                             router.add_worker(worker_id)?;
                             let effects = router.try_drain_pending(self.now_ms)?;
@@ -1825,6 +1853,16 @@ impl DisaggRuntime {
             }
             let active_prefill_ids = self.prefill_engine.active_group_ids();
             let active_decode_ids = self.decode_engine.active_group_ids();
+            self.prefill_fpm_buffer.emit_idle_due(
+                &active_prefill_ids,
+                self.prefill_engine.dp_size(),
+                self.now_ms,
+            );
+            self.decode_fpm_buffer.emit_idle_due(
+                &active_decode_ids,
+                self.decode_engine.dp_size(),
+                self.now_ms,
+            );
             let metrics = PlannerTickMetrics {
                 now_ms: self.now_ms,
                 prefill_fpm: self.prefill_fpm_buffer.take(),
@@ -1961,6 +1999,13 @@ impl DisaggRuntime {
                     );
                 }
                 None => {
+                    if self.collect_fpm {
+                        self.prefill_fpm_buffer.activate_worker(
+                            id,
+                            self.prefill_engine.dp_size(),
+                            self.now_ms,
+                        );
+                    }
                     if let Some(router) = self.prefill_router.as_mut() {
                         router.add_worker(id)?;
                     }
@@ -1997,6 +2042,13 @@ impl DisaggRuntime {
                     );
                 }
                 None => {
+                    if self.collect_fpm {
+                        self.decode_fpm_buffer.activate_worker(
+                            id,
+                            self.decode_engine.dp_size(),
+                            self.now_ms,
+                        );
+                    }
                     if let Some(router) = self.decode_router.as_mut() {
                         router.add_worker(id)?;
                     }

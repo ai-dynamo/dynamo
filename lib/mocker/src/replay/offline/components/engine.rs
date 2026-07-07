@@ -257,6 +257,10 @@ impl EngineComponent {
             .collect()
     }
 
+    pub(in crate::replay::offline) fn dp_size(&self) -> u32 {
+        self.args.dp_size.max(1)
+    }
+
     pub(in crate::replay::offline) fn rank_id(
         &self,
         worker_id: usize,

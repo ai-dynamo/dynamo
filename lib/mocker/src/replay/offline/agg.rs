@@ -247,6 +247,10 @@ impl AggRuntime {
     /// planner via recurring `PlannerTick` events (one `on_tick` callback per tick).
     pub(in crate::replay) fn with_planner_hook(mut self, hook: Box<dyn PlannerHook>) -> Self {
         self.collect_fpm = true;
+        for worker_id in self.engine.active_group_ids() {
+            self.fpm_buffer
+                .activate_worker(worker_id, self.dp_size, self.now_ms);
+        }
         self.planner_hook = Some(hook);
         self
     }
@@ -330,7 +334,7 @@ impl AggRuntime {
         })?;
         snapshot.worker_id = worker_id.to_string();
         snapshot.dp_rank = dp_rank;
-        self.fpm_buffer.insert(worker_id, snapshot);
+        self.fpm_buffer.insert(worker_id, snapshot, self.now_ms);
         Ok(())
     }
 
@@ -717,6 +721,10 @@ impl AggRuntime {
         while let Some((stage, worker_id)) = pop_ready_worker_ready(&mut self.events, self.now_ms) {
             debug_assert_eq!(stage, SimulationWorkerStage::Aggregated);
             if self.engine.mark_worker_ready(worker_id) {
+                if self.collect_fpm {
+                    self.fpm_buffer
+                        .activate_worker(worker_id, self.dp_size, self.now_ms);
+                }
                 if let Some(router) = self.router.as_mut() {
                     router.add_worker(worker_id)?;
                     // Drain any requests that were queued while all workers
@@ -798,6 +806,8 @@ impl AggRuntime {
                 continue;
             }
             let active_decode_ids = self.engine.active_group_ids();
+            self.fpm_buffer
+                .emit_idle_due(&active_decode_ids, self.dp_size, self.now_ms);
             let metrics = PlannerTickMetrics {
                 now_ms: self.now_ms,
                 prefill_fpm: Vec::new(),
@@ -905,6 +915,10 @@ impl AggRuntime {
                     );
                 }
                 None => {
+                    if self.collect_fpm {
+                        self.fpm_buffer
+                            .activate_worker(id, self.dp_size, self.now_ms);
+                    }
                     if let Some(router) = self.router.as_mut() {
                         router.add_worker(id)?;
                     }
@@ -1097,6 +1111,27 @@ mod tests {
     use crate::replay::{TraceRequestStatsSnapshot, normalize_trace_requests};
     use dynamo_kv_router::config::{KvRouterConfig, RouterQueuePolicy};
     use rstest::rstest;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct CaptureOnceHook {
+        at_ms: f64,
+        captured: Rc<RefCell<Option<PlannerTickMetrics>>>,
+    }
+
+    impl PlannerHook for CaptureOnceHook {
+        fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+            Ok(self.at_ms)
+        }
+
+        fn on_tick(
+            &mut self,
+            metrics: PlannerTickMetrics,
+        ) -> anyhow::Result<super::super::planner_hook::PlannerTickDecision> {
+            *self.captured.borrow_mut() = Some(metrics);
+            Ok(super::super::planner_hook::PlannerTickDecision::default())
+        }
+    }
 
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
         MockEngineArgs::builder()
@@ -1440,6 +1475,74 @@ mod tests {
 
         assert!(identities.contains(&(0, "0".to_string(), 0)));
         assert!(identities.contains(&(0, "0".to_string(), 1)));
+    }
+
+    #[test]
+    fn planner_tick_emits_idle_fpm_after_simulated_second() {
+        let mut args = sglang_replay_args();
+        args.dp_size = 2;
+        let pending = normalize_trace_requests(
+            vec![
+                DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(9_201)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+                DirectRequest {
+                    tokens: vec![2; 8],
+                    max_output_tokens: 1,
+                    uuid: Some(Uuid::from_u128(9_202)),
+                    arrival_timestamp_ms: Some(3_000.0),
+                    ..Default::default()
+                },
+            ],
+            1.0,
+        )
+        .unwrap();
+        let captured = Rc::new(RefCell::new(None));
+        let hook = CaptureOnceHook {
+            at_ms: 2_000.0,
+            captured: Rc::clone(&captured),
+        };
+
+        AggRuntime::new(
+            &args,
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_planner_hook(Box::new(hook))
+        .run()
+        .unwrap();
+
+        let metrics = captured
+            .borrow_mut()
+            .take()
+            .expect("planner tick must fire");
+        assert_eq!(metrics.now_ms, 2_000.0);
+        assert_eq!(metrics.decode_fpm.len(), 2);
+        assert!(metrics.decode_fpm.iter().all(|(worker_id, snapshot)| {
+            *worker_id == 0
+                && snapshot.wall_time_secs == 0.0
+                && snapshot.num_prefill_requests == 0
+                && snapshot.num_decode_requests == 0
+                && snapshot.num_queued_prefill == 0
+                && snapshot.num_queued_decode == 0
+        }));
+        assert_eq!(
+            metrics
+                .decode_fpm
+                .iter()
+                .map(|(_, snapshot)| snapshot.dp_rank)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 
     #[test]
