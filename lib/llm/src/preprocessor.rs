@@ -25,7 +25,7 @@ use anyhow::{Result, bail};
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionToolChoiceOption, CompletionTokensDetails, EncodingFormat,
 };
 use dynamo_renderer::OAIPromptFormatter;
 use dynamo_runtime::error::{DynamoError, ErrorType};
@@ -3093,6 +3093,61 @@ impl
             prompt_injected_reasoning,
             uses_tool_call_structural_tag,
         )?;
+
+        // Try to parse reasoning content only if parser is configured
+        let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
+            && !Self::is_reasoning_disabled_by_request(
+                self.runtime_config.reasoning_parser.as_deref(),
+                request.chat_template_args.as_ref(),
+            );
+
+        let transformed_stream: Pin<
+            Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+        > = if should_parse_reasoning {
+            let tokenizer = self.tokenizer.clone();
+            Box::pin(transformed_stream.scan(
+                0u32,
+                move |accumulated_reasoning_tokens, response| {
+                    let result = response.map_data(|mut data| {
+                        for choice in data.inner.choices.iter_mut() {
+                            if let Some(ref reasoning_content) = choice.delta.reasoning_content {
+                                if let Ok(encoding) = tokenizer.encode(reasoning_content) {
+                                    *accumulated_reasoning_tokens +=
+                                        encoding.token_ids().len() as u32;
+                                } else {
+                                    tracing::warn!("Failed to tokenize reasoning text");
+                                }
+                            }
+                        }
+
+                        if let Some(ref mut usage) = data.inner.usage
+                            && *accumulated_reasoning_tokens > 0
+                        {
+                            if let Some(ref mut completion_tokens_details) =
+                                usage.completion_tokens_details
+                            {
+                                completion_tokens_details.reasoning_tokens = Some(
+                                    completion_tokens_details.reasoning_tokens.unwrap_or(0)
+                                        + *accumulated_reasoning_tokens,
+                                );
+                            } else {
+                                usage.completion_tokens_details = Some(CompletionTokensDetails {
+                                    reasoning_tokens: Some(*accumulated_reasoning_tokens),
+                                    accepted_prediction_tokens: None,
+                                    audio_tokens: None,
+                                    rejected_prediction_tokens: None,
+                                });
+                            }
+                            *accumulated_reasoning_tokens = 0;
+                        }
+                        Ok(data)
+                    });
+                    std::future::ready(Some(result))
+                },
+            ))
+        } else {
+            Box::pin(transformed_stream)
+        };
 
         // Apply audit aggregation strategy.
         // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
