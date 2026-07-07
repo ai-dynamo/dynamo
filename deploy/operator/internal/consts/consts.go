@@ -96,6 +96,13 @@ const (
 	// on generated pod templates for debugging and admission.
 	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"
 
+	// SnapshotOwnerLabel is stamped by the checkpoint controller on the PodSnapshot and on the
+	// checkpoint Job's pod template, with the owning DynamoCheckpoint's name as the value. It is the
+	// stable lookup/search key for a checkpoint's PodSnapshot (decoupled from the object name, which
+	// may change in a future naming scheme) and lets the source-pod watch map a Job pod back to its
+	// DynamoCheckpoint. It follows the nvidia.com/snapshot-* label convention.
+	SnapshotOwnerLabel = "nvidia.com/snapshot-owner"
+
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
 

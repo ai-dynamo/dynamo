@@ -344,6 +344,17 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
+  - podsnapshots
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
   - dynamocheckpoints/finalizers
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
@@ -352,16 +363,6 @@ rules:
   - podsnapshots/finalizers
   verbs:
   - update
-- apiGroups:
-  - nvidia.com
-  resources:
-  - podsnapshots
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - nvidia.com
   resources:
