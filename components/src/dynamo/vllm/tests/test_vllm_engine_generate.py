@@ -135,7 +135,11 @@ def test_multimodal_cache_hit_prompt_preserves_hashes_and_placeholders():
         cache_salt="checkpoint-mm",
         features={
             "mm_hashes": {"image": ["hash-1"]},
-            "mm_placeholders": {"image": [{"offset": 1, "length": 1}]},
+            "mm_placeholders": {
+                "image": [
+                    {"offset": 1, "length": 1, "is_embed": [True]},
+                ]
+            },
             "kwargs_data": None,
         },
     )
@@ -144,8 +148,27 @@ def test_multimodal_cache_hit_prompt_preserves_hashes_and_placeholders():
     assert prompt["prompt_token_ids"] == [11, 22, 33]
     assert prompt["mm_hashes"] == {"image": ["hash-1"]}
     assert prompt["mm_placeholders"]["image"][0].offset == 1
+    assert prompt["mm_placeholders"]["image"][0].is_embed.tolist() == [True]
     assert prompt["mm_kwargs"]["image"] == [None]
     assert prompt["cache_salt"] == "checkpoint-mm"
+
+
+def test_multimodal_prompt_rejects_invalid_sparse_placeholder_mask():
+    request = _request(
+        {},
+        features={
+            "mm_hashes": {"audio": ["hash-1"]},
+            "mm_placeholders": {
+                "audio": [
+                    {"offset": 1, "length": 2, "is_embed": [True]},
+                ]
+            },
+            "kwargs_data": None,
+        },
+    )
+
+    with pytest.raises(ValueError, match="is_embed"):
+        _build_engine_generate_prompt(request)
 
 
 def test_priority_uses_envelope_for_generate_and_routing_for_legacy():
