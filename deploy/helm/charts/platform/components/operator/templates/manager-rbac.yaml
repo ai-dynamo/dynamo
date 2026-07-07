@@ -247,7 +247,10 @@ rules:
   - patch
   - update
   - watch
-{{- if or .Values.istioVirtualServiceEnabled (and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled) }}
+{{- $serviceMesh := .Values.dynamo.serviceMesh | default dict }}
+{{- $hasServiceMesh := and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh }}
+{{- $serviceMeshProviderIstio := and $hasServiceMesh (eq ($serviceMesh.provider | default "istio") "istio") }}
+{{- if or .Values.istioVirtualServiceEnabled $serviceMeshProviderIstio }}
 - apiGroups:
   - networking.istio.io
   resources:
