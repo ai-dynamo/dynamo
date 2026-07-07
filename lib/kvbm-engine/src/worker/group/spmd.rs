@@ -151,9 +151,7 @@ impl WorkerTransfers for SpmdParallelWorkers {
         let mut new_handles = Vec::new();
         let mut import_responses = Vec::new();
 
-        for (worker_idx, (worker, meta)) in
-            self.workers.iter().zip(metadata.into_iter()).enumerate()
-        {
+        for (worker_idx, (worker, meta)) in self.workers.iter().zip(metadata).enumerate() {
             // Unpack to extract logical type info
             let unpacked = meta.unpack()?;
 

@@ -398,6 +398,30 @@ pub mod llm {
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
 
+    /// Forward-pass-metrics trace configuration.
+    pub mod fpm_trace {
+        /// Master switch. Truthy values persist locally produced FPM events.
+        pub const DYN_FPM_TRACE: &str = "DYN_FPM_TRACE";
+
+        /// Local gzip JSONL segment prefix. A sanitized producer id is appended
+        /// before the segment index so multiple producers do not share files.
+        pub const DYN_FPM_OUTPUT_PATH: &str = "DYN_FPM_OUTPUT_PATH";
+
+        /// Capture mode: `sampled` (latest event per DP rank each interval) or
+        /// `full` (every event reaching the producer-side trace tap).
+        pub const DYN_FPM_MODE: &str = "DYN_FPM_MODE";
+
+        /// Sampling interval in milliseconds when `DYN_FPM_MODE=sampled`.
+        pub const DYN_FPM_SAMPLE_INTERVAL_MS: &str = "DYN_FPM_SAMPLE_INTERVAL_MS";
+
+        /// Rotating gzip JSONL threshold in uncompressed bytes.
+        pub const DYN_FPM_JSONL_GZ_ROLL_BYTES: &str = "DYN_FPM_JSONL_GZ_ROLL_BYTES";
+
+        /// Maximum number of gzip JSONL segments retained per producer,
+        /// including the active segment.
+        pub const DYN_FPM_MAX_SEGMENTS: &str = "DYN_FPM_MAX_SEGMENTS";
+    }
+
     /// Audit sink configuration
     pub mod audit {
         /// Audit sink selection. Comma-separated values: `stderr`, `nats`,

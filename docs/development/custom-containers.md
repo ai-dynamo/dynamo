@@ -58,7 +58,7 @@ ENTRYPOINT ["my-backend"]
 For a Rust custom backend, build the backend binary in your own builder stage and copy it into the Dynamo runtime image:
 
 ```Dockerfile
-FROM rust:1.93 AS backend-builder
+FROM rust:1.96.1 AS backend-builder
 WORKDIR /src
 COPY . .
 RUN cargo build --release

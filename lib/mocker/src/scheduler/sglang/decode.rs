@@ -276,11 +276,7 @@ pub(super) fn simulate_decode_step_with_sampler(
     let mut output_signals = Vec::with_capacity(sampled_bursts.iter().copied().sum::<usize>());
     let mut completed_indices = Vec::new();
 
-    for (idx, (req, burst)) in running
-        .iter_mut()
-        .zip(sampled_bursts.into_iter())
-        .enumerate()
-    {
+    for (idx, (req, burst)) in running.iter_mut().zip(sampled_bursts).enumerate() {
         for _ in 0..burst {
             let crossing_page_boundary = req.current_sequence_len() + 1 > req.allocated_tokens;
             let last_idx = req.kv_indices.last().copied();

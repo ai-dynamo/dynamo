@@ -153,6 +153,7 @@ impl JsonlGzipAuditSink {
                 flush_interval: Duration::from_millis(policy.jsonl_flush_interval_ms.max(1)),
                 roll_uncompressed_bytes: policy.jsonl_gz_roll_bytes,
                 roll_lines: policy.jsonl_gz_roll_lines,
+                max_segments: None,
             },
         )
         .await
@@ -309,6 +310,7 @@ mod tests {
                 flush_interval: Duration::from_secs(60),
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: None,
+                max_segments: None,
             },
         )
         .await

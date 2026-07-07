@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated agent serving with session radix tagging, KV event tracking,
+# Aggregated agent serving with priority-based radix eviction, KV event tracking,
 # and reasoning/tool-call parsing.
 # GPUs: 2 (default model uses --tp 2)
 
@@ -64,7 +64,7 @@ python3 -m dynamo.frontend \
   --router-reset-states \
   --enable-anthropic-api &
 
-# Session-aware radix ownership is built into SGLang 0.5.14+.
+# Use priority-based radix eviction for agent requests.
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \

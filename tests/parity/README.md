@@ -16,7 +16,7 @@ See `conformance/README.md` in frontend-crates for the full layout. Quick refere
 
 ## Running the conformance tests (from a frontend-crates checkout)
 
-Use the repo's pinned toolchain (Rust 1.93.1 via rustup):
+Use the repo's pinned toolchain (Rust 1.96.1 via rustup):
 
 ```bash
 # v1 batch tool-calling parity, all families:

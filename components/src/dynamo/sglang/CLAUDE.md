@@ -313,10 +313,11 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   Always slice with an offset, don't assume per-chunk logprobs.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
-- **Session radix cache**: SGLang 0.5.14+ provides session-aware radix ownership
-  without an opt-in flag. The handler passes `agent_context.session_id` to SGLang
-  as `session_params.id`. Agent KV hints are forwarded as metadata but are not
-  acted on by the SGLang backend. This path does not create router affinity.
+- **Session identity**: SGLang 0.5.14 does not support passive session-aware radix
+  ownership. Do not pass `agent_context.session_id` as `session_params.id`;
+  SGLang treats that field as an explicit session lifecycle and rejects IDs that
+  were not created through `open_session`. Session headers remain available for
+  tracing and router affinity.
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.

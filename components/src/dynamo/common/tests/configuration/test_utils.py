@@ -39,7 +39,7 @@ class TestEnvOrDefault:
 
     def test_bool_conversion_true(self, monkeypatch):
         """Test bool conversion for true values."""
-        test_cases = ["true", "True", "1", "yes", "YES", "on", "ON"]
+        test_cases = ["true", "True", "1", "yes", "YES", "on", "ON", " true "]
 
         for value in test_cases:
             monkeypatch.setenv("TEST_BOOL", value)
@@ -48,7 +48,7 @@ class TestEnvOrDefault:
 
     def test_bool_conversion_false(self, monkeypatch):
         """Test bool conversion for false values."""
-        test_cases = ["false", "False", "0", "no", "NO", "off", "OFF"]
+        test_cases = ["false", "False", "0", "no", "NO", "off", "OFF", " off "]
 
         for value in test_cases:
             monkeypatch.setenv("TEST_BOOL", value)

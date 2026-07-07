@@ -114,25 +114,24 @@ impl SingleRuntime {
     fn enqueue_trace_arrivals(&mut self) {
         let mut ready_requests = Vec::new();
         match &mut self.admission {
-            AdmissionSource::Requests(pending) => loop {
-                let Some(next_arrival_ms) = pending
+            AdmissionSource::Requests(pending) => {
+                while let Some(next_arrival_ms) = pending
                     .front()
                     .and_then(|request| request.arrival_timestamp_ms)
-                else {
-                    break;
-                };
-                if next_arrival_ms > self.current_time_ms {
-                    break;
-                }
+                {
+                    if next_arrival_ms > self.current_time_ms {
+                        break;
+                    }
 
-                let request = pending
-                    .pop_front()
-                    .expect("front request must exist when arrival is available");
-                let arrival_ms = request
-                    .arrival_timestamp_ms
-                    .expect("trace replay requests must have an arrival timestamp");
-                ready_requests.push((request, arrival_ms));
-            },
+                    let request = pending
+                        .pop_front()
+                        .expect("front request must exist when arrival is available");
+                    let arrival_ms = request
+                        .arrival_timestamp_ms
+                        .expect("trace replay requests must have an arrival timestamp");
+                    ready_requests.push((request, arrival_ms));
+                }
+            }
             AdmissionSource::Workload(driver) => {
                 ready_requests.extend(
                     driver
@@ -356,13 +355,10 @@ mod tests {
         collector: &mut TraceCollector,
         current_time_ms: f64,
     ) {
-        loop {
-            let Some(next_arrival_ms) = pending
-                .front()
-                .and_then(|request| request.arrival_timestamp_ms)
-            else {
-                break;
-            };
+        while let Some(next_arrival_ms) = pending
+            .front()
+            .and_then(|request| request.arrival_timestamp_ms)
+        {
             if next_arrival_ms > current_time_ms {
                 break;
             }

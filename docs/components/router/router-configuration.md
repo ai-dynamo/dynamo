@@ -111,43 +111,36 @@ a value from `1` through `31536000` to enable it, then send
 `X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
 without the TTL option provides session identity but does not enable router affinity.
 
-The first affinity request creates one immutable binding from the session ID to a
-worker and, when available, a data-parallel rank. The binding is scoped to the
-existing endpoint and phase, so disaggregated prefill and decode routes remain
-separate. Later requests exact-dispatch to that target without transport fallback.
-An existing local or shared binding takes precedence over explicit routing headers;
-those headers are proposals only while the claim is absent. Direct mode therefore
-requires an explicit target for a new binding, but an existing binding supplies the
-target for later requests. Query-only requests remain read-only and do not create or
-close claims.
+The first successfully dispatched request binds the session ID to its selected
+worker and, when available, data-parallel rank. Later requests exact-dispatch to
+that target without transport fallback. Concurrent requests can share a binding.
+Active requests prevent expiry. When a request lease ends after EOF, early drop,
+error, or cancellation, the idle timer restarts. A missing bound worker or a
+non-cancellation selection, setup, dispatch, or target-validation failure invalidates
+the binding.
 
-With etcd or FileStore on a filesystem shared by all replicas, frontends coordinate
-through an immutable distributed claim. The existing-session hot path reads only the
-process-local cache. A cache miss reads shared storage first and attempts an atomic
-insertion only when the claim is absent. Racing frontends all cache and dispatch to
-the stored winner. Storage errors fail the request before scheduler bookkeeping or
-dispatch. MemoryStore coordinates only callers sharing the same process and store.
-Kubernetes discovery does not provide cross-process affinity and keeps process-local
-behavior.
+The configured value is the idle timeout. It is independent of
+`--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
+option to keep affinity disabled.
 
-For distributed backends, `--router-session-affinity-ttl-secs` controls only
-process-local cache eviction. A cache miss after local eviction reloads the immutable
-claim. The claim itself follows the creating frontend's existing etcd lease or
-FileStore ownership lifetime; it is not a global idle-session timeout. Delete events
-eventually invalidate other frontend caches. Watch lag, disconnect, or restart clears
-the entire local affinity cache, and later requests reload claims on demand.
+If the bound worker disappears, Dynamo invalidates the binding so a subsequent
+selection can bind an available worker. Router restart clears all bindings. Bindings
+are not shared between frontend replicas. In a multi-frontend deployment, configure
+the ingress or load balancer to consistently route a session to one frontend. Hash
+the raw session header received at ingress, not Dynamo's normalized internal
+`session_id`: canonical clients send `X-Dynamo-Session-ID`, while agent-native
+clients use the corresponding header listed in [Session IDs](../../agents/session-ids.md).
+Agent-native identity is normalized only after the request reaches the frontend.
 
-`X-Dynamo-Session-Final: true` marks a terminal request. Dynamo routes that request
-normally, then evicts the closing frontend's cache entry and idempotently deletes the
-shared claim. Other replicas observe the delete eventually. Close must not race active
-requests, and callers must not use that session ID again. The same no-reuse rule
-applies after claim expiry. If the bound worker disappears while the claim exists,
-exact dispatch fails; start a new session with a new session ID.
+Direct mode still requires the phase-appropriate explicit worker ID on every
+affinity request. The stored binding validates that target but does not supply a
+missing ID. In disaggregated serving, prefill and decode use separate phase-local
+bindings. If no prefill router is active, only the decode or aggregated binding is
+created.
 
-Global idle-session TTL, rebinding, dead-worker replacement, compare-and-swap updates,
-fencing, generations, broader `WorkerSet` affinity, and backend-tokenized path
-expansion are outside this contract. The setting remains independent of
-`--router-ttl-secs` and `--router-predicted-ttl-secs`; omit it to disable affinity.
+Session affinity does not create a backend session or send lifecycle RPCs. There is
+no explicit unbind; idle expiry removes only router-local state. The same session
+ID is available to tracing and other explicitly configured consumers.
 
 ### AIC Prefill Load Model
 

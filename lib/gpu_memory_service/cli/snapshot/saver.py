@@ -16,7 +16,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from gpu_memory_service.common.cuda_utils import list_devices
+from gpu_memory_service.common import cuda_utils
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
     device_sharded_ssd_roots,
@@ -55,6 +55,9 @@ def _save_device(
         ",".join(shard_roots) or "-",
     )
     t0 = time.monotonic()
+    # This runs on a ThreadPoolExecutor thread; bind its CUDA device before
+    # any device work, mirroring the loader's _load_device.
+    cuda_utils.cuda_runtime_set_device(device)
     GMSStorageClient(
         output_dir,
         socket_path=get_socket_path(device),
@@ -119,7 +122,7 @@ def main(argv: list[str] | None = None) -> None:
     shard_size_bytes = args.shard_size_bytes
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
 
-    devices = list_devices()
+    devices = cuda_utils.list_devices()
     logger.info(
         "Starting GMS save for %d devices lock_timeout_ms=%d sharded_ssd_roots=%s",
         len(devices),

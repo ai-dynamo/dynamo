@@ -198,6 +198,13 @@ impl ModelManager {
         self.cards.iter().map(|r| r.value().clone()).collect()
     }
 
+    /// Return owned discovery instance keys for the locally recorded cards.
+    /// Reconciliation must not hold DashMap guards while it performs
+    /// asynchronous cleanup.
+    pub fn get_model_card_keys(&self) -> Vec<String> {
+        self.cards.iter().map(|r| r.key().clone()).collect()
+    }
+
     /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
     /// deleted.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {

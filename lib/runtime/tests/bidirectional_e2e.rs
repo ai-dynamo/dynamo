@@ -25,7 +25,10 @@ use dynamo_runtime::{
     protocols::maybe_error::MaybeError,
 };
 
-use dynamo_runtime::pipeline::network::egress::push_router::{PushRouter, RouterMode};
+use dynamo_runtime::pipeline::network::{
+    RequestPlanePayloadCodec,
+    egress::push_router::{PushRouter, RouterMode},
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct EchoResponse {
@@ -70,6 +73,16 @@ impl AsyncEngine<ManyIn<u64>, ManyOut<EchoResponse>, Error> for EchoEngine {
 
 #[tokio::test]
 async fn bidirectional_end_to_end_echo() {
+    // This integration test is a standalone process, so clear any inherited
+    // override before the request-plane codec cache is initialized.
+    unsafe {
+        std::env::remove_var("DYN_REQUEST_PLANE_CODEC");
+    }
+    assert_eq!(
+        RequestPlanePayloadCodec::configured(),
+        RequestPlanePayloadCodec::Msgpack
+    );
+
     let rt = Runtime::from_current().unwrap();
     let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
         .await

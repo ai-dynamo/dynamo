@@ -149,7 +149,10 @@ class SglangLLMEngine(LLMEngine):
     async def from_args(
         cls, argv: list[str] | None = None
     ) -> tuple[SglangLLMEngine, WorkerConfig]:
-        config = await parse_args(argv if argv is not None else sys.argv[1:])
+        config = await parse_args(
+            argv if argv is not None else sys.argv[1:],
+            fpm_trace_relay_supported=False,
+        )
         server_args = config.server_args
         dynamo_args = config.dynamo_args
 
@@ -509,6 +512,11 @@ class SglangLLMEngine(LLMEngine):
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
+                    "prompt_tokens_details": (
+                        {"cached_tokens": meta_info["cached_tokens"]}
+                        if meta_info.get("cached_tokens") is not None
+                        else None
+                    ),
                 }
                 prompt_payload = (
                     _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(meta_info)

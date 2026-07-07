@@ -155,7 +155,7 @@ impl DeltaAggregator {
             .map(dynamo_protocols::types::Choice::from)
             .collect();
 
-        choices.sort_by(|a, b| a.index.cmp(&b.index));
+        choices.sort_by_key(|a| a.index);
 
         let inner = dynamo_protocols::types::CreateCompletionResponse {
             id: aggregator.id,
@@ -438,7 +438,7 @@ mod tests {
 
         // Verify the response fields
         assert_eq!(response.inner.choices.len(), 2);
-        response.inner.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
+        response.inner.choices.sort_by_key(|a| a.index); // Ensure the choices are ordered
         let choice0 = &response.inner.choices[0];
         assert_eq!(choice0.index, 0);
         assert_eq!(choice0.text, "Choice 0".to_string());

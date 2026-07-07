@@ -201,8 +201,11 @@ def process_directory(dir_path: Path, recursive: bool = True) -> int:
     Returns:
         Number of files processed
     """
-    pattern = "**/*.md" if recursive else "*.md"
-    files = list(dir_path.glob(pattern))
+    files = [
+        f
+        for pattern in (("**/*.md", "**/*.mdx") if recursive else ("*.md", "*.mdx"))
+        for f in dir_path.glob(pattern)
+    ]
     count = 0
 
     for file_path in files:
@@ -368,9 +371,9 @@ def run_tests():
         "<Note>\nLine one.\nLine two.\n</Note>\n\nAfter.\n",
     )
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"Results: {passed} passed, {failed} failed")
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")
 
     return failed == 0
 

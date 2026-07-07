@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Standalone Selection Service
 subtitle: Select workers and account for reservations without forwarding inference requests
@@ -38,6 +38,24 @@ Launch the service from the repository root:
 
 The service binds to `0.0.0.0` and does not provide authentication. Run it on a
 trusted internal network or place it behind an appropriate network policy.
+
+## Embedded Rust API
+
+Use `SelectionServiceBuilder` to embed selection without the HTTP server. The
+resulting `SelectionService` owns worker registration, KV-event listeners,
+indexer recovery, replica synchronization, and shutdown. It exposes the same
+worker, selection, bookkeeping, inspection, peer-membership, and recovery
+operations as the standalone HTTP service.
+
+`SelectionCore::new_local` creates an intentionally unsynchronized core for
+tests and local-only use. Production integrations should use
+`SelectionServiceBuilder` so startup recovery, readiness, and background-task
+lifecycle remain consistent with the standalone service.
+
+The C and Go bindings do not currently expose `SelectionService`. An EPP
+integration requires separate FFI lifecycle, error-mapping, worker, and peer
+APIs. Those bindings should wrap `SelectionService` rather than construct
+`SelectionCore` directly.
 
 ### CLI
 

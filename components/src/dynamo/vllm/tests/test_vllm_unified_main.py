@@ -31,7 +31,7 @@ def test_main_routes_headless_to_run_dynamo_headless():
     ):
         unified_main.main()
 
-    parse_args.assert_called_once()
+    parse_args.assert_called_once_with(fpm_trace_relay_supported=False)
     run_headless.assert_called_once_with(config)
     run.assert_not_called()
 
@@ -47,7 +47,7 @@ async def test_main_routes_normal_node_to_run():
     ):
         unified_main.main()
 
-    parse_args.assert_called_once()
+    parse_args.assert_called_once_with(fpm_trace_relay_supported=False)
     run_headless.assert_not_called()
     run.assert_called_once()
     assert run.call_args.args == (unified_main.VllmLLMEngine,)
@@ -74,6 +74,8 @@ async def test_from_args_rejects_headless_reaching_engine_path():
         headless=True,
         disaggregation_mode=DisaggregationMode.AGGREGATED,
     )
-    with patch("dynamo.vllm.llm_engine.parse_args", return_value=config):
+    with patch("dynamo.vllm.llm_engine.parse_args", return_value=config) as parse_args:
         with pytest.raises(NotImplementedError, match="headless"):
             await VllmLLMEngine.from_args([])
+
+    parse_args.assert_called_once_with([], fpm_trace_relay_supported=False)

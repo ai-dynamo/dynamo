@@ -34,18 +34,31 @@ def _make_provider(
     return provider, subscriber
 
 
-def _card(block_size: Optional[int], total_blocks: Optional[int]) -> str:
+def _card(
+    block_size: Optional[int],
+    total_blocks: Optional[int],
+    host_total_tokens: Optional[int] = None,
+) -> str:
     body: dict = {}
     if block_size is not None:
         body["kv_cache_block_size"] = block_size
     if total_blocks is not None:
         body["runtime_config"] = {"total_kv_blocks": total_blocks}
+    if host_total_tokens is not None:
+        body.setdefault("runtime_config", {}).setdefault("runtime_data", {})[
+            "sglang_hicache_capacity"
+        ] = {"host_total_tokens": host_total_tokens}
     return json.dumps(body)
 
 
 def test_snapshot_extracts_kv_pool_tokens():
     provider, _ = _make_provider({"1": _card(16, 1000), "2": _card(8, 2000)})
     assert provider.snapshot() == {1: 16_000, 2: 16_000}
+
+
+def test_snapshot_adds_hicache_host_tokens_to_retention_budget():
+    provider, _ = _make_provider({"1": _card(16, 1_000, host_total_tokens=300)})
+    assert provider.snapshot() == {1: 16_300}
 
 
 def test_snapshot_skips_malformed_cards():

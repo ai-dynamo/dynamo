@@ -12,13 +12,12 @@ use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
 
 use crate::protocols::WorkerId;
-use crate::services::common::replica_sync::{PeerManager, setup_replica_sync};
-use crate::services::common::replica_sync_http;
+use crate::services::common::replica_sync::ReplicaPeerError;
 
-use super::core::{SelectionCore, SelectionServiceConfig};
+use super::core::SelectionServiceConfig;
+use super::service::SelectionService;
 use super::types::{
     OutputBlockRequest, OverlapScoresRequest, PotentialLoadsRequest, REQUEST_BODY_LIMIT_BYTES,
     ReservationRequest, SelectAndReserveRequest, SelectRequest, WorkerPatchRequest, WorkerRequest,
@@ -31,7 +30,12 @@ struct FilterQuery {
 }
 
 pub struct AppState {
-    pub core: Arc<SelectionCore>,
+    pub service: Arc<SelectionService>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerRequest {
+    endpoint: String,
 }
 
 async fn create_worker(
@@ -42,7 +46,7 @@ async fn create_worker(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    match state.core.upsert_worker(req).await {
+    match state.service.upsert_worker(req).await {
         Ok(worker) => (StatusCode::CREATED, Json(worker)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -57,7 +61,7 @@ async fn patch_worker(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    match state.core.patch_worker(worker_id, req).await {
+    match state.service.patch_worker(worker_id, req).await {
         Ok(worker) => Json(worker).into_response(),
         Err(error) => error.into_response(),
     }
@@ -67,7 +71,7 @@ async fn delete_worker(
     State(state): State<Arc<AppState>>,
     Path(worker_id): Path<WorkerId>,
 ) -> Response {
-    match state.core.delete_worker(worker_id).await {
+    match state.service.delete_worker(worker_id).await {
         Ok(worker) => Json(worker).into_response(),
         Err(error) => error.into_response(),
     }
@@ -79,7 +83,7 @@ async fn list_workers(
 ) -> Response {
     Json(
         state
-            .core
+            .service
             .list_workers(params.model_name.as_deref(), params.tenant_id.as_deref()),
     )
     .into_response()
@@ -95,7 +99,7 @@ async fn select(
         Err(error) => return json_rejection(error),
     };
     match state
-        .core
+        .service
         .select_with_policy_class(req, policy_class_from_headers(&headers))
         .await
     {
@@ -114,7 +118,7 @@ async fn select_and_reserve(
         Err(error) => return json_rejection(error),
     };
     match state
-        .core
+        .service
         .select_and_reserve_with_policy_class(req, policy_class_from_headers(&headers))
         .await
     {
@@ -131,7 +135,7 @@ async fn create_reservation(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    match state.core.create_reservation(req).await {
+    match state.service.create_reservation(req).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(error) => error.into_response(),
     }
@@ -141,7 +145,7 @@ async fn prefill_complete(
     State(state): State<Arc<AppState>>,
     Path(reservation_id): Path<String>,
 ) -> Response {
-    match state.core.prefill_complete(&reservation_id).await {
+    match state.service.prefill_complete(&reservation_id).await {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => error.into_response(),
     }
@@ -151,7 +155,7 @@ async fn delete_reservation(
     State(state): State<Arc<AppState>>,
     Path(reservation_id): Path<String>,
 ) -> Response {
-    match state.core.free_reservation(&reservation_id).await {
+    match state.service.free_reservation(&reservation_id).await {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => error.into_response(),
     }
@@ -167,7 +171,7 @@ async fn add_output_block(
         Err(error) => return json_rejection(error),
     };
     match state
-        .core
+        .service
         .add_output_block(&reservation_id, req.decay_fraction)
     {
         Ok(()) => json_ok(StatusCode::OK),
@@ -180,7 +184,7 @@ async fn health() -> Response {
 }
 
 async fn ready(State(state): State<Arc<AppState>>) -> Response {
-    let response = state.core.ready();
+    let response = state.service.ready();
     if response.ready {
         Json(response).into_response()
     } else {
@@ -191,7 +195,7 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 async fn loads(State(state): State<Arc<AppState>>, Query(params): Query<FilterQuery>) -> Response {
     Json(
         state
-            .core
+            .service
             .loads(params.model_name.as_deref(), params.tenant_id.as_deref()),
     )
     .into_response()
@@ -205,7 +209,7 @@ async fn potential_loads(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    match state.core.potential_loads(req).await {
+    match state.service.potential_loads(req).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_response(),
     }
@@ -219,14 +223,48 @@ async fn overlap_scores(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    match state.core.overlap_scores(req).await {
+    match state.service.overlap_scores(req).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_response(),
     }
 }
 
 async fn dump_events(State(state): State<Arc<AppState>>) -> Response {
-    Json(state.core.dump_indexer_events().await).into_response()
+    Json(state.service.indexer_snapshot().await).into_response()
+}
+
+async fn register_peer(
+    State(state): State<Arc<AppState>>,
+    payload: Result<Json<PeerRequest>, JsonRejection>,
+) -> Response {
+    let Json(req) = match payload {
+        Ok(payload) => payload,
+        Err(error) => return json_rejection(error),
+    };
+    match state.service.register_replica_peer(req.endpoint).await {
+        Ok(true) => json_ok(StatusCode::CREATED),
+        Ok(false) => json_ok(StatusCode::OK),
+        Err(error) => replica_peer_error(error),
+    }
+}
+
+async fn deregister_peer(
+    State(state): State<Arc<AppState>>,
+    payload: Result<Json<PeerRequest>, JsonRejection>,
+) -> Response {
+    let Json(req) = match payload {
+        Ok(payload) => payload,
+        Err(error) => return json_rejection(error),
+    };
+    match state.service.deregister_replica_peer(req.endpoint).await {
+        Ok(true) => json_ok(StatusCode::OK),
+        Ok(false) => json_error(StatusCode::NOT_FOUND, "peer not found"),
+        Err(error) => replica_peer_error(error),
+    }
+}
+
+async fn list_peers(State(state): State<Arc<AppState>>) -> Response {
+    Json(state.service.list_replica_peers()).into_response()
 }
 
 async fn not_found() -> Response {
@@ -253,6 +291,15 @@ fn json_rejection(error: JsonRejection) -> Response {
     json_error(error.status(), error.body_text())
 }
 
+fn replica_peer_error(error: ReplicaPeerError) -> Response {
+    let status = match &error {
+        ReplicaPeerError::InvalidEndpoint(_) => StatusCode::BAD_REQUEST,
+        ReplicaPeerError::Disabled => StatusCode::CONFLICT,
+        ReplicaPeerError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    json_error(status, error)
+}
+
 fn policy_class_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-dynamo-meta-policy-class")
@@ -262,7 +309,7 @@ fn policy_class_from_headers(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn create_router(state: Arc<AppState>, peer_manager: Option<PeerManager>) -> Router {
+pub(crate) fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/select", post(select))
         .route("/select_and_reserve", post(select_and_reserve))
@@ -287,74 +334,40 @@ pub(crate) fn create_router(state: Arc<AppState>, peer_manager: Option<PeerManag
         .route("/potential_loads", post(potential_loads))
         .route("/overlap_scores", post(overlap_scores))
         .route("/dump", get(dump_events))
+        .route("/replica_sync/register_peer", post(register_peer))
+        .route("/replica_sync/deregister_peer", post(deregister_peer))
+        .route("/replica_sync/peers", get(list_peers))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(axum::extract::DefaultBodyLimit::max(
             REQUEST_BODY_LIMIT_BYTES,
         ))
         .with_state(state)
-        .merge(replica_sync_http::router(peer_manager))
 }
 
 pub async fn run_server(config: SelectionServiceConfig) -> anyhow::Result<()> {
-    let cancel_token = CancellationToken::new();
-    let shutdown_token = cancel_token.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("received shutdown signal");
-        shutdown_token.cancel();
-    });
-
-    let replica_runtime = setup_replica_sync(
-        config.replica_sync_port,
-        &config.replica_sync_peers,
-        cancel_token.child_token(),
-    )?;
-
     tracing::info!(
         port = config.port,
         threads = config.threads,
         indexer_peers = config.indexer_peers.len(),
-        replica_sync = replica_runtime.is_some(),
+        replica_sync = config.replica_sync_port.is_some(),
         "Starting Dynamo selection service"
     );
 
-    let core = Arc::new(SelectionCore::new_for_server(
-        config.kv_router_config,
-        config.threads,
-        cancel_token.clone(),
-        replica_runtime,
-    ));
-    if !config.indexer_peers.is_empty() {
-        match core.recover_indexer_from_peers(&config.indexer_peers).await {
-            Ok(true) => tracing::info!("Selection indexer recovery completed"),
-            Ok(false) => {
-                tracing::warn!("No reachable selection indexer peers; starting with empty state")
-            }
-            Err(error) => {
-                tracing::warn!(%error, "Selection indexer recovery failed; starting with empty state")
-            }
-        }
-    }
-    core.signal_indexer_ready();
-
-    let peer_manager = if config.replica_sync_port.is_some() {
-        let dispatch_core = Arc::clone(&core);
-        Some(PeerManager::start(
-            config.replica_sync_peers,
-            cancel_token.child_token(),
-            move |event| dispatch_core.dispatch_replica_event(event),
-        )?)
-    } else {
-        None
-    };
-
-    let app = create_router(Arc::new(AppState { core }), peer_manager);
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
-    axum::serve(listener, app)
+    let service = Arc::new(config.service_builder().build().await?);
+    let app = create_router(Arc::new(AppState {
+        service: Arc::clone(&service),
+    }));
+    let shutdown_service = Arc::clone(&service);
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            cancel_token.cancelled().await;
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("received shutdown signal");
+            shutdown_service.shutdown().await;
         })
-        .await?;
+        .await;
+    service.shutdown().await;
+    result?;
     Ok(())
 }

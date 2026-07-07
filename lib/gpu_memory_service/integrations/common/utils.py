@@ -11,7 +11,10 @@ from typing import TYPE_CHECKING
 
 import torch
 from gpu_memory_service.client.torch.allocator import prune_allocations
-from gpu_memory_service.client.torch.module import register_module_tensors
+from gpu_memory_service.client.torch.module import (
+    rebind_nonparameter_tensors,
+    register_module_tensors,
+)
 from gpu_memory_service.common.locks import RequestedLockType
 
 if TYPE_CHECKING:
@@ -82,6 +85,13 @@ def finalize_gms_write(
     """Finalize GMS write mode: register tensors, commit, reconnect in read mode.
 
     Flow: register tensors -> sync -> unmap + commit -> connect(RO) -> remap
+    -> rebind non-parameter tensors to private clones
+
+    The rebind mirrors the importer binding semantics from
+    ``materialize_module_from_gms``: after publish, the read-only GMS
+    mapping backs parameters only, while buffers and tensor attributes that
+    may be written later (fp8 KV scale re-initialization on wake,
+    quantization range updates) live in ordinary CUDA memory.
 
     Args:
         allocator: The GMS client memory manager in write mode.
@@ -110,13 +120,17 @@ def finalize_gms_write(
     allocator.connect(RequestedLockType.RO)
     allocator.remap_all_vas()
 
+    rebound_bytes = rebind_nonparameter_tensors(allocator, model)
+
     logger.info(
         "[GMS] Committed %.2f GiB, switched to read mode with %d mappings "
-        "(pruned %d allocations / %.2f GiB before commit)",
+        "(pruned %d allocations / %.2f GiB before commit; rebound %.2f MiB "
+        "of non-parameter tensors to private memory)",
         total_bytes / (1 << 30),
         len(allocator.mappings),
         pruned_count,
         pruned_bytes / (1 << 30),
+        rebound_bytes / (1 << 20),
     )
 
     return GMSCommittedMemoryStats(

@@ -6,8 +6,6 @@ sidebar-title: Building from Source
 description: Build Dynamo from source for development and contributions
 ---
 
-[简体中文](./building-from-source.zh-CN.md)
-
 Build Dynamo from source when you want to contribute code, test features on the development branch, or customize the build. If you just want to run Dynamo, the [Local Installation](local-installation.md) guide is faster.
 
 This guide covers Ubuntu and macOS. For a containerized dev environment that handles all of this automatically, see [DevContainer](#devcontainer).

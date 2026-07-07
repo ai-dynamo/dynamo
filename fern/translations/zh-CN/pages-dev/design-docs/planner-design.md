@@ -4,11 +4,7 @@
 title: Planner 设计
 ---
 
-<p align="left">
-  <a href="./planner-design.md" hreflang="en">English</a> | <strong>简体中文</strong>
-</p>
-
-> 面向贡献者和架构设计者的 **Tier 3 设计文档**。面向用户的文档请参阅 [Planner 指南](../components/planner/planner-guide.zh-CN.md)。
+> 面向贡献者和架构设计者的 **Tier 3 设计文档**。面向用户的文档请参阅 [Planner 指南](../components/planner/planner-guide.md)。
 
 ## 概览
 

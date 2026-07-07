@@ -158,7 +158,7 @@ impl Discovery for MockDiscovery {
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let instance = spec.with_instance_id(self.instance_id);
+        let instance = spec.into_instance(self.instance_id);
 
         self.registry
             .instances

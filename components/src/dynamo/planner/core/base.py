@@ -642,6 +642,13 @@ class NativePlannerBase:
         )
         m.accept_length = self._collect_accept_length(interval_str)
 
+        normalized_idle_metrics = m.normalize_idle_nans()
+        if normalized_idle_metrics:
+            logger.info(
+                "Zero traffic observed; treating undefined averages as 0: %s",
+                ", ".join(normalized_idle_metrics),
+            )
+
         hit_rate_str = f"{m.kv_hit_rate:.3f}" if m.kv_hit_rate is not None else "n/a"
         accept_length_str = (
             f"{m.accept_length:.3f}" if m.accept_length is not None else "n/a"

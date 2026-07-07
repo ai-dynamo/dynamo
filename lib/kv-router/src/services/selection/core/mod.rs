@@ -101,7 +101,9 @@ pub struct SelectionCore {
 }
 
 impl SelectionCore {
-    pub fn new(
+    /// Create an intentionally local selector without replica synchronization
+    /// or startup recovery.
+    pub fn new_local(
         kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
@@ -109,7 +111,7 @@ impl SelectionCore {
         Self::new_inner(kv_router_config, indexer_threads, cancel_token, None, true)
     }
 
-    pub(crate) fn new_for_server(
+    pub(super) fn new_managed(
         kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
@@ -1026,6 +1028,7 @@ mod tests {
             expected_output_tokens: None,
             priority_jump: None,
             strict_priority: None,
+            session_id: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -1043,6 +1046,7 @@ mod tests {
             expected_output_tokens: None,
             priority_jump: None,
             strict_priority: None,
+            session_id: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -1073,7 +1077,7 @@ mod tests {
     #[test]
     fn parent_cancel_cancels_core() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new(test_config(false), 1, parent.clone());
+        let core = SelectionCore::new_local(test_config(false), 1, parent.clone());
 
         assert!(!core.cancel_token.is_cancelled());
         parent.cancel();
@@ -1083,7 +1087,7 @@ mod tests {
     #[test]
     fn shutdown_keeps_parent_alive() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new(test_config(false), 1, parent.clone());
+        let core = SelectionCore::new_local(test_config(false), 1, parent.clone());
 
         core.shutdown();
 
@@ -1094,7 +1098,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_cancels_listeners() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new(test_config(true), 1, parent);
+        let core = SelectionCore::new_local(test_config(true), 1, parent);
 
         let record = core
             .upsert_worker(worker_with_kv_events(1))
@@ -1109,7 +1113,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_reports_not_ready_and_rejects_new_work() {
-        let core = SelectionCore::new(test_config(false), 1, CancellationToken::new());
+        let core = SelectionCore::new_local(test_config(false), 1, CancellationToken::new());
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         assert!(core.ready().ready);
 
@@ -1170,7 +1174,11 @@ mod tests {
     async fn queued_selection_errors_on_shutdown() {
         let mut config = test_config(false);
         config.router_queue_threshold = Some(0.0);
-        let core = Arc::new(SelectionCore::new(config, 1, CancellationToken::new()));
+        let core = Arc::new(SelectionCore::new_local(
+            config,
+            1,
+            CancellationToken::new(),
+        ));
 
         let record = core.upsert_worker(worker(1)).await.expect("worker upsert");
         assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable);
@@ -1199,7 +1207,11 @@ mod tests {
     async fn queued_selection_returns_refreshed_overlap_snapshot() {
         let mut config = test_config(false);
         config.router_queue_threshold = Some(0.0);
-        let core = Arc::new(SelectionCore::new(config, 1, CancellationToken::new()));
+        let core = Arc::new(SelectionCore::new_local(
+            config,
+            1,
+            CancellationToken::new(),
+        ));
 
         for worker_id in [1, 2] {
             let mut request = worker(worker_id);
@@ -1261,6 +1273,7 @@ mod tests {
                     expected_output_tokens: None,
                     priority_jump: None,
                     strict_priority: None,
+                    session_id: None,
                     pinned_worker: None,
                     allowed_worker_ids: None,
                     routing_constraints: RoutingConstraints::default(),

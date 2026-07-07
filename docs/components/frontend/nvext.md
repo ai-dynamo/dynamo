@@ -54,7 +54,7 @@ token IDs, pass integer IDs in the normal `stop` array, for example
 `"stop": [576]`. Strings such as `"token_id:576"` remain literal string stop
 sequences and are not parsed as token IDs.
 
-### Header overrides
+### Header Overrides
 
 Routing fields can also be set via HTTP headers, which take priority over `nvext` values:
 
@@ -75,13 +75,9 @@ session headers described in [Session IDs](../../agents/session-ids.md);
 `nvext` does not accept session identity fields.
 
 When session affinity is enabled with `--router-session-affinity-ttl-secs`, the
-router uses `X-Dynamo-Session-ID` for immutable endpoint- and phase-scoped affinity.
-On etcd and shared FileStore, replicas coordinate through a distributed claim while
-the request hot path uses a process-local cache. Existing local or shared bindings
-override routing headers; the headers above are proposals only when no binding exists.
-Memory and Kubernetes discovery do not provide cross-process affinity. See
-[Configuration and Tuning](../router/router-configuration.md#session-affinity) for
-claim lifetime, cache TTL, terminal close, and failure behavior.
+router also uses `X-Dynamo-Session-ID` for router-local affinity. See
+[Configuration and Tuning](../router/router-configuration.md#session-affinity)
+for routing behavior and TTL settings.
 
 For trace sink configuration and JSONL schema details, see
 [Agent Tracing](../../agents/agent-tracing.md).
@@ -233,4 +229,4 @@ When the client requests response metadata via `extra_fields`, the response incl
 | [Session IDs](../../agents/session-ids.md) | Passive session identity |
 | [Agent Tracing](../../agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
 | [Agent Hints](../../agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
-| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session-aware radix tagging |
+| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling and KV eviction policies |

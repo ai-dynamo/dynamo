@@ -42,7 +42,7 @@ def env_or_default(
     target_type = value_type if value_type is not None else type(default)
 
     if target_type is bool:
-        return value.lower() in ("true", "1", "yes", "on")  # type: ignore
+        return value.strip().lower() in ("true", "1", "yes", "on")  # type: ignore
     if target_type is int:
         return int(value)  # type: ignore
     if target_type is float:

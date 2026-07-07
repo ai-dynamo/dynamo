@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
+
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::{DpRank, WorkerId};
 use dynamo_runtime::component::Instance;
@@ -69,6 +71,10 @@ impl WorkerQueryEndpointDirectory {
         self.targets
             .get(&(worker_id, dp_rank))
             .map(|target| target.value().clone())
+    }
+
+    pub(super) fn keys(&self) -> HashSet<RecoveryKey> {
+        self.targets.iter().map(|entry| *entry.key()).collect()
     }
 
     #[cfg(test)]
