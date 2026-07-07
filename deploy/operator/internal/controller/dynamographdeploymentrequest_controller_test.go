@@ -138,6 +138,10 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
 			Expect(updated.Status.ObservedGeneration).Should(Equal(updated.Generation))
+
+			validationCondition := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1beta1.ConditionTypeValidation)
+			Expect(validationCondition).NotTo(BeNil())
+			Expect(validationCondition.Message).Should(Equal(MessageValidationPassed))
 		})
 
 		It("Should pass validation with minimal config", func() {
