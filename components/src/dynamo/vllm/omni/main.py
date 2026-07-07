@@ -11,7 +11,7 @@ import uvloop
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
-from dynamo.common.rl import first_endpoint_response
+from dynamo.common.rl import env_bool, first_endpoint_response
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.output_modalities import get_output_modalities
@@ -32,6 +32,26 @@ logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 
 
+def _register_lora_engine_routes(runtime, handler) -> None:
+    route_handlers = {
+        "load_lora": handler.load_lora,
+        "unload_lora": handler.unload_lora,
+        "list_loras": handler.list_loras,
+    }
+
+    for route_name, endpoint_handler in route_handlers.items():
+
+        async def _engine_route(
+            body: dict,
+            endpoint_handler=endpoint_handler,
+        ) -> dict:
+            return await first_endpoint_response(endpoint_handler, body)
+
+        runtime.register_engine_route(route_name, _engine_route)
+
+    logger.info("Registered LoRA engine routes: %s", ", ".join(route_handlers))
+
+
 async def init_omni(
     runtime: DistributedRuntime, config: OmniConfig, shutdown_event: asyncio.Event
 ):
@@ -44,7 +64,7 @@ async def init_omni(
 
     shutdown_endpoints[:] = [generate_endpoint]
 
-    env_lora_enabled = os.getenv("DYN_LORA_ENABLED", "").lower() == "true"
+    env_lora_enabled = env_bool("DYN_LORA_ENABLED")
     engine_lora_enabled = bool(getattr(config.engine_args, "enable_lora", False))
     lora_enabled = env_lora_enabled or engine_lora_enabled
     load_lora_endpoint = None
@@ -81,20 +101,7 @@ async def init_omni(
     logger.info("Omni worker initialized for model: %s", config.model)
 
     if lora_enabled:
-
-        async def _load_lora_engine_route(body: dict) -> dict:
-            return await first_endpoint_response(handler.load_lora, body)
-
-        async def _unload_lora_engine_route(body: dict) -> dict:
-            return await first_endpoint_response(handler.unload_lora, body)
-
-        async def _list_loras_engine_route(body: dict) -> dict:
-            return await first_endpoint_response(handler.list_loras, body)
-
-        runtime.register_engine_route("load_lora", _load_lora_engine_route)
-        runtime.register_engine_route("unload_lora", _unload_lora_engine_route)
-        runtime.register_engine_route("list_loras", _list_loras_engine_route)
-        logger.info("Registered LoRA engine routes: load_lora, unload_lora, list_loras")
+        _register_lora_engine_routes(runtime, handler)
 
     setup_metrics_collection(config, generate_endpoint, logger)
 

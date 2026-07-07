@@ -85,7 +85,8 @@ class OmniHandler(BaseOmniHandler):
     """
 
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
-        if model_name and (lora := self.loaded_loras.get(model_name)):
+        loaded_loras = getattr(self, "loaded_loras", {})
+        if model_name and (lora := loaded_loras.get(model_name)):
             return LoRARequest(
                 lora_name=model_name,
                 lora_int_id=lora.id,
@@ -110,6 +111,15 @@ class OmniHandler(BaseOmniHandler):
         for sp in sampling_params_list:
             if isinstance(sp, OmniDiffusionSamplingParams):
                 sp.lora_request = lora_request
+
+    def _resolve_and_apply_lora(
+        self,
+        model_name: str | None,
+        sampling_params_list: list | None,
+    ) -> LoRARequest | None:
+        lora_request = self._resolve_lora_request(model_name)
+        self._apply_lora_to_sampling_params(sampling_params_list, lora_request)
+        return lora_request
 
     @staticmethod
     def _extract_lora_name_from_request(request: Any) -> str | None:
@@ -150,6 +160,16 @@ class OmniHandler(BaseOmniHandler):
         if uri.startswith("file://"):
             return uri[len("file://") :]
         return uri
+
+    @staticmethod
+    def _parse_load_lora_request(request: Any) -> tuple[str | None, str | None]:
+        if request is None:
+            return None, None
+
+        lora_name = request.get("lora_name")
+        source = request.get("source")
+        lora_uri = source.get("uri") if isinstance(source, dict) else None
+        return lora_name, lora_uri
 
     def __init__(
         self,
@@ -202,16 +222,13 @@ class OmniHandler(BaseOmniHandler):
         )
 
     async def load_lora(self, request=None):
+        lora_name, lora_uri = self._parse_load_lora_request(request)
         if request is None:
             yield {
                 "status": "error",
                 "message": "Request is required with 'lora_name' and 'source.uri'",
             }
             return
-
-        lora_name = request.get("lora_name")
-        source = request.get("source")
-        lora_uri = source.get("uri") if isinstance(source, dict) else None
 
         if not lora_name:
             yield {"status": "error", "message": "'lora_name' is required in request"}
@@ -593,9 +610,10 @@ class OmniHandler(BaseOmniHandler):
             prompt = OmniTextPrompt(prompt=text_prompt)
             sampling_params_list = None
 
-        model_name = request.get("model")
-        lora_request = self._resolve_lora_request(model_name)
-        self._apply_lora_to_sampling_params(sampling_params_list, lora_request)
+        lora_request = self._resolve_and_apply_lora(
+            request.get("model"),
+            sampling_params_list,
+        )
 
         return EngineInputs(
             prompt=prompt,
@@ -643,8 +661,6 @@ class OmniHandler(BaseOmniHandler):
             height=height,
             width=width,
         )
-        lora_request = self._resolve_lora_request(req.model)
-
         self._update_if_not_none(sp, "num_outputs_per_prompt", req.n)
 
         self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
@@ -658,7 +674,7 @@ class OmniHandler(BaseOmniHandler):
         )
 
         sampling_params_list = self._build_sampling_params_list(sp)
-        self._apply_lora_to_sampling_params(sampling_params_list, lora_request)
+        lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
 
         return EngineInputs(
             prompt=prompt,
@@ -709,7 +725,6 @@ class OmniHandler(BaseOmniHandler):
             width=width,
             num_frames=num_frames,
         )
-        lora_request = self._resolve_lora_request(req.model)
         self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
         self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
         sp.seed = (
@@ -720,7 +735,7 @@ class OmniHandler(BaseOmniHandler):
         self._update_if_not_none(sp, "fps", fps)
 
         sampling_params_list = self._build_sampling_params_list(sp)
-        self._apply_lora_to_sampling_params(sampling_params_list, lora_request)
+        lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
 
         logger.info(
             f"Video diffusion request: prompt='{req.prompt[:50]}...', "
