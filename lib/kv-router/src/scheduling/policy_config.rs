@@ -463,16 +463,11 @@ fn resolve_policy_class(
             raw.name
         )));
     }
-    if let Some(config) = raw.queue_admission.as_ref() {
-        if raw.queue_policy != RouterQueuePolicy::Fcfs {
-            return Err(RouterPolicyConfigError::Validation(format!(
-                "{location} policy class {:?} queue_admission requires queue_policy fcfs",
-                raw.name
-            )));
-        }
-        config
-            .validate(&format!("{location} policy class {:?}", raw.name))
-            .map_err(RouterPolicyConfigError::Validation)?;
+    if raw.queue_admission.is_some() && raw.queue_policy != RouterQueuePolicy::Fcfs {
+        return Err(RouterPolicyConfigError::Validation(format!(
+            "{location} policy class {:?} queue_admission requires queue_policy fcfs",
+            raw.name
+        )));
     }
     if raw
         .prefill_busy_threshold_frac
@@ -726,8 +721,6 @@ policy_classes:
     queue_policy: fcfs
     queue_admission:
       type: session_aware
-      pause_threshold: 0.9
-      pause_target: 0.7
     quantum: 1
 "#,
         )
@@ -737,7 +730,7 @@ policy_classes:
         let agents = profile.class(profile.resolve_class_index(Some("agents"), 0));
         assert!(matches!(
             agents.queue_admission,
-            Some(QueueAdmissionConfig::SessionAware(_))
+            Some(QueueAdmissionConfig::SessionAware {})
         ));
     }
 
@@ -802,10 +795,9 @@ policy_classes:
     queue_admission:
       type: session_aware
       pause_threshold: 0.7
-      pause_target: 0.8
     quantum: 1
 "#,
-                "pause_target",
+                "unknown field",
             ),
         ] {
             let error = RouterPolicyConfig::from_yaml(yaml).unwrap_err();
