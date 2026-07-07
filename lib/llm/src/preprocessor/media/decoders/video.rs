@@ -6,13 +6,11 @@ use std::os::fd::AsRawFd;
 
 use anyhow::Result;
 use ffmpeg_next::Rational;
-use ffmpeg_next::ffi::{AVPixelFormat, av_image_copy_to_buffer};
 use memfile::{CreateOptions, MemFile, Seal};
 use ndarray::Array4;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
-use video_rs::frame::RawFrame;
-use video_rs::{Location, Time};
+use video_rs::Time;
 
 use super::Decoder;
 use crate::preprocessor::media::{
@@ -68,13 +66,10 @@ pub struct VideoMetadata {
 
 fn get_num_requested_frames(
     config: &VideoDecoder,
-    decoder: &video_rs::decode::Decoder,
+    duration_secs: f64,
+    frame_rate: f64,
+    mut total_frames: u64,
 ) -> Result<u64> {
-    // careful, duration and frames come from file metadata, might be inaccurate
-    let duration_secs = decoder.duration()?.as_secs() as f64;
-    let frame_rate = decoder.frame_rate() as f64;
-
-    let mut total_frames = decoder.frames().unwrap_or(0);
     if total_frames == 0 && duration_secs > 0.0 && frame_rate > 0.0 {
         total_frames = (duration_secs * frame_rate) as u64;
     }
@@ -86,8 +81,7 @@ fn get_num_requested_frames(
         anyhow::ensure!(duration_secs > 0.0, "Cannot determine the video duration");
         (duration_secs * target_fps) as u64
     } else {
-        // frame count based sampling
-        // last fallback is to decode all frames
+        // frame count based sampling; the last fallback is to decode all frames
         config.num_frames.unwrap_or(total_frames)
     };
 
@@ -132,7 +126,7 @@ fn get_target_times(
         .collect())
 }
 
-fn get_frame_timestamp(frame: &RawFrame, time_base: Rational) -> Result<f64> {
+fn get_frame_timestamp(frame: &ffmpeg_next::frame::Video, time_base: Rational) -> Result<f64> {
     anyhow::ensure!(!frame.is_corrupt(), "Frame is corrupt");
 
     // get timestamp from frame metadata: best_effort_timestamp or pts from ffmpeg
@@ -145,58 +139,233 @@ fn get_frame_timestamp(frame: &RawFrame, time_base: Rational) -> Result<f64> {
     }
 }
 
-fn decode_frame_at_timestamp(
-    decoder: &mut video_rs::decode::Decoder,
-    target_time: &Time,
+fn handle_sample_error(
+    config: &VideoDecoder,
+    target_index: &mut usize,
+    target_count: usize,
+    error: anyhow::Error,
+) -> Result<bool> {
+    if config.strict {
+        return Err(error);
+    }
+
+    tracing::debug!(%error, target_index = *target_index, "Skipping failed video sample");
+    *target_index += 1;
+    Ok(*target_index == target_count)
+}
+
+fn copy_rgb_frame(frame: &ffmpeg_next::frame::Video, output_buffer: &mut [u8]) -> Result<()> {
+    let width = frame.width();
+    let height = frame.height();
+    let row_bytes = width as usize * 3;
+    anyhow::ensure!(
+        output_buffer.len() == row_bytes * height as usize,
+        "Invalid RGB output buffer size"
+    );
+
+    let stride = frame.stride(0);
+    anyhow::ensure!(stride >= row_bytes, "FFmpeg RGB frame stride is too small");
+    let rgb_data = frame.data(0);
+    anyhow::ensure!(
+        rgb_data.len() >= stride * height as usize,
+        "FFmpeg RGB frame data is truncated"
+    );
+    for row in 0..height as usize {
+        let source_offset = row * stride;
+        let output_offset = row * row_bytes;
+        output_buffer[output_offset..output_offset + row_bytes]
+            .copy_from_slice(&rgb_data[source_offset..source_offset + row_bytes]);
+    }
+    Ok(())
+}
+
+fn convert_ffmpeg_frame_to_rgb(
+    scaler: &mut ffmpeg_next::software::scaling::Context,
+    decoded_frame: &ffmpeg_next::frame::Video,
+    rgb_frame: &mut ffmpeg_next::frame::Video,
     output_buffer: &mut [u8],
-) -> Result<f64> {
-    let target_timestamp = target_time.as_secs() as f64;
-    let time_base = decoder.time_base();
+) -> Result<()> {
+    scaler.run(decoded_frame, rgb_frame)?;
+    copy_rgb_frame(rgb_frame, output_buffer)
+}
 
-    // Decode until we reach or pass the target timestamp
-    // Caller is responsible for seeking to the appropriate position
-    // We use decode_raw_iter to handle timestamps better than video-rs
-    for frame_result in decoder.decode_raw_iter() {
-        let mut raw_frame =
-            frame_result.map_err(|e| anyhow::anyhow!("Frame decode error: {}", e))?;
+fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaData> {
+    use ffmpeg_next::codec::context::Context;
+    use ffmpeg_next::software::scaling::{Context as ScalingContext, Flags};
+    use ffmpeg_next::util::format::pixel::Pixel;
 
-        let timestamp = match get_frame_timestamp(&raw_frame, time_base) {
-            Ok(ts) => ts,
-            Err(_) => continue,
-        };
+    let mut mem_file = MemFile::create("video", CreateOptions::new().allow_sealing(true))?;
+    mem_file.write_all(&bytes)?;
+    drop(bytes);
+    mem_file.add_seals(Seal::Write | Seal::Shrink | Seal::Grow)?;
+    let fd_path = format!("/proc/self/fd/{}", mem_file.as_raw_fd());
+    let mut input = ffmpeg_next::format::input(&fd_path)?;
 
-        // If we reached the target time or passed it
-        if timestamp >= target_timestamp {
-            // Copy frame data to provided buffer
-            // Adapted from video-rs convert_frame_to_ndarray_rgb24 (private function)
-            unsafe {
-                let frame_ptr = raw_frame.as_mut_ptr();
-                let frame_format = std::mem::transmute::<i32, AVPixelFormat>((*frame_ptr).format);
+    let (stream_index, stream_time_base, source_duration, source_fps, total_frames, parameters) = {
+        let input_stream = input
+            .streams()
+            .best(ffmpeg_next::media::Type::Video)
+            .ok_or_else(|| anyhow::anyhow!("FFmpeg could not find a video stream"))?;
+        let stream_time_base = input_stream.time_base();
+        let frame_rate = input_stream.rate();
+        anyhow::ensure!(
+            frame_rate.denominator() > 0,
+            "Cannot determine the video frame rate"
+        );
+        (
+            input_stream.index(),
+            stream_time_base,
+            Time::new(Some(input_stream.duration()), stream_time_base).as_secs() as f64,
+            (frame_rate.numerator() as f32 / frame_rate.denominator() as f32) as f64,
+            input_stream.frames().max(0) as u64,
+            input_stream.parameters(),
+        )
+    };
 
-                let bytes_copied = av_image_copy_to_buffer(
-                    output_buffer.as_mut_ptr(),
-                    output_buffer.len() as i32,
-                    (*frame_ptr).data.as_ptr() as *const *const u8,
-                    (*frame_ptr).linesize.as_ptr(),
-                    frame_format,
-                    raw_frame.width() as i32,
-                    raw_frame.height() as i32,
-                    1,
-                );
+    // Duration and frame count come from file metadata and might be inaccurate.
+    let requested_frames =
+        get_num_requested_frames(config, source_duration, source_fps, total_frames)?;
+    let target_times = get_target_times(requested_frames, source_duration, source_fps)?;
 
-                anyhow::ensure!(
-                    bytes_copied == output_buffer.len() as i32,
-                    "Failed to copy frame data: expected {} bytes, copied {}",
-                    output_buffer.len(),
-                    bytes_copied
-                );
+    let mut decoder_context = Context::new();
+    decoder_context.set_time_base(stream_time_base);
+    decoder_context.set_parameters(parameters)?;
+    let mut decoder = decoder_context.decoder().video()?;
+    let decoder_time_base = decoder.time_base();
+    let (width, height) = (decoder.width(), decoder.height());
+    anyhow::ensure!(
+        width > 0 && height > 0,
+        "Invalid video dimensions {width}x{height}"
+    );
+
+    let max_alloc = config.limits.max_alloc.unwrap_or(u64::MAX);
+    anyhow::ensure!(
+        (width as u64) * (height as u64) * requested_frames * 3 <= max_alloc,
+        "Video dimensions {requested_frames}x{width}x{height}x3 exceed max alloc {max_alloc}"
+    );
+
+    let frame_size = width as usize * height as usize * 3;
+    let mut all_frames = vec![0u8; requested_frames as usize * frame_size];
+    let mut sampled_timestamps = Vec::with_capacity(requested_frames as usize);
+    let mut target_index = 0usize;
+    let mut decoded_frame = ffmpeg_next::frame::Video::empty();
+    let mut rgb_frame = ffmpeg_next::frame::Video::empty();
+    let mut scaler = ScalingContext::get(
+        decoder.format(),
+        width,
+        height,
+        Pixel::RGB24,
+        width,
+        height,
+        Flags::AREA,
+    )?;
+
+    let mut receive_frames = |decoder: &mut ffmpeg_next::decoder::Video,
+                              target_index: &mut usize,
+                              sampled_timestamps: &mut Vec<f64>|
+     -> Result<bool> {
+        loop {
+            match decoder.receive_frame(&mut decoded_frame) {
+                Ok(()) => {
+                    let timestamp = match get_frame_timestamp(&decoded_frame, decoder_time_base) {
+                        Ok(timestamp) => timestamp,
+                        Err(_) => continue,
+                    };
+                    if timestamp < target_times[*target_index].as_secs() as f64 {
+                        continue;
+                    }
+
+                    let offset = sampled_timestamps.len() * frame_size;
+                    if let Err(error) = convert_ffmpeg_frame_to_rgb(
+                        &mut scaler,
+                        &decoded_frame,
+                        &mut rgb_frame,
+                        &mut all_frames[offset..offset + frame_size],
+                    ) {
+                        let error = anyhow::anyhow!(
+                            "FFmpeg RGB conversion error at timestamp {timestamp:.3}s: {error:?}"
+                        );
+                        if handle_sample_error(config, target_index, target_times.len(), error)? {
+                            return Ok(true);
+                        }
+                        continue;
+                    }
+                    sampled_timestamps.push(timestamp);
+                    *target_index += 1;
+                    if *target_index == target_times.len() {
+                        return Ok(true);
+                    }
+                }
+                Err(ffmpeg_next::Error::Other {
+                    errno: ffmpeg_next::error::EAGAIN,
+                })
+                | Err(ffmpeg_next::Error::Eof) => return Ok(false),
+                Err(error) => {
+                    let error = anyhow::anyhow!("FFmpeg frame decode error: {error:?}");
+                    if handle_sample_error(config, target_index, target_times.len(), error)? {
+                        return Ok(true);
+                    }
+                    return Ok(false);
+                }
             }
+        }
+    };
 
-            return Ok(timestamp);
+    let mut finished = false;
+    for (stream, mut packet) in input.packets() {
+        if stream.index() != stream_index {
+            continue;
+        }
+        packet.rescale_ts(stream.time_base(), decoder_time_base);
+        if let Err(error) = decoder.send_packet(&packet) {
+            let error = anyhow::anyhow!("FFmpeg packet decode error: {error:?}");
+            if handle_sample_error(config, &mut target_index, target_times.len(), error)? {
+                finished = true;
+                break;
+            }
+            continue;
+        }
+        if receive_frames(&mut decoder, &mut target_index, &mut sampled_timestamps)? {
+            finished = true;
+            break;
         }
     }
 
-    anyhow::bail!("No frame found for timestamp {target_timestamp:.3}s");
+    if !finished {
+        match decoder.send_eof() {
+            Ok(()) => {
+                finished =
+                    receive_frames(&mut decoder, &mut target_index, &mut sampled_timestamps)?;
+            }
+            Err(error) => {
+                let error = anyhow::anyhow!("FFmpeg decoder flush error: {error:?}");
+                finished =
+                    handle_sample_error(config, &mut target_index, target_times.len(), error)?;
+            }
+        }
+    }
+    anyhow::ensure!(
+        !config.strict || finished,
+        "FFmpeg reached end of video after decoding {} of {requested_frames} requested frames",
+        sampled_timestamps.len()
+    );
+
+    let num_frames_decoded = sampled_timestamps.len();
+    anyhow::ensure!(
+        num_frames_decoded > 0,
+        "Failed to decode any frames, check for video corruption"
+    );
+    all_frames.truncate(num_frames_decoded * frame_size);
+
+    let shape = (num_frames_decoded, height as usize, width as usize, 3);
+    let array = Array4::from_shape_vec(shape, all_frames)?;
+    let mut decoded: DecodedMediaData = array.try_into()?;
+    decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Video(VideoMetadata {
+        source_fps,
+        source_duration,
+        sampled_timestamps,
+    }));
+    Ok(decoded)
 }
 
 impl Decoder for VideoDecoder {
@@ -222,88 +391,7 @@ impl Decoder for VideoDecoder {
             "max_frames and num_frames cannot be specified at the same time"
         );
 
-        // video-rs wants a file path, we use memfile for in-memory file
-        let mut mem_file = MemFile::create("video", CreateOptions::new().allow_sealing(true))?;
-        mem_file.write_all(&data.into_bytes()?)?; // one-liner so result of into_bytes will be dropped asap
-        mem_file.add_seals(Seal::Write | Seal::Shrink | Seal::Grow)?;
-        let fd_path = format!("/proc/self/fd/{}", mem_file.as_raw_fd());
-        let location = Location::File(fd_path.into());
-        let mut decoder = video_rs::decode::Decoder::new(location)?;
-
-        let requested_frames = get_num_requested_frames(self, &decoder)?;
-        let source_duration = decoder.duration()?.as_secs() as f64;
-        let source_fps = decoder.frame_rate() as f64;
-        let target_times = get_target_times(requested_frames, source_duration, source_fps)?;
-
-        let (width, height) = decoder.size();
-        anyhow::ensure!(
-            width > 0 && height > 0,
-            "Invalid video dimensions {width}x{height}"
-        );
-
-        let max_alloc = self.limits.max_alloc.unwrap_or(u64::MAX);
-        anyhow::ensure!(
-            (width as u64) * (height as u64) * requested_frames * 3 <= max_alloc,
-            "Video dimensions {requested_frames}x{width}x{height}x3 exceed max alloc {max_alloc}"
-        );
-
-        // Preallocate the buffer for all frames
-        let frame_size = width as usize * height as usize * 3;
-        let total_size = requested_frames as usize * frame_size;
-        let mut all_frames = vec![0u8; total_size];
-
-        let mut sampled_timestamps: Vec<f64> = Vec::with_capacity(requested_frames as usize);
-        let mut sequential_mode = false;
-        let mut last_successful_time = Time::from_secs(0.0);
-
-        for time in target_times.iter() {
-            // Try to seek if not in sequential mode
-            if !sequential_mode && let Ok(_) = decoder.seek((time.as_secs() * 1000.0) as i64) {
-                sequential_mode = true;
-                // Re-establish decoder position at last known good position
-                decoder.seek((last_successful_time.as_secs() * 1000.0) as i64)?;
-            }
-
-            let offset = sampled_timestamps.len() * frame_size;
-            let frame_buffer = &mut all_frames[offset..offset + frame_size];
-
-            match decode_frame_at_timestamp(&mut decoder, time, frame_buffer) {
-                Ok(timestamp) => {
-                    sampled_timestamps.push(timestamp);
-                    last_successful_time = *time;
-                }
-                Err(error) => {
-                    if self.strict {
-                        anyhow::bail!(
-                            "Frame decode error at timestamp {:.3}s: {}",
-                            time.as_secs(),
-                            error
-                        );
-                    }
-                    continue;
-                }
-            }
-        }
-
-        let num_frames_decoded = sampled_timestamps.len();
-
-        anyhow::ensure!(
-            num_frames_decoded > 0,
-            "Failed to decode any frames, check for video corruption"
-        );
-
-        // Truncate buffer to actual frames decoded (in case some failed in non-strict mode)
-        all_frames.truncate(num_frames_decoded * frame_size);
-
-        let shape = (num_frames_decoded, height as usize, width as usize, 3);
-        let array = Array4::from_shape_vec(shape, all_frames)?;
-        let mut decoded: DecodedMediaData = array.try_into()?;
-        decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Video(VideoMetadata {
-            source_fps,
-            source_duration,
-            sampled_timestamps,
-        }));
-        Ok(decoded)
+        decode_video(self, data.into_bytes()?)
     }
 }
 
@@ -312,6 +400,7 @@ mod tests {
     use super::super::super::rdma::DataType;
     use super::*;
     use rstest::rstest;
+    use video_rs::Location;
 
     /// Load test video and parse expected dimensions from filename.
     /// Filename format: "{resolution}_{frames}.mp4" (e.g., "240p_10.mp4" -> 320x240, 10 frames)
@@ -341,6 +430,49 @@ mod tests {
         };
 
         (encoded, width, height, frames)
+    }
+
+    fn decode_reference_with_video_rs(
+        bytes: &[u8],
+        requested_frames: u64,
+    ) -> Result<(Vec<u8>, Vec<f64>)> {
+        let mut mem_file = MemFile::create("video", CreateOptions::new().allow_sealing(true))?;
+        mem_file.write_all(bytes)?;
+        mem_file.add_seals(Seal::Write | Seal::Shrink | Seal::Grow)?;
+        let location = Location::File(format!("/proc/self/fd/{}", mem_file.as_raw_fd()).into());
+        let mut decoder = video_rs::decode::Decoder::new(location)?;
+        let target_times = get_target_times(
+            requested_frames,
+            decoder.duration()?.as_secs() as f64,
+            decoder.frame_rate() as f64,
+        )?;
+        let (width, height) = decoder.size();
+        let frame_size = width as usize * height as usize * 3;
+        let mut frames = vec![0; requested_frames as usize * frame_size];
+        let mut sampled_timestamps = Vec::with_capacity(requested_frames as usize);
+        let mut target_index = 0;
+        let time_base = decoder.time_base();
+
+        for result in decoder.decode_raw_iter() {
+            let frame = result?;
+            let timestamp = get_frame_timestamp(&frame, time_base)?;
+            if timestamp < target_times[target_index].as_secs() as f64 {
+                continue;
+            }
+            let output = &mut frames[target_index * frame_size..(target_index + 1) * frame_size];
+            copy_rgb_frame(&frame, output)?;
+            sampled_timestamps.push(timestamp);
+            target_index += 1;
+            if target_index == target_times.len() {
+                break;
+            }
+        }
+
+        anyhow::ensure!(
+            target_index == target_times.len(),
+            "video-rs reference decoded {target_index} of {requested_frames} requested frames"
+        );
+        Ok((frames, sampled_timestamps))
     }
 
     #[test]
@@ -387,6 +519,63 @@ mod tests {
         assert_eq!(decoded.tensor_info.shape[2], width as usize);
         assert_eq!(decoded.tensor_info.shape[3], 3);
         assert_eq!(decoded.tensor_info.dtype, DataType::UINT8);
+    }
+
+    #[test]
+    fn test_sampled_decode_matches_video_rs() {
+        use dynamo_memory::actions::Slice;
+
+        let (encoded_data, ..) = load_test_video("240p_10.mp4");
+        let bytes = encoded_data.into_bytes().unwrap();
+        let requested_frames = 5;
+        let decoder: VideoDecoder = serde_json::from_value(serde_json::json!({
+            "num_frames": requested_frames,
+            "strict": true,
+        }))
+        .unwrap();
+
+        let decoded = decoder
+            .decode(EncodedMediaData::from_bytes(bytes.clone()))
+            .unwrap();
+        let (reference_frames, reference_timestamps) =
+            decode_reference_with_video_rs(&bytes, requested_frames).unwrap();
+
+        let decoded_frames = unsafe { decoded.data.as_slice().unwrap() };
+        assert_eq!(decoded_frames, reference_frames);
+        let Some(DecodedMediaMetadata::Video(metadata)) = decoded.tensor_info.metadata else {
+            panic!("missing video metadata");
+        };
+        assert_eq!(metadata.sampled_timestamps, reference_timestamps);
+    }
+
+    #[test]
+    fn test_sample_error_respects_strict_mode() {
+        // Two 16x16 frames followed by two 32x32 frames trigger swscale's InputChanged error.
+        let path = format!(
+            "{}/tests/data/media/dynamic_resolution_4.mp4",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let decoder = |strict| VideoDecoder {
+            num_frames: Some(4),
+            strict,
+            ..Default::default()
+        };
+
+        let decoded = decoder(false)
+            .decode(EncodedMediaData::from_bytes(bytes.clone()))
+            .unwrap();
+        assert_eq!(decoded.tensor_info.shape, vec![2, 16, 16, 3]);
+        let Some(DecodedMediaMetadata::Video(metadata)) = decoded.tensor_info.metadata else {
+            panic!("missing video metadata");
+        };
+        assert_eq!(metadata.sampled_timestamps, vec![0.0, 0.5]);
+
+        let error = decoder(true)
+            .decode(EncodedMediaData::from_bytes(bytes))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("FFmpeg RGB conversion error"), "{error}");
     }
 
     #[rstest]

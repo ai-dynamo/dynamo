@@ -56,6 +56,11 @@ name = "request_trace_finish_metadata"
 harness = false
 required-features = ["request-trace-bench"]
 
+[[bench]]
+name = "video_decode"
+harness = false
+required-features = ["media-ffmpeg"]
+
 [dependencies]
 # repo
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
