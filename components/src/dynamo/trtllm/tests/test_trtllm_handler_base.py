@@ -49,6 +49,7 @@ class MockSamplingParams:
     best_of: int = 1
     ignore_eos: bool = False
     guided_decoding: object | None = None
+    max_tokens: int | None = None
 
     def __post_init__(self):
         """Called after dataclass initialization (including via replace())."""
@@ -673,6 +674,7 @@ class TestHealthCheckPriority:
         res = MagicMock()
         res.outputs = [output]
         res.finished = True
+        res.prompt_token_ids = [1, 2, 3]
 
         generation_result = MagicMock()
         generation_result.abort = MagicMock()
@@ -731,3 +733,49 @@ class TestHealthCheckPriority:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
+
+    @pytest.mark.asyncio
+    async def test_skip_tokenize_uses_text_without_false_max_token_cap(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("DYN_ENGINE_CONV_AFFINITY", "1")
+        handler = self._make_handler()
+        handler.max_seq_len = 4096
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        request = {
+            "token_ids": [],
+            "prompt_text": "rendered prompt",
+            "stop_conditions": {"max_tokens": None},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["inputs"] == "rendered prompt"
+        assert kwargs["sampling_params"].max_tokens is None
+        assert chunks[-1]["completion_usage"]["prompt_tokens"] == 3
+
+    @pytest.mark.asyncio
+    async def test_skip_tokenize_without_affinity_is_request_error(self, monkeypatch):
+        monkeypatch.delenv("DYN_ENGINE_CONV_AFFINITY", raising=False)
+        handler = self._make_handler()
+        handler.engine.llm.generate_async = MagicMock()
+        request = {
+            "token_ids": [],
+            "prompt_text": "rendered prompt",
+            "stop_conditions": {"max_tokens": None},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        handler.engine.llm.generate_async.assert_not_called()
+        assert "DYN_ENGINE_CONV_AFFINITY=1" in chunks[0]["finish_reason"]["error"]

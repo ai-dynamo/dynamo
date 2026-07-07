@@ -254,14 +254,11 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 
 /// Cached at first access — env var reads acquire the process-global env mutex,
 /// which would serialize every concurrent preprocessing thread on every request.
-static SKIP_FRONTEND_TOKENIZE: std::sync::LazyLock<bool> =
-    std::sync::LazyLock::new(|| {
-        std::env::var(
-            dynamo_runtime::config::environment_names::llm::DYN_SKIP_FRONTEND_TOKENIZE,
-        )
+static SKIP_FRONTEND_TOKENIZE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    std::env::var(dynamo_runtime::config::environment_names::llm::DYN_SKIP_FRONTEND_TOKENIZE)
         .ok()
         .is_some_and(|v| v == "1" || v == "true")
-    });
+});
 
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
