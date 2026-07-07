@@ -1075,9 +1075,6 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
 		existing, found := oldStatuses[componentName]
 		if !found {
 			status := *dcd.Status.Component
-			if status.RuntimeNamespace == "" {
-				status.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(&dcd)
-			}
 			status.ComponentNames = componentReplicaResourceNames(dcd.Status.Component, dcd.Name)
 			oldStatuses[componentName] = status
 		} else {

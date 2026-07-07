@@ -1554,7 +1554,7 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(dgd *nvidiacom
 
 		resourceComponentStatuses := resource.GetComponentStatuses()
 		for componentName, componentStatus := range resourceComponentStatuses {
-			componentStatuses[componentName] = componentStatusWithRuntimeNamespace(dgd, componentName, resource, componentStatus)
+			componentStatuses[componentName] = componentStatus
 		}
 
 		if !ready {
@@ -1577,36 +1577,6 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(dgd *nvidiacom
 		Message:         Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))),
 		ComponentStatus: componentStatuses,
 	}
-}
-
-func componentStatusWithRuntimeNamespace(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	componentName string,
-	resource Resource,
-	status nvidiacomv1beta1.ComponentReplicaStatus,
-) nvidiacomv1beta1.ComponentReplicaStatus {
-	if status.RuntimeNamespace != "" {
-		return status
-	}
-	dcd, ok := resource.(*nvidiacomv1beta1.DynamoComponentDeployment)
-	if !ok {
-		return status
-	}
-	if dgd == nil {
-		status.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
-		return status
-	}
-	component := dgd.GetComponentByName(componentName)
-	if component == nil {
-		status.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
-		return status
-	}
-	status.RuntimeNamespace = dynamo.ComponentRuntimeNamespace(
-		dgd.GetDynamoNamespaceForComponent(component),
-		string(dcd.Spec.ComponentType),
-		dynamo.GetDCDEffectiveWorkerHash(dcd),
-	)
-	return status
 }
 
 func applyCheckpointStartupReadiness(

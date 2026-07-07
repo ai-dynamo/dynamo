@@ -1452,11 +1452,12 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 			},
 			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
 				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-					ComponentKind:   "Deployment",
-					ComponentNames:  []string{"test-dgd-prefill-oldhash1"},
-					Replicas:        1,
-					UpdatedReplicas: 0,
-					ReadyReplicas:   ptr.To(int32(1)),
+					ComponentKind:    "Deployment",
+					ComponentNames:   []string{"test-dgd-prefill-oldhash1"},
+					RuntimeNamespace: "base-oldhash1",
+					Replicas:         1,
+					UpdatedReplicas:  0,
+					ReadyReplicas:    ptr.To(int32(1)),
 				},
 			},
 		})

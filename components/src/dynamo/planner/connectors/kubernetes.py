@@ -102,20 +102,24 @@ class KubernetesConnector(PlannerConnector):
         workers.
         """
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-        worker_status = self._get_worker_component_status(deployment)
+        worker_status = self._get_first_worker_component_status(deployment)
         if worker_status:
             runtime_namespace = worker_status.get("runtimeNamespace")
             if runtime_namespace:
+                # Newer operators report the effective namespace directly.
                 return runtime_namespace
 
         worker_hash = self._get_current_worker_hash(deployment)
         if not worker_hash:
+            # No active managed worker hash means workers use the base namespace.
             return base_dynamo_namespace
         if worker_status is None and self._has_worker_component(deployment):
+            # A hash with no worker status leaves the backing kind unknown.
             raise PlannerError(
                 "Worker component status is not available yet; runtime namespace is indeterminate"
             )
         if not self._worker_status_uses_namespace_suffix(worker_status):
+            # Only old Deployment-backed workers used the hash as a namespace suffix.
             return base_dynamo_namespace
         return f"{base_dynamo_namespace}-{worker_hash}"
 
@@ -123,8 +127,10 @@ class KubernetesConnector(PlannerConnector):
         annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
         worker_hash = annotations.get(CURRENT_WORKER_HASH_ANNOTATION)
         if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
+            # v2 is only used when the original hash is missing or legacy.
             worker_hash = annotations.get(CURRENT_WORKER_HASH_V2_ANNOTATION)
         if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
+            # legacy marks deployments that do not use a suffixed namespace.
             return None
         return worker_hash
 
@@ -140,7 +146,8 @@ class KubernetesConnector(PlannerConnector):
             for component_name, component in get_components_by_name(deployment).items()
         )
 
-    def _get_worker_component_status(self, deployment: dict) -> Optional[dict]:
+    def _get_first_worker_component_status(self, deployment: dict) -> Optional[dict]:
+        """Return the first worker-class component status in DGD spec order."""
         status_components = deployment.get("status", {}).get("components", {}) or {}
         components_by_name = get_components_by_name(deployment)
         for component_name, component in components_by_name.items():
