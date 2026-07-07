@@ -115,7 +115,14 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     ),
                     MmCase(
                         suffix="embedding_cache",
-                        payload=make_image_payload(["green"], repeat_count=2),
+                        payload=make_image_payload(
+                            ["green"],
+                            repeat_count=2,
+                            expected_log=[
+                                r"DynamoMultimodalEmbeddingCacheConnector "
+                                r"initialized: capacity_gb=1\.00"
+                            ],
+                        ),
                         extra_script_args=[
                             "--unified",
                             "--multimodal-embedding-cache-capacity-gb",

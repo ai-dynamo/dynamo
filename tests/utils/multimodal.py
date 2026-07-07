@@ -46,7 +46,11 @@ _COLOR_PROMPT_FILLER = (
 
 
 def make_image_payload(
-    expected_response: list[str], *, max_attempts: int = 1, repeat_count: int = 1
+    expected_response: list[str],
+    *,
+    max_attempts: int = 1,
+    repeat_count: int = 1,
+    expected_log: Optional[list[str]] = None,
 ) -> ChatPayload:
     """Standard image color-identification payload using MULTIMODAL_IMG_URL.
 
@@ -56,6 +60,8 @@ def make_image_payload(
     up across attempts; only the request/response is re-issued.
     ``repeat_count`` sends the same image request repeatedly, which is useful
     for cache smoke coverage.
+    ``expected_log`` contains regex patterns that must appear in the deployment
+    log, allowing callers to verify that optional multimodal paths were enabled.
     """
     return chat_payload(
         [
@@ -67,6 +73,7 @@ def make_image_payload(
         ],
         repeat_count=repeat_count,
         expected_response=expected_response,
+        expected_log=expected_log,
         temperature=0.0,
         max_tokens=100,
         max_attempts=max_attempts,
