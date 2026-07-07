@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -65,6 +65,22 @@ use super::ModelManager;
 use crate::namespace::NamespaceFilter;
 
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+static RECONCILIATION_LIST_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static RECONCILIATION_DESERIALIZATIONS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+async fn apply_reconciliation_benchmark_list_delay() {
+    let delay_us = std::env::var("RECONCILE_BENCH_LIST_DELAY_US")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    if delay_us != 0 {
+        tokio::time::sleep(Duration::from_micros(delay_us)).await;
+    }
+}
 
 /// Constructs the WorkerSet storage key as `{namespace}:{model_type}:{worker_type}`.
 ///
@@ -289,6 +305,35 @@ impl InstanceOperation {
 enum DeleteOutcome {
     Superseded,
     Processed(Option<String>),
+}
+
+#[derive(Default)]
+struct ModelCardSnapshot {
+    keys: HashSet<String>,
+    cards_by_model: HashMap<String, Vec<(EndpointId, ModelDeploymentCard)>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StaleCleanupReservation {
+    Reappeared,
+    Superseded,
+    Reserved(u64),
+}
+
+fn reserve_stale_cleanup(
+    snapshot: &ModelCardSnapshot,
+    key: &str,
+    operation: &InstanceOperation,
+    snapshot_generation: u64,
+) -> StaleCleanupReservation {
+    if snapshot.keys.contains(key) {
+        StaleCleanupReservation::Reappeared
+    } else {
+        operation
+            .reserve_after(snapshot_generation)
+            .map(StaleCleanupReservation::Reserved)
+            .unwrap_or(StaleCleanupReservation::Superseded)
+    }
 }
 
 impl Drop for RegistrationGuard<'_> {
@@ -620,6 +665,7 @@ impl ModelWatcher {
                             &namespace_filter,
                             operation,
                             generation,
+                            None,
                         )
                         .await
                     {
@@ -661,27 +707,34 @@ impl ModelWatcher {
             })
             .collect::<Vec<_>>();
 
-        let mut instances = self.drt.discovery().list(DiscoveryQuery::AllModels).await?;
-        instances.sort_by_key(|instance| {
-            model_card_instance_id(instance)
-                .map(|mcid| mcid.to_path())
-                .unwrap_or_default()
-        });
+        #[cfg(test)]
+        {
+            RECONCILIATION_LIST_CALLS.fetch_add(1, Ordering::Relaxed);
+            apply_reconciliation_benchmark_list_delay().await;
+        }
+        let instances = self.drt.discovery().list(DiscoveryQuery::AllModels).await?;
+        let mut instances = instances
+            .into_iter()
+            .filter_map(|instance| {
+                let mcid = match model_card_instance_id(&instance) {
+                    Ok(mcid) => mcid,
+                    Err(err) => {
+                        tracing::error!(
+                            error = format!("{err:#}"),
+                            "Unexpected discovery entry during model reconciliation"
+                        );
+                        return None;
+                    }
+                };
+                Some((mcid.to_path(), mcid, instance))
+            })
+            .collect::<Vec<_>>();
+        instances.sort_by(|left, right| left.0.cmp(&right.0));
 
         let mut desired_keys = HashSet::with_capacity(instances.len());
         let mut retry_count = 0usize;
 
-        for instance in instances {
-            let mcid = match model_card_instance_id(&instance) {
-                Ok(mcid) => mcid,
-                Err(err) => {
-                    tracing::error!(
-                        error = format!("{err:#}"),
-                        "Unexpected discovery entry during model reconciliation"
-                    );
-                    continue;
-                }
-            };
+        for (key, mcid, instance) in instances {
             if !namespace_filter.matches(&mcid.namespace) {
                 continue;
             }
@@ -689,8 +742,10 @@ impl ModelWatcher {
             // Record the source key before deserializing the card. A malformed
             // source entry must not cause a valid local entry with the same key
             // to be treated as stale and deleted.
-            desired_keys.insert(mcid.to_path());
+            desired_keys.insert(key);
 
+            #[cfg(test)]
+            RECONCILIATION_DESERIALIZATIONS.fetch_add(1, Ordering::Relaxed);
             let mut card = match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(card) => card,
                 Err(err) => {
@@ -727,21 +782,56 @@ impl ModelWatcher {
         stale_entries.sort_by(|left, right| left.0.cmp(&right.0));
         let stale_entry_count = stale_entries.len();
 
+        // Refresh discovery once before cleanup. Besides bounding discovery
+        // work independently of the number of stale entries, this protects a
+        // card that reappeared after the initial reconciliation snapshot.
+        // A failed refresh leaves every local card intact for the next pass.
+        let cleanup_snapshot = if stale_entries.is_empty() {
+            None
+        } else {
+            Some(self.model_card_snapshot(namespace_filter).await?)
+        };
+
         let mut removed_stale_count = 0usize;
         let mut superseded_stale_count = 0usize;
         for (key, mcid, operation, snapshot_generation) in stale_entries {
-            let Some(delete_generation) = operation.reserve_after(snapshot_generation) else {
-                superseded_stale_count += 1;
-                tracing::debug!(
-                    key = %key,
-                    snapshot_generation,
-                    current_generation = operation.current_generation(),
-                    "Skipping stale cleanup superseded after reconciliation snapshot"
-                );
-                continue;
+            let cleanup_snapshot = cleanup_snapshot
+                .as_ref()
+                .expect("a cleanup snapshot exists when stale entries are present");
+            let delete_generation = match reserve_stale_cleanup(
+                cleanup_snapshot,
+                &key,
+                &operation,
+                snapshot_generation,
+            ) {
+                StaleCleanupReservation::Reappeared => {
+                    superseded_stale_count += 1;
+                    tracing::debug!(
+                        key = %key,
+                        "Skipping stale cleanup for a card present in the refreshed discovery snapshot"
+                    );
+                    continue;
+                }
+                StaleCleanupReservation::Superseded => {
+                    superseded_stale_count += 1;
+                    tracing::debug!(
+                        key = %key,
+                        snapshot_generation,
+                        current_generation = operation.current_generation(),
+                        "Skipping stale cleanup superseded after reconciliation snapshot"
+                    );
+                    continue;
+                }
+                StaleCleanupReservation::Reserved(generation) => generation,
             };
             match self
-                .handle_delete(&mcid, namespace_filter, operation, delete_generation)
+                .handle_delete(
+                    &mcid,
+                    namespace_filter,
+                    operation,
+                    delete_generation,
+                    Some(cleanup_snapshot),
+                )
                 .await
             {
                 Ok(DeleteOutcome::Processed(_)) => removed_stale_count += 1,
@@ -857,6 +947,7 @@ impl ModelWatcher {
         namespace_filter: &NamespaceFilter,
         operation: Arc<InstanceOperation>,
         generation: u64,
+        active_snapshot: Option<&ModelCardSnapshot>,
     ) -> anyhow::Result<DeleteOutcome> {
         let key = mcid.to_path();
 
@@ -911,7 +1002,9 @@ impl ModelWatcher {
             let _ = pending.handle.await;
         }
 
-        let result = self.handle_delete_serialized(mcid, namespace_filter).await;
+        let result = self
+            .handle_delete_serialized(mcid, namespace_filter, active_snapshot)
+            .await;
         drop(operation_guard);
         self.prune_instance_operation(&key, &operation);
         result.map(DeleteOutcome::Processed)
@@ -921,6 +1014,7 @@ impl ModelWatcher {
         &self,
         mcid: &ModelCardInstanceId,
         namespace_filter: &NamespaceFilter,
+        active_snapshot: Option<&ModelCardSnapshot>,
     ) -> anyhow::Result<Option<String>> {
         let key = mcid.to_path();
 
@@ -964,10 +1058,21 @@ impl ModelWatcher {
         // state. If discovery is temporarily unavailable, retaining the card
         // lets the next reconciliation pass retry this stale entry instead of
         // losing the key while leaving its WorkerSet behind.
-        let active_instances = self
-            .cards_for_model_with_endpoints(&model_name, namespace_filter)
-            .await
-            .with_context(|| model_name.clone())?;
+        let queried_instances;
+        let active_instances = match active_snapshot {
+            Some(snapshot) => snapshot
+                .cards_by_model
+                .get(&model_name)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            None => {
+                queried_instances = self
+                    .cards_for_model_with_endpoints(&model_name, namespace_filter)
+                    .await
+                    .with_context(|| model_name.clone())?;
+                queried_instances.as_slice()
+            }
+        };
 
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
@@ -1811,13 +1916,80 @@ impl ModelWatcher {
         Ok(())
     }
 
+    /// Take one indexed snapshot of the registered model cards selected by the
+    /// namespace filter. Keys are retained even when card deserialization
+    /// fails, so malformed discovery data cannot make a valid local card look
+    /// stale. Successfully decoded cards are grouped for removal decisions.
+    async fn model_card_snapshot(
+        &self,
+        namespace_filter: &NamespaceFilter,
+    ) -> anyhow::Result<ModelCardSnapshot> {
+        let discovery = self.drt.discovery();
+        #[cfg(test)]
+        {
+            RECONCILIATION_LIST_CALLS.fetch_add(1, Ordering::Relaxed);
+            apply_reconciliation_benchmark_list_delay().await;
+        }
+        let instances = discovery.list(DiscoveryQuery::AllModels).await?;
+
+        let mut snapshot = ModelCardSnapshot {
+            keys: HashSet::with_capacity(instances.len()),
+            cards_by_model: HashMap::with_capacity(instances.len()),
+        };
+        for instance in instances {
+            let mcid = match model_card_instance_id(&instance) {
+                Ok(mcid) => mcid,
+                Err(err) => {
+                    tracing::error!(
+                        error = format!("{err:#}"),
+                        "Unexpected discovery entry while snapshotting model cards"
+                    );
+                    continue;
+                }
+            };
+            if !namespace_filter.matches(&mcid.namespace) {
+                continue;
+            }
+            snapshot.keys.insert(mcid.to_path());
+
+            #[cfg(test)]
+            RECONCILIATION_DESERIALIZATIONS.fetch_add(1, Ordering::Relaxed);
+            match instance.deserialize_model::<ModelDeploymentCard>() {
+                Ok(mut card) => {
+                    self.apply_tokenizer_backend_override(&mut card);
+                    let endpoint_id = EndpointId {
+                        namespace: mcid.namespace,
+                        component: mcid.component,
+                        name: mcid.endpoint,
+                    };
+                    snapshot
+                        .cards_by_model
+                        .entry(card.name().to_string())
+                        .or_default()
+                        .push((endpoint_id, card));
+                }
+                Err(err) => {
+                    tracing::error!(%err, "Failed to deserialize model card");
+                }
+            }
+        }
+        Ok(snapshot)
+    }
+
     /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance
     async fn all_cards(&self) -> anyhow::Result<Vec<(EndpointId, ModelDeploymentCard)>> {
         let discovery = self.drt.discovery();
+        #[cfg(test)]
+        {
+            RECONCILIATION_LIST_CALLS.fetch_add(1, Ordering::Relaxed);
+            apply_reconciliation_benchmark_list_delay().await;
+        }
         let instances = discovery.list(DiscoveryQuery::AllModels).await?;
 
         let mut results = Vec::with_capacity(instances.len());
         for instance in instances {
+            #[cfg(test)]
+            RECONCILIATION_DESERIALIZATIONS.fetch_add(1, Ordering::Relaxed);
             match instance.deserialize_model::<ModelDeploymentCard>() {
                 Ok(mut card) => {
                     self.apply_tokenizer_backend_override(&mut card);
@@ -1912,6 +2084,129 @@ fn seed_lora_state_from_card(
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
+
+    async fn reconciliation_benchmark_watcher(
+        discovered: usize,
+    ) -> (Arc<ModelWatcher>, Arc<ModelManager>) {
+        use dynamo_runtime::{Runtime, discovery::DiscoverySpec, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().expect("benchmark must run inside Tokio");
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .expect("create process-local runtime");
+        let manager = Arc::new(ModelManager::new());
+        let discovery = drt.discovery();
+
+        for i in 0..discovered {
+            let namespace = "reconcile-bench".to_string();
+            let component = "backend".to_string();
+            let endpoint = format!("generate-{i:08}");
+            let mut card = ModelDeploymentCard::with_name_only(&format!("desired-{i:08}"));
+            card.worker_type = Some(WorkerType::Encode);
+
+            let instance = discovery
+                .register_internal(
+                    DiscoverySpec::from_model(
+                        namespace.clone(),
+                        component.clone(),
+                        endpoint,
+                        &card,
+                    )
+                    .expect("serialize benchmark card"),
+                )
+                .await
+                .expect("register benchmark card");
+            let mcid = model_card_instance_id(&instance).expect("model-card instance");
+            manager
+                .save_model_card(&mcid.to_path(), card.clone())
+                .expect("save desired model card");
+            let ws_key = worker_set_key(&namespace, card.model_type, card.worker_type);
+            let model_name = card.name().to_string();
+            let checksum = card.mdcsum().to_string();
+            manager.add_worker_set(
+                &model_name,
+                &ws_key,
+                WorkerSet::new(namespace, checksum, card),
+            );
+        }
+
+        let watcher = Arc::new(ModelWatcher::new(
+            drt,
+            Arc::clone(&manager),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        ));
+        (watcher, manager)
+    }
+
+    fn seed_stale_benchmark_cards(manager: &ModelManager, stale: usize) {
+        for i in 0..stale {
+            let mcid = ModelCardInstanceId {
+                namespace: "reconcile-bench".to_string(),
+                component: "stale-backend".to_string(),
+                endpoint: format!("stale-{i:08}"),
+                instance_id: u64::MAX - i as u64,
+                model_suffix: None,
+            };
+            let mut card = ModelDeploymentCard::with_name_only(&format!("stale-{i:08}"));
+            card.worker_type = Some(WorkerType::Encode);
+            manager
+                .save_model_card(&mcid.to_path(), card)
+                .expect("save stale model card");
+        }
+    }
+
+    /// Deterministic CPU-only harness for reconciliation cardinality scaling.
+    ///
+    /// Run the already-built test binary with `--ignored --nocapture` and set
+    /// `RECONCILE_BENCH_N`, `RECONCILE_BENCH_S`, `RECONCILE_BENCH_WARMUP`, and
+    /// `RECONCILE_BENCH_ITERS` to select the workload.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "performance investigation harness"]
+    async fn benchmark_reconciliation_cardinality() {
+        let parameter = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let discovered = parameter("RECONCILE_BENCH_N", 100);
+        let stale = parameter("RECONCILE_BENCH_S", 100);
+        let warmup = parameter("RECONCILE_BENCH_WARMUP", 1);
+        let iterations = parameter("RECONCILE_BENCH_ITERS", 5);
+        let list_delay_us = parameter("RECONCILE_BENCH_LIST_DELAY_US", 0);
+        let (watcher, manager) = reconciliation_benchmark_watcher(discovered).await;
+
+        for iteration in 0..(warmup + iterations) {
+            seed_stale_benchmark_cards(&manager, stale);
+            RECONCILIATION_LIST_CALLS.store(0, Ordering::Relaxed);
+            RECONCILIATION_DESERIALIZATIONS.store(0, Ordering::Relaxed);
+            let started = std::time::Instant::now();
+            watcher
+                .reconcile(&NamespaceFilter::Global)
+                .await
+                .expect("reconciliation benchmark iteration");
+            let elapsed = started.elapsed();
+            assert_eq!(manager.get_model_card_keys().len(), discovered);
+
+            if iteration >= warmup {
+                println!(
+                    "PERF_SAMPLE {{\"iteration\":{},\"discovered\":{},\"stale\":{},\"list_delay_us\":{},\"wall_ns\":{},\"list_calls\":{},\"deserializations\":{}}}",
+                    iteration - warmup,
+                    discovered,
+                    stale,
+                    list_delay_us,
+                    elapsed.as_nanos(),
+                    RECONCILIATION_LIST_CALLS.load(Ordering::Relaxed),
+                    RECONCILIATION_DESERIALIZATIONS.load(Ordering::Relaxed),
+                );
+            }
+        }
+    }
 
     #[test]
     fn base_card_with_capacity_seeds_idle_lora_capable_worker() {
@@ -2030,11 +2325,29 @@ mod tests {
     fn stale_cleanup_cannot_reserve_after_a_new_registration() {
         let operation = InstanceOperation::default();
         let snapshot_generation = operation.current_generation();
+        let snapshot = ModelCardSnapshot::default();
 
         let registration_generation = operation.begin();
 
         assert!(operation.is_current(registration_generation));
-        assert_eq!(operation.reserve_after(snapshot_generation), None);
+        assert_eq!(
+            reserve_stale_cleanup(&snapshot, "missing", &operation, snapshot_generation),
+            StaleCleanupReservation::Superseded
+        );
+    }
+
+    #[test]
+    fn stale_cleanup_cannot_reserve_a_reappeared_card() {
+        let operation = InstanceOperation::default();
+        let snapshot_generation = operation.current_generation();
+        let mut snapshot = ModelCardSnapshot::default();
+        snapshot.keys.insert("reappeared".to_string());
+
+        assert_eq!(
+            reserve_stale_cleanup(&snapshot, "reappeared", &operation, snapshot_generation),
+            StaleCleanupReservation::Reappeared
+        );
+        assert_eq!(operation.current_generation(), snapshot_generation);
     }
 
     #[tokio::test]
