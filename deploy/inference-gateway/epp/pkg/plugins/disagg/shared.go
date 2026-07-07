@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/go-logr/logr"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
@@ -158,4 +159,14 @@ func getEnvBoolOrDefault(key string, def bool) bool {
 		}
 	}
 	return def
+}
+
+var enforceDisaggDeprecationOnce sync.Once
+
+func warnDeprecatedEnforceDisagg(logger logr.Logger) {
+	if getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false) {
+		enforceDisaggDeprecationOnce.Do(func() {
+			logger.Info("DYN_ENFORCE_DISAGG is deprecated and ignored; routing topology and readiness come from registered worker types")
+		})
+	}
 }

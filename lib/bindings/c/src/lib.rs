@@ -640,7 +640,7 @@ pub enum QueryRouterResult {
 /// # Arguments
 /// - `namespace`: Namespace for the model
 /// - `component`: Component name (defaults to "backend" if NULL or empty)
-/// - `enforce_disagg`: If true, requires prefill workers to be present at init time
+/// - `enforce_disagg`: Deprecated compatibility parameter. The value is ignored.
 /// - `out_handle`: Output handle
 ///
 /// # Safety
@@ -654,6 +654,12 @@ pub unsafe extern "C" fn create_routers(
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     initialize_tracing();
+
+    if enforce_disagg {
+        tracing::warn!(
+            "enforce_disagg is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+        );
+    }
 
     if namespace.is_null() || out_handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
@@ -812,7 +818,6 @@ pub unsafe extern "C" fn create_routers(
             block_size,
             Some(prefill_config),
             None,
-            enforce_disagg,
             None,
             model_name.clone(),
             actual_namespace.clone(),

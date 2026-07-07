@@ -12,7 +12,7 @@ Integrate Dynamo with the Gateway API Inference Extension, also known as Inferen
 
 - EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration is embedded in the recipe-based GAIE deploy YAMLs under [`recipes/llama-3-70b/vllm/agg/gaie/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/gaie) and [`recipes/llama-3-70b/vllm/disagg-single-node/gaie/`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/gaie), following the GAIE/EPP configuration layout used by this repository.
 
-- Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The recipe examples provide separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Unless `DYN_ENFORCE_DISAGG=true`, deployments without a `prefill` profile or prefill workers fall back to aggregated serving.
+- Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The recipe examples provide separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Registered worker types determine routing topology and readiness; deployments without a `prefill` profile or prefill workers serve aggregated.
 
 - GAIE integration supports Data Parallelism.
 
@@ -183,7 +183,7 @@ resolution and router configuration:
 | `DYN_NAMESPACE_PREFIX` | *(unset)* | Dynamo discovery namespace (highest priority) |
 | `DYN_NAMESPACE` | `vllm-agg` | Dynamo discovery namespace (fallback) |
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component name |
-| `DYN_ENFORCE_DISAGG` | `false` | Enforce disaggregated prefill/decode routing |
+| `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |
 | `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode; Rust EPP currently rejects `container` |
 | `RUST_LOG` | `info` | Tracing log level filter |
 
@@ -291,11 +291,6 @@ kubectl apply -f recipes/llama-3-70b/model-cache/model-cache.yaml  -n ${NAMESPAC
 kubectl apply -f recipes/llama-3-70b/model-cache/model-download.yaml  -n ${NAMESPACE}
 ```
 We provide examples for llama-3-70b vLLM under the `recipes/llama-3-70b/vllm/agg/gaie/` for aggregated and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/` for disaggregated serving.
-Note for the aggregated serving you need to disable DYN_ENFORCE_DISAGG in epp config.
-```bash
-  - name: DYN_ENFORCE_DISAGG
-    value: "false"
-```
 Use the proper folder in commands below.
 
 ```bash
@@ -384,9 +379,7 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 3. **Optionally** set `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
 
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
-- Set `DYN_ENFORCE_DISAGG=true` (default: `false`) to control per-request behavior when prefill workers are unavailable:
-  - **`true` (recommended for disaggregated serving):** Requests fail with an error if prefill workers are not available. Use this when disaggregated serving is required and aggregated fallback is not acceptable.
-  - **`false` (default):** Requests gracefully fall back to aggregated mode (skip prefill, route directly to decode) when prefill workers are not available. When prefill workers appear later, subsequent requests automatically use disaggregated routing.
+- `DYN_ENFORCE_DISAGG` is deprecated and ignored. Registered worker types determine routing topology and readiness: decode workers that declare a prefill dependency stay unready until a prefill worker registers, while aggregated workers are ready without prefill.
 - Set `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` to control the device-local prefix-overlap credit multiplier, from 0.0 to 1.0. Higher values bias toward reusing workers with similar cached prefixes. (default: 1)
 - Set `DYN_ROUTER_PREFILL_LOAD_SCALE` to scale adjusted prompt-side prefill load before decode blocks are added. (default: 1)
 - Set `DYN_ROUTER_TEMPERATURE` (default: `0.0`) to soften or sharpen normalized worker sampling. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
