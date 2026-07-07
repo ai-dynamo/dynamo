@@ -578,7 +578,7 @@ class TestDisaggRequestId:
     def test_disagg_request_id_populated_in_prefill_mode(self):
         """When mode is PREFILL and no ep_disaggregated_params, disagg_request_id is set."""
         handler = self._make_prefill_handler()
-        disagg_params, _, _ = handler._setup_disaggregated_params_for_mode(
+        disagg_params, _, _, _ = handler._setup_disaggregated_params_for_mode(
             request={}, ep_disaggregated_params=None
         )
         assert disagg_params is not None
@@ -590,7 +590,7 @@ class TestDisaggRequestId:
         handler = self._make_prefill_handler()
         ids = set()
         for _ in range(10):
-            params, _, _ = handler._setup_disaggregated_params_for_mode(
+            params, _, _, _ = handler._setup_disaggregated_params_for_mode(
                 request={}, ep_disaggregated_params=None
             )
             ids.add(params.disagg_request_id)
@@ -604,7 +604,7 @@ class TestDisaggRequestId:
         # Make bool(ep_params) truthy so the if-branch is taken
         ep_params.__bool__ = lambda self: True
 
-        params, _, _ = handler._setup_disaggregated_params_for_mode(
+        params, _, _, _ = handler._setup_disaggregated_params_for_mode(
             request={}, ep_disaggregated_params=ep_params
         )
         assert params.disagg_request_id is not None
@@ -618,7 +618,7 @@ class TestDisaggRequestId:
         ep_params.disagg_request_id = existing_id
         ep_params.__bool__ = lambda self: True
 
-        params, _, _ = handler._setup_disaggregated_params_for_mode(
+        params, _, _, _ = handler._setup_disaggregated_params_for_mode(
             request={}, ep_disaggregated_params=ep_params
         )
         assert params.disagg_request_id == existing_id
@@ -632,10 +632,10 @@ class TestDisaggRequestId:
         """Handlers with different machine_ids produce non-overlapping snowflake IDs."""
         handler_a = self._make_prefill_handler(machine_id=1)
         handler_b = self._make_prefill_handler(machine_id=2)
-        params_a, _, _ = handler_a._setup_disaggregated_params_for_mode(
+        params_a, _, _, _ = handler_a._setup_disaggregated_params_for_mode(
             request={}, ep_disaggregated_params=None
         )
-        params_b, _, _ = handler_b._setup_disaggregated_params_for_mode(
+        params_b, _, _, _ = handler_b._setup_disaggregated_params_for_mode(
             request={}, ep_disaggregated_params=None
         )
         assert params_a.disagg_request_id != params_b.disagg_request_id

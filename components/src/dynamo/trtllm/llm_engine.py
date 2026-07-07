@@ -825,15 +825,28 @@ class TrtllmLLMEngine(LLMEngine):
             )
             disaggregated_params = self._decode_prefill_handoff(prefill_result)
 
-        # exp H (gap #4): forward the conversation/session id (set by the frontend KV
-        # router into RoutingHints.conversation_id) onto disaggregated_params so the
-        # engine's conversation-affinity ADP router can pin conv -> DP rank.
+        # exp H (gap #4): forward the conversation/session id so the engine's
+        # ConversationAwareADPRouter can pin conv -> DP rank. Older trtllm builds
+        # carried this on disaggregated_params; newer builds expose a dedicated
+        # ConversationParams object on generate_async().
         conv_id = conversation_id_from_request(request)
-        if disaggregated_params is not None and conv_id is not None:
-            disaggregated_params.conversation_id = conv_id
+        conversation_params = None
+        if conv_id is not None:
+            if disaggregated_params is not None and hasattr(
+                type(disaggregated_params), "conversation_id"
+            ):
+                disaggregated_params.conversation_id = conv_id
+            else:
+                from tensorrt_llm.llmapi import ConversationParams
+
+                conversation_params = ConversationParams(conversation_id=conv_id)
         # exp-H (gap #4): confirm propagation at run time. PERF-SAFE: log the FIRST request at
         # INFO (one-shot) so it's confirmable WITHOUT enabling debug at benchmark time; rest debug.
-        _set_on_disagg = disaggregated_params is not None and conv_id is not None
+        _set_on_disagg = (
+            conv_id is not None
+            and disaggregated_params is not None
+            and hasattr(type(disaggregated_params), "conversation_id")
+        )
         if not self._convid_first_logged:
             self._convid_first_logged = True
             logger.info(
@@ -893,14 +906,19 @@ class TrtllmLLMEngine(LLMEngine):
         # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
-        generation_result = self._engine.llm.generate_async(
-            inputs=token_ids,
-            sampling_params=sampling_params,
-            streaming=streaming,
-            disaggregated_params=disaggregated_params,
-            scheduling_params=scheduling_params,
+        generate_kwargs = {
+            "inputs": token_ids,
+            "sampling_params": sampling_params,
+            "streaming": streaming,
+            "disaggregated_params": disaggregated_params,
+            "scheduling_params": scheduling_params,
             **telemetry.engine_trace_kwargs(context),
-        )
+        }
+        # Only pass conversation_params when we built one; older trtllm
+        # builds don't accept the kwarg at all.
+        if conversation_params is not None:
+            generate_kwargs["conversation_params"] = conversation_params
+        generation_result = self._engine.llm.generate_async(**generate_kwargs)
 
         request_id = context.id()
         if request_id is not None:

@@ -664,7 +664,7 @@ class HandlerBase(BaseGenerativeHandler):
         self,
         request: dict,
         ep_disaggregated_params: Optional[Any],
-    ) -> tuple[Any, Any, dict]:
+    ) -> tuple[Any, Any, dict, Any]:
         """
         Setup disaggregated_params based on disaggregation mode.
 
@@ -686,7 +686,11 @@ class HandlerBase(BaseGenerativeHandler):
             ep_disaggregated_params: Optional params from encode worker (EPD flow)
 
         Returns:
-            Tuple of (disaggregated_params, ep_disaggregated_params, epd_metadata)
+            Tuple of (disaggregated_params, ep_disaggregated_params, epd_metadata,
+            conversation_params). conversation_params is a tensorrt_llm ConversationParams
+            when the installed trtllm exposes the newer generate_async(conversation_params=)
+            API (DisaggregatedParams no longer carries conversation_id); otherwise None,
+            and the id is placed on disaggregated_params for the older API.
         """
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
@@ -694,7 +698,12 @@ class HandlerBase(BaseGenerativeHandler):
         # Canary probe: use its pre-built disagg params (skip prefill_result decode
         # and skip the mode-specific request_type overrides).
         if request.get(HEALTH_CHECK_KEY) and request.get("disaggregated_params"):
-            return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
+            return (
+                LlmDisaggregatedParams(**request["disaggregated_params"]),
+                None,
+                {},
+                None,
+            )
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -742,13 +751,28 @@ class HandlerBase(BaseGenerativeHandler):
             ep_disaggregated_params = disaggregated_params
 
         # exp-H (gap #4): plumb conversation_id (frontend seeded routing.conversation_id from
-        # nvext.session_control) onto disaggregated_params so the engine's ConversationAwareADPRouter
-        # can pin conv -> DP rank. Covers PREFILL (context_only) / AGGREGATED / DECODE (generation_only).
+        # nvext.session_control) so the engine's ConversationAwareADPRouter can pin
+        # conv -> DP rank. Older trtllm builds carried this on disaggregated_params;
+        # newer builds (that predate the compat field) expose a dedicated
+        # ConversationParams object accepted by LLM.generate_async(conversation_params=).
         _conv_id = conversation_id_from_request(request)
-        if disaggregated_params is not None and _conv_id is not None:
-            disaggregated_params.conversation_id = _conv_id
+        conversation_params = None
+        if _conv_id is not None:
+            if disaggregated_params is not None and hasattr(
+                type(disaggregated_params), "conversation_id"
+            ):
+                disaggregated_params.conversation_id = _conv_id
+            else:
+                from tensorrt_llm.llmapi import ConversationParams
 
-        return disaggregated_params, ep_disaggregated_params, epd_metadata
+                conversation_params = ConversationParams(conversation_id=_conv_id)
+
+        return (
+            disaggregated_params,
+            ep_disaggregated_params,
+            epd_metadata,
+            conversation_params,
+        )
 
     async def _prepare_input_for_generation(
         self,
@@ -985,6 +1009,7 @@ class HandlerBase(BaseGenerativeHandler):
             disaggregated_params,
             ep_disaggregated_params,
             epd_metadata,
+            conversation_params,
         ) = self._setup_disaggregated_params_for_mode(request, ep_disaggregated_params)
 
         # Prepare input for generation (handles multimodal/text flows)
@@ -1130,9 +1155,13 @@ class HandlerBase(BaseGenerativeHandler):
         if not _EXPH_FIRST_LOGGED:
             _EXPH_FIRST_LOGGED = True
             _cid = (
-                disaggregated_params.conversation_id
-                if disaggregated_params is not None
-                else None
+                conversation_params.conversation_id
+                if conversation_params is not None
+                else (
+                    getattr(disaggregated_params, "conversation_id", None)
+                    if disaggregated_params is not None
+                    else None
+                )
             )
             logging.info(
                 "exp-H FIRST req: conversation_id=%s attention_dp_rank_forced=%s "
@@ -1148,15 +1177,20 @@ class HandlerBase(BaseGenerativeHandler):
 
         try:
             # NEW: Updated engine call to include multimodal data
-            generation_result = self.engine.llm.generate_async(
-                inputs=processed_input,  # Use the correctly extracted inputs
-                sampling_params=sampling_params,
-                disaggregated_params=disaggregated_params,
-                streaming=streaming,
-                trace_headers=trace_headers,
-                scheduling_params=scheduling_params,
-                priority=priority,
-            )
+            generate_kwargs = {
+                "inputs": processed_input,
+                "sampling_params": sampling_params,
+                "disaggregated_params": disaggregated_params,
+                "streaming": streaming,
+                "trace_headers": trace_headers,
+                "scheduling_params": scheduling_params,
+                "priority": priority,
+            }
+            # Only pass conversation_params when we built one — older trtllm
+            # builds don't accept the kwarg at all.
+            if conversation_params is not None:
+                generate_kwargs["conversation_params"] = conversation_params
+            generation_result = self.engine.llm.generate_async(**generate_kwargs)
 
             # In disagg decode mode, wrap abort() to defer until first token
             # (KV transfer complete).
