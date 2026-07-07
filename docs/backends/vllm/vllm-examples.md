@@ -94,12 +94,14 @@ The frontend runs in KV routing mode and automatically detects prefill workers t
 
 ### Data Parallel / Expert Parallelism
 
-Launches 4 data-parallel workers with expert parallelism behind a KV-aware router. Uses a Mixture-of-Experts model (`Qwen/Qwen3-30B-A3B`). Requires 4 GPUs.
+Launches 4 data-parallel workers with expert parallelism behind a KV-aware router using PyTorch's multiprocessing backend. Uses a Mixture-of-Experts model (`Qwen/Qwen3-30B-A3B`). Requires 4 GPUs.
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/dep.sh
 ```
+
+This uses the recommended PyTorch multiprocessing (mp) backend for distributed execution, providing better performance and operational simplicity compared to legacy approaches.
 
 <Tip>
 Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.
@@ -137,7 +139,7 @@ export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
 export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
 ```
 
-For multi-node tensor/pipeline parallelism (when TP x PP exceeds GPUs on a single node), see [`launch/multi_node_tp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/multi_node_tp.sh). For details on distributed execution, see the [vLLM multiprocessing docs](https://docs.vllm.ai/en/stable/serving/parallelism_scaling/#running-vllm-with-multiprocessing).
+For multi-node tensor/pipeline parallelism (when TP x PP exceeds GPUs on a single node), use PyTorch multiprocessing backend with `--nnodes`, `--node-rank`, and `--master-addr` flags. See [`launch/multi_node_tp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/multi_node_tp.sh) and the [vLLM multiprocessing docs](https://docs.vllm.ai/en/stable/serving/parallelism_scaling/#running-vllm-with-multiprocessing) for details.
 
 ### DeepSeek-R1
 

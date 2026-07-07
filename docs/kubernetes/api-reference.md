@@ -3784,6 +3784,7 @@ The operator automatically selects between two deployment modes based on paralle
 
 **Tensor/Pipeline Parallel Mode** (when `world_size > GPUs_per_node`):
 - Uses Ray for distributed execution (`--distributed-executor-backend ray`)
+- Requires `ray` in the Python environment; install it with `pip install "ray>=2.55.0"` if needed
 - **Leader nodes**: Starts Ray head and runs vLLM; all probes remain active
 - **Worker nodes**: Run Ray agents only; all probes (liveness, readiness, startup) are removed
 

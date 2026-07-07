@@ -192,33 +192,25 @@ When you deploy a multinode workload, the Dynamo operator automatically applies 
 
 For vLLM multinode deployments, the operator automatically selects and configures the appropriate distributed execution mode based on your parallelism settings:
 
-#### Deployment Modes
+#### Recommended Approach: PyTorch Distributed (mp)
 
-The operator automatically determines the deployment mode based on your parallelism configuration:
+For multi-node tensor/pipeline parallelism, **the `mp` (multiprocessing) backend is the recommended approach**. This aligns with vLLM's current architectural direction and provides better integration with PyTorch's native distributed execution model.
 
-**1. Tensor/Pipeline Parallelism Mode (Single model across nodes)**
-- **When used**: When `world_size > GPUs_per_node` where `world_size = tensor_parallel_size × pipeline_parallel_size`
-- **Use case**: Distributing a single model instance across multiple nodes using tensor or pipeline parallelism
+**When used**: When `world_size > GPUs_per_node` where `world_size = tensor_parallel_size × pipeline_parallel_size`
 
-The operator uses Ray for multi-node tensor/pipeline parallel deployments. Ray provides automatic placement group management and worker spawning across nodes.
+**All Nodes (Leader and Workers):**
+- **Injected Flags**:
+  - `--nnodes <total-nodes>` - Total number of nodes in the deployment
+  - `--node-rank <rank>` - Rank of this node (automatically determined)
+  - `--master-addr <leader-hostname>` - Address of the leader node
+  - `--master-port 6379` - Port for synchronization
+  - `--distributed-executor-backend mp` - Use PyTorch multiprocessing backend
+- **Behavior**: Each node runs its own vLLM process with PyTorch's native distributed initialization
+- **Probes**: Worker probes are automatically adjusted; leader probes remain active
 
-**Leader Node:**
-- **Command**: `ray start --head --port=6379 && <original-vllm-command> --distributed-executor-backend ray`
-- **Behavior**: Starts Ray head node, then runs vLLM which creates a placement group spanning all Ray workers
-- **Probes**: All health probes remain active (liveness, readiness, startup)
+#### Data Parallel Mode (Multiple model instances across nodes)
 
-**Worker Nodes:**
-- **Command**: `ray start --address=<leader-hostname>:6379 --block`
-- **Behavior**: Joins Ray cluster and blocks; vLLM on leader spawns Ray actors to these workers
-- **Probes**: All probes (liveness, readiness, startup) are automatically removed
-
-<Note>
-vLLM's Ray executor automatically creates a placement group and spawns workers across the cluster. The `--nnodes` flag is NOT used with Ray - it's only compatible with the `mp` backend.
-</Note>
-
-**2. Data Parallel Mode (Multiple model instances across nodes)**
-- **When used**: When `world_size × data_parallel_size > GPUs_per_node`
-- **Use case**: Running multiple independent model instances across nodes with data parallelism (e.g., MoE models with expert parallelism)
+**When used**: When running multiple independent model instances across nodes with data parallelism (e.g., MoE models with expert parallelism)
 
 **All Nodes (Leader and Workers):**
 - **Injected Flags**:
@@ -230,17 +222,16 @@ vLLM's Ray executor automatically creates a placement group and spawns workers a
 
 **Note**: The operator intelligently injects these flags into your command regardless of command structure (direct Python commands or shell wrappers)
 
-#### Why Ray for Multi-Node TP/PP?
+#### Legacy: Ray Backend (Optional)
 
-vLLM supports two distributed executor backends: `ray` and `mp`. For multi-node deployments:
+The Ray backend is available for advanced use cases but is not recommended for new deployments. Ray support is maintained for backward compatibility with existing workloads.
 
-- **Ray executor**: vLLM creates a placement group and spawns Ray actors across the cluster. Workers don't run vLLM directly - the leader's vLLM process manages everything.
-- **mp executor**: Each node must run its own vLLM process with `--nnodes`, `--node-rank`, `--master-addr`, `--master-port`. This approach is more complex to orchestrate.
+**To use Ray for multi-node deployments:**
+1. Ensure Ray is installed in your container: `pip install "ray>=2.55.0"`
+2. Configure your vLLM launch with: `--distributed-executor-backend ray --data-parallel-backend ray`
+3. Contact NVIDIA support for guidance on Ray-based deployments
 
-The Dynamo operator uses Ray because:
-1. It aligns with vLLM's official multi-node documentation (see `multi-node-serving.sh`)
-2. Simpler orchestration - only the leader runs vLLM, workers just need Ray agents
-3. vLLM automatically handles placement group creation and worker management
+The `mp` backend is the official recommendation and should be used for all new deployments.
 
 #### Compilation Cache Support
 When a volume mount is configured with `useAsCompilationCache: true`, the operator automatically sets:

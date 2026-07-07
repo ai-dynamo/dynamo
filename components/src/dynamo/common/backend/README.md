@@ -532,13 +532,13 @@ Lifecycle and runtime:
 - **Sleep/wake (vLLM)** — `sleep` / `wake_up` controls via
   `VllmEnginePauseController` (discovery unregister before sleep,
   re-register after wake; `worker.rs` `engine_control_policy`)
-- **Elastic EP scaling (vLLM)** — `scale_elastic_ep` control at parity
+- **Elastic EP scaling (vLLM, Legacy)** — `scale_elastic_ep` control at parity
   with the legacy handler: `new_data_parallel_size` validation, a
   single-flight lock (concurrent scales rejected, not queued), and the
   `ray.util.state.list_nodes` → GCS shim for ray `--minimal`. Served at
   `/engine/control/scale_elastic_ep` on the system port (the unified
   Worker namespaces controls under `/engine/control/<name>`, matching the
-  legacy backend). Requires the Ray DP backend
+  legacy backend). **Note: Ray DP backend is deprecated. For new deployments, use PyTorch multiprocessing (mp) backend instead.** Requires the Ray DP backend
   (`--data-parallel-backend ray`, `nnodes == 1`) **and `ray` installed**
   (the vLLM runtime image does not ship it). The single head-node backend
   drives `add_dp_placement_groups` to place DP-worker Ray actors across
