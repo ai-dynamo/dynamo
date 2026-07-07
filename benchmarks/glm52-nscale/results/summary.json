@@ -523,7 +523,7 @@
       "error": "The first native-vLLM A/B Verified attempt stopped at 31/500 predictions when the shared ancestor VAST quota returned EDQUOT while saving a trajectory. The cell PVC itself was healthy at 13.485 GB of 1 TiB, but its shared ancestor was more than 99.98% utilized with about 7.4 GB headroom.",
       "impact": "The partial generation failed closed with 31 valid submitted trajectories, no score, and guarded command exit 125; it was excluded from official results. Native vLLM's volatile /v1/models created and permission-id fields then correctly prevented treating a later request as identical immutable endpoint evidence, so the official cell must restart from a fresh deployment rather than splice attempts.",
       "fix": "Moved both registry cold-fill data and the campaign output subtree off the shared VAST quota. A pin-safe runner overlay outside the immutable eval tree mounts a retained 1 TiB Cinder PVC only at /artifacts/glm52-nscale in both the runner and DinD while retaining VAST at the parent /artifacts for harness environments. Migration copied VAST read-only, verified exact source/destination identities, retained both PVs, and selected the clean vllm-serve-ab-r2 replay name without modifying official evaluator semantics.",
-      "verification": "Output migration copied 5,040 files and 673,879,115 bytes with identical source/destination tree SHA-256 fa69bfe9c128f9b9282265e54431f8ba95796061d12b8bc723de6758f055b668; marker SHA-256 is 4a3bbd039d2355a26c48e7d8018679cc8dd54bfd5e45a1fd303da82e28f4e8e4. Both containers report VAST device 238 at /artifacts and Cinder device 64784 at /artifacts/glm52-nscale with zero restarts. The evaluator source remains 71df933dd01394bf54e1d5cc25a0f666bd91dd9e, the exact 500/500 prefill checkpoint was restored, and no partial score was imported. Proof results/cache-verification/benchmark-output-migration-20260707T033722Z.json has SHA-256 2f1fcf0a9bce5d6804943b59ae7d0f3d2b92e60482b975a913a3ffd82b8226b9. A successful clean 500-task replay is still required for end-to-end closure."
+      "verification": "Output migration copied 5,040 files and 673,879,115 bytes with identical source/destination tree SHA-256 fa69bfe9c128f9b9282265e54431f8ba95796061d12b8bc723de6758f055b668; marker SHA-256 is 4a3bbd039d2355a26c48e7d8018679cc8dd54bfd5e45a1fd303da82e28f4e8e4. Both containers report VAST device 238 at /artifacts and Cinder device 64784 at /artifacts/glm52-nscale with zero restarts. The evaluator source remains 71df933dd01394bf54e1d5cc25a0f666bd91dd9e, the exact 500/500 prefill checkpoint was restored, and no partial score was imported. Proof results/cache-verification/benchmark-output-migration-20260707T033722Z.json has SHA-256 2f1fcf0a9bce5d6804943b59ae7d0f3d2b92e60482b975a913a3ffd82b8226b9. At 2026-07-07T07:19:29Z the clean replay was active at 79/500 saved trajectories with Cinder at 1% usage, no EDQUOT, and zero serving restarts. A successful clean 500-task replay is still required for end-to-end closure."
     },
     {
       "id": "swebench-dockerhub-cold-fill-capacity",
@@ -539,11 +539,11 @@
       "id": "pinned-node-gpu-contention",
       "variant": "vllm-serve",
       "severity": "medium",
-      "status": "in_progress",
+      "status": "fixed",
       "error": "The fresh native-vLLM A/B deployment preflight requires four scheduler-free GPUs on the pinned campaign node but found only one. The 8-GPU node is healthy and unrelated namespaces currently request seven GPUs.",
       "impact": "No serving resources were created and no official workload started. The next vllm-serve A/B SWE-bench Verified cell remains pending rather than moving to different hardware and breaking the campaign's same-node control.",
-      "fix": null,
-      "verification": "The failed preflight exited before apply; the campaign namespace still has zero GPU requests and no GLM-5.2 serving resources. The evaluator runner, Cinder output mount, Docker Hub cache, and 500/500 prefill proof remain ready for an unchanged retry when four GPUs are free."
+      "fix": "Waited for capacity on the same pinned node instead of changing hardware. The guarded preflight was retried only after five GPUs became scheduler-free, then created one fresh four-GPU native-vLLM deployment.",
+      "verification": "The successful preflight reported five scheduler-free GPUs, the deployment rolled out on the pinned node, smoke passed, and the vllm-serve-ab-r2 official cell started under the sole campaign lock. No hardware placement or evaluation setting changed; the serving pod remains Ready with zero restarts."
     },
     {
       "id": "setup-dynamo-vllm-tool-routing",
@@ -593,7 +593,7 @@
       "error": "A long foreground kubectl exec lost its Teleport transport and left an orphaned evaluator process without a valid continuity attestation.",
       "impact": "The interrupted partial result was invalid and could not be imported; another disconnect could have wasted a multi-hour full cell.",
       "fix": "Moved evaluator ownership to a detached runner-side supervisor with atomic locking and state publication, bounded reconnectable control calls, explicit cancellation, process-group cleanup, and fail-closed postflight attestation.",
-      "verification": "All 166 campaign tests pass, including disconnect/start-race/cancellation coverage; the replacement full cell completed, passed continuity validation, and was imported without a transport retry."
+      "verification": "All 166 campaign tests pass, including disconnect/start-race/cancellation coverage; the replacement full cell completed, passed continuity validation, and was imported without a transport retry. During the current native-vLLM cell, local Teleport credentials expired while the remote run advanced from 63 to 77 trajectories under the same supervisor and lock; monitoring reconnected to the unchanged pod with zero restarts."
     },
     {
       "id": "setup-vllm-omni-plugin-import",
@@ -610,7 +610,7 @@
     "No benchmark scores are published until the corresponding full run and official evaluator complete.",
     "Validation-only smoke matrix: Dynamo + vLLM passed BFCL 5/5, SWE-bench Verified 1/1, Pro 0/1, Multilingual 0/1, and Terminal-Bench 3/3; native vLLM, Dynamo + SGLang, and native SGLang each passed BFCL 5/5, all three single-instance SWE-bench checks 1/1, and Terminal-Bench 3/3. The SWE checks are stochastic single-instance diagnostics; a 0/1 model outcome is not a harness failure.",
     "First official full result: Dynamo + vLLM A/B Verified completed all 500 predictions and evaluator reports with zero infrastructure errors, resolving 436/500 instances for an official benchmark score of 87.2%. Two earlier partial evaluation attempts were rejected by the strict gate after anonymous Docker Hub pull limits; preserved reports plus identity-verified local image staging allowed the unchanged run to complete.",
-    "Live campaign snapshot at 2026-07-07T03:41:04Z: 1/40 official cells are imported. Verified image prefill and the dedicated Cinder output cutover are complete, both runner containers have zero restarts, the evaluator source pin is unchanged, and the campaign namespace has zero GPU requests. The next native-vLLM A/B deployment is waiting because only one of the required four GPUs is scheduler-free on the pinned node.",
+    "Live campaign snapshot at 2026-07-07T07:19:29Z: 1/40 official cells are imported. The native-vLLM A/B SWE-bench Verified replay is active under its detached guard at 79/500 saved trajectories, with one task container active, zero serving restarts, unchanged evaluator source identity, and dedicated Cinder output at 1% usage. No score will be published until all 500 trajectories and official evaluator reports validate.",
     "The BFCL web-search category requires an external SERPAPI_API_KEY; none is available, so the full official BFCL run remains blocked."
   ]
 }
