@@ -307,13 +307,14 @@ pub mod llm {
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
     /// Master switch for the `nvext` extension protocol on the frontend.
-    /// Default `true`. Falsy values (`0` / `false` / `no` / `off`,
-    /// case-insensitive) cause the frontend to drop `request.nvext` at
-    /// handler entry, ignore the routing-override headers
-    /// (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`,
-    /// `x-dynamo-dp-rank`, `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
+    /// The protocol is **enabled by default**; this variable disables it.
+    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) cause
+    /// the frontend to drop `request.nvext` at handler entry, ignore the
+    /// routing-override headers (`x-dynamo-worker-instance-id`,
+    /// `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
+    /// `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
     /// `extra_fields` opt-in.
-    pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
+    pub const DYN_DISABLE_FRONTEND_NVEXT: &str = "DYN_DISABLE_FRONTEND_NVEXT";
 
     /// Ignore unknown OpenAI frontend request fields. Unknown fields are dropped,
     /// not handled; known pass-through fields remain type-validated.
@@ -321,10 +322,11 @@ pub mod llm {
         "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
 
     /// Master switch for the frontend's HTTP admin API surface.
-    /// Default `true`. Falsy values prevent registration of `GET` /
-    /// `POST /busy_threshold`. Inference, metrics, models, health, and
-    /// liveness routes are unaffected.
-    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
+    /// The admin API is **enabled by default**; this variable disables it.
+    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
+    /// registration of `GET` / `POST /busy_threshold`. Inference, metrics,
+    /// models, health, and liveness routes are unaffected.
+    pub const DYN_DISABLE_FRONTEND_ADMIN_API: &str = "DYN_DISABLE_FRONTEND_ADMIN_API";
 
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
@@ -396,11 +398,34 @@ pub mod llm {
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
 
+    /// Forward-pass-metrics trace configuration.
+    pub mod fpm_trace {
+        /// Master switch. Truthy values persist locally produced FPM events.
+        pub const DYN_FPM_TRACE: &str = "DYN_FPM_TRACE";
+
+        /// Local gzip JSONL segment prefix. A sanitized producer id is appended
+        /// before the segment index so multiple producers do not share files.
+        pub const DYN_FPM_OUTPUT_PATH: &str = "DYN_FPM_OUTPUT_PATH";
+
+        /// Capture mode: `sampled` (latest event per DP rank each interval) or
+        /// `full` (every event reaching the producer-side trace tap).
+        pub const DYN_FPM_MODE: &str = "DYN_FPM_MODE";
+
+        /// Sampling interval in milliseconds when `DYN_FPM_MODE=sampled`.
+        pub const DYN_FPM_SAMPLE_INTERVAL_MS: &str = "DYN_FPM_SAMPLE_INTERVAL_MS";
+
+        /// Rotating gzip JSONL threshold in uncompressed bytes.
+        pub const DYN_FPM_JSONL_GZ_ROLL_BYTES: &str = "DYN_FPM_JSONL_GZ_ROLL_BYTES";
+
+        /// Maximum number of gzip JSONL segments retained per producer,
+        /// including the active segment.
+        pub const DYN_FPM_MAX_SEGMENTS: &str = "DYN_FPM_MAX_SEGMENTS";
+    }
+
     /// Audit sink configuration
     pub mod audit {
         /// Audit sink selection. Comma-separated values: `stderr`, `nats`,
-        /// `jsonl`, `jsonl_gz`. Setting any non-empty value enables audit
-        /// recording.
+        /// `jsonl`, `jsonl_gz`, `otel`. Unset disables audit recording.
         pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
 
         /// Force audit emission even when the request `store` flag is `false`.
@@ -429,6 +454,10 @@ pub mod llm {
 
         /// Rotating gzip JSONL audit sink roll threshold in record lines.
         pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
+
+        /// Maximum serialized OTEL audit payload bytes. Oversized records emit
+        /// an incomplete marker payload instead of the full request/response.
+        pub const DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES: &str = "DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES";
     }
 
     /// Per-request replay trace configuration
@@ -717,9 +746,9 @@ mod tests {
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
-            llm::DYN_ENABLE_FRONTEND_NVEXT,
+            llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
-            llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+            llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
@@ -753,6 +782,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -823,6 +853,7 @@ mod tests {
 
         // OpenTelemetry vars should start with OTEL_
         assert!(logging::otlp::OTEL_EXPORT_ENABLED.starts_with("OTEL_"));
+        assert!(logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT.starts_with("OTEL_"));
         assert!(logging::otlp::OTEL_SERVICE_NAME.starts_with("OTEL_"));
     }
 }

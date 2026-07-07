@@ -4,8 +4,8 @@
 mod coordinator;
 mod push_router;
 
+pub(crate) use coordinator::{AffinityAcquire, affinity_id};
 pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
-pub(crate) use coordinator::{ResolvedAffinity, affinity_id, session_final};
 pub use push_router::SessionAffinityPushRouter;
 
 pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;

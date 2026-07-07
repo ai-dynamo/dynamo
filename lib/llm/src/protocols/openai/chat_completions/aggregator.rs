@@ -430,7 +430,7 @@ impl DeltaAggregator {
             .map(dynamo_protocols::types::ChatChoice::from)
             .collect();
 
-        choices.sort_by(|a, b| a.index.cmp(&b.index));
+        choices.sort_by_key(|a| a.index);
 
         // Construct the final response object.
         let response = NvCreateChatCompletionResponse {
@@ -568,8 +568,8 @@ mod tests {
         let tool_calls: Option<serde_json::Value> =
             tool_calls.map(|tool_calls| serde_json::from_str(tool_calls).unwrap());
 
-        let tool_call_chunks = if let Some(tool_calls) = tool_calls {
-            Some(vec![
+        let tool_call_chunks = tool_calls.map(|tool_calls| {
+            vec![
                 dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                     index: 0,
                     id: Some("test_id".to_string()),
@@ -579,10 +579,8 @@ mod tests {
                         arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),
                     }),
                 },
-            ])
-        } else {
-            None
-        };
+            ]
+        });
 
         let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
             content: Some(ChatCompletionMessageContent::Text(text.to_string())),
@@ -1210,7 +1208,7 @@ mod tests {
 
         // Verify the response fields
         assert_eq!(response.inner.choices.len(), 2);
-        response.inner.choices.sort_by(|a, b| a.index.cmp(&b.index)); // Ensure the choices are ordered
+        response.inner.choices.sort_by_key(|a| a.index); // Ensure the choices are ordered
         let choice0 = &response.inner.choices[0];
         assert_eq!(choice0.index, 0);
         assert_eq!(

@@ -1387,26 +1387,37 @@ impl VllmCore {
                     .iter()
                     .filter_map(|running_uuid| self.state.requests.get(running_uuid))
                     .map(|request| &request.sequence);
-                let prompt_is_prebuilt = request.prompt_is_prebuilt();
-                match admission.stage_for(prompt_is_prebuilt) {
-                    AdmissionStage::Materialized => AdmissionDecision::Admit {
-                        prefill_cost: PrefillCost {
-                            new_blocks: 0,
-                            new_tokens: 0,
-                            cached_tokens: request.sequence.num_input_tokens(),
-                            active_cached_tokens: request.sequence.num_input_tokens(),
+                if policy::should_reject_for_model_len(
+                    scheduling_policy,
+                    &request.sequence,
+                    self.args.max_model_len,
+                ) {
+                    AdmissionDecision::Reject
+                } else {
+                    let prompt_is_prebuilt = request.prompt_is_prebuilt();
+                    match admission.stage_for(prompt_is_prebuilt) {
+                        AdmissionStage::Materialized => AdmissionDecision::Admit {
+                            prefill_cost: PrefillCost {
+                                new_blocks: 0,
+                                new_tokens: 0,
+                                cached_tokens: request.sequence.num_input_tokens(),
+                                active_cached_tokens: request.sequence.num_input_tokens(),
+                            },
                         },
-                    },
-                    AdmissionStage::PendingDestinationHead => break,
-                    AdmissionStage::FreshKv => policy::decide_waiting_admission(
-                        scheduling_policy,
-                        &request.sequence,
-                        request.status == RequestStatus::Waiting,
-                        running_seqs,
-                        self.args.num_gpu_blocks,
-                        self.args.block_size,
-                        &self.kv_manager,
-                    ),
+                        AdmissionStage::PendingDestinationHead => break,
+                        AdmissionStage::FreshKv => {
+                            let is_fresh = request.status == RequestStatus::Waiting;
+                            policy::decide_waiting_admission(
+                                scheduling_policy,
+                                &request.sequence,
+                                is_fresh,
+                                running_seqs,
+                                self.args.num_gpu_blocks,
+                                self.args.block_size,
+                                &self.kv_manager,
+                            )
+                        }
+                    }
                 }
             };
             let prefill_cost = match decision {
@@ -1418,8 +1429,14 @@ impl VllmCore {
                     tracing::warn!(
                         %uuid,
                         ?scheduling_policy,
+                        prompt_tokens = self
+                            .state
+                            .requests
+                            .get(&uuid)
+                            .map(|request| request.sequence.num_input_tokens()),
+                        max_model_len = self.args.max_model_len,
                         num_gpu_blocks = self.args.num_gpu_blocks,
-                        "rejecting request whose admission footprint exceeds the entire KV pool"
+                        "rejecting request that exceeds a worker admission limit"
                     );
                     rejected_uuids.push(uuid);
                     self.drop_request(uuid);
@@ -1893,7 +1910,7 @@ impl VllmCore {
                 continue;
             };
             if request.num_computed_tokens < request.sequence.len()
-                || request.sequence.generated_tokens() >= request.sequence.max_output_tokens()
+                || policy::generation_complete(&request.sequence, self.args.max_model_len)
             {
                 continue;
             }
@@ -1941,8 +1958,11 @@ impl VllmCore {
                 let Some(sequence) = self.state.running_sequence_mut(uuid) else {
                     break;
                 };
-                let (token_id, signals) = sequence.generate_token();
-                completed = sequence.generated_tokens() >= sequence.max_output_tokens();
+                let (token_id, mut signals) = sequence.generate_token();
+                completed = policy::generation_complete(sequence, self.args.max_model_len);
+                if completed && sequence.generated_tokens() < sequence.max_output_tokens() {
+                    signals.extend(sequence.terminal_signals());
+                }
                 let effects = if completed {
                     split_terminal_effects(signals)
                 } else {
@@ -2072,10 +2092,10 @@ impl VllmCore {
                 .iter()
                 .filter_map(|uuid| self.state.requests.get(uuid))
                 .map(|request| {
-                    let remaining = request
-                        .sequence
-                        .max_output_tokens()
-                        .saturating_sub(request.sequence.generated_tokens());
+                    let remaining = policy::remaining_generation_tokens(
+                        &request.sequence,
+                        self.args.max_model_len,
+                    );
                     let burst = max_burst.min(remaining);
                     let current_blocks = request.sequence.len().div_ceil(self.args.block_size);
                     let target_blocks =
@@ -2130,7 +2150,7 @@ impl VllmCore {
                     continue;
                 };
                 if request.num_computed_tokens == request.sequence.len()
-                    && request.sequence.generated_tokens() < request.sequence.max_output_tokens()
+                    && !policy::generation_complete(&request.sequence, self.args.max_model_len)
                 {
                     ready.push(uuid);
                 }
@@ -2179,10 +2199,10 @@ impl VllmCore {
                         .requests
                         .get(uuid)
                         .expect("ready request must remain active");
-                    let remaining = request
-                        .sequence
-                        .max_output_tokens()
-                        .saturating_sub(request.sequence.generated_tokens());
+                    let remaining = policy::remaining_generation_tokens(
+                        &request.sequence,
+                        self.args.max_model_len,
+                    );
                     let burst = if self.args.worker_type == WorkerType::Prefill {
                         remaining.min(1)
                     } else {
@@ -2205,9 +2225,15 @@ impl VllmCore {
                         .requests
                         .get_mut(&uuid)
                         .expect("sampled request must remain active");
-                    let (token_id, signals) = request.sequence.generate_token();
+                    let (token_id, mut signals) = request.sequence.generate_token();
                     let is_complete =
-                        request.sequence.generated_tokens() >= request.sequence.max_output_tokens();
+                        policy::generation_complete(&request.sequence, self.args.max_model_len);
+                    if is_complete
+                        && request.sequence.generated_tokens()
+                            < request.sequence.max_output_tokens()
+                    {
+                        signals.extend(request.sequence.terminal_signals());
+                    }
                     (token_id, signals, is_complete)
                 };
                 let effects = if is_complete {

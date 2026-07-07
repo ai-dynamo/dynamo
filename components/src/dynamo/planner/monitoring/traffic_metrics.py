@@ -61,6 +61,19 @@ class Metrics:
     kv_hit_rate: Optional[float] = None
     accept_length: Optional[float] = None
 
+    def normalize_idle_nans(self) -> list[str]:
+        """Replace undefined averages only for a confirmed idle window."""
+        if self.num_req != 0:
+            return []
+
+        normalized: list[str] = []
+        for field_name in ("ttft", "itl", "isl", "osl", "request_duration"):
+            value = getattr(self, field_name)
+            if value is not None and math.isnan(value):
+                setattr(self, field_name, 0.0)
+                normalized.append(field_name)
+        return normalized
+
     def is_valid(self) -> bool:
         """Check if all required metrics are valid (not None and not NaN)."""
         required = [

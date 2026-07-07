@@ -154,7 +154,6 @@ def _test_router_basic(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     router_mode: str = "kv",
-    enforce_disagg: bool = False,
     min_initial_workers: int | None = None,
 ):
     """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
@@ -178,7 +177,6 @@ def _test_router_basic(
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: Request plane to use ("nats", "tcp"). Defaults to "nats".
         router_mode: Router mode ("kv", "round-robin", "random", "power-of-two", "direct"). Defaults to "kv".
-        enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
         min_initial_workers: Optional frontend startup worker gate. Defaults to None.
 
     Raises:
@@ -191,7 +189,6 @@ def _test_router_basic(
         frontend_port,
         engine_workers.namespace,
         store_backend,
-        enforce_disagg=enforce_disagg,
         request_plane=request_plane,
         router_mode=router_mode,
         min_initial_workers=min_initial_workers,
@@ -522,40 +519,27 @@ def _test_router_two_routers(
             kv_router.__exit__(None, None, None)
 
 
-def _test_distributed_session_affinity(
+def _test_session_affinity(
     engine_workers,
     block_size: int,
     request,
-    router_ports: list[int],
+    frontend_port: int,
     test_payload: dict[str, Any],
     store_backend: str = "etcd",
 ):
-    """Verify shared affinity claims override conflicting KV-prefix placement."""
-    with (
-        FrontendRouterProcess(
-            request,
-            block_size,
-            router_ports[0],
-            engine_workers.namespace,
-            store_backend,
-            router_mode="kv",
-            min_initial_workers=engine_workers.num_workers,
-            event_plane="nats",
-            session_affinity_ttl_secs=300,
-        ) as first_router,
-        FrontendRouterProcess(
-            request,
-            block_size,
-            router_ports[1],
-            engine_workers.namespace,
-            store_backend,
-            router_mode="kv",
-            min_initial_workers=engine_workers.num_workers,
-            event_plane="nats",
-            session_affinity_ttl_secs=300,
-        ) as second_router,
+    """Verify one frontend keeps each session on its initially selected worker."""
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        store_backend,
+        router_mode="kv",
+        min_initial_workers=engine_workers.num_workers,
+        event_plane="nats",
+        session_affinity_ttl_secs=300,
     ):
-        urls = [f"http://localhost:{port}/v1/chat/completions" for port in router_ports]
+        url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
         async def run_test() -> None:
             runtime = get_runtime(store_backend, "nats")
@@ -568,21 +552,24 @@ def _test_distributed_session_affinity(
             assert len(worker_ids) >= 2
             worker_a, worker_b = worker_ids[:2]
 
-            for port in router_ports:
-                await wait_for_frontend_ready(
-                    frontend_url=f"http://localhost:{port}",
-                    expected_num_workers=engine_workers.num_workers,
-                    timeout=120,
-                    engine_workers=engine_workers,
-                    store_backend=store_backend,
-                    request_plane="nats",
-                )
+            await wait_for_frontend_ready(
+                frontend_url=f"http://localhost:{frontend_port}",
+                expected_num_workers=engine_workers.num_workers,
+                timeout=120,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+                request_plane="nats",
+            )
 
             suffix = uuid.uuid4().hex
             prefix_a = " ".join([f"affinity-alpha-{suffix}"] * (block_size * 2))
             prefix_b = " ".join([f"affinity-beta-{suffix}"] * (block_size * 2))
-            session_a = f"distributed-affinity-a-{uuid.uuid4()}"
-            session_b = f"distributed-affinity-b-{uuid.uuid4()}"
+            session_a_headers = {
+                "x-dynamo-session-id": f"local-affinity-a-{uuid.uuid4()}"
+            }
+            session_b_headers = {
+                "x-dynamo-session-id": f"local-affinity-b-{uuid.uuid4()}"
+            }
 
             def payload(content: str, *, query_only: bool = False) -> dict[str, Any]:
                 annotations = ["query_instance_id:"] if query_only else []
@@ -599,7 +586,6 @@ def _test_distributed_session_affinity(
 
             async def send(
                 client: aiohttp.ClientSession,
-                url: str,
                 request_payload: dict[str, Any],
                 headers: dict[str, str] | None = None,
             ) -> tuple[int, int]:
@@ -628,13 +614,12 @@ def _test_distributed_session_affinity(
 
             async def wait_for_prefix_target(
                 client: aiohttp.ClientSession,
-                url: str,
                 content: str,
                 expected: tuple[int, int],
             ) -> None:
                 for _ in range(50):
                     if (
-                        await send(client, url, payload(content, query_only=True))
+                        await send(client, payload(content, query_only=True))
                         == expected
                     ):
                         return
@@ -643,8 +628,6 @@ def _test_distributed_session_affinity(
                     f"KV events did not make prefix target {expected} visible"
                 )
 
-            session_a_headers = {"x-dynamo-session-id": session_a}
-            session_b_headers = {"x-dynamo-session-id": session_b}
             proposal_a = {
                 **session_a_headers,
                 "x-dynamo-worker-instance-id": str(worker_a),
@@ -657,76 +640,25 @@ def _test_distributed_session_affinity(
             }
 
             async with aiohttp.ClientSession() as client:
-                assert await send(client, urls[0], payload(prefix_a), proposal_a) == (
+                assert await send(client, payload(prefix_a), proposal_a) == (
                     worker_a,
                     0,
                 )
-                assert await send(client, urls[1], payload(prefix_b), proposal_b) == (
+                assert await send(client, payload(prefix_b), proposal_b) == (
                     worker_b,
                     0,
                 )
 
-                await wait_for_prefix_target(client, urls[0], prefix_a, (worker_a, 0))
-                await wait_for_prefix_target(client, urls[1], prefix_b, (worker_b, 0))
+                await wait_for_prefix_target(client, prefix_a, (worker_a, 0))
+                await wait_for_prefix_target(client, prefix_b, (worker_b, 0))
 
-                assert await send(
-                    client, urls[0], payload(prefix_a), session_b_headers
-                ) == (worker_b, 0)
-                assert await send(
-                    client, urls[1], payload(prefix_b), session_a_headers
-                ) == (worker_a, 0)
-
-                first_evictions = first_router.read_logs().count(
-                    "evicted session affinity cache entry"
+                assert await send(client, payload(prefix_b), session_a_headers) == (
+                    worker_a,
+                    0,
                 )
-                assert await send(
-                    client,
-                    urls[1],
-                    payload(prefix_b),
-                    {
-                        **session_a_headers,
-                        "x-dynamo-session-final": "true",
-                    },
-                ) == (worker_a, 0)
-
-                for _ in range(50):
-                    if (
-                        first_router.read_logs().count(
-                            "evicted session affinity cache entry"
-                        )
-                        > first_evictions
-                    ):
-                        break
-                    await asyncio.sleep(0.1)
-                else:
-                    raise AssertionError(
-                        "first frontend did not observe session A claim deletion"
-                    )
-
-                second_evictions = second_router.read_logs().count(
-                    "evicted session affinity cache entry"
-                )
-                assert await send(
-                    client,
-                    urls[0],
-                    payload(prefix_a),
-                    {
-                        **session_b_headers,
-                        "x-dynamo-session-final": "true",
-                    },
-                ) == (worker_b, 0)
-
-                for _ in range(50):
-                    if (
-                        second_router.read_logs().count(
-                            "evicted session affinity cache entry"
-                        )
-                        > second_evictions
-                    ):
-                        return
-                    await asyncio.sleep(0.1)
-                raise AssertionError(
-                    "second frontend did not observe session B claim deletion"
+                assert await send(client, payload(prefix_a), session_b_headers) == (
+                    worker_b,
+                    0,
                 )
 
         asyncio.run(run_test())
@@ -1331,8 +1263,8 @@ def _probe_overload_529_and_assert(
     """Send staggered streaming requests until the router rejects with 529.
 
     Shared core for the aggregated and disaggregated overload tests. The caller
-    is responsible for starting the frontend (with the desired thresholds and,
-    for disagg, ``enforce_disagg=True``) and for waiting until it is ready.
+    is responsible for starting the frontend with the desired thresholds and
+    waiting until it is ready.
 
     Sends unique (shuffled) prompts 0.1s apart until the router rejects, then
     asserts:
@@ -1546,11 +1478,10 @@ def _test_disagg_router_overload_529(
     """Verify disaggregated load-shedding: clients get 529 when the gated pool is busy.
 
     Assumes the prefill and decode workers are already running (kept alive by the
-    caller); this function owns the frontend (router) lifecycle. The frontend is
-    started with ``--enforce-disagg`` so prefill and decode are routed by separate
-    pools — and so the model only becomes ready (listed in ``/v1/models``) once the
-    prefill router has activated, meaning the readiness wait below already gates on
-    prefill registration.
+    caller); this function owns the frontend (router) lifecycle. Registered
+    prefill and decode worker types establish separate pools. The model only
+    becomes ready (listed in ``/v1/models``) once both worker types are available,
+    so the readiness wait below gates on prefill registration.
 
     Two configurations exercise the two pools (driven by the thresholds the
     caller passes):
@@ -1573,7 +1504,6 @@ def _test_disagg_router_overload_529(
         frontend_port=frontend_port,
         namespace=decode_workers.namespace,
         store_backend=store_backend,
-        enforce_disagg=True,
         blocks_threshold=blocks_threshold,
         tokens_threshold=tokens_threshold,
         tokens_threshold_frac=tokens_threshold_frac,
@@ -2394,7 +2324,6 @@ def _test_router_decisions_disagg(
         frontend_port,
         decode_workers.namespace,
         store_backend,
-        enforce_disagg=True,
         request_plane=request_plane,
         durable_kv_events=durable_kv_events,
         min_initial_workers=decode_workers.num_workers,
@@ -2594,7 +2523,6 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
         block_size,
         frontend_port,
         namespace=decode_workers.namespace,
-        enforce_disagg=True,
         request_plane=request_plane,
         min_initial_workers=decode_workers.num_workers,
     ):
@@ -2724,7 +2652,6 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
         frontend_port,
         decode_workers.namespace,
         store_backend,
-        enforce_disagg=True,
         request_plane=request_plane,
         router_mode="round-robin",
         min_initial_workers=decode_workers.num_workers,
@@ -3565,7 +3492,6 @@ def _test_disagg_direct_mode(
         BLOCK_SIZE,
         frontend_port,
         decode_workers.namespace,
-        enforce_disagg=True,
         request_plane=request_plane,
         router_mode="direct",
     ):

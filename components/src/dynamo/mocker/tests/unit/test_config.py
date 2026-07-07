@@ -35,6 +35,7 @@ def make_args(**overrides):
         "engine_type": "vllm",
         "num_gpu_blocks": None,
         "block_size": None,
+        "max_model_len": None,
         "max_num_seqs": 256,
         "max_num_batched_tokens": 8192,
         "enable_prefix_caching": True,
@@ -395,6 +396,73 @@ def test_mocker_cli_accepts_mtp_configuration():
     assert args.aic_nextn == 3
     assert args.aic_nextn_accept_rates == "1,0.5"
     assert args.aic_mtp_seed == 99
+
+
+def test_mocker_cli_accepts_max_model_len():
+    args = parse_args(["--max-model-len", "32768"])
+
+    engine_args = CONFIG.build_mocker_engine_args(args)
+    _, runtime_config = CONFIG.build_runtime_config(engine_args)
+
+    assert engine_args.max_model_len == 32768
+    assert runtime_config.context_length == 32768
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_mocker_cli_rejects_non_positive_max_model_len(value):
+    with pytest.raises(SystemExit):
+        parse_args(["--max-model-len", value])
+
+
+def test_build_mocker_engine_args_keeps_max_model_len_explicit_only():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(model_path="/models/mock", num_gpu_blocks=4096)
+    )
+
+    assert engine_args.max_model_len is None
+
+
+def test_build_mocker_engine_args_preserves_explicit_max_model_len():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            model_path="/models/mock",
+            max_model_len=32768,
+            num_gpu_blocks=4096,
+        )
+    )
+
+    assert engine_args.max_model_len == 32768
+
+
+def test_replay_engine_args_keeps_max_model_len_explicit_only():
+    import dynamo.replay.main as replay_main
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "aic_model_path": "/models/mock",
+            }
+        )
+    )
+
+    assert engine_args.max_model_len is None
+
+
+def test_replay_engine_args_preserves_explicit_max_model_len():
+    import dynamo.replay.main as replay_main
+
+    engine_args = replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "max_model_len": 32768,
+                "aic_model_path": "/models/mock",
+            }
+        )
+    )
+
+    assert engine_args.max_model_len == 32768
 
 
 def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatch):

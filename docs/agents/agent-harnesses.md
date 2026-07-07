@@ -35,6 +35,26 @@ codex -m zai-org/GLM-4.7-Flash -c model_provider=dynamo
 
 Codex sends a `session-id` header that Dynamo maps to `session_id`.
 
+## Pi
+
+Pi uses the Dynamo provider plugin. Build and install it from the [agent-plugins](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin) checkout:
+
+```bash
+git clone https://github.com/ai-dynamo/agent-plugins.git ~/agent-plugins
+cd ~/agent-plugins/pi-plugin
+npm install && npm run build
+pi install "$PWD"
+```
+
+Point it at the Dynamo OpenAI-compatible endpoint and run Pi with the `dynamo` provider:
+
+```bash
+export DYNAMO_BASE_URL=http://localhost:8000/v1
+export DYNAMO_API_KEY=dynamo-local
+
+pi --model dynamo/zai-org/GLM-4.7-Flash
+```
+
 ## Claude Code
 
 Claude Code uses Anthropic-compatible Messages API. The local launcher above starts `dynamo.frontend` with `--enable-anthropic-api`; for other deployments, pass that flag when starting the frontend. Then set:
