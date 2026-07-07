@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::protocols::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchIntent {
+pub enum WorkerPlacement {
     Any,
     Exact(WorkerWithDpRank),
 }

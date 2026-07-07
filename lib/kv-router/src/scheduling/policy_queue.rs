@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::queue_admission::{
-    DispatchIntent, PolicyClassAdmissionController, QueueAdmissionConfig,
+    PolicyClassAdmissionController, QueueAdmissionConfig, WorkerPlacement,
 };
 use crate::protocols::WorkerWithDpRank;
 
@@ -135,7 +135,7 @@ impl<T> PartialOrd for PolicyQueueEntry<T> {
 
 #[derive(Debug, Clone, Copy)]
 struct ClassCandidate {
-    intent: DispatchIntent,
+    intent: WorkerPlacement,
     cost: usize,
 }
 
@@ -161,10 +161,10 @@ impl<T> PolicyClassQueue<T> {
             .chain(self.ready_by_worker.values().flat_map(|ready| ready.iter()))
     }
 
-    fn push_ready(&mut self, intent: DispatchIntent, entry: PolicyQueueEntry<T>) {
+    fn push_ready(&mut self, intent: WorkerPlacement, entry: PolicyQueueEntry<T>) {
         match intent {
-            DispatchIntent::Any => self.pending.push(entry),
-            DispatchIntent::Exact(worker) => {
+            WorkerPlacement::Any => self.pending.push(entry),
+            WorkerPlacement::Exact(worker) => {
                 debug_assert!(matches!(
                     self.admission,
                     PolicyClassAdmissionController::SessionAware
@@ -183,13 +183,13 @@ impl<T> PolicyClassQueue<T> {
             .pending
             .peek()
             .filter(|entry| is_dispatchable(class_index, &self.config, entry.payload()))
-            .map(|entry| (DispatchIntent::Any, entry));
+            .map(|entry| (WorkerPlacement::Any, entry));
         for (&worker, ready) in &self.ready_by_worker {
             if let Some(entry) = ready.peek()
                 && is_dispatchable(class_index, &self.config, entry.payload())
                 && best.is_none_or(|(_, current)| entry > current)
             {
-                best = Some((DispatchIntent::Exact(worker), entry));
+                best = Some((WorkerPlacement::Exact(worker), entry));
             }
         }
         best.map(|(intent, entry)| ClassCandidate {
@@ -198,10 +198,10 @@ impl<T> PolicyClassQueue<T> {
         })
     }
 
-    fn pop(&mut self, intent: DispatchIntent) -> PolicyQueueEntry<T> {
+    fn pop(&mut self, intent: WorkerPlacement) -> PolicyQueueEntry<T> {
         match intent {
-            DispatchIntent::Any => self.pending.pop().expect("policy class front vanished"),
-            DispatchIntent::Exact(worker) => {
+            WorkerPlacement::Any => self.pending.pop().expect("policy class front vanished"),
+            WorkerPlacement::Exact(worker) => {
                 let ready = self
                     .ready_by_worker
                     .get_mut(&worker)
@@ -331,7 +331,7 @@ impl<T> PolicyQueue<T> {
             arrival_offset_secs,
             priority_jump,
             strict_priority,
-            DispatchIntent::Any,
+            WorkerPlacement::Any,
             payload,
         )
     }
@@ -345,7 +345,7 @@ impl<T> PolicyQueue<T> {
         arrival_offset_secs: f64,
         priority_jump: f64,
         strict_priority: u32,
-        intent: DispatchIntent,
+        intent: WorkerPlacement,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
@@ -419,8 +419,8 @@ impl<T> PolicyQueue<T> {
         entry_id: u64,
         snapshot: QueueSnapshot,
         priority_boost: f64,
-        intent: DispatchIntent,
-        prepare: impl FnOnce(&mut T, DispatchIntent),
+        intent: WorkerPlacement,
+        prepare: impl FnOnce(&mut T, WorkerPlacement),
     ) -> bool {
         let class = &mut self.classes[class_index];
         if matches!(class.admission, PolicyClassAdmissionController::None) {
@@ -526,7 +526,7 @@ impl<T> PolicyQueue<T> {
         })
     }
 
-    fn pop_class(&mut self, class_index: usize, intent: DispatchIntent) -> PolicyQueueEntry<T> {
+    fn pop_class(&mut self, class_index: usize, intent: WorkerPlacement) -> PolicyQueueEntry<T> {
         let class = &mut self.classes[class_index];
         let entry = class.pop(intent);
         class.deficit = class
@@ -752,7 +752,7 @@ policy_classes:
             entry_id,
             QueueSnapshot::new(10, 5),
             1.0,
-            DispatchIntent::Exact(worker),
+            WorkerPlacement::Exact(worker),
             |_, _| {},
         ));
         assert_eq!(queue.class_stats(0).cached_tokens, 5);
@@ -774,7 +774,7 @@ policy_classes:
                     worker as f64,
                     0.0,
                     0,
-                    DispatchIntent::Exact(WorkerWithDpRank::new(worker, 0)),
+                    WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
                     payload,
                 )
                 .unwrap();
