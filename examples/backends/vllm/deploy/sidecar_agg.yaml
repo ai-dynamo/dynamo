@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated serving via the engine RPC sidecar.
+#
+# Each worker pod runs TWO containers sharing the pod network (localhost):
+#   - vllm-engine  : `vllm-rs serve` (Rust frontend + managed Python EngineCore)
+#                    exposing the engine RPC gRPC server (GPU)
+#   - mainContainer: the Dynamo vLLM sidecar worker, an engine RPC client (CPU)
+#
+# The sidecar reaches the engine over 127.0.0.1:50051 because containers in the
+# same pod share a network namespace. The engine owns the GPU; the sidecar is
+# CPU-only. The sidecar is given ONLY the engine RPC endpoint and discovers the
+# model and role from the engine RPC API. This template requires the custom
+# sidecar image described in deploy/README.md; the standard vllm-runtime image
+# does not install vllm-rs or dynamo-vllm-sidecar.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-sidecar-agg
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-sidecar-runtime:my-tag
+    VllmSidecarWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        # Engine container: holds the GPU and runs the Rust vLLM server.
+        containers:
+          - name: vllm-engine
+            image: my-registry/vllm-sidecar-runtime:my-tag
+            command:
+              - vllm-rs
+              - serve
+              - Qwen/Qwen3-0.6B
+              - --engine-rpc-host
+              - 127.0.0.1
+              - --engine-rpc-port
+              - "50051"
+              - --enforce-eager
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+        # Sidecar container (Dynamo worker): CPU-only engine RPC client.
+        # Endpoint-only; model and role are discovered from the engine.
+        mainContainer:
+          image: my-registry/vllm-sidecar-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - dynamo-vllm-sidecar
+          args:
+            - --engine-rpc-endpoint
+            - 127.0.0.1:50051

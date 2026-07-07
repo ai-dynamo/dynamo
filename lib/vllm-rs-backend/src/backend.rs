@@ -312,6 +312,8 @@ impl LLMEngine for VllmBackend {
                 data_parallel_size: Some(data_parallel_size),
                 // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines
                 data_parallel_start_rank: Some(0),
+                supports_lora: false,
+                max_loras: None,
                 bootstrap_host: None,
                 bootstrap_port: None,
             }),

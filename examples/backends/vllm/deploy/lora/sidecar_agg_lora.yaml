@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Requires the custom sidecar image described in ../README.md.
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-sidecar-agg-lora
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/vllm-sidecar-runtime:my-tag
+    VllmSidecarWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        volumes:
+          - name: lora-cache
+            emptyDir: {}
+        containers:
+          - name: vllm-engine
+            image: my-registry/vllm-sidecar-runtime:my-tag
+            command:
+              - vllm-rs
+              - serve
+              - Qwen/Qwen3-0.6B
+              - --engine-rpc-host
+              - 127.0.0.1
+              - --engine-rpc-port
+              - "50051"
+              - --enforce-eager
+              - --enable-lora
+              - --max-loras
+              - "4"
+              - --max-lora-rank
+              - "64"
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+            volumeMounts:
+              - name: lora-cache
+                mountPath: /var/cache/dynamo/loras
+        mainContainer:
+          image: my-registry/vllm-sidecar-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          env:
+            - name: DYN_LORA_ENABLED
+              value: "true"
+            - name: DYN_LORA_PATH
+              value: /var/cache/dynamo/loras
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "8081"
+          command:
+            - dynamo-vllm-sidecar
+          args:
+            - --engine-rpc-endpoint
+            - 127.0.0.1:50051
+          volumeMounts:
+            - name: lora-cache
+              mountPath: /var/cache/dynamo/loras

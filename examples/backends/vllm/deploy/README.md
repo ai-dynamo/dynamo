@@ -119,6 +119,17 @@ docker build -f container/rendered.Dockerfile .
 # Update the image references in the YAML files
 ```
 
+The `sidecar_*.yaml` templates require a custom image tagged as
+`my-registry/vllm-sidecar-runtime:my-tag`. The standard vLLM runtime image does
+not install the two native executables. Build matching revisions, then copy
+these files into `/usr/local/bin` of a runtime image containing the same Python
+vLLM installation:
+
+- vLLM: `cargo build --release --manifest-path rust/Cargo.toml -p vllm-cmd`
+  produces `rust/target/release/vllm-rs`.
+- Dynamo: `cargo build --release -p dynamo-vllm-sidecar` produces
+  `target/release/dynamo-vllm-sidecar`.
+
 ### Planner Perf Model Bootstrap (SLA Planner Only)
 
 The SLA Planner deployment (`disagg_planner.yaml`) can start from native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See the [pre-deployment profiling guide](../../../../docs/components/profiler/profiler-guide.md) for the optional bootstrap workflow.

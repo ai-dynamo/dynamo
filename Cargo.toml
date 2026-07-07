@@ -23,6 +23,7 @@ members = [
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
     "lib/vllm-rs-backend",
+    "lib/vllm-sidecar",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",

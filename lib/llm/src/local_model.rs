@@ -460,6 +460,11 @@ impl LocalModel {
         &self.card.display_name
     }
 
+    /// Change the externally served model name and its discovery slug.
+    pub fn set_name(&mut self, name: &str) {
+        self.card.set_name(name);
+    }
+
     /// The name under which we make this model available over HTTP.
     /// A slugified version of the model's name, for use in NATS, etcd, etc.
     pub fn service_name(&self) -> &str {
@@ -584,7 +589,7 @@ impl LocalModel {
         // Compute model_suffix from lora_name if present
         let model_suffix = lora_info
             .as_ref()
-            .map(|info| Slug::slugify(&info.name).to_string());
+            .map(|info| Slug::slugify_unique(&info.name).to_string());
 
         let suffix_for_log = model_suffix
             .as_ref()
@@ -753,7 +758,7 @@ impl LocalModel {
         let instance_id = drt.connection_id();
         let endpoint_id = endpoint.id();
 
-        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+        let model_suffix = lora_name.map(|name| Slug::slugify_unique(name).to_string());
         let registry_owner = (instance_id, model_suffix.clone());
 
         let instance = DiscoveryInstance::Model {
