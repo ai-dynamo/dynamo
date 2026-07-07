@@ -169,6 +169,48 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 	}
 }
 
+func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
+	sourceTemplate := &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				TargetContainersAnnotation:   "main",
+				linkerdInjectAnnotation:      "enabled",
+				istioSidecarInjectAnnotation: "true",
+				"example.com/keep":           "true",
+			},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "main",
+				Command: []string{"python3"},
+			}},
+		},
+	}
+
+	job, err := NewCheckpointJob(sourceTemplate, CheckpointJobOptions{
+		Namespace:    "test-ns",
+		CheckpointID: "hash",
+		Name:         "test-job",
+	})
+	if err != nil {
+		t.Fatalf("expected checkpoint job, got error: %v", err)
+	}
+
+	annotations := job.Spec.Template.Annotations
+	if got := annotations[linkerdInjectAnnotation]; got != linkerdInjectDisabled {
+		t.Fatalf("linkerd injection annotation = %q, want %q", got, linkerdInjectDisabled)
+	}
+	if got := annotations[istioSidecarInjectAnnotation]; got != istioSidecarInjectDisabled {
+		t.Fatalf("istio injection annotation = %q, want %q", got, istioSidecarInjectDisabled)
+	}
+	if got := annotations["example.com/keep"]; got != "true" {
+		t.Fatalf("existing annotation was not preserved, got %q", got)
+	}
+	if got := sourceTemplate.Annotations[linkerdInjectAnnotation]; got != "enabled" {
+		t.Fatalf("source template was mutated: linkerd annotation = %q", got)
+	}
+}
+
 func TestNewCheckpointJobRequiresTargetAnnotation(t *testing.T) {
 	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{

@@ -202,6 +202,10 @@ legacy `spec.identity` metadata, a container named `main`, and the placeholder
 image; the rest of the pod template should mirror your normal worker config.
 Extra containers are allowed, but only `main` is checkpointed unless
 `spec.job.targetContainerName` selects another container.
+Checkpoint Jobs automatically disable common service-mesh sidecar injectors
+because the Job must finish when the checkpointed container exits. This only
+affects checkpoint capture Jobs; serving worker pods keep their normal pod
+annotations.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1

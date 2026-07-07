@@ -1546,6 +1546,87 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsSyncsExistingAutoLi
 	assert.Equal(t, "worker", updated.Labels[commonconsts.KubeLabelDynamoComponent])
 }
 
+func TestDynamoGraphDeploymentReconciler_createCheckpointCR_disablesServiceMeshInjection(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					Annotations: map[string]string{
+						"linkerd.io/inject":       "enabled",
+						"sidecar.istio.io/inject": "true",
+						"example.com/keep":        "true",
+					},
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled: true,
+						Mode:    v1alpha1.CheckpointModeAuto,
+						Identity: &v1alpha1.DynamoCheckpointIdentity{
+							Model:            identity.Model,
+							BackendFramework: identity.BackendFramework,
+						},
+					},
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Name:  "main",
+							Image: "checkpoint-source:latest",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	if len(dgd.Spec.Components) != 1 {
+		t.Fatalf("expected one component, got %d", len(dgd.Spec.Components))
+	}
+
+	ckpt, err := reconciler.createCheckpointCR(ctx, dgd, "worker", &dgd.Spec.Components[0])
+	if err != nil {
+		t.Fatalf("createCheckpointCR() error = %v", err)
+	}
+
+	annotations := ckpt.Spec.Job.PodTemplateSpec.Annotations
+	if got := annotations["linkerd.io/inject"]; got != "disabled" {
+		t.Fatalf("checkpoint job linkerd annotation = %q, want disabled", got)
+	}
+	if got := annotations["sidecar.istio.io/inject"]; got != "false" {
+		t.Fatalf("checkpoint job istio annotation = %q, want false", got)
+	}
+	if got := annotations["example.com/keep"]; got != "true" {
+		t.Fatalf("checkpoint job did not preserve user annotation, got %q", got)
+	}
+
+	stored := &v1alpha1.DynamoCheckpoint{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: "default"}, stored); err != nil {
+		t.Fatalf("Failed to get checkpoint: %v", err)
+	}
+	if got := stored.Spec.Job.PodTemplateSpec.Annotations["linkerd.io/inject"]; got != "disabled" {
+		t.Fatalf("stored checkpoint job linkerd annotation = %q, want disabled", got)
+	}
+	if got := stored.Spec.Job.PodTemplateSpec.Annotations["sidecar.istio.io/inject"]; got != "false" {
+		t.Fatalf("stored checkpoint job istio annotation = %q, want false", got)
+	}
+}
+
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkipsAutoCreateWhileReferencedCRIsNotReady(t *testing.T) {
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
