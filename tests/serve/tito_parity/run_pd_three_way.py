@@ -30,7 +30,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", required=True)
     parser.add_argument(
-        "--suite", choices=("smoke", "expanded", "full"), default="smoke"
+        "--suite",
+        choices=(
+            "smoke",
+            "expanded",
+            "full",
+            "video-smoke",
+            "video",
+            "audio-smoke",
+            "audio",
+        ),
+        default="smoke",
     )
     parser.add_argument("--max-concurrency", type=int, choices=(1, 4), default=1)
     parser.add_argument("--startup-timeout", type=int, default=900)

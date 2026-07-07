@@ -7,12 +7,15 @@ import copy
 import difflib
 import io
 import json
+import math
 import os
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import time
+import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -38,6 +41,7 @@ class Case:
     kind: str
     prompt: str
     colors: tuple[str, ...] = ()
+    audio_frequencies: tuple[float, ...] = ()
     ignore_eos: bool = True
     sampling_overrides: tuple[tuple[str, Any], ...] = ()
 
@@ -60,7 +64,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", required=True)
     parser.add_argument(
-        "--suite", choices=("smoke", "expanded", "full"), default="smoke"
+        "--suite",
+        choices=(
+            "smoke",
+            "expanded",
+            "full",
+            "video-smoke",
+            "video",
+            "audio-smoke",
+            "audio",
+        ),
+        default="smoke",
     )
     parser.add_argument(
         "--dynamo-topology",
@@ -95,6 +109,42 @@ def make_image_data_uri(colors: tuple[str, ...], size: int = 224) -> str:
     image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+def make_video_data_uri(
+    colors: tuple[str, ...], size: int = 112, frames_per_color: int = 2
+) -> str:
+    encoded_frames = []
+    for color in colors:
+        for _ in range(frames_per_color):
+            frame = Image.new("RGB", (size, size), color)
+            buffer = io.BytesIO()
+            frame.save(buffer, format="JPEG", quality=95, subsampling=0)
+            encoded_frames.append(base64.b64encode(buffer.getvalue()).decode("ascii"))
+    return "data:video/jpeg;base64," + ",".join(encoded_frames)
+
+
+def make_audio_data_uri(
+    frequencies: tuple[float, ...], sample_rate: int = 16_000
+) -> str:
+    samples_per_tone = sample_rate // 2
+    amplitude = 0.25 * ((1 << 15) - 1)
+    pcm = bytearray()
+    for frequency in frequencies:
+        for index in range(samples_per_tone):
+            sample = round(
+                amplitude * math.sin(2 * math.pi * frequency * index / sample_rate)
+            )
+            pcm.extend(struct.pack("<h", sample))
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        audio.writeframes(pcm)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:audio/wav;base64,{encoded}"
 
 
 def smoke_cases() -> list[Case]:
@@ -171,11 +221,53 @@ def expanded_cases() -> list[Case]:
     ]
 
 
+def video_cases() -> list[Case]:
+    return [
+        Case(
+            name="video-smoke",
+            kind="video",
+            prompt="Name the colors shown in this short video.",
+            colors=("red", "blue"),
+        ),
+        Case(
+            name="video-color-sequence",
+            kind="video",
+            prompt="List the colors in the order they appear.",
+            colors=("green", "yellow", "purple"),
+        ),
+    ]
+
+
+def audio_cases() -> list[Case]:
+    return [
+        Case(
+            name="audio-smoke",
+            kind="audio",
+            prompt="Is this audio silent or does it contain a tone?",
+            audio_frequencies=(440.0,),
+        ),
+        Case(
+            name="audio-tone-sequence",
+            kind="audio",
+            prompt="Does the pitch stay constant or change during this audio?",
+            audio_frequencies=(440.0, 880.0),
+        ),
+    ]
+
+
 def cases_for_suite(suite: str) -> list[Case]:
     if suite == "smoke":
         return smoke_cases()
     if suite == "expanded":
         return expanded_cases()
+    if suite == "video-smoke":
+        return video_cases()[:1]
+    if suite == "video":
+        return video_cases()
+    if suite == "audio-smoke":
+        return audio_cases()[:1]
+    if suite == "audio":
+        return audio_cases()
     return smoke_cases() + expanded_cases()
 
 
@@ -192,6 +284,34 @@ def render_payload(
     }
     if case.kind == "text":
         return "/v1/completions/render", {"prompt": case.prompt, **common}
+
+    if case.kind == "video":
+        content = [
+            {
+                "type": "video_url",
+                "video_url": {"url": make_video_data_uri(case.colors)},
+            },
+            {"type": "text", "text": case.prompt},
+        ]
+        return "/v1/chat/completions/render", {
+            "messages": [{"role": "user", "content": content}],
+            **common,
+        }
+
+    if case.kind == "audio":
+        content = [
+            {
+                "type": "audio_url",
+                "audio_url": {
+                    "url": make_audio_data_uri(case.audio_frequencies),
+                },
+            },
+            {"type": "text", "text": case.prompt},
+        ]
+        return "/v1/chat/completions/render", {
+            "messages": [{"role": "user", "content": content}],
+            **common,
+        }
 
     image_parts = []
     if case.name in ("vlm-two-identical", "vlm-two-distinct"):
@@ -278,7 +398,7 @@ def build_runs(
     max_concurrency: int,
 ) -> list[tuple[int, list[RequestRun]]]:
     groups: list[tuple[int, list[RequestRun]]] = []
-    smoke_names = {case.name for case in smoke_cases()}
+    smoke_names = {case.name for case in cases if case.name.endswith("-smoke")}
     smoke = [case for case in cases if case.name in smoke_names]
     expanded = [case for case in cases if case.name not in smoke_names]
     if smoke:

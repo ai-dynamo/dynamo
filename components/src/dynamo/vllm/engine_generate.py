@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 import msgspec
 import numpy as np
+import torch
 from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.inputs import TokensPrompt, mm_input
@@ -93,13 +94,32 @@ def build_prompt(request: Dict[str, Any]) -> Any:
     mm_hashes = features.get("mm_hashes") or {}
     placeholders = features.get("mm_placeholders") or {}
     kwargs_data = features.get("kwargs_data")
-    mm_placeholders = {
-        modality: [
-            PlaceholderRange(offset=int(item["offset"]), length=int(item["length"]))
-            for item in ranges
-        ]
-        for modality, ranges in placeholders.items()
-    }
+    mm_placeholders: Dict[str, list[PlaceholderRange]] = {}
+    for modality, ranges in placeholders.items():
+        modality_ranges: list[PlaceholderRange] = []
+        for item in ranges:
+            length = int(item["length"])
+            is_embed_raw = item.get("is_embed")
+            is_embed = (
+                None
+                if is_embed_raw is None
+                else torch.as_tensor(is_embed_raw, dtype=torch.bool)
+            )
+            if is_embed is not None and (
+                is_embed.ndim != 1 or is_embed.numel() != length
+            ):
+                raise ValueError(
+                    "native Generate placeholder is_embed must be one-dimensional "
+                    f"with length {length}"
+                )
+            modality_ranges.append(
+                PlaceholderRange(
+                    offset=int(item["offset"]),
+                    length=length,
+                    is_embed=is_embed,
+                )
+            )
+        mm_placeholders[modality] = modality_ranges
     mm_kwargs: Dict[str, list[MultiModalKwargsItem | None]] = {}
     if isinstance(kwargs_data, dict):
         for modality, items in kwargs_data.items():

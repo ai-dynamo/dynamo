@@ -23,17 +23,27 @@ python tests/serve/tito_parity/run_pd_three_way.py \
 python tests/serve/tito_parity/run_pd_three_way.py \
   --model Qwen/Qwen3.5-35B-A3B-FP8 \
   --suite full
+
+# Qwen3.5 supports video input.
+python tests/serve/tito_parity/run_pd_three_way.py \
+  --model Qwen/Qwen3.5-2B \
+  --suite video
+
+# Gemma 4 supports audio input. vLLM needs its audio extras (av and soundfile).
+python tests/serve/tito_parity/run_pd_three_way.py \
+  --model google/gemma-4-E2B-it \
+  --suite audio
 ```
 
 `run_pd_three_way.py` performs a true P/D comparison. It cold-starts two
-independent upstream vLLM prefill/decode pairs, then starts one Dynamo
-prefill/decode deployment on the same visible GPU. Every deployment receives
-the same rendered requests and uses NIXL, distinct side-channel ports, and the
-same hybrid-state layout. The comparison matrix is:
+independent `vllm serve` prefill/decode pairs to establish that the upstream
+reference is reproducible, then starts one `dynamo.vllm` prefill/decode
+deployment on the same visible GPU. Every deployment receives the same
+rendered requests and uses NIXL, distinct side-channel ports, and the same
+hybrid-state layout. The checks are:
 
-1. upstream P/D run 1 versus upstream P/D run 2;
-2. Dynamo P/D versus upstream P/D run 1; and
-3. Dynamo P/D versus upstream P/D run 2.
+1. the repeated `vllm serve` result is exact;
+2. `dynamo.vllm` is exact against each upstream reference.
 
 Prompt logprobs are composed at the P/D boundary: the prefill result supplies
 prompt logprobs, while decode supplies generated tokens and generated
@@ -48,6 +58,6 @@ composition changes, even within upstream vLLM itself.
 
 Pass `--max-concurrency 4` to append an exact concurrent-batching stress stage.
 That mode intentionally reports any upstream/Dynamo drift instead of weakening
-the comparison. The two-way runner writes beneath `logs/tito-parity/`; the
-three-way runner writes metadata, requests, per-deployment logs, raw responses,
+the comparison. The aggregated runner writes beneath `logs/tito-parity/`; the
+P/D runner writes metadata, requests, per-deployment logs, raw responses,
 field-level checks, and summaries beneath `logs/tito-pd-three-way/`.
