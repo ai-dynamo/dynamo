@@ -202,10 +202,30 @@ impl DefaultWorkerSelector {
             + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
             + self.kv_router_config.disk_cache_hit_weight * disk_overlap_blocks
             + shared_overlap_blocks;
-        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
-        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let worker_load = worker_load.unwrap_or_default();
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
+
+        // Decode routers normally force `overlap_score_credit=0` through the
+        // per-request override, which preserves load-only disagg routing. When
+        // conditional disagg leaves a positive overlap credit in place, prefer
+        // cache-hot decode workers while still charging decode backlog.
+        if self.worker_type == "decode"
+            && !request.track_prefill_tokens
+            && weights.overlap_score_credit > 0.0
+        {
+            let logit = decode_cost_blocks - overlap_credit_blocks;
+            tracing::debug!(
+                "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
+                 = decode_blocks - overlap_credit_blocks \
+                 = {decode_cost_blocks:.3} - {overlap_credit_blocks:.3}",
+                worker.worker_id,
+                worker.dp_rank,
+            );
+            return logit;
+        }
+
+        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks;
 
         if shared_beyond > 0 {

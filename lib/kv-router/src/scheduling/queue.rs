@@ -23,7 +23,9 @@ use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
     SchedulingResponse,
 };
-use crate::protocols::{LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId};
+use crate::protocols::{
+    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
@@ -402,6 +404,36 @@ impl<
     /// Sum of `isl_tokens` for requests currently parked in the pending queue (lock-free).
     pub fn pending_isl_tokens(&self) -> usize {
         self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Per-worker prefill-busy check used by conditional-disagg load policies.
+    /// Returns `None` when the worker config is unavailable.
+    pub fn worker_is_prefill_busy(
+        &self,
+        worker: WorkerWithDpRank,
+        decay_now: Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        let configs = self.workers_with_configs.borrow();
+        let config = configs.get(&worker.worker_id)?;
+        let max_batched = config
+            .max_num_batched_tokens()
+            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+        let active_tokens = self.slots.active_tokens(decay_now);
+        let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+        Some((tokens as f64) > threshold * (max_batched as f64))
+    }
+
+    /// Per-worker decode-busy check used by the conditional-disagg decode
+    /// circuit breaker. Returns `None` when the worker config or total KV
+    /// capacity is unavailable.
+    pub fn worker_is_decode_busy(&self, worker: WorkerWithDpRank, threshold: f64) -> Option<bool> {
+        let configs = self.workers_with_configs.borrow();
+        let config = configs.get(&worker.worker_id)?;
+        let total_kv_blocks = config.total_kv_blocks()?;
+        let active_blocks = self.slots.active_blocks();
+        let blocks = active_blocks.get(&worker).copied().unwrap_or(0);
+        Some((blocks as f64) > threshold * (total_kv_blocks as f64))
     }
 
     pub fn class_queue_stats(&self, class_index: usize) -> Option<ClassQueueStats> {

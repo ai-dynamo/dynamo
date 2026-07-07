@@ -346,6 +346,20 @@ where
         self.inner.pending_isl_tokens()
     }
 
+    pub fn worker_is_prefill_busy(
+        &self,
+        worker: WorkerWithDpRank,
+        decay_now: tokio::time::Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.inner
+            .worker_is_prefill_busy(worker, decay_now, threshold)
+    }
+
+    pub fn worker_is_decode_busy(&self, worker: WorkerWithDpRank, threshold: f64) -> Option<bool> {
+        self.inner.worker_is_decode_busy(worker, threshold)
+    }
+
     pub fn worker_type(&self) -> &'static str {
         self.inner.worker_type()
     }

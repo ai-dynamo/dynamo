@@ -8,6 +8,7 @@
 
 mod active_set;
 pub(crate) mod cleanup;
+pub mod conditional_disagg;
 mod lookup_update;
 
 pub mod indexer;
@@ -44,8 +45,8 @@ pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{
-    KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
-    SharedCacheType,
+    ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel,
+    RouterQueuePolicy, SharedCacheType,
 };
 #[allow(deprecated)]
 pub use indexer::{

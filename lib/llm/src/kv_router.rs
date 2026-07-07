@@ -861,6 +861,20 @@ where
         self.scheduler.add_output_block(request_id, decay_fraction)
     }
 
+    pub fn worker_is_prefill_busy(
+        &self,
+        worker: WorkerWithDpRank,
+        decay_now: tokio::time::Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.scheduler
+            .worker_is_prefill_busy(worker, decay_now, threshold)
+    }
+
+    pub fn worker_is_decode_busy(&self, worker: WorkerWithDpRank, threshold: f64) -> Option<bool> {
+        self.scheduler.worker_is_decode_busy(worker, threshold)
+    }
+
     pub fn block_size(&self) -> u32 {
         self.block_size
     }

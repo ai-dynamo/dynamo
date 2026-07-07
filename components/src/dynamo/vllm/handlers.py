@@ -94,6 +94,11 @@ from .multimodal_utils.request_processor import (
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+# Marker set by the Rust conditional-disagg bypass path. When present on a
+# DECODE-mode worker, the request runs as local prefill+decode instead of
+# expecting KV-transfer metadata from an upstream prefill worker.
+BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
@@ -2765,8 +2770,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             kv_params = None
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
+            request.get("annotations") or []
+        ):
+            logger.debug(
+                "DECODE: conditional-disagg bypass annotation present; "
+                "running request as AGG (prefill+decode on this worker)."
+            )
+            is_decode_only = False
         try:
-            mode = cast(DisaggregationMode, self.config.disaggregation_mode)
+            mode = (
+                DisaggregationMode.AGGREGATED
+                if not is_decode_only
+                and self.config.disaggregation_mode == DisaggregationMode.DECODE
+                else cast(DisaggregationMode, self.config.disaggregation_mode)
+            )
             prepared_input = await self._multimodal_request_processor.prepare_input(
                 request,
                 request_id,

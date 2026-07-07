@@ -797,6 +797,62 @@ class TestDecodeWorkerMultimodalBranching:
         assert len(chunks) == 1
         assert chunks[0]["status"] == "error"
 
+    async def test_decode_only_bypass_annotation_runs_as_agg(self):
+        """Decode worker with conditional-disagg bypass annotation runs as AGG."""
+        handler = _make_decode_handler(
+            model="Qwen/Qwen3-VL-2B-Instruct",
+            disaggregation_mode="DECODE",
+        )
+        handler._multimodal_request_processor.extract_multimodal_data = AsyncMock(
+            return_value=None
+        )
+        handler._build_prompt_from_request = MagicMock(
+            return_value=(None, None, {"status": "error", "message": "test stop"})
+        )
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"Url": "http://img.png"}]},
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+        context = MagicMock()
+
+        chunks = []
+        async for chunk in handler._generate_token_mode(request, context, "req-1"):
+            chunks.append(chunk)
+
+        handler._multimodal_request_processor.extract_multimodal_data.assert_awaited_once()
+        assert len(chunks) == 1
+        assert chunks[0]["message"] == "test stop"
+
+    async def test_decode_only_bypass_annotation_text_only_does_not_require_prefill_kv_params(
+        self,
+    ):
+        """Text-only bypass does not require incoming prefill KV params."""
+        handler = _make_decode_handler(disaggregation_mode="DECODE")
+        handler._build_prompt_from_request = MagicMock(
+            return_value=(None, None, {"status": "error", "message": "stop"})
+        )
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+        context = MagicMock()
+
+        chunks = []
+        async for chunk in handler._generate_token_mode(request, context, "req-1"):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        assert chunks[0]["message"] == "stop"
+
     @pytest.mark.parametrize(
         "mm_processor_kwargs",
         [None, {"use_audio_in_video": True}],
