@@ -113,6 +113,7 @@ PROCESS_COLORS = [
     "#ff8a80",
 ]
 OTHER_COLOR = "#9e9e9e"
+ACTIVE_TOTAL_EPSILON = 1e-9
 CACHE_DIR = Path.home() / ".cache" / "dynamo_local_resource_monitor"
 CACHE_FILE = CACHE_DIR / "metrics.json"
 
@@ -461,7 +462,11 @@ class ProcessTracker:
         return PROCESS_COLORS[slot % len(PROCESS_COLORS)]
 
     def ranked_ids(self, n: int = 20, sort_by: str = "recency") -> list[int]:
-        active = [pid for pid in self.series if self._series_total.get(pid, 0.0) > 0]
+        active = [
+            pid
+            for pid in self.series
+            if self._series_total.get(pid, 0.0) > ACTIVE_TOTAL_EPSILON
+        ]
         if sort_by == "recency":
             return sorted(
                 active,
@@ -494,7 +499,9 @@ class ProcessTracker:
             for pid in selected
         ]
         rest = [pid for pid in self.series if pid not in selected]
-        if not rest or not any(self._series_total.get(pid, 0.0) > 0 for pid in rest):
+        if not rest or not any(
+            self._series_total.get(pid, 0.0) > ACTIVE_TOTAL_EPSILON for pid in rest
+        ):
             return result
         if self._aggregate_history is not None:
             other = self._values(self._aggregate_history, value_slice)
