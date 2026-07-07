@@ -21,12 +21,13 @@ logger = logging.getLogger(__name__)
 def _fetch_model_process_main(
     remote_name: str,
     ignore_weights: bool,
+    revision: str | None,
     result_conn: Connection,
 ) -> None:
     from dynamo._core import fetch_model
 
     async def fetch_model_async() -> str:
-        return await fetch_model(remote_name, ignore_weights)
+        return await fetch_model(remote_name, ignore_weights, revision=revision)
 
     try:
         local_path = asyncio.run(fetch_model_async())
@@ -44,6 +45,7 @@ def _fetch_model_process_main(
 async def fetch_model_in_subprocess(
     remote_name: str,
     ignore_weights: bool = False,
+    revision: str | None = None,
 ) -> str:
     """Fetch a model in a short-lived process before snapshotting."""
     logger.info("Fetching model %s in a subprocess", remote_name)
@@ -51,7 +53,7 @@ async def fetch_model_in_subprocess(
     parent_conn, child_conn = ctx.Pipe(duplex=False)
     proc = ctx.Process(
         target=_fetch_model_process_main,
-        args=(remote_name, ignore_weights, child_conn),
+        args=(remote_name, ignore_weights, revision, child_conn),
         name="dynamo-model-fetch",
     )
     proc.start()
@@ -84,11 +86,13 @@ async def fetch_model_in_subprocess(
     return payload
 
 
-async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
+async def fetch_model(
+    remote_name: str, ignore_weights: bool = False, revision: str | None = None
+) -> str:
     if is_snapshot_enabled():
         # Keep Hugging Face TCP sockets out of the snapshotted process.
-        return await fetch_model_in_subprocess(remote_name, ignore_weights)
+        return await fetch_model_in_subprocess(remote_name, ignore_weights, revision)
 
     from dynamo.llm import fetch_model as llm_fetch_model
 
-    return await llm_fetch_model(remote_name, ignore_weights)
+    return await llm_fetch_model(remote_name, ignore_weights, revision=revision)

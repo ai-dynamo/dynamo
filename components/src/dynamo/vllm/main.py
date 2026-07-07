@@ -138,7 +138,7 @@ async def worker(argv: list[str] | None = None) -> None:
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
     if should_prefetch_model(config):
-        await fetch_model(config.model)
+        await fetch_model(config.model, revision=config.engine_args.revision)
 
     # Snapshot mode: load engine before runtime creation so there are no
     # runtime connections when CRIU captures GPU state.
@@ -758,6 +758,7 @@ async def register_vllm_model(
         worker_type=worker_type,
         needs=needs,
         ignore_weights=should_register_model_ignore_weights(config),
+        revision=vllm_config.model_config.revision,
         # Advertise LoRA capacity on the BASE card so the frontend can place the first
         # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve
         # lifecycle registration; embeddings still do not.

@@ -2306,6 +2306,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 max_gpu_lora_count=getattr(
                                     self.config.engine_args, "max_loras", None
                                 ),
+                                revision=self.config.engine_args.revision,
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"

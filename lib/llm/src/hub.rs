@@ -4,7 +4,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use hf_hub::Cache;
+use anyhow::Context;
+use hf_hub::{Cache, Repo, RepoType, api::tokio::ApiBuilder};
 use modelexpress_client::{
     Client as MxClient, ClientConfig as MxClientConfig, ModelProvider as MxModelProvider,
 };
@@ -75,6 +76,84 @@ fn get_cached_model_path_in(
     let snapshot_path = config_path.parent()?.to_path_buf();
     tracing::info!("Found cached model '{model_name}' at {snapshot_path:?}, skipping download");
     Some(snapshot_path)
+}
+
+/// Returns the snapshot path if that exact revision is already on disk.
+fn get_cached_model_path_at_revision(
+    model_name: &str,
+    revision: &str,
+    ignore_weights: bool,
+    required_files: Option<&[String]>,
+    cache_dir: PathBuf,
+) -> Option<PathBuf> {
+    // HF cache layout: models--{org}--{model}/snapshots/{sha}/
+    let model_key = model_name.replace('/', "--");
+    let snapshot_dir = cache_dir
+        .join(format!("models--{model_key}"))
+        .join("snapshots")
+        .join(revision);
+
+    if !snapshot_dir.exists() {
+        return None;
+    }
+
+    if let Some(files) = required_files {
+        // Caller knows the exact MDC file set (frontend resolving an
+        // already-published card) — require every one of them, so a
+        // sparse/interrupted snapshot is correctly treated as incomplete
+        // instead of passing a config.json+tokenizer-only heuristic.
+        if !files.iter().all(|f| snapshot_dir.join(f).exists()) {
+            return None;
+        }
+    } else {
+        // No MDC yet (worker discovering its own file set for the first
+        // time) — fall back to the config.json + tokenizer heuristic.
+        if !snapshot_dir.join("config.json").exists() {
+            return None;
+        }
+
+        let has_tokenizer = snapshot_dir.join("tokenizer.json").exists()
+            || snapshot_dir.join("tiktoken.model").exists()
+            || has_tiktoken_file(&snapshot_dir);
+
+        if !has_tokenizer {
+            return None;
+        }
+    }
+
+    if !ignore_weights {
+        let index = snapshot_dir.join("model.safetensors.index.json");
+        let pt_index = snapshot_dir.join("pytorch_model.bin.index.json");
+        let has_weights = snapshot_dir.join("model.safetensors").exists()
+            || snapshot_dir.join("pytorch_model.bin").exists()
+            || (index.exists() && shard_files_present(&index))
+            || (pt_index.exists() && shard_files_present(&pt_index));
+        if !has_weights {
+            return None;
+        }
+    }
+
+    tracing::info!(
+        "Found cached model '{model_name}' at revision {revision}({snapshot_dir:?}), skipping download"
+    );
+    Some(snapshot_dir)
+}
+
+/// If `path` sits inside an HF-cache-style snapshot dir
+/// (".../models--{org}--{name}/snapshots/{sha}"), return the repo id "org/name".
+/// Returns `None` for any path that isn't shaped like an HF cache snapshot
+/// (e.g. a plain local checkpoint directory).
+pub(crate) fn hf_repo_from_snapshot_path(path: &Path) -> Option<String> {
+    let snapshots_dir = path.parent()?;
+    if snapshots_dir.file_name()?.to_str()? != "snapshots" {
+        return None;
+    }
+    let models_dir = snapshots_dir.parent()?;
+    let repo_key = models_dir.file_name()?.to_str()?.strip_prefix("models--")?;
+    match repo_key.split_once("--") {
+        Some((org, name)) => Some(format!("{org}/{name}")),
+        None => Some(repo_key.to_string()),
+    }
 }
 
 /// Check if the snapshot directory contains any `*.tiktoken` file (e.g. `qwen.tiktoken`).
@@ -207,6 +286,116 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
             Err(e)
         }
     }
+}
+
+/// Like `from_hf`, but resolves a specific commit SHA instead of latest.
+/// If the snapshot is already on disk at that revision, returns it immediately.
+/// Otherwise downloads just that revision directly from HuggingFace (bypassing
+/// ModelExpress, which has no concept of pinned revisions) into the shared
+/// cache directory.
+pub async fn from_hf_at_revision(
+    name: impl AsRef<Path>,
+    revision: &str,
+    required_files: Option<&[String]>,
+    ignore_weights: bool,
+) -> anyhow::Result<PathBuf> {
+    let name = name.as_ref();
+    let model_name = name.display().to_string();
+
+    if let Some(cached) = get_cached_model_path_at_revision(
+        &model_name,
+        revision,
+        ignore_weights,
+        required_files,
+        get_model_express_cache_dir(),
+    ) {
+        return Ok(cached);
+    }
+
+    if !ignore_weights {
+        anyhow::bail!(
+            "from_hf_at_revision does not support downloading weights for a pinned \
+            revision yet (ignore_weights=false); only tokenizer/config metadata \
+            download is implemented."
+        );
+    }
+
+    let token = env::var(env_model::huggingface::HF_TOKEN).ok();
+    let api = ApiBuilder::from_env()
+        .with_cache_dir(get_model_express_cache_dir())
+        .with_token(token)
+        .build()
+        .context("building HuggingFace API client for pinned-revision download")?;
+
+    let repo = api.repo(Repo::with_revision(
+        model_name.clone(),
+        RepoType::Model,
+        revision.to_string(),
+    ));
+
+    let config_path = if let Some(files) = required_files {
+        // Caller knows exactly which files this MDC needs - fetch precisely
+        // those instead of guessing from a hardcoded list, so arbitrary
+        // worker-harvested siblings (added_tokens.json, merges.txt, ...)
+        // are actually downloaded instead of silently missing later.
+        let mut config_path = None;
+        for f in files {
+            let path = repo
+                .get(f)
+                .await
+                .with_context(|| format!("downloading {f} for {model_name}@{revision}"))?;
+            if f == "config.json" {
+                config_path = Some(path);
+            }
+        }
+        config_path.context("MDC required_files did not include config.json")?
+    } else {
+        let config_path = repo
+            .get("config.json")
+            .await
+            .with_context(|| format!("downloading config.json for {model_name}@{revision}"))?;
+
+        if repo.get("tokenizer.json").await.is_err() && repo.get("tiktoken.model").await.is_err() {
+            let info = repo
+                .info()
+                .await
+                .with_context(|| format!("listing files for {model_name}@{revision}"))?;
+            let tiktoken_file = info
+                .siblings
+                .iter()
+                .map(|s| s.rfilename.as_str())
+                .find(|f| f.ends_with(".tiktoken"));
+            match tiktoken_file {
+                Some(f) => {
+                    repo.get(f)
+                        .await
+                        .with_context(|| format!("downloading {f}"))?;
+                }
+                None => anyhow::bail!("no tokenizer file found for {model_name}@{revision}"),
+            }
+        }
+
+        for extra in [
+            "tokenizer_config.json",
+            "generation_config.json",
+            "chat_template.jinja",
+            "chat_template.json",
+            "preprocessor_config.json",
+            "special_tokens_map.json",
+        ] {
+            if let Err(e) = repo.get(extra).await {
+                tracing::debug!(
+                    "optional file {extra} not available for {model_name}@{revision}: {e}"
+                );
+            }
+        }
+        config_path
+    };
+
+    Ok(config_path
+        .parent()
+        .context("config.json path has no parent directory")?
+        .to_path_buf())
 }
 
 // Direct download using the ModelExpress client.
@@ -413,6 +602,104 @@ mod tests {
         assert!(
             get_cached_model_path_in(model, false, temp.path().to_path_buf()).is_none(),
             "tokenizer_config.json alone must NOT satisfy ignore_weights=false",
+        );
+    }
+
+    #[test]
+    fn test_get_cached_model_path_at_revision_finds_pinned_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/my-model";
+        // build_hf_cache always uses "0000000000000000000000000000000000000000" as the SHA
+        let snapshot = build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        let result = get_cached_model_path_at_revision(
+            model,
+            "0000000000000000000000000000000000000000",
+            true,
+            None,
+            temp.path().to_path_buf(),
+        );
+
+        assert_eq!(result.as_deref(), Some(snapshot.as_path()));
+    }
+
+    #[test]
+    fn test_get_cached_model_path_at_revision_wrong_sha_returns_none() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/my-model";
+        build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        let result = get_cached_model_path_at_revision(
+            model,
+            "different_sha",
+            true,
+            None,
+            temp.path().to_path_buf(),
+        );
+
+        assert!(result.is_none(), "wrong SHA should return None");
+    }
+
+    #[test]
+    fn test_hf_repo_from_snapshot_path_recognizes_hf_cache_layout() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/my-model";
+        let snapshot = build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        assert_eq!(
+            hf_repo_from_snapshot_path(&snapshot),
+            Some(model.to_string())
+        );
+    }
+
+    #[test]
+    fn test_hf_repo_from_snapshot_path_recognizes_single_segment_repo() {
+        let temp = TempDir::new().unwrap();
+        let model = "gpt2";
+        let snapshot = build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        assert_eq!(
+            hf_repo_from_snapshot_path(&snapshot),
+            Some(model.to_string())
+        );
+    }
+
+    #[test]
+    fn test_hf_repo_from_snapshot_path_rejects_plain_local_dir() {
+        let temp = TempDir::new().unwrap();
+        let local_checkpoint = temp.path().join("my-finetuned-model");
+        fs::create_dir_all(&local_checkpoint).unwrap();
+
+        assert_eq!(hf_repo_from_snapshot_path(&local_checkpoint), None);
+    }
+
+    #[tokio::test]
+    async fn test_from_hf_at_revision_rejects_weights_on_cache_miss() {
+        let temp = TempDir::new().unwrap();
+        // Empty cache dir — guarantees a cache miss, so we hit the new guard
+        // before any network call would happen.
+        let result = temp_env::async_with_vars(
+            [(
+                env_model::huggingface::HF_HUB_CACHE,
+                Some(temp.path().to_str().unwrap()),
+            )],
+            async {
+                from_hf_at_revision(
+                    PathBuf::from("test-org/some-model"),
+                    "deadbeef",
+                    None,
+                    /* ignore_weights = */ false,
+                )
+                .await
+            },
+        )
+        .await;
+
+        let err = result.expect_err("ignore_weights=false must be rejected on cache miss");
+        assert!(
+            err.to_string()
+                .contains("does not support downloading weights"),
+            "unexpected error: {err}"
         );
     }
 

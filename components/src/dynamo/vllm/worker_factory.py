@@ -634,6 +634,7 @@ class WorkerFactory:
                 [WorkerType.Prefill, WorkerType.Decode],
                 [WorkerType.Aggregated],
             ],
+            revision=config.engine_args.revision,
         )
         logger.info("Starting to serve the encode worker endpoint...")
 
