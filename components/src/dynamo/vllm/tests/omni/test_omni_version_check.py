@@ -3,6 +3,7 @@
 
 """Tests for the fail-fast vLLM/vLLM-Omni version compatibility guard."""
 
+import importlib.metadata
 from unittest.mock import patch
 
 import pytest
@@ -65,7 +66,7 @@ def test_aligned_versions_pass():
 
 def test_missing_metadata_is_skipped():
     def _raise(name):
-        raise Exception("no metadata")
+        raise importlib.metadata.PackageNotFoundError(name)
 
     with patch("importlib.metadata.version", _raise):
         # Should not raise; downstream import handles the missing package.

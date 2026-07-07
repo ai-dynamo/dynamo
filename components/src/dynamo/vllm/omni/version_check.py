@@ -8,6 +8,7 @@ major/minor version mismatch crashes with an opaque ImportError. We check
 up front and raise an actionable error instead.
 """
 
+import importlib.metadata
 import logging
 
 logger = logging.getLogger(__name__)
@@ -31,11 +32,9 @@ def _major_minor(version: str) -> tuple[int, int] | None:
 def check_vllm_omni_compatibility() -> None:
     """Raise if installed vLLM and vLLM-Omni major/minor versions differ."""
     try:
-        from importlib.metadata import version as _pkg_version
-
-        vllm_version = _pkg_version("vllm")
-        vllm_omni_version = _pkg_version("vllm-omni")
-    except Exception as exc:
+        vllm_version = importlib.metadata.version("vllm")
+        vllm_omni_version = importlib.metadata.version("vllm-omni")
+    except importlib.metadata.PackageNotFoundError as exc:
         # Missing metadata: let the downstream import raise its own error.
         logger.debug("Skipping vLLM/vLLM-Omni version check: %s", exc)
         return
