@@ -1246,10 +1246,10 @@ async def test_lora_registration_model_type_gate(
 
     assert results and results[-1]["status"] == "success", results
     assert captured, "register_llm was not invoked"
-    assert str(captured["model_type"]) == expected_model_type_str, (
-        f"model_type {captured['model_type']} != expected {expected_model_type_str}"
-    )
-    assert str(captured["worker_type"]) == expected_worker_type, (
-        f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
-    )
+    assert (
+        str(captured["model_type"]) == expected_model_type_str
+    ), f"model_type {captured['model_type']} != expected {expected_model_type_str}"
+    assert (
+        str(captured["worker_type"]) == expected_worker_type
+    ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
