@@ -25,7 +25,9 @@ class QwenGridParams:
     vision_hidden_dim: int
 
 
-def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
+def load_qwen_grid_params(
+    model_name: str, trust_remote_code: bool = False
+) -> QwenGridParams | None:
     """Load Qwen VL grid parameters from model config.
 
     Reads AutoImageProcessor and vision_config at init time so that
@@ -35,10 +37,10 @@ def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
     """
     try:
         processor = AutoImageProcessor.from_pretrained(
-            model_name, trust_remote_code=True
+            model_name, trust_remote_code=trust_remote_code
         )
         vision_config = AutoConfig.from_pretrained(
-            model_name, trust_remote_code=True
+            model_name, trust_remote_code=trust_remote_code
         ).vision_config
 
         patch_size: int = processor.patch_size
