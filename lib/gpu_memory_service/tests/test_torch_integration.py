@@ -283,7 +283,11 @@ def test_finalize_gms_write_rebinds_nonparameter_tensors(running_gms):
     gms_model._buffers["scale"] = gms_scale
     _, gms_extra = _make_gms_tensor(writer, baseline_extra, tag="weights")
     gms_model.extra = gms_extra
-    del gms_weight, gms_scale, gms_extra
+    _, gms_list_item = _make_gms_tensor(writer, baseline_scale, tag="weights")
+    gms_model.tensor_list = [gms_list_item]
+    _, gms_tuple_item = _make_gms_tensor(writer, baseline_extra, tag="weights")
+    gms_model.tensor_tuple = (gms_tuple_item,)
+    del gms_weight, gms_scale, gms_extra, gms_list_item, gms_tuple_item
 
     weight_ptr = gms_model.linear.weight.data_ptr()
 
@@ -304,14 +308,20 @@ def test_finalize_gms_write_rebinds_nonparameter_tensors(running_gms):
         # The buffer and the tensor attr are rebound to private memory.
         assert not _in_gms(cast(torch.Tensor, gms_model.scale))
         assert not _in_gms(cast(torch.Tensor, gms_model.extra))
+        assert not _in_gms(gms_model.tensor_list[0])
+        assert not _in_gms(gms_model.tensor_tuple[0])
 
         # Values are preserved across the rebind.
         _assert_exact_tensor_equal(expected, gms_model(inputs))
+        _assert_exact_tensor_equal(baseline_scale, gms_model.tensor_list[0])
+        _assert_exact_tensor_equal(baseline_extra, gms_model.tensor_tuple[0])
 
         # The rebound copies are writable. Without the rebind these writes
         # would land on the PROT_READ weights mapping (Xid 31).
         cast(torch.Tensor, gms_model.scale).add_(1.0)
         cast(torch.Tensor, gms_model.extra).zero_()
+        gms_model.tensor_list[0].add_(1.0)
+        gms_model.tensor_tuple[0].zero_()
         torch.cuda.synchronize()
     finally:
         del gms_model
