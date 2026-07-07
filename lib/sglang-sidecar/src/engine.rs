@@ -960,12 +960,14 @@ mod tests {
     use std::collections::HashMap;
 
     use dynamo_backend_common::{
-        BootstrapInfo, DisaggregationMode, FinishReason, OutputOptions, PreprocessedRequest,
-        SamplingOptions, StopConditions,
+        BootstrapInfo, DisaggregationMode, FinishReason, OutputOptions, PrefillResult,
+        PreprocessedRequest, SamplingOptions, StopConditions,
     };
     use serde_json::json;
 
-    use super::{build_generate_request, extract_logprobs, terminal_from_meta};
+    use super::{
+        build_generate_request, disaggregated_params_to_json, extract_logprobs, terminal_from_meta,
+    };
 
     fn request() -> PreprocessedRequest {
         PreprocessedRequest::builder()
@@ -1014,6 +1016,35 @@ mod tests {
         .unwrap();
         assert_eq!(mapped.sampling_params.unwrap().max_new_tokens, Some(1));
         assert_eq!(mapped.disaggregated_params.unwrap().bootstrap_port, 5001);
+    }
+
+    #[test]
+    fn prefill_handoff_round_trips_to_decode_request() {
+        let prefill = build_generate_request(
+            &request(),
+            "rid-prefill",
+            DisaggregationMode::Prefill,
+            Some("prefill.internal"),
+            Some(5001),
+        )
+        .unwrap();
+        let handoff = prefill.disaggregated_params.unwrap();
+
+        let mut decode_request = request();
+        decode_request.prefill_result = Some(PrefillResult {
+            disaggregated_params: disaggregated_params_to_json(&handoff),
+            prompt_tokens_details: None,
+        });
+        let decode = build_generate_request(
+            &decode_request,
+            "rid-decode",
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(decode.disaggregated_params, Some(handoff));
     }
 
     #[test]
