@@ -512,6 +512,11 @@ class SglangLLMEngine(LLMEngine):
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
+                    "prompt_tokens_details": (
+                        {"cached_tokens": meta_info["cached_tokens"]}
+                        if meta_info.get("cached_tokens") is not None
+                        else None
+                    ),
                 }
                 prompt_payload = (
                     _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(meta_info)
