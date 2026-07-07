@@ -23,6 +23,7 @@ from dynamo import prometheus_names
 from dynamo.planner.monitoring.traffic_metrics import (
     FrontendMetric,
     FrontendMetricContainer,
+    Metrics,
     PrometheusAPIClient,
 )
 
@@ -109,6 +110,60 @@ def test_frontend_metric_container_with_nan_value():
     test_data["value"][1] = 42.5  # type: ignore[index]
     container = FrontendMetricContainer.model_validate(test_data)
     assert container.value[1] == 42.5
+
+
+def test_metrics_normalize_nan_averages_for_idle_window():
+    metrics = Metrics(
+        ttft=math.nan,
+        itl=math.nan,
+        num_req=0,
+        isl=math.nan,
+        osl=math.nan,
+        request_duration=math.nan,
+    )
+
+    normalized = metrics.normalize_idle_nans()
+
+    assert normalized == ["ttft", "itl", "isl", "osl", "request_duration"]
+    assert metrics.is_valid()
+    assert metrics.ttft == 0
+    assert metrics.itl == 0
+    assert metrics.isl == 0
+    assert metrics.osl == 0
+    assert metrics.request_duration == 0
+
+
+def test_metrics_keep_nan_averages_invalid_with_traffic():
+    metrics = Metrics(
+        ttft=math.nan,
+        itl=math.nan,
+        num_req=1,
+        isl=math.nan,
+        osl=math.nan,
+        request_duration=math.nan,
+    )
+
+    assert metrics.normalize_idle_nans() == []
+    assert not metrics.is_valid()
+
+
+def test_metrics_keep_missing_idle_averages_invalid():
+    metrics = Metrics(
+        ttft=None,
+        itl=math.nan,
+        num_req=0,
+        isl=math.nan,
+        osl=math.nan,
+        request_duration=math.nan,
+    )
+
+    assert metrics.normalize_idle_nans() == [
+        "itl",
+        "isl",
+        "osl",
+        "request_duration",
+    ]
+    assert not metrics.is_valid()
 
 
 def test_frontend_metric_with_partial_data():

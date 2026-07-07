@@ -600,16 +600,8 @@ impl SglangCore {
         let prefill_fpm = admit.prefill_fpm;
 
         let batch_size = admit.can_run.len();
-        let mean_isl = if batch_size > 0 {
-            admit.total_isl / batch_size
-        } else {
-            0
-        };
-        let mean_prefix = if batch_size > 0 {
-            admit.total_prefix / batch_size
-        } else {
-            0
-        };
+        let mean_isl = admit.total_isl.checked_div(batch_size).unwrap_or(0);
+        let mean_prefix = admit.total_prefix.checked_div(batch_size).unwrap_or(0);
         let prefill_time =
             simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true);
 

@@ -531,35 +531,6 @@ navigation:
       - section: Additional Resources
         hidden: true
         contents:
-          # -- Translations (Simplified Chinese) --
-          # Linked from the language switcher on each English page; published
-          # via direct URL so the links resolve, but kept out of the sidebar.
-          - page: Introduction (Simplified Chinese)
-            path: getting-started/introduction.zh-CN.md
-          - page: Quickstart (Simplified Chinese)
-            path: getting-started/quickstart.zh-CN.mdx
-          - page: Local Installation (Simplified Chinese)
-            path: getting-started/local-installation.zh-CN.md
-          - page: Building from Source (Simplified Chinese)
-            path: getting-started/building-from-source.zh-CN.md
-          - page: Overall Architecture (Simplified Chinese)
-            path: design-docs/architecture.zh-CN.md
-          - page: Disaggregated Serving (Simplified Chinese)
-            path: design-docs/disagg-serving.zh-CN.md
-          - page: Planner Design (Simplified Chinese)
-            path: design-docs/planner-design.zh-CN.md
-          - page: Router (Simplified Chinese)
-            path: components/router/README.zh-CN.md
-          - page: KVBM (Simplified Chinese)
-            path: components/kvbm/README.zh-CN.md
-          - page: Planner Guide (Simplified Chinese)
-            path: components/planner/planner-guide.zh-CN.md
-          - page: Tool Calling (Simplified Chinese)
-            path: tool-calling/README.zh-CN.md
-          - page: Contribution Guide (Simplified Chinese)
-            path: contribution-guide.zh-CN.md
-          - page: Request Migration (Simplified Chinese)
-            path: fault-tolerance/request-migration.zh-CN.md
           # -- Development --
           - page: Runtime Guide
             path: development/runtime-guide.md
