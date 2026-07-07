@@ -422,8 +422,14 @@ func hasCheckpointJobFile(environ []byte) (bool, error) {
 	}
 	for _, entry := range bytes.Split(environ[:len(environ)-1], []byte{0}) {
 		key, _, ok := bytes.Cut(entry, []byte{'='})
-		if !ok || len(key) == 0 {
-			return false, errors.New("environment contains malformed entry")
+		if !ok {
+			if bytes.Equal(entry, []byte("CUDA_CHECKPOINT_JOB_FILE")) {
+				return true, nil
+			}
+			continue
+		}
+		if len(key) == 0 {
+			continue
 		}
 		if bytes.Equal(key, []byte("CUDA_CHECKPOINT_JOB_FILE")) {
 			return true, nil

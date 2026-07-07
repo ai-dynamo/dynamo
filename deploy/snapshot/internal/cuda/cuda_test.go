@@ -327,6 +327,23 @@ func TestCanRestoreConcurrently(t *testing.T) {
 			reason: "independent",
 		},
 		{
+			name: "unrelated bare entry",
+			environs: map[int]string{
+				101: "FLASHINFER_PYNCCL_NO_MODEL_ALLGATHER_GUARD_STANDBY_SKIP",
+			},
+			pids:   []int{101},
+			want:   true,
+			reason: "independent",
+		},
+		{
+			name: "bare job file",
+			environs: map[int]string{
+				101: "CUDA_CHECKPOINT_JOB_FILE",
+			},
+			pids:   []int{101},
+			reason: "pid 101 has CUDA_CHECKPOINT_JOB_FILE set",
+		},
+		{
 			name: "shared job file",
 			environs: map[int]string{
 				101: "CUDA_CHECKPOINT_JOB_FILE=/tmp/job",
