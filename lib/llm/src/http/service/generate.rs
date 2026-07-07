@@ -145,6 +145,14 @@ fn generate_cancelled_response() -> Response {
     )
 }
 
+fn generate_internal_error_response() -> Response {
+    generate_error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "internal server error".to_string(),
+    )
+}
+
 /// Project routing controls while retaining the complete client request in
 /// `extra_args.vllm_tito`. The backend remains the authority for interpreting
 /// every vLLM-specific field.
@@ -302,11 +310,10 @@ async fn handler_generate(
     .await
     {
         Ok(response) => response,
-        Err(error) => generate_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            format!("generate task panicked: {error}"),
-        ),
+        Err(error) => {
+            tracing::error!(%error, "generate dispatch task panicked");
+            generate_internal_error_response()
+        }
     };
 
     connection_handle.disarm();
@@ -343,29 +350,32 @@ async fn generate_dispatch(
     let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
+            let was_cancelled = request_context.is_killed()
+                || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
-            inflight_guard.mark_error(if request_context.is_killed() {
+            inflight_guard.mark_error(if was_cancelled {
                 ErrorType::Cancelled
             } else if was_rejected {
                 ErrorType::Unavailable
             } else {
                 ErrorType::Internal
             });
+            if was_cancelled {
+                return generate_cancelled_response();
+            }
             if was_rejected {
+                tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected generate request");
                 state
                     .metrics_clone()
                     .inc_rejection(&model, super::metrics::Endpoint::Generate);
                 return generate_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
-                    format!("engine rejected the request: {error:#}"),
+                    "engine rejected the request".to_string(),
                 );
             }
-            return generate_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                format!("failed to generate: {error:#}"),
-            );
+            tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
+            return generate_internal_error_response();
         }
     };
 
@@ -395,27 +405,22 @@ async fn generate_dispatch(
             if !response.is_complete_unary() {
                 inflight_guard.mark_error(ErrorType::Internal);
                 tracing::error!(%request_id, "generate stream ended without a complete choice");
-                return generate_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal_error",
-                    format!("generation produced no complete choice for {request_id}"),
-                );
+                return generate_internal_error_response();
             }
             inflight_guard.mark_ok();
             Json(response).into_response()
         }
         Err(error) => {
-            if request_context.is_killed() || engine_context.is_killed() {
+            if request_context.is_killed()
+                || engine_context.is_killed()
+                || super::metrics::request_was_cancelled(error.as_ref())
+            {
                 inflight_guard.mark_error(ErrorType::Cancelled);
                 return generate_cancelled_response();
             }
             inflight_guard.mark_error(ErrorType::Internal);
             tracing::error!(%request_id, %error, "failed to fold generate stream");
-            generate_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                format!("failed to fold generate stream for {request_id}"),
-            )
+            generate_internal_error_response()
         }
     }
 }
@@ -505,6 +510,43 @@ mod tests {
         phase: PendingPhase,
         started: Arc<Notify>,
         dropped: Arc<AtomicBool>,
+    }
+
+    struct TerminalEngine(crate::protocols::common::FinishReason);
+
+    struct CancelledEngine;
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for CancelledEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::Cancelled)
+                .message("backend cancelled before opening a stream")
+                .build()
+                .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for TerminalEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+                index: Some(0),
+                finish_reason: Some(self.0.clone()),
+                ..Default::default()
+            })]);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
     }
 
     #[async_trait::async_trait]
@@ -919,6 +961,25 @@ mod tests {
         await_cancelled_dispatch(task, dropped.as_ref(), state.as_ref()).await;
     }
 
+    async fn dispatch_terminal_finish_reason(
+        finish_reason: crate::protocols::common::FinishReason,
+    ) -> (Response, Arc<service_v2::State>) {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TerminalEngine(finish_reason));
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let response = generate_dispatch(
+            engine,
+            dispatch_test_context(),
+            "req-terminal-dispatch".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+        (response, state)
+    }
+
     #[tokio::test]
     async fn request_kill_interrupts_pending_engine_generate() {
         assert_request_kill_interrupts_pending(PendingPhase::Generate).await;
@@ -927,6 +988,54 @@ mod tests {
     #[tokio::test]
     async fn request_kill_interrupts_pending_response_stream() {
         assert_request_kill_interrupts_pending(PendingPhase::Stream).await;
+    }
+
+    #[tokio::test]
+    async fn backend_error_finish_returns_sanitized_500() {
+        let secret = "sensitive backend failure";
+        let (response, _state) = dispatch_terminal_finish_reason(
+            crate::protocols::common::FinishReason::Error(secret.to_string()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read error response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("parse error response");
+        assert_eq!(body["error"]["message"], "internal server error");
+        assert!(!body.to_string().contains(secret));
+    }
+
+    #[tokio::test]
+    async fn backend_cancelled_finish_returns_499() {
+        let (response, state) =
+            dispatch_terminal_finish_reason(crate::protocols::common::FinishReason::Cancelled)
+                .await;
+
+        assert_eq!(response.status().as_u16(), 499);
+        assert_cancelled_dispatch_metrics(state.as_ref());
+    }
+
+    #[tokio::test]
+    async fn immediate_engine_cancellation_returns_499() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(CancelledEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        let response = generate_dispatch(
+            engine,
+            dispatch_test_context(),
+            "req-immediate-cancel".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status().as_u16(), 499);
+        assert_cancelled_dispatch_metrics(state.as_ref());
     }
 
     #[test]

@@ -105,6 +105,9 @@ fn supports_vllm_generate(card: &ModelDeploymentCard) -> bool {
     )
 }
 
+// Generate's opaque request state is not yet verified for migration replay.
+const GENERATE_MIGRATION_LIMIT: u32 = 0;
+
 /// Resolve the effective [`WorkerType`] for a card during the
 /// cross-version rollout.
 ///
@@ -1016,7 +1019,10 @@ impl ModelWatcher {
             // tokenizer.is_some() implies a local chat or completions pipeline will be built.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
-            let needs_preprocessed_routing = needs_factory_chat_pipeline || tokenizer.is_some();
+            let needs_generate_pipeline =
+                self.generate_engine_enabled && supports_vllm_generate(card);
+            let needs_preprocessed_routing =
+                needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
             // Create the KV router whenever any routed pipeline will be built.
             // Python chat factories receive a Rust-routed engine, so they also
@@ -1139,38 +1145,48 @@ impl ModelWatcher {
                             self.metrics.clone(),
                         )
                         .context("PreprocessedRouting::build_preprocessed_pipeline")?;
-                    factory(mcid.clone(), card.clone(), routed_engine)
-                        .await
-                        .context("python chat_engine_factory")?
-                } else {
-                    let tk = tokenizer.clone().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Model has no supported Rust tokenizer and no chat_engine_factory. \
-                             Use --dyn-chat-processor vllm/sglang or provide a supported \
-                             tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)."
-                        )
-                    })?;
+                    Some(
+                        factory(mcid.clone(), card.clone(), routed_engine)
+                            .await
+                            .context("python chat_engine_factory")?,
+                    )
+                } else if let Some(tk) = tokenizer.clone() {
                     let PromptFormatter::OAI(formatter) =
                         prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
                     let preprocessor =
                         OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
                             .context("OpenAIPreprocessor.new_with_parts")?;
-                    routing
-                        .build_pipeline::<
-                            NvCreateChatCompletionRequest,
-                            NvCreateChatCompletionStreamResponse,
-                        >(
-                            card,
-                            preprocessor,
-                            tk,
-                            self.migration_limit,
-                            self.migration_max_seq_len,
-                            self.metrics.clone(),
+                    Some(
+                        routing
+                            .build_pipeline::<
+                                NvCreateChatCompletionRequest,
+                                NvCreateChatCompletionStreamResponse,
+                            >(
+                                card,
+                                preprocessor,
+                                tk,
+                                self.migration_limit,
+                                self.migration_max_seq_len,
+                                self.metrics.clone(),
+                            )
+                            .context("PreprocessedRouting::build_pipeline")?,
                         )
-                        .context("PreprocessedRouting::build_pipeline")?
+                } else if needs_generate_pipeline {
+                    tracing::warn!(
+                        "Skipping chat engine: no supported Rust tokenizer or chat_engine_factory; Generate remains available"
+                    );
+                    None
+                } else {
+                    anyhow::bail!(
+                        "Model has no supported Rust tokenizer and no chat_engine_factory. \
+                         Use --dyn-chat-processor vllm/sglang or provide a supported \
+                         tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken)."
+                    );
                 };
-                worker_set.chat_engine = Some(chat_engine);
-                tracing::info!("Chat completions is ready");
+                if let Some(chat_engine) = chat_engine {
+                    worker_set.chat_engine = Some(chat_engine);
+                    tracing::info!("Chat completions is ready");
+                }
             }
 
             // Add completions engine only if the model supports completions
@@ -1207,15 +1223,15 @@ impl ModelWatcher {
             // Generate is a frontend-native token-in/token-out surface. It
             // reuses the raw routed pipeline so the complete request envelope
             // reaches the worker without passing through the OpenAI decoder.
-            if self.generate_engine_enabled
-                && supports_vllm_generate(card)
-                && let Some(routing) = preprocessed_routing.as_ref()
-            {
+            if needs_generate_pipeline {
+                let routing = preprocessed_routing.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("generate pipeline requires preprocessed routing")
+                })?;
                 let generate_engine = routing
                     .build_preprocessed_pipeline(
                         card,
-                        self.migration_limit,
-                        self.migration_max_seq_len,
+                        GENERATE_MIGRATION_LIMIT,
+                        None,
                         self.metrics.clone(),
                     )
                     .context("build generate (preprocessed) pipeline")?;
@@ -1223,11 +1239,9 @@ impl ModelWatcher {
                 tracing::info!("Generate (token-in/token-out) is ready");
             }
 
-            // Verify we built at least one serving engine. A Tokens model that
-            // ends up with no chat AND no completions engine (e.g. completions-only
-            // model with no tokenizer) should fail fast rather than register an
-            // empty WorkerSet that can't serve any requests.
-            if !worker_set.has_decode_engine() {
+            // Verify we built at least one serving engine. Generate can be the
+            // sole engine because token-native requests need no frontend tokenizer.
+            if !worker_set.has_any_serving_engine() {
                 anyhow::bail!(
                     "Model '{}' requires frontend tokenization/preprocessing (ModelInput::Tokens) \
                      but no serving engine could be built. Provide a working tokenizer config or \

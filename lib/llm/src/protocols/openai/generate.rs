@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
 use futures::{Stream, StreamExt, pin_mut};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -327,6 +328,25 @@ struct GenerateChoiceAcc {
 
 impl GenerateChoiceAcc {
     fn apply(&mut self, output: &LLMEngineOutput, options: GenerateResponseOptions) -> Result<()> {
+        if let Some(finish_reason) = output.finish_reason.as_ref() {
+            match finish_reason {
+                crate::protocols::common::FinishReason::Error(message) => {
+                    return Err(DynamoError::builder()
+                        .error_type(DynamoErrorType::Backend(BackendError::Unknown))
+                        .message(message)
+                        .build()
+                        .into());
+                }
+                crate::protocols::common::FinishReason::Cancelled => {
+                    return Err(DynamoError::builder()
+                        .error_type(DynamoErrorType::Cancelled)
+                        .message("backend cancelled generation")
+                        .build()
+                        .into());
+                }
+                _ => self.finish_reason = Some(finish_reason.to_string()),
+            }
+        }
         if options.include_logprobs {
             match completion_logprobs_from_output(output)? {
                 Some(mut chunk_logprobs) => self
@@ -341,9 +361,6 @@ impl GenerateChoiceAcc {
             }
         }
         self.token_ids.extend_from_slice(&output.token_ids);
-        if let Some(finish_reason) = output.finish_reason.as_ref() {
-            self.finish_reason = Some(finish_reason.to_string());
-        }
         Ok(())
     }
 
@@ -1063,6 +1080,24 @@ mod tests {
                 .await
                 .expect("aggregate partial stream");
         assert!(!partial_response.is_complete_unary());
+    }
+
+    #[tokio::test]
+    async fn generate_response_rejects_error_and_cancelled_finish_reasons() {
+        for finish_reason in [
+            crate::protocols::common::FinishReason::Error("worker failed".to_string()),
+            crate::protocols::common::FinishReason::Cancelled,
+        ] {
+            let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+                index: Some(0),
+                finish_reason: Some(finish_reason),
+                ..Default::default()
+            })]);
+
+            GenerateResponse::from_annotated_stream(stream, "req-failed".to_string())
+                .await
+                .expect_err("error-like finish reasons must not produce HTTP-success responses");
+        }
     }
 
     #[tokio::test]
