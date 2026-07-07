@@ -240,7 +240,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        assert!(request.isl_tokens > 0);
+        // isl_tokens may be 0 when DYN_SKIP_FRONTEND_TOKENIZE=1 elides
+        // tokenization in the Rust preprocessor. Downstream math
+        // (request_blocks / worker_logit) is 0-safe: prefill load
+        // projection collapses to 0 and the router falls back to
+        // decode-load balancing.
         eligibility.validate_pinned_worker_allowed()?;
 
         let pinned_worker = eligibility.pinned_worker();
