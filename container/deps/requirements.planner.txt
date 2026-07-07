@@ -3,7 +3,7 @@
 
 # Dependencies required by the planner, profiler, and global_planner services.
 
-aiconfigurator[webapp]>=0.9.0
+aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@7191b7cf38f6e12e76a12ad3b557d5b38a8afb96
 aiofiles<=25.1.0
 aiohttp>=3.9.0,<4.0
 filterpy==1.4.5

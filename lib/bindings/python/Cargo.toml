@@ -46,7 +46,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 # own interpreter is used; build_aic_engine() crosses into Python once at
 # startup while AicEngine::{prefill,decode}_latency_ms() are pure Rust (no GIL)
 # on the predict hot path.
-aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "7191b7cf38f6e12e76a12ad3b557d5b38a8afb96", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "3.0.0" }

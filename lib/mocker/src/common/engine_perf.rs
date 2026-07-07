@@ -83,6 +83,7 @@ impl AicEngineConfig {
                 attention_dp_size: self.attention_dp_size,
                 moe_tp_size: self.moe_tp_size,
                 moe_ep_size: self.moe_ep_size,
+                cp_size: None,
             },
             quantization: QuantizationConfig {
                 weight_dtype: self
@@ -103,6 +104,10 @@ impl AicEngineConfig {
                     .transpose()?,
             },
             speculative: None,
+            // Empty = single primary `data_root` (pre-shared-layer back-compat);
+            // shared-layer source lists are resolved by the Python SDK, which
+            // this native construction path bypasses.
+            perf_db_sources: Default::default(),
             extra: self.extra,
         })
     }
@@ -1067,6 +1072,7 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
                 .aic_moe_ep_size
                 .map(|value| to_u32(value, "aic_moe_ep_size"))
                 .transpose()?,
+            cp_size: None,
         },
         // Native analytics path: quant dtypes are parsed by `parse_data_type`
         // into `aiconfigurator_core::DataType` (accepted: bfloat16, float16,
@@ -1098,6 +1104,7 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
                 .transpose()?,
         },
         speculative: None,
+        perf_db_sources: Default::default(),
         extra,
     })))
 }
