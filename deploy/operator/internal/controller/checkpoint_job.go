@@ -11,11 +11,9 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	resourcev1 "k8s.io/api/resource/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -83,86 +81,6 @@ func buildCheckpointJob(
 		snapshotprotocol.ApplyCheckpointStorageMetadata(podTemplate.Annotations, storage)
 	}
 
-	// Decide whether cuda-checkpoint needs --launch-job from the rendered pod
-	// template, not from deprecated identity fields. Regular pods expose GPUs
-	// as scalar resources; GMS/DRA-prepared checkpoint pods expose them through
-	// ResourceClaims. For DRA claims, only count requests using the configured
-	// GMS DeviceClassName (or Dynamo's default) so unrelated device claims do
-	// not trigger checkpoint launch wrapping.
-	gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
-	if err != nil {
-		return nil, err
-	}
-	if kubeClient != nil {
-		gpuDeviceClassName := dra.DefaultDeviceClassName
-		if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.DeviceClassName != "" {
-			gpuDeviceClassName = ckpt.Spec.GPUMemoryService.DeviceClassName
-		}
-		deviceCount := func(allocation resourcev1.DeviceAllocationMode, count int64) int {
-			if allocation == resourcev1.DeviceAllocationModeAll {
-				// AllocationModeAll is resolved by the scheduler, so the
-				// exact count is unavailable here. Assume multi-GPU so
-				// checkpoint launch wrapping is not missed.
-				return 2
-			}
-			if count == 0 {
-				return 1
-			}
-			return int(count)
-		}
-
-		for _, containerClaim := range targetContainer.Resources.Claims {
-			var claimSpec *resourcev1.ResourceClaimSpec
-			for i := range podTemplate.Spec.ResourceClaims {
-				podClaim := podTemplate.Spec.ResourceClaims[i]
-				if podClaim.Name != containerClaim.Name {
-					continue
-				}
-				switch {
-				case podClaim.ResourceClaimTemplateName != nil && *podClaim.ResourceClaimTemplateName != "":
-					template := &resourcev1.ResourceClaimTemplate{}
-					name := *podClaim.ResourceClaimTemplateName
-					if err := kubeClient.Get(ctx, ctrlclient.ObjectKey{Namespace: ckpt.Namespace, Name: name}, template); err != nil {
-						return nil, fmt.Errorf("failed to get ResourceClaimTemplate %s/%s for checkpoint GPU count: %w", ckpt.Namespace, name, err)
-					}
-					claimSpec = &template.Spec.Spec
-				case podClaim.ResourceClaimName != nil && *podClaim.ResourceClaimName != "":
-					claim := &resourcev1.ResourceClaim{}
-					name := *podClaim.ResourceClaimName
-					if err := kubeClient.Get(ctx, ctrlclient.ObjectKey{Namespace: ckpt.Namespace, Name: name}, claim); err != nil {
-						return nil, fmt.Errorf("failed to get ResourceClaim %s/%s for checkpoint GPU count: %w", ckpt.Namespace, name, err)
-					}
-					claimSpec = &claim.Spec
-				}
-				break
-			}
-			if claimSpec == nil {
-				continue
-			}
-
-			for _, request := range claimSpec.Devices.Requests {
-				if containerClaim.Request != "" && request.Name != containerClaim.Request {
-					continue
-				}
-				if request.Exactly != nil {
-					if request.Exactly.DeviceClassName == gpuDeviceClassName {
-						gpuCount += deviceCount(request.Exactly.AllocationMode, request.Exactly.Count)
-					}
-					continue
-				}
-
-				requestGPUCount := 0
-				for _, subRequest := range request.FirstAvailable {
-					if subRequest.DeviceClassName == gpuDeviceClassName {
-						requestGPUCount = max(requestGPUCount, deviceCount(subRequest.AllocationMode, subRequest.Count))
-					}
-				}
-				gpuCount += requestGPUCount
-			}
-		}
-	}
-	wrapLaunchJob := gpuCount > 1
-
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {
 		defaultDeadline := int64(3600)
@@ -179,6 +97,8 @@ func buildCheckpointJob(
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,
-		WrapLaunchJob:         wrapLaunchJob,
+		// Experiment only: prove that no legacy CUDA IPC depends on the
+		// cuda-checkpoint launch-job coordinator.
+		WrapLaunchJob: false,
 	})
 }
