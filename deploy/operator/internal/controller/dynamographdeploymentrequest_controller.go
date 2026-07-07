@@ -332,12 +332,6 @@ if [ -f {{.OutputPath}}/profiler_status.yaml ]; then
   sed 's/^/    /' {{.OutputPath}}/profiler_status.yaml >> /tmp/cm.yaml
 fi
 
-# Add webui_data.json for pareto curve data (used by operator to populate status.profilingResults.pareto)
-if [ -f {{.OutputPath}}/webui_data.json ]; then
-  echo "  webui_data.json: |" >> /tmp/cm.yaml
-  sed 's/^/    /' {{.OutputPath}}/webui_data.json >> /tmp/cm.yaml
-fi
-
 # Note: Profiling data (raw_data.npz converted to JSON) is included in the
 # generated DGD YAML as a separate ConfigMap by the profiler, no need to add it here
 
@@ -2076,15 +2070,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	}
 
 	profilingResults := &nvidiacomv1beta1.ProfilingResultsStatus{}
-	if webUIData, ok := cm.Data["webui_data.json"]; ok {
-		pareto, err := extractParetoFromWebUIData([]byte(webUIData))
-		if err != nil {
-			logger.Error(err, "Failed to parse webui_data.json; skipping pareto population")
-		} else {
-			profilingResults.Pareto = pareto
-			logger.Info("Populated ProfilingResults.Pareto", "count", len(pareto))
-		}
-	}
 
 	// Store manifest bytes with apiVersion/kind in status/annotation without
 	// setting TypeMeta on the typed object submitted through the Kubernetes client.
@@ -2136,76 +2121,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) encodeBetaDGDManifest(dgd *nvid
 	}
 
 	return jsonBytes, yamlBytes, nil
-}
-
-// extractParetoFromWebUIData parses webui_data.json and returns all Pareto-optimal
-// deployment configurations from the cost table. Each row's last column ("Action")
-// is a partial DynamoGraphDeployment YAML snippet.
-func extractParetoFromWebUIData(data []byte) ([]nvidiacomv1beta1.ParetoConfig, error) {
-	var parsed struct {
-		Cost struct {
-			Table struct {
-				Data [][]json.RawMessage `json:"data"`
-			} `json:"table"`
-		} `json:"cost"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal webui_data.json: %w", err)
-	}
-
-	rows := parsed.Cost.Table.Data
-	if len(rows) == 0 {
-		return nil, nil
-	}
-
-	// Schema: [TTFT(ms), PrefillThpt, ITL(ms), DecodeThpt, TokensPerUser, GPUHours, ActionYAML]
-	const minColumns = 7
-	const actionColumnIndex = 6
-
-	pareto := make([]nvidiacomv1beta1.ParetoConfig, 0, len(rows))
-	for _, row := range rows {
-		if len(row) < minColumns {
-			continue
-		}
-
-		var actionYAML string
-		if err := json.Unmarshal(row[actionColumnIndex], &actionYAML); err != nil {
-			continue
-		}
-
-		var configObj map[string]interface{}
-		if err := sigsyaml.Unmarshal([]byte(stripYAMLComments(actionYAML)), &configObj); err != nil {
-			continue
-		}
-
-		if len(configObj) == 0 {
-			continue
-		}
-
-		configJSON, err := json.Marshal(configObj)
-		if err != nil {
-			continue
-		}
-
-		pareto = append(pareto, nvidiacomv1beta1.ParetoConfig{
-			Config: runtime.RawExtension{Raw: configJSON},
-		})
-	}
-
-	return pareto, nil
-}
-
-// stripYAMLComments removes comment lines (lines whose first non-whitespace character
-// is '#') from a YAML string. The profiler prefixes action snippets with comment lines.
-func stripYAMLComments(s string) string {
-	lines := strings.Split(s, "\n")
-	out := lines[:0] // reuse backing array; write index always <= range read index
-	for _, line := range lines {
-		if !strings.HasPrefix(strings.TrimLeft(line, " \t"), "#") {
-			out = append(out, line)
-		}
-	}
-	return strings.Join(out, "\n")
 }
 
 // storeAdditionalResources marshals additional resources to YAML and stores them in DGDR annotations.
