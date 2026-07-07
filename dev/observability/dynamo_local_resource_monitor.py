@@ -51,6 +51,7 @@ import sys
 import threading
 import time
 from collections import Counter, deque
+from itertools import islice
 from pathlib import Path
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
@@ -349,6 +350,9 @@ class ProcessTracker:
         self._pid_slot: dict[int, int] = {}
         self._free_slots: list[int] = []
         self._next_slot = 0
+        self._series_total: dict[int, float] = {}
+        self._last_active: dict[int, int] = {}
+        self._aggregate_history = deque(maxlen=maxlen) if not prune else None
 
     def new_pids(self, data: dict[int, float]) -> set[int]:
         return set(data.keys()) - set(self.series.keys())
@@ -359,13 +363,16 @@ class ProcessTracker:
         name_resolver,
         timestamp: float = 0,
         pre_resolved: dict[int, str] | None = None,
-    ):
+    ) -> bool:
+        changed = False
         pre_resolved = pre_resolved or {}
         self.names.update(pre_resolved)
         for pid in data:
             if pid not in self.series:
                 backfill = min(self._len, self.maxlen)
                 self.series[pid] = deque([0.0] * backfill, maxlen=self.maxlen)
+                self._series_total[pid] = 0.0
+                self._last_active[pid] = -1
                 self.names[pid] = pre_resolved.get(pid) or name_resolver(pid)
                 self.first_seen[pid] = timestamp
                 if self._free_slots:
@@ -374,26 +381,38 @@ class ProcessTracker:
                     slot = self._next_slot
                     self._next_slot += 1
                 self._pid_slot[pid] = slot
+                changed = True
 
         for pid, dq in self.series.items():
-            dq.append(data.get(pid, 0.0))
+            dropped = dq[0] if len(dq) == self.maxlen else 0.0
+            value = data.get(pid, 0.0)
+            dq.append(value)
+            self._series_total[pid] += value - dropped
+            if value > 0:
+                self._last_active[pid] = self._len
+        if self._aggregate_history is not None:
+            self._aggregate_history.append(sum(data.values()))
         self._len += 1
         if self._prune_enabled:
-            self._prune_dead()
+            changed |= self._prune_dead()
+        return changed
 
-    def _prune_dead(self):
+    def _prune_dead(self) -> bool:
         window = min(200, self._len)
         dead = [
             pid
-            for pid, dq in self.series.items()
-            if all(v == 0.0 for v in list(dq)[-window:])
+            for pid in self.series
+            if self._last_active.get(pid, -1) < self._len - window
         ]
         for pid in dead:
             del self.series[pid]
             del self.names[pid]
+            del self._series_total[pid]
+            del self._last_active[pid]
             self.first_seen.pop(pid, None)
             if pid in self._pid_slot:
                 self._free_slots.append(self._pid_slot.pop(pid))
+        return bool(dead)
 
     def to_dict(self) -> dict:
         return {
@@ -418,10 +437,81 @@ class ProcessTracker:
         self._pid_slot = {int(k): v for k, v in data.get("_pid_slot", {}).items()}
         self._free_slots = data.get("_free_slots", [])
         self._next_slot = data.get("_next_slot", 0)
+        self._series_total = {
+            pid: sum(values) for pid, values in self.series.items()
+        }
+        self._last_active = {}
+        for pid, values in self.series.items():
+            first_index = self._len - len(values)
+            self._last_active[pid] = -1
+            for index in range(len(values) - 1, -1, -1):
+                if values[index] > 0:
+                    self._last_active[pid] = first_index + index
+                    break
+        if self._aggregate_history is not None:
+            aggregate = [0.0] * min(self._len, self.maxlen)
+            for values in self.series.values():
+                for i, value in enumerate(values):
+                    aggregate[i] += value
+            self._aggregate_history = deque(aggregate, maxlen=self.maxlen)
 
     def _color_for(self, pid: int) -> str:
         slot = self._pid_slot.get(pid, 0)
         return PROCESS_COLORS[slot % len(PROCESS_COLORS)]
+
+    def ranked_ids(self, n: int = 20, sort_by: str = "recency") -> list[int]:
+        active = [
+            pid for pid in self.series if self._series_total.get(pid, 0.0) > 0
+        ]
+        if sort_by == "recency":
+            return sorted(
+                active,
+                key=lambda pid: (self._last_active[pid], self._series_total[pid]),
+                reverse=True,
+            )[:n]
+        return sorted(
+            active,
+            key=lambda pid: self._series_total[pid],
+            reverse=True,
+        )[:n]
+
+    @staticmethod
+    def _values(values: deque[float], value_slice: slice | None) -> list[float]:
+        if value_slice is None:
+            return list(values)
+        return list(islice(values, *value_slice.indices(len(values))))
+
+    def series_for_ids(
+        self, selected_ids: list[int], value_slice: slice | None = None
+    ) -> list[tuple[int, str, str, list[float]]]:
+        selected = [pid for pid in selected_ids if pid in self.series]
+        result = [
+            (
+                pid,
+                self.names[pid],
+                self._color_for(pid),
+                self._values(self.series[pid], value_slice),
+            )
+            for pid in selected
+        ]
+        rest = [pid for pid in self.series if pid not in selected]
+        if not rest or not any(
+            self._series_total.get(pid, 0.0) > 0 for pid in rest
+        ):
+            return result
+        if self._aggregate_history is not None:
+            other = self._values(self._aggregate_history, value_slice)
+            for _, _, _, selected_values in result:
+                for i, value in enumerate(selected_values):
+                    other[i] -= value
+        else:
+            other = [0.0] * len(self._values(self.series[rest[0]], value_slice))
+            for pid in rest:
+                for i, value in enumerate(
+                    self._values(self.series[pid], value_slice)
+                ):
+                    other[i] += value
+        return [*result, (-1, "Other", OTHER_COLOR, other)]
 
     def get_top_sorted(
         self, n: int = 20, sort_by: str = "recency"
@@ -429,42 +519,7 @@ class ProcessTracker:
         if not self.series:
             return []
 
-        if sort_by == "recency":
-
-            def _key(p):
-                series = self.series[p]
-                last_active = -1
-                for i in range(len(series) - 1, -1, -1):
-                    if series[i] > 0:
-                        last_active = i
-                        break
-                return (last_active, max(series) if series else 0)
-
-        else:
-
-            def _key(p):
-                return sum(self.series[p])
-
-        sorted_pids = sorted(self.series.keys(), key=_key, reverse=True)
-        top = sorted_pids[:n]
-        rest = sorted_pids[n:]
-        result = [
-            (pid, self.names[pid], self._color_for(pid), list(self.series[pid]))
-            for pid in top
-            if max(self.series[pid]) > 0
-        ]
-        if rest:
-            length = len(next(iter(self.series.values())))
-            rest_vals = [0.0] * length
-            has_data = False
-            for pid in rest:
-                for i, value in enumerate(self.series[pid]):
-                    rest_vals[i] += value
-                    if value > 0:
-                        has_data = True
-            if has_data:
-                result.append((-1, "Other", OTHER_COLOR, rest_vals))
-        return result
+        return self.series_for_ids(self.ranked_ids(n, sort_by))
 
 
 # ---------------------------------------------------------------------------
@@ -622,6 +677,11 @@ class MetricsCollector:
         self._cpu_name_to_id: dict[str, int] = {}
         self._cpu_next_id = 1
         self._cpu_top_n = 5
+        self._top_refresh_samples = max(1, round(1000 / main_interval_ms))
+        self._top_cache_counter = -self._top_refresh_samples
+        self._top_cache_dirty = True
+        self._cpu_top_ids: list[int] = []
+        self._gpu_top_ids: list[list[int]] = []
 
         self.ts_disk: deque[float] = deque(maxlen=maxlen_disk)
         self.counter_disk = 0
@@ -642,6 +702,7 @@ class MetricsCollector:
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 self.gpu_mem_total_gib.append(mem.total / (1024**3))
                 self.proc_gpu_mem.append(ProcessTracker(maxlen_main, prune=False))
+                self._gpu_top_ids.append([])
                 self.gpu_util.append(deque(maxlen=maxlen_main))
                 self.gpu_temp.append(deque(maxlen=maxlen_main))
                 self.gpu_pcie_tx.append(deque(maxlen=maxlen_pcie))
@@ -657,6 +718,24 @@ class MetricsCollector:
                     self.has_pcie = True
                 except pynvml.NVMLError:
                     self.has_pcie = False
+
+    def _refresh_top_ids(self, force: bool = False):
+        """Refresh selections only when membership or one-second totals can change."""
+        if (
+            not force
+            and not self._top_cache_dirty
+            and self.counter_main - self._top_cache_counter
+            < self._top_refresh_samples
+        ):
+            return
+        self._cpu_top_ids = self.proc_cpu.ranked_ids(
+            self._cpu_top_n, sort_by="total"
+        )
+        self._gpu_top_ids = [
+            tracker.ranked_ids(self.top_n) for tracker in self.proc_gpu_mem
+        ]
+        self._top_cache_counter = self.counter_main
+        self._top_cache_dirty = False
 
     def save_state(self):
         """Persist the rolling window so restarting the dashboard keeps context."""
@@ -816,14 +895,14 @@ class MetricsCollector:
             self.ts_main.append(now)
             self.counter_main += 1
             self.cpu_pct.append(cpu)
-            self.proc_cpu.record(
+            membership_changed = self.proc_cpu.record(
                 cpu_id_data,
                 lambda sid: cpu_id_names.get(sid, f"pid:{sid}"),
                 now,
                 pre_resolved=cpu_id_names,
             )
             for i, (gpu_proc_mem, util, temp) in enumerate(gpu_data):
-                self.proc_gpu_mem[i].record(
+                membership_changed |= self.proc_gpu_mem[i].record(
                     gpu_proc_mem,
                     _resolve_process_name,
                     now,
@@ -831,6 +910,7 @@ class MetricsCollector:
                 )
                 self.gpu_util[i].append(util)
                 self.gpu_temp[i].append(temp)
+            self._top_cache_dirty |= membership_changed
             alpha_net = 0.15
             prev_sent = self.net_sent_mbps[-1] if self.net_sent_mbps else 0.0
             prev_recv = self.net_recv_mbps[-1] if self.net_recv_mbps else 0.0
@@ -865,16 +945,17 @@ class MetricsCollector:
 
     def snapshot_full(self) -> dict:
         with self.lock:
+            self._refresh_top_ids(force=True)
             main_vals = [list(self.cpu_pct)]
-            cpu_procs_full = self.proc_cpu.get_top_sorted(
-                self._cpu_top_n, sort_by="total"
-            )
+            cpu_procs_full = self.proc_cpu.series_for_ids(self._cpu_top_ids)
             for _, _, _, values in cpu_procs_full:
                 main_vals.append(values)
 
             gpu_mem_per_gpu_full = []
             for gi in range(self.gpu_count):
-                procs = self.proc_gpu_mem[gi].get_top_sorted(self.top_n)
+                procs = self.proc_gpu_mem[gi].series_for_ids(
+                    self._gpu_top_ids[gi]
+                )
                 gpu_mem_per_gpu_full.append(procs)
                 for _, _, _, values in procs:
                     main_vals.append(values)
@@ -987,6 +1068,7 @@ class MetricsCollector:
         step: int = 1,
     ) -> dict:
         with self.lock:
+            self._refresh_top_ids()
             new_main = self.counter_main - since_main
             main_len = len(self.ts_main)
             main_idx = max(0, main_len - new_main) if new_main > 0 else main_len
@@ -994,13 +1076,13 @@ class MetricsCollector:
             new_ts_main = list(self.ts_main)[sl_m]
             cpu = list(self.cpu_pct)[sl_m]
 
-            cpu_procs = self.proc_cpu.get_top_sorted(self._cpu_top_n, sort_by="total")
+            cpu_procs = self.proc_cpu.series_for_ids(self._cpu_top_ids, sl_m)
             cpu_procs_delta = [
                 {
                     "id": proc_id,
                     "name": name,
                     "color": color,
-                    "vals": values[sl_m] if main_idx < len(values) else [],
+                    "vals": values,
                 }
                 for proc_id, name, color, values in cpu_procs
             ]
@@ -1009,14 +1091,16 @@ class MetricsCollector:
             gpu_mem_per_gpu = []
             gpu_mem_keys_per_gpu = []
             for gi in range(self.gpu_count):
-                gpu_mem = self.proc_gpu_mem[gi].get_top_sorted(self.top_n)
+                gpu_mem = self.proc_gpu_mem[gi].series_for_ids(
+                    self._gpu_top_ids[gi], sl_m
+                )
                 gpu_mem_per_gpu.append(
                     [
                         {
                             "pid": pid,
                             "name": name,
                             "color": color,
-                            "vals": values[sl_m] if main_idx < len(values) else [],
+                            "vals": values,
                         }
                         for pid, name, color, values in gpu_mem
                     ]
@@ -1326,6 +1410,11 @@ def build_monitor_server(collector: MetricsCollector):
         app,
         cors_allowed_origins="*",
         async_mode="threading",
+        # Werkzeug 3.1's dev server 500s on the websocket upgrade
+        # ("write() before start_response") with flask-socketio+simple-websocket,
+        # which leaves the dashboard blank. Long-polling delivers the same events
+        # fine, so disable the upgrade and stay on polling.
+        allow_upgrades=False,
         ping_timeout=60,
         ping_interval=25,
         max_http_buffer_size=50 * 1024 * 1024,
