@@ -10,11 +10,13 @@ before the fix the GPU budget aggregated to zero and the ``--max-total-gpus``
 schema (the version the planner requests); v1alpha1 remains as a fallback.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
+from dynamo.planner import SubComponentType, TargetReplica
+from dynamo.planner.connectors.protocol import ScaleRequest
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -131,3 +133,110 @@ def test_budget_nonzero_for_v1beta1():
     handler = _handler()
     handler.connectors["default/my-dgd"] = _connector(V1BETA1)
     assert handler._total_gpus_with_overrides({}) == 5
+
+
+# v1beta1 aggregated DGD: both workers declared as the generic `type: worker`
+# (addressable only by component name), 2*1 + 3*1 = 5 GPUs.
+V1BETA1_GENERIC_WORKERS = {
+    "spec": {
+        "components": [
+            _component("Frontend", "frontend", 1, 0),
+            _component("VllmPrefillWorker", "worker", 2, 1),
+            _component("VllmDecodeWorker", "worker", 3, 1),
+        ]
+    }
+}
+
+
+def test_generic_worker_components_count_toward_budget():
+    """`type: worker` components are snapshotted (keyed worker/<name>) and
+    their GPUs count toward the budget total."""
+    handler = _handler()
+    pools = handler._read_dgd_pools(_connector(V1BETA1_GENERIC_WORKERS))
+    assert set(pools) == {"worker/VllmPrefillWorker", "worker/VllmDecodeWorker"}
+    assert pools["worker/VllmPrefillWorker"].current_replicas == 2
+    assert pools["worker/VllmDecodeWorker"].gpu_per_replica == 1
+    handler.connectors["default/my-dgd"] = _connector(V1BETA1_GENERIC_WORKERS)
+    assert handler._total_gpus_with_overrides({}) == 5
+
+
+@pytest.mark.asyncio
+async def test_ceiling_counts_generic_worker_gpus():
+    """A typed scale-up is rejected when generic-worker GPUs already consume
+    the ceiling headroom (regression: type: worker GPUs were invisible to
+    the budget, so this request was admitted)."""
+    mixed = {
+        "spec": {
+            "components": [
+                _component("VllmPrefillWorker", "prefill", 1, 1),
+                _component("VllmDecodeWorker", "decode", 1, 1),
+                _component("VllmExtraWorker", "worker", 3, 1),
+            ]
+        }
+    }
+    handler = ScaleRequestHandler(
+        runtime=MagicMock(),
+        managed_namespaces=["app-ns"],
+        k8s_namespace="default",
+        max_total_gpus=6,
+    )
+    connector = AsyncMock()
+    connector.set_component_replicas = AsyncMock()
+    connector.parent_dgd_name = "my-dgd"
+    connector.kube_api = MagicMock()
+    connector.kube_api.get_graph_deployment = MagicMock(return_value=mixed)
+    handler.connectors["default/my-dgd"] = connector
+
+    request = ScaleRequest(
+        caller_namespace="app-ns",
+        graph_deployment_name="my-dgd",
+        k8s_namespace="default",
+        target_replicas=[
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL, desired_replicas=3
+            )
+        ],
+    )
+    # Baseline 1+1+3 = 5 GPUs; prefill 1 -> 3 lands at 7 > ceiling 6.
+    # Without worker counting the total would read 4 and be admitted.
+    results = [r async for r in handler.scale_request(request.model_dump())]
+
+    assert results[0]["status"] == "rejected"
+    connector.set_component_replicas.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scale_success_reports_replicas_on_v1beta1():
+    """Post-scale current_replicas read works on a v1beta1 DGD.
+
+    Regression: the success path parsed ``deployment["spec"]["services"]``
+    directly, which raises KeyError on a v1beta1 DGD and turned a completed
+    scale into an ERROR response.
+    """
+    handler = _handler()
+    request = ScaleRequest(
+        caller_namespace="app-ns",
+        graph_deployment_name="my-dgd",
+        k8s_namespace="default",
+        target_replicas=[
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL, desired_replicas=2
+            )
+        ],
+    )
+
+    with patch(
+        "dynamo.global_planner.scale_handler.KubernetesConnector"
+    ) as mock_connector_cls:
+        mock_connector = AsyncMock()
+        mock_connector_cls.return_value = mock_connector
+        mock_connector.set_component_replicas = AsyncMock()
+        mock_connector.parent_dgd_name = "my-dgd"
+        mock_connector.kube_api = MagicMock()
+        mock_connector.kube_api.get_graph_deployment = MagicMock(return_value=V1BETA1)
+
+        results = [r async for r in handler.scale_request(request.model_dump())]
+
+    assert len(results) == 1
+    assert results[0]["status"] == "success"
+    assert results[0]["current_replicas"] == {"prefill": 2, "decode": 3}
