@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import pathlib
 
 import pytest
 
@@ -292,5 +293,57 @@ async def test_prefill_dual_emit_model_type_validation(temp_file_store):
                 worker_type=WorkerType.Prefill,
                 needs=[],
             )
+    finally:
+        rt.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_lora_registration_persists_base_and_lora_model_cards(temp_file_store):
+    rt = _runtime()
+    try:
+        ep = rt.endpoint("test.ns.generate")
+        await ep.register_endpoint_instance()
+
+        await register_model(
+            ModelInput.Tensor,
+            ModelType.TensorBased,
+            ep,
+            "base-model",
+            worker_type=WorkerType.Aggregated,
+        )
+        await register_model(
+            ModelInput.Tensor,
+            ModelType.TensorBased,
+            ep,
+            "base-model",
+            worker_type=WorkerType.Aggregated,
+            lora_name="adapterA",
+            base_model_path="base-model",
+        )
+
+        model_card_files = sorted(pathlib.Path(temp_file_store).glob("v1/mdc/**/*"))
+        model_card_json = [
+            json.loads(path.read_text()) for path in model_card_files if path.is_file()
+        ]
+
+        base_cards = [
+            card
+            for card in model_card_json
+            if card["card_json"]["display_name"] == "base-model"
+        ]
+        lora_cards = [
+            card
+            for card in model_card_json
+            if card["card_json"]["display_name"] == "adapterA"
+        ]
+
+        assert len(base_cards) == 1
+        assert len(lora_cards) == 1
+
+        assert base_cards[0]["card_json"]["source_path"] == "base-model"
+
+        assert lora_cards[0]["card_json"]["source_path"] == "base-model"
+        assert lora_cards[0]["card_json"]["lora"] == {"name": "adapterA"}
+        assert lora_cards[0]["model_suffix"] == "adaptera"
     finally:
         rt.shutdown()
