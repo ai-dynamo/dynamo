@@ -775,9 +775,9 @@ class SglangLLMEngine(LLMEngine):
         Partial ``bootstrap_info`` is a router contract violation; we
         warn and fill the gaps so the request doesn't fail outright.
         """
-        assert self._bootstrap_host is not None and self._bootstrap_port is not None, (
-            "prefill workers must resolve bootstrap host/port in start()"
-        )
+        assert (
+            self._bootstrap_host is not None and self._bootstrap_port is not None
+        ), "prefill workers must resolve bootstrap host/port in start()"
 
         bootstrap_info_from_req = request.get("bootstrap_info") or {}
         if isinstance(bootstrap_info_from_req, dict) and bootstrap_info_from_req:
