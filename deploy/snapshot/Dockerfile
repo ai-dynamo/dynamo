@@ -3,13 +3,14 @@
 #
 # Unified Dockerfile for snapshot-agent and placeholder images.
 #
-# Build targets:
-#   docker build --platform linux/amd64 --target agent -t snapshot-agent:latest .
-#   docker build --platform linux/amd64 --target placeholder --build-arg BASE_IMAGE=<app-image> -t placeholder:latest .
+# Build targets (the `operator` build context is required — the snapshot module depends on the
+# operator module via `replace => ../operator`):
+#   docker build --platform linux/amd64 --target agent --build-context operator=../operator -t snapshot-agent:latest .
+#   docker build --platform linux/amd64 --target placeholder --build-context operator=../operator --build-arg BASE_IMAGE=<app-image> -t placeholder:latest .
 #
 # Optional targets for CI:
-#   docker build --target linter .   # Run linting
-#   docker build --target tester .   # Run tests
+#   docker build --target linter --build-context operator=../operator .   # Run linting
+#   docker build --target tester --build-context operator=../operator .   # Run tests
 
 # =============================================================================
 # Build Arguments
