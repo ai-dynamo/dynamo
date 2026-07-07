@@ -29,12 +29,13 @@ enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 | `DYN_SKIP_SGLANG_LOG_FORMATTING` | Disable Dynamo's SGLang log configuration | `false` | `true` |
 | `OTEL_SERVICE_NAME` | Service name for trace and span information | `dynamo` | `dynamo-frontend` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP export of both traces and logs | `false` | `true` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Default OTLP endpoint for traces and logs when signal-specific endpoints are unset | `http://localhost:4317` | `http://collector:4317` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Default OTLP endpoint for traces and logs when signal-specific endpoints are unset | `http://localhost:4317` (`grpc`) / `http://localhost:4318` (`http/protobuf`) | `http://collector:4317` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Override endpoint for traces, used as-is | unset | `http://tempo:4317` |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Override endpoint for logs, used as-is | unset | `http://loki-collector:4317` |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | Default OTLP protocol for traces and logs | `grpc` | `http/protobuf` |
 | `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | Override protocol for traces | unset | `grpc` |
 | `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` | Override protocol for logs | unset | `grpc` |
+| `OTEL_TRACES_SAMPLE_RATIO` | Trace head-sampling ratio in `[0.0, 1.0]`; unset exports every trace | unset (export all) | `0.01` |
 
 ## OTLP Log Export
 
@@ -43,6 +44,9 @@ When `OTEL_EXPORT_ENABLED=true`, Dynamo exports both **traces and logs** via OTL
 Set `OTEL_EXPORTER_OTLP_ENDPOINT` to configure the default OTLP collector endpoint for both traces and logs. To send logs somewhere else, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`; to send traces somewhere else, set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
 
 Signal-specific endpoints are used as-is. When using the generic `OTEL_EXPORTER_OTLP_ENDPOINT` with `http/protobuf`, Dynamo appends the signal path (`/v1/logs` or `/v1/traces`). With `grpc`, the endpoint is used without a path.
+
+> [!WARNING]
+> Changed in v1.3.0: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` no longer falls back to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. It now falls back to the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, then the protocol default. A deployment that sets only the traces endpoint sends logs to the protocol default (`http://localhost:4317`), where they are silently dropped if no collector is listening. Also set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, or use the generic `OTEL_EXPORTER_OTLP_ENDPOINT` for both signals.
 
 ```bash
 export OTEL_EXPORT_ENABLED=true
