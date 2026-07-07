@@ -55,6 +55,9 @@ Allows specifying network topology pack and spread constraints to optimize for b
 ### Custom Startup Dependencies
 Prescribes the order in which PodCliques must start in a declarative specification, with pod startup decoupled from pod creation or scheduling. This ensures proper initialization order for disaggregated components.
 
+### Update Strategy Control
+Dynamo can pass a Grove `PodCliqueSet` update strategy through the `nvidia.com/grove-update-strategy` annotation on a `DynamoGraphDeployment`. Use this annotation to select Grove `RollingRecreate` or `OnDelete` behavior for Grove-backed deployments. See the [Rolling Updates guide](./rolling-update.md#grove-update-strategy-annotation) for supported values, examples, and rollout guidance.
+
 ## Use Cases and Examples
 
 Grove specifically supports:
