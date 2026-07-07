@@ -32,7 +32,7 @@ func TestManifestRoundTrip(t *testing.T) {
 			BindMountDests: []string{"/data"},
 		},
 	)
-	original.CUDA = NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"})
+	original.CUDA = NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"}, true /* hasJobFile */)
 
 	if err := WriteManifest(dir, original); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
@@ -85,6 +85,32 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if len(loaded.CUDA.SourceGPUUUIDs) != 2 || loaded.CUDA.SourceGPUUUIDs[0] != "GPU-aaa" {
 		t.Errorf("CUDA.SourceGPUUUIDs = %v", loaded.CUDA.SourceGPUUUIDs)
+	}
+	if !loaded.CUDA.HasJobFile {
+		t.Error("CUDA.HasJobFile should be true")
+	}
+}
+
+func TestCUDAManifestHasJobFileDefaultsToFalse(t *testing.T) {
+	dir := t.TempDir()
+
+	// A manifest written before the hasJobFile field existed unmarshals to
+	// false, meaning restore treats it as having no job file.
+	content := []byte(`checkpointId: sha256:abc123
+cudaRestore:
+  pids: [42]
+  sourceGpuUuids: [GPU-aaa]
+`)
+	if err := os.WriteFile(filepath.Join(dir, manifestFilename), content, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	loaded, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if loaded.CUDA.HasJobFile {
+		t.Error("CUDA.HasJobFile should default to false when absent")
 	}
 }
 
