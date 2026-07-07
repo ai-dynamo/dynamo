@@ -307,8 +307,15 @@ where
         if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
-            indexer::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
-                .await?;
+            indexer::start_subscriber(
+                component.clone(),
+                &kv_router_config,
+                indexer.clone(),
+                workers_with_configs.clone(),
+                model_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                worker_type,
+            )
+            .await?;
         } else {
             tracing::info!(
                 "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",

@@ -78,6 +78,16 @@
       "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
       "from_tag": "ad7125a431e176d4161099480a66f0169609a690-xpu",
       "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:b15b9f691838b46723fcb0a51a01a015576cac8e5c52f174eba7cab0d1c893c7",
+      "baseline_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
+      "baseline_sbom": "vllm-ci-test-repo@b15b9f69-amd64.cdx.json",
+      "baseline_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
+      "from_digest": "sha256:b15b9f691838b46723fcb0a51a01a015576cac8e5c52f174eba7cab0d1c893c7",
+      "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
+      "from_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
+      "platform": "linux/amd64"
     }
   ],
   "entry_schema": {
@@ -92,6 +102,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-06-30T15:40:33+00:00",
+  "generated_at": "2026-07-03T06:54:02+00:00",
   "schema_version": 2
 }
