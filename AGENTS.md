@@ -144,3 +144,45 @@ Any change under `docs/`, `examples/`, or `recipes/` must follow
 [documentation style guide](docs/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.
+
+## Cursor Cloud specific instructions
+
+The Cursor Cloud VM has **no GPU** and **restricted network egress** (Hugging Face and
+some other hosts are unreachable). The standard Build / Test / Lint commands above work;
+the notes below cover only the non-obvious caveats for this environment. The startup
+update script already activates `.venv` and refreshes the editable installs
+(`maturin develop`, `-e .`, `-e lib/gpu_memory_service`, `requirements.test.txt`), so a
+fresh session just needs `source .venv/bin/activate` before running anything.
+
+- **Toolchain:** `cc`/`c++` default to `clang`, which cannot compile/link the vendored
+  ZeroMQ (`zmq-sys`) C++ dependency (missing `libstdc++`). The snapshot pins `cc`→`gcc`
+  and `c++`→`g++` via `update-alternatives`; keep it that way or `maturin develop` /
+  `cargo build` will fail at the `zmq-sys` link step.
+- **No GPU:** the real backends (`dynamo.vllm`, `dynamo.sglang`, `dynamo.trtllm`) and the
+  `kvbm` bindings (need CUDA/NIXL) can't run here. Use `python -m dynamo.mocker` as a
+  GPU-free worker. `pytest -m unit tests/` passes except the optional `kvbm` import checks
+  in `tests/dependencies/test_kvbm_imports.py` (kvbm wheel not built) — expected.
+- **Offline models:** never rely on downloading from Hugging Face. Use the local
+  fixture models under `lib/llm/tests/data/sample-models/` and set `HF_HUB_OFFLINE=1`
+  `TRANSFORMERS_OFFLINE=1`. For `/v1/chat/completions` the model dir must contain a
+  `chat_template` (e.g. `mock-llama-3.1-8b-instruct`; `TinyLlama_v1.1` has none and only
+  works for non-chat paths).
+- **Run without etcd/NATS:** the frontend defaults to etcd discovery, which is not running.
+  Pass `--discovery-backend file` to both the frontend and the worker and point them at the
+  same `DYN_FILE_KV` dir (defaults to `$TMPDIR/dynamo_store_kv`). The default `tcp` request
+  plane and `zmq` event plane need no external services.
+- **GPU-free smoke test** (frontend + KV router + mock worker), each in its own shell:
+  ```bash
+  export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 DYN_FILE_KV=/tmp/dynamo_store_kv
+  python -m dynamo.frontend --http-port 8000 --router-mode round-robin --discovery-backend file
+  python -m dynamo.mocker --model-path lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct \
+      --discovery-backend file --speedup-ratio 1000
+  curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+      -d '{"model":"lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct","messages":[{"role":"user","content":"hi"}],"max_tokens":20}'
+  ```
+  The mocker simulates scheduling/KV/timing and returns token counts (`content` is `null`
+  because it emits placeholder token IDs, not real text) — that is expected.
+- **`pre-commit run --all-files`:** the deterministic hooks (isort, black, flake8,
+  clang-format, codespell, ruff, file checks) pass. The `pytest-marker-report` hook needs
+  the full backend deps installed to collect every test, so it reports gaps on this
+  GPU-free VM; treat its result as informational here.
