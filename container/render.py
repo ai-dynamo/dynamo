@@ -215,13 +215,17 @@ def _resolve_compliance_inputs(framework, target, device_key, context):
     """Return (base_stage, baseline_sbom_filename) for templates/compliance.Dockerfile.
 
     The shared compliance template needs to know:
-      - which earlier stage to FROM (pre_runtime)
+      - which earlier stage to FROM (pre_runtime / pre_planner)
       - which baseline SBOM file to subtract (may be empty if not captured)
-    Both depend on `framework` + `device_key`, so the lookup lives here
-    rather than being repeated as Jinja expressions per template.
+    Both depend on `target` + `framework` + `device_key`, so the lookup lives
+    here rather than being repeated as Jinja expressions per template.
     """
     if context is None:
         return "pre_runtime", ""
+    if target == "planner":
+        # planner is framework=dynamo, but its distroless-python base differs
+        # from dynamo-runtime's, so it carries its own baseline stem.
+        return "pre_planner", context.get("dynamo", {}).get("planner_baseline_sbom", "")
     # runtime / dev / local-dev / wheel_builder / base / framework
     return "pre_runtime", (
         context.get(framework, {}).get(device_key, {}).get("baseline_sbom", "")

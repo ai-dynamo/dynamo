@@ -450,6 +450,8 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      inline_compliance: true
+      artifact_retention_days: '7'
       build_timeout_minutes: 45
     secrets: inherit
 

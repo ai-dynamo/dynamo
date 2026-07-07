@@ -27,6 +27,9 @@ dynamo:
   planner_build_image_tag: 3.12-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
   planner_runtime_image_tag: 3.12-v4.0.3
+  # Self-baseline of the distroless-python runtime; the licenses stage subtracts
+  # it so planner NOTICES attribute only what the builder adds on top.
+  planner_baseline_sbom: python@043085f9
   python_version: "3.12"
 
   nats_version: v2.10.28

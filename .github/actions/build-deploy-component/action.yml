@@ -48,6 +48,14 @@ inputs:
     description: 'Optional newline-separated KEY=VALUE build args'
     required: false
     default: ''
+  archive_sources:
+    description: |
+      When 'true', build the operator with ENABLE_SOURCE_ARCHIVAL=true and
+      extract /sources/ as a workflow artifact. Off by default — top-level
+      callers opt in (post-merge-ci.yml sets true for push to main /
+      release branches). No effect for non-operator components.
+    required: false
+    default: 'false'
 
 outputs:
   image_tag:
@@ -66,6 +74,10 @@ runs:
         else
           echo "build_platforms=linux/amd64" >> $GITHUB_OUTPUT
         fi
+        # Compliance /legal + /sboms are platform-invariant for the operator's
+        # Go-only build (same go.mod both arches), so the extract steps run on a
+        # single platform. go@ baseline has an -amd64 variant.
+        echo "compliance_platform=linux/amd64" >> $GITHUB_OUTPUT
 
     - name: Initialize Dynamo Builder
       uses: ./.github/actions/init-dynamo-builder
@@ -116,6 +128,13 @@ runs:
         fi
 
         BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
+        # Inline-compliance build args (operator only). BASELINE_SBOM_FILE is the
+        # per-arch baseline *stem*; the licenses stage appends -${TARGETARCH}.cdx.json
+        # to subtract each arch's own floor (mirrors container/context.yaml).
+        if [[ "${{ inputs.component }}" == "operator" ]]; then
+          BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=go@e86c88d0")
+          BUILD_ARGS+=("--build-arg" "ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}")
+        fi
         while IFS= read -r build_arg; do
           if [[ -n "${build_arg}" ]]; then
             BUILD_ARGS+=("--build-arg" "${build_arg}")
@@ -125,9 +144,14 @@ runs:
         # operator and snapshot both consume the named `snapshot` build context
         # (deploy/operator/Dockerfile COPYs --from=snapshot; the snapshot image
         # IS that tree). power-agent is self-contained, so omit it there.
+        # operator additionally consumes the `compliance` context for its
+        # inline license/SBOM stages (see deploy/operator/Dockerfile).
         BUILD_CONTEXT_FLAG=""
         if [[ "${{ inputs.component }}" != "power-agent" ]]; then
           BUILD_CONTEXT_FLAG="--build-context snapshot=../snapshot"
+        fi
+        if [[ "${{ inputs.component }}" == "operator" ]]; then
+          BUILD_CONTEXT_FLAG="${BUILD_CONTEXT_FLAG} --build-context compliance=../../container/compliance"
         fi
 
         docker buildx build --push \
@@ -145,3 +169,74 @@ runs:
         for image_uri in "${IMAGE_URIS[@]}"; do
           echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
         done
+
+    # Inline-compliance extraction (operator only). Reuses the warm BuildKit
+    # cache from the push step above; compliance_artifact is FROM scratch so the
+    # export is a few MB regardless of runtime image size.
+    - name: Compliance extract
+      if: ${{ inputs.component == 'operator' }}
+      shell: bash
+      working-directory: ./deploy/operator
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        mkdir -p /tmp/compliance
+        # Single FROM-scratch compliance_artifact stage → the unified /legal tree
+        # (flat NOTICES-<Eco>.txt + osrb-deps.csv + osrb.cdx.json). Runs on one
+        # platform, so buildx exports directly into dest. Keep BASELINE_SBOM_FILE
+        # in sync with the build-and-push step above.
+        docker buildx build \
+            --platform ${{ steps.settings.outputs.compliance_platform }} \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-arg BASELINE_SBOM_FILE=go@e86c88d0 \
+            --build-context snapshot=../snapshot \
+            --build-context compliance=../../container/compliance \
+            --target compliance_artifact \
+            --output type=local,dest=/tmp/compliance \
+            --progress=plain \
+            -f Dockerfile .
+        # Name the OSRB files: osrb-operator-<arch>-<sha8>.{csv,cdx.json}.
+        SHA8=$(echo "${{ github.sha }}" | cut -c1-8); [ -z "${SHA8}" ] && SHA8="nosha"
+        ARCH=$(echo "${{ steps.settings.outputs.compliance_platform }}" | sed 's|.*linux/||')
+        [ -f /tmp/compliance/osrb-deps.csv ] && mv /tmp/compliance/osrb-deps.csv "/tmp/compliance/osrb-operator-${ARCH}-${SHA8}.csv"
+        [ -f /tmp/compliance/osrb.cdx.json ] && mv /tmp/compliance/osrb.cdx.json "/tmp/compliance/osrb-operator-${ARCH}-${SHA8}.cdx.json"
+
+    # /sources/ extraction: opt-in via archive_sources. PR / on-demand leave it
+    # false; post-merge-ci.yml sets it true for push to main + release branches.
+    - name: Extract /sources/ (opt-in via archive_sources)
+      if: ${{ inputs.component == 'operator' && inputs.archive_sources == 'true' }}
+      shell: bash
+      working-directory: ./deploy/operator
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        mkdir -p /tmp/sources
+        docker buildx build \
+            --platform ${{ steps.settings.outputs.compliance_platform }} \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-arg BASELINE_SBOM_FILE=go@e86c88d0 \
+            --build-arg ENABLE_SOURCE_ARCHIVAL=true \
+            --build-context snapshot=../snapshot \
+            --build-context compliance=../../container/compliance \
+            --target sources_archive \
+            --output type=local,dest=/tmp/sources \
+            --progress=plain \
+            -f Dockerfile .
+
+    - name: Upload compliance artifact (NOTICES + CSV + CycloneDX)
+      if: ${{ inputs.component == 'operator' && always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        # compliance-<git-sha>-operator (image_tag is already <github.sha>-operator),
+        # matching the framework images' compliance-<git-sha>-<container> naming.
+        name: compliance-${{ inputs.image_tag }}
+        path: /tmp/compliance/
+        retention-days: 90
+
+    - name: Upload /sources/ archive (opt-in via archive_sources)
+      if: ${{ inputs.component == 'operator' && inputs.archive_sources == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: compliance-${{ inputs.image_tag }}-sources
+        path: /tmp/sources/
+        retention-days: 90
