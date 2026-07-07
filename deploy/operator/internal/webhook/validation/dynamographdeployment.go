@@ -28,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -159,6 +160,18 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 			annotationsPath.Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),
 			value,
 			`must be "mp" or "ray"`,
+		))
+	}
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists &&
+		value != string(grovev1alpha1.RollingRecreateStrategy) &&
+		value != string(grovev1alpha1.OnDeleteStrategy) {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
+			value,
+			[]string{
+				string(grovev1alpha1.RollingRecreateStrategy),
+				string(grovev1alpha1.OnDeleteStrategy),
+			},
 		))
 	}
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists && value != "pod" && value != "container" {
