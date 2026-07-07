@@ -396,6 +396,7 @@ impl SelectionService {
     #[new]
     #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None))]
     fn new(
+        py: Python<'_>,
         indexer_threads: usize,
         indexer_peers: Option<Vec<String>>,
         replica_sync_port: Option<u16>,
@@ -413,8 +414,8 @@ impl SelectionService {
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
-        let inner = pyo3_async_runtimes::tokio::get_runtime()
-            .block_on(builder.build())
+        let inner = py
+            .allow_threads(|| pyo3_async_runtimes::tokio::get_runtime().block_on(builder.build()))
             .map_err(to_pyerr)?;
         Ok(Self {
             inner: Arc::new(inner),
@@ -426,7 +427,13 @@ impl SelectionService {
     ///
     /// The KV indexer thread pool is released when the last Python handle is
     /// dropped. Idempotent, and also run automatically on drop.
-    fn shutdown<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+    fn shutdown(&self, py: Python<'_>) {
+        let service = Arc::clone(&self.inner);
+        py.allow_threads(|| pyo3_async_runtimes::tokio::get_runtime().block_on(service.shutdown()));
+    }
+
+    /// Await service shutdown without blocking the Python event loop.
+    fn shutdown_async<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let service = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             service.shutdown().await;
@@ -697,10 +704,12 @@ mod selection_service_lifecycle_tests {
 
     #[test]
     fn idempotent_shutdown() {
-        let service = SelectionService::new(1, None, None, None).unwrap();
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(service.inner.shutdown());
-        runtime.block_on(service.inner.shutdown());
+        let service =
+            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None)).unwrap();
+        Python::with_gil(|py| {
+            service.shutdown(py);
+            service.shutdown(py);
+        });
         drop(service);
     }
 }
