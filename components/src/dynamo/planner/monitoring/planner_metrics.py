@@ -119,6 +119,16 @@ class PlannerPrometheusMetrics:
             "Cumulative GPU hours consumed",
         )
 
+        # -- SLA targets (static: set once at planner startup) ------------
+        self.sla_target_ttft_ms = Gauge(
+            f"{PREFIX}_sla_target_ttft_ms",
+            "Configured SLA target for time to first token (ms)",
+        )
+        self.sla_target_itl_ms = Gauge(
+            f"{PREFIX}_sla_target_itl_ms",
+            "Configured SLA target for inter-token latency (ms)",
+        )
+
         # -- Diagnostics: estimated latencies -----------------------------
         self.estimated_ttft_ms = Gauge(
             f"{PREFIX}_estimated_ttft_ms",

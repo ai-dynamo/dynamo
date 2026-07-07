@@ -48,12 +48,27 @@ pub mod logging {
         /// Enable OTLP export for traces and logs (set to "1" to enable)
         pub const OTEL_EXPORT_ENABLED: &str = "OTEL_EXPORT_ENABLED";
 
+        /// OTLP exporter transport protocol. Supported values: "grpc", "http/protobuf".
+        pub const OTEL_EXPORTER_OTLP_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_PROTOCOL";
+
+        /// OTLP exporter transport protocol for traces. Defaults to OTEL_EXPORTER_OTLP_PROTOCOL.
+        pub const OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL";
+
+        /// OTLP exporter transport protocol for logs. Defaults to OTEL_EXPORTER_OTLP_PROTOCOL.
+        pub const OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL";
+
+        /// Generic OTLP exporter endpoint URL used when signal-specific endpoints are unset.
+        pub const OTEL_EXPORTER_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+
         /// OTLP exporter endpoint URL for traces
         /// Spec: https://opentelemetry.io/docs/specs/otel/protocol/exporter/
         pub const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
-        /// OTLP exporter endpoint URL for logs (defaults to traces endpoint if unset)
+        /// OTLP exporter endpoint URL for logs. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT or the protocol default when unset.
         pub const OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT";
+
+        /// Trace sampling ratio used when set. Example: "0.01" samples roughly 1% of traces.
+        pub const OTEL_TRACES_SAMPLE_RATIO: &str = "OTEL_TRACES_SAMPLE_RATIO";
 
         /// Service name for OTLP traces and logs
         pub const OTEL_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
@@ -69,6 +84,10 @@ pub mod runtime {
 
     /// Maximum number of blocking threads for Tokio runtime
     pub const DYN_RUNTIME_MAX_BLOCKING_THREADS: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
+
+    /// Maximum time to wait for graceful endpoint drain during runtime shutdown.
+    pub const DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
+        "DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
     /// Enable Tokio task poll-time histogram (calls enable_metrics_poll_time_histogram on builder).
     /// Set to "1", "true", or "yes" to enable. Adds ~2× overhead of Instant::now() per task poll.
@@ -124,6 +143,9 @@ pub mod worker {
 pub mod nats {
     /// NATS server address (e.g., "nats://localhost:4222")
     pub const NATS_SERVER: &str = "NATS_SERVER";
+
+    /// NATS request/reply timeout in seconds. Unset = async-nats default (10 s).
+    pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
 
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
@@ -284,6 +306,28 @@ pub mod llm {
     /// Enable the experimental Anthropic Messages API endpoint (/v1/messages)
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
+    /// Master switch for the `nvext` extension protocol on the frontend.
+    /// The protocol is **enabled by default**; this variable disables it.
+    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) cause
+    /// the frontend to drop `request.nvext` at handler entry, ignore the
+    /// routing-override headers (`x-dynamo-worker-instance-id`,
+    /// `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
+    /// `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
+    /// `extra_fields` opt-in.
+    pub const DYN_DISABLE_FRONTEND_NVEXT: &str = "DYN_DISABLE_FRONTEND_NVEXT";
+
+    /// Ignore unknown OpenAI frontend request fields. Unknown fields are dropped,
+    /// not handled; known pass-through fields remain type-validated.
+    pub const DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: &str =
+        "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
+
+    /// Master switch for the frontend's HTTP admin API surface.
+    /// The admin API is **enabled by default**; this variable disables it.
+    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
+    /// registration of `GET` / `POST /busy_threshold`. Inference, metrics,
+    /// models, health, and liveness routes are unaffected.
+    pub const DYN_DISABLE_FRONTEND_ADMIN_API: &str = "DYN_DISABLE_FRONTEND_ADMIN_API";
+
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
     /// varies per session and per release, wasting tokens and breaking prompt caching.
@@ -295,6 +339,12 @@ pub mod llm {
     /// Enable streaming reasoning dispatch (`event: reasoning_dispatch` SSE events)
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
+
+    /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
+    /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
+    /// streaming path, bypassing the v1 tool-call jail. Off by default; when set, the
+    /// v2 parser owns incremental tool-call emission and drops values truncated at EOF.
+    pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
 
     /// Backend stream inactivity timeout in seconds.
     ///
@@ -309,8 +359,13 @@ pub mod llm {
     /// Enable the LoRA allocation controller (set to "true" to enable)
     pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
 
-    /// LoRA allocation algorithm ("hrw" or "random")
+    /// LoRA allocation algorithm ("hrw", "random", or "mcf")
     pub const DYN_LORA_ALLOCATION_ALGORITHM: &str = "DYN_LORA_ALLOCATION_ALGORITHM";
+
+    /// JSON configuration for the MCF (min-cost flow) placement solver.
+    /// Example: '{"candidate_m":16,"gamma_load":2000,"beta_keep":500}'
+    /// Omitted fields use defaults. Only relevant when algorithm is "mcf".
+    pub const DYN_LORA_MCF_CONFIG: &str = "DYN_LORA_MCF_CONFIG";
 
     /// LoRA allocation controller recompute interval in seconds
     pub const DYN_LORA_ALLOCATION_TIMESTEP_SECS: &str = "DYN_LORA_ALLOCATION_TIMESTEP_SECS";
@@ -343,11 +398,34 @@ pub mod llm {
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
 
+    /// Forward-pass-metrics trace configuration.
+    pub mod fpm_trace {
+        /// Master switch. Truthy values persist locally produced FPM events.
+        pub const DYN_FPM_TRACE: &str = "DYN_FPM_TRACE";
+
+        /// Local gzip JSONL segment prefix. A sanitized producer id is appended
+        /// before the segment index so multiple producers do not share files.
+        pub const DYN_FPM_OUTPUT_PATH: &str = "DYN_FPM_OUTPUT_PATH";
+
+        /// Capture mode: `sampled` (latest event per DP rank each interval) or
+        /// `full` (every event reaching the producer-side trace tap).
+        pub const DYN_FPM_MODE: &str = "DYN_FPM_MODE";
+
+        /// Sampling interval in milliseconds when `DYN_FPM_MODE=sampled`.
+        pub const DYN_FPM_SAMPLE_INTERVAL_MS: &str = "DYN_FPM_SAMPLE_INTERVAL_MS";
+
+        /// Rotating gzip JSONL threshold in uncompressed bytes.
+        pub const DYN_FPM_JSONL_GZ_ROLL_BYTES: &str = "DYN_FPM_JSONL_GZ_ROLL_BYTES";
+
+        /// Maximum number of gzip JSONL segments retained per producer,
+        /// including the active segment.
+        pub const DYN_FPM_MAX_SEGMENTS: &str = "DYN_FPM_MAX_SEGMENTS";
+    }
+
     /// Audit sink configuration
     pub mod audit {
         /// Audit sink selection. Comma-separated values: `stderr`, `nats`,
-        /// `jsonl`, `jsonl_gz`. Setting any non-empty value enables audit
-        /// recording.
+        /// `jsonl`, `jsonl_gz`, `otel`. Unset disables audit recording.
         pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
 
         /// Force audit emission even when the request `store` flag is `false`.
@@ -376,50 +454,10 @@ pub mod llm {
 
         /// Rotating gzip JSONL audit sink roll threshold in record lines.
         pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
-    }
 
-    /// Agent trace configuration
-    pub mod agent_trace {
-        /// Master switch. Truthy enables tracing with defaults for sinks,
-        /// output path, and the ZMQ tool-event endpoint; other variables below
-        /// override individual knobs.
-        pub const DYN_AGENT_TRACE: &str = "DYN_AGENT_TRACE";
-
-        /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
-        pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
-
-        /// Local output path for normalized agent trace records.
-        ///
-        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
-        /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
-        pub const DYN_AGENT_TRACE_OUTPUT_PATH: &str = "DYN_AGENT_TRACE_OUTPUT_PATH";
-
-        /// In-process trace bus capacity.
-        pub const DYN_AGENT_TRACE_CAPACITY: &str = "DYN_AGENT_TRACE_CAPACITY";
-
-        /// JSONL sink buffer size in bytes.
-        pub const DYN_AGENT_TRACE_JSONL_BUFFER_BYTES: &str = "DYN_AGENT_TRACE_JSONL_BUFFER_BYTES";
-
-        /// JSONL sink periodic flush interval in milliseconds.
-        pub const DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
-            "DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS";
-
-        /// Rotating gzip JSONL sink roll threshold in uncompressed bytes.
-        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES";
-
-        /// Rotating gzip JSONL sink roll threshold in record lines.
-        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES";
-
-        /// Enable replay-oriented prompt block hashes in agent request trace records.
-        pub const DYN_AGENT_TRACE_REPLAY_HASHES: &str = "DYN_AGENT_TRACE_REPLAY_HASHES";
-
-        /// Local ZMQ PULL endpoint Dynamo binds for harness tool events.
-        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
-            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
-
-        /// Optional first-frame ZMQ topic filter for harness tool events.
-        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
-            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
+        /// Maximum serialized OTEL audit payload bytes. Oversized records emit
+        /// an incomplete marker payload instead of the full request/response.
+        pub const DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES: &str = "DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES";
     }
 
     /// Per-request replay trace configuration
@@ -454,6 +492,14 @@ pub mod llm {
         /// Rotating gzip JSONL sink roll threshold in record lines.
         pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES: &str =
             "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES";
+
+        /// Local ZMQ PULL endpoint Dynamo binds for harness tool events.
+        pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
+            "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
+
+        /// First-frame ZMQ topic filter override for harness tool events.
+        pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
+            "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
     }
 }
 
@@ -503,6 +549,14 @@ pub mod router {
 
     /// Scheduling policy for the router queue ("fcfs" or "wspt").
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
+    pub const DYN_ROUTER_POLICY_CONFIG: &str = "DYN_ROUTER_POLICY_CONFIG";
+}
+
+/// Request plane transport environment variables
+pub mod request_plane {
+    /// Request plane payload codec selection: "json" or "msgpack".
+    /// JSON is the compatibility default.
+    pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 }
 
 /// TCP response stream server (CallHome listener) environment variables
@@ -633,12 +687,18 @@ mod tests {
             logging::DYN_LOG_USE_LOCAL_TZ,
             logging::DYN_LOGGING_SPAN_EVENTS,
             logging::otlp::OTEL_EXPORT_ENABLED,
+            logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL,
+            logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+            logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
+            logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
             logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
+            logging::otlp::OTEL_TRACES_SAMPLE_RATIO,
             // Runtime
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
+            runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             runtime::system::DYN_SYSTEM_ENABLED,
             runtime::system::DYN_SYSTEM_HOST,
             runtime::system::DYN_SYSTEM_PORT,
@@ -651,6 +711,7 @@ mod tests {
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
             // NATS
             nats::NATS_SERVER,
+            nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,
@@ -680,13 +741,18 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_DISABLE_FRONTEND_NVEXT,
+            llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+            llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -695,6 +761,7 @@ mod tests {
             llm::DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND,
             llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
             llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
+            llm::DYN_LORA_MCF_CONFIG,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,
@@ -705,17 +772,6 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
-            llm::agent_trace::DYN_AGENT_TRACE,
-            llm::agent_trace::DYN_AGENT_TRACE_SINKS,
-            llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
-            llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
-            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
-            llm::agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
-            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
-            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             llm::request_trace::DYN_REQUEST_TRACE,
             llm::request_trace::DYN_REQUEST_TRACE_SINKS,
             llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
@@ -724,6 +780,9 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
+            llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+            llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -736,6 +795,8 @@ mod tests {
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
+            router::DYN_ROUTER_POLICY_CONFIG,
+            request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
@@ -776,6 +837,7 @@ mod tests {
     fn test_naming_conventions() {
         // Dynamo-specific vars should start with DYN_
         assert!(runtime::DYN_RUNTIME_NUM_WORKER_THREADS.starts_with("DYN_"));
+        assert!(runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS.starts_with("DYN_"));
         assert!(runtime::system::DYN_SYSTEM_ENABLED.starts_with("DYN_"));
         assert!(kvbm::DYN_KVBM_METRICS.starts_with("DYN_"));
         assert!(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT.starts_with("DYN_"));
@@ -791,6 +853,7 @@ mod tests {
 
         // OpenTelemetry vars should start with OTEL_
         assert!(logging::otlp::OTEL_EXPORT_ENABLED.starts_with("OTEL_"));
+        assert!(logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT.starts_with("OTEL_"));
         assert!(logging::otlp::OTEL_SERVICE_NAME.starts_with("OTEL_"));
     }
 }

@@ -117,6 +117,7 @@ impl JsonlGzipRequestTraceSink {
                 flush_interval: Duration::from_millis(policy.jsonl_flush_interval_ms.max(1)),
                 roll_uncompressed_bytes: policy.jsonl_gz_roll_bytes,
                 roll_lines: policy.jsonl_gz_roll_lines,
+                max_segments: None,
             },
         )
         .await
@@ -222,7 +223,7 @@ mod tests {
     use flate2::read::MultiGzDecoder;
     use tempfile::tempdir;
 
-    use crate::agents::trace::AgentReplayMetrics;
+    use crate::request_trace::RequestReplayMetrics;
     use crate::telemetry::jsonl_gz::segment_path;
 
     use super::*;
@@ -233,16 +234,33 @@ mod tests {
             schema: RequestTraceSchema::V1,
             event_type: RequestTraceEventType::RequestEnd,
             event_time_unix_ms: 1_100,
-            request: RequestTraceMetrics {
+            event_source: None,
+            agent_context: None,
+            request: Some(RequestTraceMetrics {
                 request_id: "req-123".to_string(),
-                request_received_ms: 1_000,
-                output_tokens: 7,
-                replay: AgentReplayMetrics {
+                x_request_id: None,
+                model: None,
+                input_tokens: None,
+                output_tokens: Some(7),
+                cached_tokens: None,
+                request_received_ms: Some(1_000),
+                prefill_wait_time_ms: None,
+                prefill_time_ms: None,
+                ttft_ms: None,
+                total_time_ms: None,
+                avg_itl_ms: None,
+                kv_hit_rate: None,
+                kv_transfer_estimated_latency_ms: None,
+                queue_depth: None,
+                worker: None,
+                replay: Some(RequestReplayMetrics {
                     trace_block_size: 2,
                     input_length: 3,
                     input_sequence_hashes: vec![11, 22],
-                },
-            },
+                }),
+                finish_reason_metadata: None,
+            }),
+            tool: None,
         }
     }
 
@@ -286,6 +304,7 @@ mod tests {
                 flush_interval: Duration::from_secs(60),
                 roll_uncompressed_bytes: 1024 * 1024,
                 roll_lines: Some(1),
+                max_segments: None,
             },
         )
         .await

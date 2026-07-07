@@ -685,6 +685,71 @@ class LoraTestChatPayload(ChatPayload):
 
 
 @dataclass
+class ElasticEPScalePayload(ChatPayload):
+    """Scales the vLLM data-parallel size live, then verifies the worker still
+    serves a chat request post-scale.
+
+    POSTs ``/engine/control/scale_elastic_ep`` on the worker's system port
+    before the chat request (mirroring LoraTestChatPayload's admin-then-infer
+    pattern), so a single payload exercises both the scale control and that
+    generation survives the reconfigure. Requires a worker started with the Ray
+    DP backend + ePLB (see ``examples/backends/vllm/launch/elastic_ep.sh``).
+    """
+
+    def __init__(
+        self,
+        body: dict,
+        new_data_parallel_size: int,
+        system_port: int = DefaultPort.SYSTEM1.value,
+        repeat_count: int = 1,
+        expected_response: Optional[list] = None,
+        expected_log: Optional[list] = None,
+        timeout: int = 300,
+    ):
+        super().__init__(
+            body=body,
+            repeat_count=repeat_count,
+            expected_response=expected_response or [],
+            expected_log=expected_log or [],
+            timeout=timeout,
+        )
+        self.system_ports = [system_port]
+        self.new_data_parallel_size = new_data_parallel_size
+        self._scaled = False
+
+    def _ensure_scaled(self) -> None:
+        """Drive the scale control once before the first chat request."""
+        if self._scaled:
+            return
+        scale_url = (
+            f"http://{self.host}:{self.system_ports[0]}"
+            "/engine/control/scale_elastic_ep"
+        )
+        logger.info(
+            "Scaling elastic EP to data_parallel_size=%s via %s",
+            self.new_data_parallel_size,
+            scale_url,
+        )
+        response = requests.post(
+            scale_url,
+            json={"new_data_parallel_size": self.new_data_parallel_size},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status") != "ok":
+            raise RuntimeError(f"scale_elastic_ep failed: {result}")
+        if result.get("new_data_parallel_size") != self.new_data_parallel_size:
+            raise RuntimeError(f"unexpected scale_elastic_ep result: {result}")
+        self._scaled = True
+
+    def url(self) -> str:
+        """Scale before the first chat request, then return the chat URL."""
+        self._ensure_scaled()
+        return super().url()
+
+
+@dataclass
 class CompletionPayload(BasePayload):
     """Payload for completions endpoint."""
 
@@ -704,6 +769,32 @@ class CompletionPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return CompletionPayload.extract_text(response)
+
+
+@dataclass
+class ImagesPayload(BasePayload):
+    """Payload for the image-generation endpoint (raw-media / DiffusionEngine).
+
+    Targets ``/v1/images/generations`` and validates the OpenAI-shaped
+    response: a non-empty ``data`` list whose first item carries either a
+    ``b64_json`` or a ``url``.
+    """
+
+    endpoint: str = "/v1/images/generations"
+
+    @staticmethod
+    def extract_image(response):
+        response.raise_for_status()
+        result = response.json()
+        assert "data" in result, "Missing 'data' in image response"
+        assert len(result["data"]) > 0, "Empty 'data' in image response"
+        item = result["data"][0]
+        # Return whichever representation the engine produced — either is a
+        # valid image result.
+        return item.get("b64_json") or item.get("url") or ""
+
+    def response_handler(self, response: Any) -> str:
+        return ImagesPayload.extract_image(response)
 
 
 @dataclass

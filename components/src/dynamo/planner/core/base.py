@@ -170,6 +170,8 @@ class NativePlannerBase:
                 )
             except Exception as e:
                 logger.error(f"Failed to start Prometheus metrics server: {e}")
+            self.prometheus_metrics.sla_target_ttft_ms.set(config.ttft_ms)
+            self.prometheus_metrics.sla_target_itl_ms.set(config.itl_ms)
 
         # Worker info (resolved during _async_init)
         self.prefill_worker_info = WorkerInfo()
@@ -639,6 +641,13 @@ class NativePlannerBase:
             interval_str, self.model_name
         )
         m.accept_length = self._collect_accept_length(interval_str)
+
+        normalized_idle_metrics = m.normalize_idle_nans()
+        if normalized_idle_metrics:
+            logger.info(
+                "Zero traffic observed; treating undefined averages as 0: %s",
+                ", ".join(normalized_idle_metrics),
+            )
 
         hit_rate_str = f"{m.kv_hit_rate:.3f}" if m.kv_hit_rate is not None else "n/a"
         accept_length_str = (

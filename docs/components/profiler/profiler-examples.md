@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler Examples
+subtitle: Complete DGDR profiling examples for dense and MoE models across rapid and thorough search strategies.
 ---
 
 Complete examples for profiling with DGDRs.
@@ -19,7 +20,7 @@ metadata:
   name: qwen-0-6b
 spec:
   model: "Qwen/Qwen3-0.6B"
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 ### Dense Model: Thorough
@@ -34,7 +35,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
   searchStrategy: thorough
 ```
 
@@ -55,7 +56,7 @@ metadata:
 spec:
   model: "deepseek-ai/DeepSeek-R1"
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   hardware:
     numGpusPerNode: 8
@@ -85,7 +86,7 @@ metadata:
   name: llama-private
 spec:
   model: "meta-llama/Llama-3.1-8B-Instruct"
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   overrides:
     profilingJob:
@@ -116,7 +117,7 @@ metadata:
   name: low-latency-dense
 spec:
   model: "Qwen/Qwen3-0.6B"
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   sla:
     ttft: 500      # Time To First Token target in milliseconds
@@ -150,7 +151,7 @@ metadata:
   name: dense-with-tolerations
 spec:
   model: "Qwen/Qwen3-0.6B"
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   overrides:
     profilingJob:
@@ -189,14 +190,14 @@ Profile SGLang workers at runtime via HTTP endpoints:
 
 ```bash
 # Start profiling
-curl -X POST http://localhost:9090/engine/start_profile \
+curl -X POST http://localhost:9090/engine/control/start_profile \
   -H "Content-Type: application/json" \
   -d '{"output_dir": "/tmp/profiler_output"}'
 
 # Run inference requests to generate profiling data...
 
 # Stop profiling
-curl -X POST http://localhost:9090/engine/stop_profile
+curl -X POST http://localhost:9090/engine/control/stop_profile
 ```
 
 A test script is provided at `examples/backends/sglang/test_sglang_profile.py`:

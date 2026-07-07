@@ -343,7 +343,7 @@ impl StorageTier {
     pub fn from_kv_medium(medium: &str) -> Option<Self> {
         match medium {
             "GPU" | "DEVICE" => Some(Self::Device),
-            "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
+            "CPU" | "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
             "CPU_TIER2" | "DISK" | "NVME" => Some(Self::Disk),
             "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
             _ => None,
@@ -438,8 +438,26 @@ pub enum RouterRequest {
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
         #[serde(default, skip_serializing_if = "RoutingConstraints::is_empty")]
         routing_constraints: RoutingConstraints,
+        #[serde(default)]
+        priority_jump: f64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        strict_priority: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
     },
-    MarkPrefill,
+    PotentialLoads {
+        tokens: Vec<Token>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
+    },
+    MarkPrefill {
+        // once prefill completes, the frontend might not be allowed to send a
+        // request with linking the id. In this case, the request_id is provided in the payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
     MarkFree {
         // once request is cancelled, the frontend might not be allowed to send a
         // request with linking the id. In this case, the request_id is provided in the payload.
@@ -454,15 +472,25 @@ impl Default for RouterRequest {
             tokens: vec![],
             block_mm_infos: None,
             routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: None,
         }
     }
 }
 
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RouterBackpressureReason {
-    /// The configured cap on total queued ISL tokens has been reached.
-    MaxQueuedIslTokensExceeded,
+pub struct PotentialLoad {
+    pub worker_id: WorkerId,
+    pub dp_rank: DpRank,
+    pub potential_prefill_tokens: usize,
+    pub potential_decode_blocks: usize,
+    #[serde(default)]
+    pub active_requests: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,17 +502,23 @@ pub enum RouterResponse {
         dp_rank: DpRank,
         overlap_blocks: u32,
     },
-    Backpressure {
-        reason: RouterBackpressureReason,
-        queued_isl_tokens: usize,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_queued_isl_tokens: Option<usize>,
+    QueueRejected {
+        rejection: crate::scheduling::QueueRejection,
     },
     PrefillMarked {
         success: bool,
     },
     FreeMarked {
         success: bool,
+    },
+    PotentialLoads {
+        // loads of every worker tracked by the scheduler.
+        loads: Vec<PotentialLoad>,
+        // the queue sizes for this specific router instance.
+        #[serde(default)]
+        pending_count: usize,
+        #[serde(default)]
+        pending_isl_tokens: usize,
     },
 }
 
@@ -597,6 +631,8 @@ pub enum ActiveSequenceEventData {
         #[serde(default)]
         prefill_load_hint: Option<PrefillLoadHint>,
     },
+    // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
+    // at high frequency, and broadcasting it would consume disproportionate network bandwidth.
     Free,
     MarkPrefillCompleted,
 }
@@ -1179,12 +1215,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_overlap_scores_default() {
-        let overlap_scores: OverlapScores = Default::default();
-        assert!(overlap_scores.scores.is_empty());
-    }
-
     #[rstest]
     #[case(11)]
     #[case(32)]
@@ -1427,59 +1457,6 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_cache_events_serialization() {
-        let event_data = KvCacheEventData::Stored(KvCacheStoreData {
-            parent_hash: Some(ExternalSequenceBlockHash(1)),
-            start_position: None,
-            blocks: vec![KvCacheStoredBlockData {
-                block_hash: ExternalSequenceBlockHash(2),
-                tokens_hash: LocalBlockHash(3),
-                mm_extra_info: None,
-            }],
-        });
-
-        let event = KvCacheEvent {
-            event_id: 1,
-            data: event_data,
-            dp_rank: 0,
-        };
-
-        let events = KvCacheEvents {
-            events: vec![event],
-            shutdown: false,
-        };
-
-        let serialized = serde_json::to_string(&events).unwrap();
-        let deserialized: KvCacheEvents = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(deserialized.events.len(), 1);
-        assert_eq!(deserialized.events[0].event_id, 1);
-        if let KvCacheEventData::Stored(store_data) = &deserialized.events[0].data {
-            assert_eq!(store_data.parent_hash.unwrap().0, 1);
-            assert_eq!(store_data.blocks.len(), 1);
-            assert_eq!(store_data.blocks[0].block_hash.0, 2);
-            assert_eq!(store_data.blocks[0].tokens_hash.0, 3);
-        } else {
-            panic!("Expected KvCacheEventData::Stored variant");
-        }
-        assert!(!deserialized.shutdown);
-    }
-
-    #[test]
-    fn test_kv_cache_remove_data_serialization() {
-        let remove_data = KvCacheRemoveData {
-            block_hashes: vec![ExternalSequenceBlockHash(4), ExternalSequenceBlockHash(5)],
-        };
-
-        let serialized = serde_json::to_string(&remove_data).unwrap();
-        let deserialized: KvCacheRemoveData = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(deserialized.block_hashes.len(), 2);
-        assert_eq!(deserialized.block_hashes[0].0, 4);
-        assert_eq!(deserialized.block_hashes[1].0, 5);
-    }
-
-    #[test]
     fn test_router_request_mark_free_backwards_compatible_deserialization() {
         let request: RouterRequest = serde_json::from_str(r#"{"method":"mark_free"}"#).unwrap();
 
@@ -1619,5 +1596,207 @@ mod tests {
                 request_id: Some(ref request_id)
             } if request_id == "req-123"
         ));
+    }
+
+    #[test]
+    fn test_router_request_new_serialization_with_priority_jump() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 5.0,
+            strict_priority: 0,
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":5.0}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                priority_jump,
+                ..
+            } if priority_jump == 5.0
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_serialization_with_lora_name() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: Some("adapter-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"lora_name":"adapter-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                lora_name: Some(ref lora_name),
+                ..
+            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_defaults_lora_name() {
+        let deserialized: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                lora_name: None,
+                ..
+            } if tokens == vec![1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_strict_priority_compatibility() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 4,
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"strict_priority":4}"#
+        );
+
+        let missing: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+        assert!(matches!(
+            missing,
+            RouterRequest::New {
+                strict_priority: 0,
+                ..
+            }
+        ));
+
+        let zero = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&zero).unwrap(),
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0}"#
+        );
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_serialization_with_lora_name() {
+        let request = RouterRequest::PotentialLoads {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            lora_name: Some("adapter-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"potential_loads","tokens":[1,2,3],"lora_name":"adapter-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos: None,
+                lora_name: Some(ref lora_name),
+            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_defaults_lora_name() {
+        let deserialized: RouterRequest =
+            serde_json::from_str(r#"{"method":"potential_loads","tokens":[1,2,3]}"#).unwrap();
+
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos: None,
+                lora_name: None,
+            } if tokens == vec![1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn test_router_request_mark_prefill_serialization_with_request_id() {
+        let request = RouterRequest::MarkPrefill {
+            request_id: Some("req-123".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"mark_prefill","request_id":"req-123"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::MarkPrefill {
+                request_id: Some(ref request_id)
+            } if request_id == "req-123"
+        ));
+    }
+
+    #[test]
+    fn test_potential_load_defaults_active_requests() {
+        let load = serde_json::from_str::<PotentialLoad>(
+            r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4}"#,
+        )
+        .unwrap();
+
+        assert_eq!(load.worker_id, 1);
+        assert_eq!(load.dp_rank, 0);
+        assert_eq!(load.potential_prefill_tokens, 16);
+        assert_eq!(load.potential_decode_blocks, 4);
+        assert_eq!(load.active_requests, 0);
+    }
+
+    #[test]
+    fn test_potential_load_serializes_active_requests() {
+        let load = PotentialLoad {
+            worker_id: 1,
+            dp_rank: 0,
+            potential_prefill_tokens: 16,
+            potential_decode_blocks: 4,
+            active_requests: 2,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&load).unwrap(),
+            r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
+        );
     }
 }

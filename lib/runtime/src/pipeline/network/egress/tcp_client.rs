@@ -103,27 +103,31 @@ impl Default for TcpRequestConfig {
 impl TcpRequestConfig {
     /// Create configuration from environment variables
     pub fn from_env() -> Self {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
         let mut config = Self::default();
 
-        if let Ok(val) = std::env::var("DYN_TCP_REQUEST_TIMEOUT")
+        if let Some(val) = lookup("DYN_TCP_REQUEST_TIMEOUT")
             && let Ok(timeout) = val.parse::<u64>()
         {
             config.request_timeout = Duration::from_secs(timeout);
         }
 
-        if let Ok(val) = std::env::var("DYN_TCP_POOL_SIZE")
+        if let Some(val) = lookup("DYN_TCP_POOL_SIZE")
             && let Ok(size) = val.parse::<usize>()
         {
             config.pool_size = size;
         }
 
-        if let Ok(val) = std::env::var("DYN_TCP_CONNECT_TIMEOUT")
+        if let Some(val) = lookup("DYN_TCP_CONNECT_TIMEOUT")
             && let Ok(timeout) = val.parse::<u64>()
         {
             config.connect_timeout = Duration::from_secs(timeout);
         }
 
-        if let Ok(val) = std::env::var("DYN_TCP_CHANNEL_BUFFER")
+        if let Some(val) = lookup("DYN_TCP_CHANNEL_BUFFER")
             && let Ok(size) = val.parse::<usize>()
         {
             config.channel_buffer = size;
@@ -527,16 +531,9 @@ impl TcpConnection {
                     total_batch_size += count as u64;
 
                     if last_report.elapsed() >= Duration::from_secs(5) {
-                        let avg_batch = if batch_count > 0 {
-                            total_batch_size / batch_count
-                        } else {
-                            0
-                        };
-                        let avg_write_ns = if batch_count > 0 {
-                            total_batch_write_ns / batch_count
-                        } else {
-                            0
-                        };
+                        let avg_batch = total_batch_size.checked_div(batch_count).unwrap_or(0);
+                        let avg_write_ns =
+                            total_batch_write_ns.checked_div(batch_count).unwrap_or(0);
                         tracing::info!(
                             batches = batch_count,
                             avg_batch_size = avg_batch,
@@ -1480,26 +1477,20 @@ mod tests {
 
     #[test]
     fn test_tcp_config_from_env() {
-        unsafe {
-            std::env::set_var("DYN_TCP_REQUEST_TIMEOUT", "10");
-            std::env::set_var("DYN_TCP_POOL_SIZE", "50");
-            std::env::set_var("DYN_TCP_CONNECT_TIMEOUT", "3");
-            std::env::set_var("DYN_TCP_CHANNEL_BUFFER", "100");
-        }
-
-        let config = TcpRequestConfig::from_env();
+        let config = TcpRequestConfig::from_lookup(|key| {
+            match key {
+                "DYN_TCP_REQUEST_TIMEOUT" => Some("10"),
+                "DYN_TCP_POOL_SIZE" => Some("50"),
+                "DYN_TCP_CONNECT_TIMEOUT" => Some("3"),
+                "DYN_TCP_CHANNEL_BUFFER" => Some("100"),
+                _ => None,
+            }
+            .map(str::to_string)
+        });
         assert_eq!(config.request_timeout, Duration::from_secs(10));
         assert_eq!(config.pool_size, 50);
         assert_eq!(config.connect_timeout, Duration::from_secs(3));
         assert_eq!(config.channel_buffer, 100);
-
-        // Clean up env vars
-        unsafe {
-            std::env::remove_var("DYN_TCP_REQUEST_TIMEOUT");
-            std::env::remove_var("DYN_TCP_POOL_SIZE");
-            std::env::remove_var("DYN_TCP_CONNECT_TIMEOUT");
-            std::env::remove_var("DYN_TCP_CHANNEL_BUFFER");
-        }
     }
 
     #[test]

@@ -68,9 +68,10 @@ impl PromptTrieNode {
         }
     }
 
-    fn uncovered_suffix_hashes(&self, cutoff: usize) -> Vec<SequenceHash> {
-        debug_assert!(cutoff <= self.edge.len());
-        self.edge[cutoff..].to_vec()
+    fn newly_uncovered_hashes(&self, new_cutoff: usize, old_cutoff: usize) -> Vec<SequenceHash> {
+        debug_assert!(new_cutoff <= old_cutoff);
+        debug_assert!(old_cutoff <= self.edge.len());
+        self.edge[new_cutoff..old_cutoff].to_vec()
     }
 
     fn lookup_hashes_for_worker_repair(
@@ -125,7 +126,7 @@ impl PromptTrieNode {
         }
 
         let new_cutoff = pos;
-        let stale_hashes = self.uncovered_suffix_hashes(new_cutoff);
+        let stale_hashes = self.newly_uncovered_hashes(new_cutoff, current_cutoff);
 
         if new_cutoff == 0 {
             self.drop_worker(worker);
@@ -939,6 +940,39 @@ mod tests {
             trie.compute_overlap_depths(Some(&[1, 2, 3, 4])),
             FxHashMap::from_iter([(worker, 1)]),
         );
+    }
+
+    #[test]
+    fn leaf_to_root_removes_return_only_newly_uncovered_hashes() {
+        let worker = worker(1, 0);
+        let mut node = PromptTrieNode {
+            edge: vec![1, 2, 3, 4],
+            edge_index: PromptTrieNode::edge_index_for(&[1, 2, 3, 4]),
+            worker_cutoffs: FxHashMap::default(),
+            full_edge_workers: PromptTrieNode::full_edge_workers_for(worker),
+            children: FxHashMap::default(),
+        };
+
+        let pos_4 = node.edge_index[&4];
+        let outcome = node.remove_worker_at_pos(worker, pos_4, 4);
+        assert_eq!(outcome.stale_hashes, vec![4]);
+        assert_eq!(node.current_cutoff(worker), 3);
+
+        let pos_3 = node.edge_index[&3];
+        let outcome = node.remove_worker_at_pos(worker, pos_3, 3);
+        assert_eq!(outcome.stale_hashes, vec![3]);
+        assert_eq!(node.current_cutoff(worker), 2);
+
+        let pos_2 = node.edge_index[&2];
+        let outcome = node.remove_worker_at_pos(worker, pos_2, 2);
+        assert_eq!(outcome.stale_hashes, vec![2]);
+        assert_eq!(node.current_cutoff(worker), 1);
+
+        let pos_1 = node.edge_index[&1];
+        let outcome = node.remove_worker_at_pos(worker, pos_1, 1);
+        assert_eq!(outcome.stale_hashes, vec![1]);
+        assert_eq!(node.current_cutoff(worker), 0);
+        assert!(!node.has_any_workers());
     }
 
     #[test]
