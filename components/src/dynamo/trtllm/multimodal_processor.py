@@ -344,11 +344,8 @@ class MultimodalRequestProcessor:
                                 f"Loaded {len(pil_images)} image(s) as PIL Images"
                             )
                     except (UrlValidationError, HttpStatusError):
-                        # Rejections of user-supplied media (SSRF-blocked URL,
-                        # disallowed scheme, unsupported format) are client errors.
-                        # Propagate them so the frontend maps them to a 4xx instead
-                        # of the generic except below swallowing them into a silent
-                        # dropped image (which the frontend cannot report).
+                        # Client errors: let them reach the frontend as a 4xx
+                        # instead of the generic catch below swallowing them to None.
                         raise
                     except Exception as e:
                         logging.error(f"Failed to load images: {e}")

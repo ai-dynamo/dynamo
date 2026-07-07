@@ -148,11 +148,8 @@ class ImageLoader:
             logger.error(f"Unsupported image format loading: '{image_url}'")
             raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
         except UrlValidationError as e:
-            # SSRF / disallowed-URL rejection surfaced during per-hop redirect
-            # revalidation. Preserve the type (a ValueError subclass) so the
-            # batch caller keeps its client-error semantics instead of the
-            # generic ValueError wrapping below flattening it. UrlValidationError
-            # subclasses ValueError, so this branch must precede the ValueError one.
+            # Keep the type (must precede ValueError, its base) so the batch
+            # caller can still map this client error to a 4xx, not a 500.
             logger.error("URL rejected loading image: '%s': %s", image_url, e)
             raise
         except ValueError as e:
@@ -265,9 +262,8 @@ class ImageLoader:
             HttpStatusError: If any image fails with an HTTP status error
                 (e.g. 415 Unsupported Media Type); the status is preserved so the
                 frontend returns the correct client-error code instead of 500.
-            UrlValidationError: If a media URL is rejected by the SSRF policy
-                (blocked IP/host, disallowed scheme, redirect-limit). Preserved
-                as a ValueError so the frontend returns a 4xx instead of 500.
+            UrlValidationError: If a media URL is rejected by the SSRF policy;
+                preserved as a ValueError so the frontend returns a 4xx, not 500.
             Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
         """
@@ -311,11 +307,8 @@ class ImageLoader:
                 # the first one so single-item batches keep their client-error code.
                 if status_error is None and isinstance(result, HttpStatusError):
                     status_error = result
-                # Same reasoning for a rejected media URL (blocked IP/host,
-                # disallowed scheme, redirect-limit): UrlValidationError is a
-                # ValueError, which py_err_to_dynamo maps to Backend(InvalidArgument)
-                # -> HTTP 4xx. Collapsing it into the bare Exception below would
-                # strip that and mislabel the client error as a 500.
+                # Same for a rejected URL (UrlValidationError is a ValueError):
+                # preserve it so the frontend still gets a 4xx, not a 500.
                 elif url_error is None and isinstance(result, UrlValidationError):
                     url_error = result
                 continue
