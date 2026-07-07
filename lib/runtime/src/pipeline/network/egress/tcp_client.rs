@@ -170,7 +170,7 @@ struct TcpWriteBuffer {
 impl TcpWriteBuffer {
     fn new() -> Self {
         Self {
-            write_buf: VecDeque::new(),
+            write_buf: VecDeque::with_capacity(WRITE_VECTORED_CHUNKS),
             flattened_writes: BytesMut::new(),
             write_buf_len: 0,
         }
