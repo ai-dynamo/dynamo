@@ -2447,6 +2447,7 @@ dependencies = [
  "anyhow",
  "dynamo-kv-router",
  "dynamo-llm",
+ "dynamo-protocols",
  "dynamo-runtime",
  "futures",
  "hyper-util",
