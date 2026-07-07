@@ -482,6 +482,11 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
 
+	// The lease is acquired before runCheckpoint launches (in reconcileSourcePod) and released after
+	// checkpointFn returns. Assert while the dump is in-flight (fc.wasCalled is true but not done).
+	_, err := w.clientset.CoordinationV1().Leases("inference").Get(context.Background(), "checkpoint-lease-abc", metav1.GetOptions{})
+	assert.NoError(t, err, "Lease checkpoint-lease-abc must exist in namespace inference while dump is in-flight")
+
 	// Capture parameters are read from the source pod, not from PodSnapshotContent metadata.
 	params := fc.lastParams()
 	assert.Equal(t, "abc", params.CheckpointID)
@@ -501,12 +506,6 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 		}
 		return meta.FindStatusCondition(c.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) != nil
 	}, time.Second, 5*time.Millisecond)
-
-	// The lease must be keyed on the checkpoint ID, not the work-order name.
-	require.Eventually(t, func() bool {
-		_, err := w.clientset.CoordinationV1().Leases("inference").Get(context.Background(), "checkpoint-lease-abc", metav1.GetOptions{})
-		return err == nil
-	}, time.Second, 5*time.Millisecond, "Lease checkpoint-lease-abc must exist in namespace inference")
 }
 
 func TestRunCheckpoint_WritesReadyOnSuccess(t *testing.T) {
