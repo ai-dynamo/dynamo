@@ -146,3 +146,14 @@ SPDX-License-Identifier: Apache-2.0
   image identity, paces first fills against the upstream window, persists per-image progress, and
   blocks evaluator overlap while active. The runbook separately requires validated 500/500 prefill
   completion before the next fresh serving deployment.
+- The Verified cache prefill stopped without a terminal status after 328 validated entries. The
+  wrapper had released its lock, and audit found no OOM kill, container restart, node
+  memory/disk/PID pressure, residual prefill process, or running Docker container. All 328 entry
+  records matched the unchanged PVC/marker binding. Recovery now reuses only same-binding entries,
+  while legacy or changed bindings revalidate or fail closed; the detached wrapper also records a
+  nonterminal process exit before releasing its global lock.
+- The reviewed same-binding recovery advanced directly to entry 329, then its VAST-backed log hit
+  `EDQUOT`. Cache data remained on healthy Cinder; the failure proved that compact prefill state was
+  still exposed to the saturated shared ancestor. The validated 329-entry checkpoint was retained
+  as recovery evidence and copied identically into the runner's 40 GiB workspace for the remaining
+  prefill. Official benchmark output still requires dedicated-volume isolation before clean replay.

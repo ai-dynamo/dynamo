@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +27,25 @@ class PrefillLockTest(unittest.TestCase):
                 prefill_lock.acquire(lock_dir, "second", "verified", state_dir)
             with self.assertRaisesRegex(RuntimeError, "another invocation"):
                 prefill_lock.release(lock_dir, "second")
+            status = Path(temporary) / "status.json"
+            status.write_text(json.dumps({"state": "running", "completed": 328}))
+            prefill_lock.record_exit(lock_dir, "first", status, 137)
+            terminal = json.loads(status.read_text())
+            self.assertEqual(terminal["state"], "failed")
+            self.assertEqual(terminal["process_exit_code"], 137)
+            status.write_text(json.dumps({"state": "complete", "completed": 500}))
+            prefill_lock.record_exit(lock_dir, "first", status, 0)
+            self.assertEqual(json.loads(status.read_text())["state"], "complete")
+            status.write_text(json.dumps({"state": "complete", "completed": 500}))
+            prefill_lock.record_exit(lock_dir, "first", status, 1)
+            failed_complete = json.loads(status.read_text())
+            self.assertEqual(failed_complete["state"], "failed")
+            self.assertEqual(failed_complete["process_exit_code"], 1)
+            with self.assertRaisesRegex(RuntimeError, "another lock owner"):
+                prefill_lock.record_exit(lock_dir, "second", status, 1)
+            status.unlink()
+            with self.assertRaises(FileNotFoundError):
+                prefill_lock.record_exit(lock_dir, "first", status, 1)
             prefill_lock.release(lock_dir, "first")
             self.assertFalse(lock_dir.exists())
 

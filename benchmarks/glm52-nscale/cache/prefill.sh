@@ -53,7 +53,8 @@ current_cache_binding() {
 
 runner=glm52-eval-runner
 session="glm52-cache-prefill-${suite}"
-state_dir="/artifacts/glm52-nscale/cache/prefill/${suite}"
+state_root="${GLM52_PREFILL_STATE_ROOT:-/workspace/glm52-cache-prefill}"
+state_dir="${state_root}/${suite}"
 status_path="${state_dir}/status.json"
 remote_script="${state_dir}/prefill_swebench.py"
 remote_lock_script="${state_dir}/prefill_lock.py"
@@ -168,8 +169,9 @@ kubectl exec "${runner}" -n "${NAMESPACE}" -c runner -- \
 lock_acquired=1
 
 printf -v command \
-  'set +e; python3 -u %q --manifest %q --state-dir %q --cache-binding-sha256 %q >>%q 2>&1; rc=$?; python3 %q release --lock-dir %q --invocation-id %q >>%q 2>&1 || rc=125; exit "$rc"' \
+  'set +e; python3 -u %q --manifest %q --state-dir %q --cache-binding-sha256 %q >>%q 2>&1; prefill_rc=$?; final_rc=$prefill_rc; if python3 %q record-exit --lock-dir %q --invocation-id %q --status %q --exit-code "$prefill_rc" >>%q 2>&1; then python3 %q release --lock-dir %q --invocation-id %q >>%q 2>&1 || final_rc=125; else final_rc=125; fi; exit "$final_rc"' \
   "${remote_script}" "${manifest}" "${state_dir}" "${cache_binding_sha256}" "${log_path}" \
+  "${remote_lock_script}" "${lock_dir}" "${invocation_id}" "${status_path}" "${log_path}" \
   "${remote_lock_script}" "${lock_dir}" "${invocation_id}" "${log_path}"
 # From this point onward a transport failure is ambiguous: the remote tmux may
 # have started. Retain the lock unless the remote wrapper releases it.

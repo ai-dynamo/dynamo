@@ -88,14 +88,20 @@ starts one named tmux session on the runner, so neither an official workload nor
 another suite prefill can win the same start race. The remote wrapper releases
 the lock only after the prefill process exits; an abrupt runner loss leaves the
 lock in place for fail-closed manual recovery. It is
-idempotent and resumable, retains its source manifest and per-instance evidence
-under `/artifacts/glm52-nscale/cache/prefill/<suite>`, polls the anonymous Docker
+idempotent and resumable within the retained evaluator pod, keeps its active
+per-instance checkpoint under `/workspace/glm52-cache-prefill/<suite>`, polls the anonymous Docker
 Hub allowance before every pull, and leaves a five-pull reserve. A registry-side
 rate-limit response forces a full reported-window cooldown. Every pulled image
 must exactly match the source manifest's image ID, RepoDigests, and canonical
-content-identity hash before progress is committed. State is bound to the active
-PVC UID plus migration marker; every recorded entry is pulled and identity-checked
-again after a resume, and an explicit second `start` revalidates a completed set.
+content-identity hash before progress is committed. State and every completed
+entry are bound to the active PVC UID plus migration marker. A same-binding resume
+reuses those validated entries; a legacy state is revalidated, and a changed
+binding fails closed. The official evaluator independently enforces the same exact
+image identity before accepting a result.
+The runner-local checkpoint intentionally avoids writes to the saturated shared
+VAST ancestor. Seed it from the last validated artifact checkpoint after an
+interruption, and export the completed compact evidence before replacing the
+runner pod. Override `GLM52_PREFILL_STATE_ROOT` only for a deliberate recovery.
 Do not launch the next
 official cell until `status.json` reports `state=complete`, `completed=total`, and
 the tmux session has exited, and `prefill.sh status` reports
@@ -105,6 +111,9 @@ gate remains authoritative.
 `require-complete.sh` is the executable preflight used by the Verified runbook;
 it rejects incomplete state, an active prefill, a changed manifest/cache binding,
 or anything other than 500 validated catalog entries.
+The detached wrapper records a nonterminal process exit in `status.json` before
+releasing the global lock, so a signal or transport-side termination cannot leave
+stale `running` state.
 
 This implementation is intentionally Verified-only. It relies on Verified's
 one-repository-per-instance layout. SWE-bench Pro uses many tags in a shared

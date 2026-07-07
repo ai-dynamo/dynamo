@@ -201,7 +201,11 @@ def load_manifest(path: Path) -> tuple[str, dict[str, dict[str, Any]]]:
 
 
 def load_completed(
-    entries_dir: Path, images: dict[str, dict[str, Any]]
+    entries_dir: Path,
+    images: dict[str, dict[str, Any]],
+    cache_binding_sha256: str,
+    *,
+    allow_missing_binding: bool = False,
 ) -> dict[str, dict[str, Any]]:
     completed: dict[str, dict[str, Any]] = {}
     if not entries_dir.exists():
@@ -213,6 +217,11 @@ def load_completed(
             raise ValueError(f"invalid prefill entry: {path}")
         if record.get("identity") != images[instance_id]:
             raise ValueError(f"prefill entry identity drifted: {instance_id}")
+        record_binding = record.get("cache_binding_sha256")
+        if record_binding != cache_binding_sha256 and not (
+            allow_missing_binding and record_binding is None
+        ):
+            raise ValueError(f"prefill entry cache binding drifted: {instance_id}")
         completed[instance_id] = record
     return completed
 
@@ -300,6 +309,7 @@ def run(args: argparse.Namespace) -> None:
         "cache_binding_sha256": args.cache_binding_sha256,
         "total": total,
     }
+    legacy_without_binding = False
     if metadata_path.exists():
         metadata = json.loads(metadata_path.read_text())
         legacy_without_binding = "cache_binding_sha256" not in metadata
@@ -321,7 +331,12 @@ def run(args: argparse.Namespace) -> None:
         if script_sha256 not in script_sha256s:
             script_sha256s.append(script_sha256)
         normalized_metadata = {
-            **expected_metadata,
+            **(
+                {key: value for key, value in expected_metadata.items()
+                 if key != "cache_binding_sha256"}
+                if legacy_without_binding
+                else expected_metadata
+            ),
             "started_at": metadata["started_at"],
             "script_sha256s": sorted(set(script_sha256s)),
         }
@@ -356,7 +371,13 @@ def run(args: argparse.Namespace) -> None:
     initial_cached_repositories = expected_repositories & initial_catalog
     initial_cached = len(initial_cached_repositories)
     cold_fill_required = total - initial_cached
-    completed = load_completed(entries_dir, images)
+    completed = load_completed(
+        entries_dir,
+        images,
+        args.cache_binding_sha256,
+        allow_missing_binding=legacy_without_binding,
+    )
+    revalidate_completed = legacy_without_binding or args.revalidate_completed
     entries_dir.mkdir(parents=True, exist_ok=True)
 
     ordered = sorted(
@@ -378,6 +399,7 @@ def run(args: argparse.Namespace) -> None:
         source_manifest_sha256=manifest_sha256,
         script_sha256=script_sha256,
         cache_binding_sha256=args.cache_binding_sha256,
+        revalidate_completed=revalidate_completed,
         started_at=metadata["started_at"],
     )
 
@@ -386,6 +408,8 @@ def run(args: argparse.Namespace) -> None:
     last_quota_header: str | None = None
     for instance_id, expected in ordered:
         revalidating = instance_id in completed
+        if revalidating and not revalidate_completed:
+            continue
         reference = expected["requested_ref"]
         repository = repository_from_reference(reference)
         failures = 0
@@ -551,12 +575,24 @@ def run(args: argparse.Namespace) -> None:
     missing = sorted(expected_repositories - final_catalog)
     if missing:
         raise ValueError(f"completed task repositories absent from registry catalog: {missing[:5]}")
+    if legacy_without_binding:
+        metadata = {
+            **expected_metadata,
+            "started_at": metadata["started_at"],
+            "script_sha256s": metadata["script_sha256s"],
+        }
+        atomic_write_json(metadata_path, metadata)
+    quota_fields: dict[str, Any] = {}
     if (
-        last_quota_remaining is None
-        or last_quota_window is None
-        or last_quota_header is None
+        last_quota_remaining is not None
+        and last_quota_window is not None
+        and last_quota_header is not None
     ):
-        raise RuntimeError("prefill completed without a successful quota observation")
+        quota_fields = {
+            "quota_last_observed_before_pull": last_quota_header,
+            "quota_window_seconds": last_quota_window,
+            "quota_last_observed_count": last_quota_remaining,
+        }
     write_status(
         status_path,
         state="complete",
@@ -571,15 +607,10 @@ def run(args: argparse.Namespace) -> None:
         started_at=metadata["started_at"],
         completed_at=utc_now(),
         final_catalog_verified=total,
-        quota_last_observed_before_pull=last_quota_header,
-        quota_window_seconds=last_quota_window,
-        quota_last_observed_count=last_quota_remaining,
+        **quota_fields,
     )
-    print(
-        f"{utc_now()} prefill complete: {total}/{total} "
-        f"last_quota_before_pull={last_quota_header}",
-        flush=True,
-    )
+    quota_message = last_quota_header or "not-probed-no-new-pulls"
+    print(f"{utc_now()} prefill complete: {total}/{total} quota={quota_message}", flush=True)
 
 
 def main() -> None:
@@ -593,6 +624,7 @@ def main() -> None:
     parser.add_argument("--retry-seconds", type=int, default=60)
     parser.add_argument("--max-pull-failures", type=int, default=5)
     parser.add_argument("--pull-timeout-seconds", type=int, default=1800)
+    parser.add_argument("--revalidate-completed", action="store_true")
     args = parser.parse_args()
     if (
         args.quota_reserve < 1
@@ -608,7 +640,12 @@ def main() -> None:
     except BaseException as error:
         try:
             suite, images = load_manifest(args.manifest)
-            completed = load_completed(args.state_dir / "entries", images)
+            completed = load_completed(
+                args.state_dir / "entries",
+                images,
+                args.cache_binding_sha256,
+                allow_missing_binding=True,
+            )
             initial_catalog_path = args.state_dir / "initial-catalog.json"
             initial_catalog = (
                 set(json.loads(initial_catalog_path.read_text()).get("repositories", []))
