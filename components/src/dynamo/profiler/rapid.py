@@ -19,11 +19,11 @@ import logging
 
 import pandas as pd
 import yaml
-from aiconfigurator.cli.main import _execute_task_configs, build_default_task_configs
+from aiconfigurator.cli.main import _execute_tasks, build_default_tasks
 from aiconfigurator.generator.api import generate_backend_artifacts
 from aiconfigurator.generator.module_bridge import task_config_to_generator_config
 from aiconfigurator.generator.naive import build_naive_generator_params
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.sdk.task_v2 import Task
 
 from dynamo.profiler.utils.config import clamp_total_gpus_to_budget
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
@@ -58,7 +58,7 @@ def _generate_dgd_from_pick(
     dgdr: DynamoGraphDeploymentRequestSpec,
     best_config_df: pd.DataFrame,
     chosen_exp: str,
-    task_configs: dict[str, TaskConfig],
+    task_configs: dict[str, Task],
     picking_mode: str = "default",
 ) -> dict | None:
     """Generate a DGD config dict from the rank-1 picked result via AIC's generator."""
@@ -105,7 +105,7 @@ def _generate_dgd_from_pick(
                 )
             tc.total_gpus = clamped_total_gpus
 
-        k8s_overrides = _build_k8s_overrides(dgdr, tc.backend_name)
+        k8s_overrides = _build_k8s_overrides(dgdr, tc.primary_backend_name)
         cfg = task_config_to_generator_config(
             task_config=tc,
             result_df=row,
@@ -121,8 +121,8 @@ def _generate_dgd_from_pick(
 
     artifacts = generate_backend_artifacts(
         params=cfg,
-        backend=tc.backend_name,
-        backend_version=tc.backend_version,
+        backend=tc.primary_backend_name,
+        backend_version=tc.primary_backend_version,
         use_dynamo_generator=True,
     )
     dgd_yaml = artifacts.get("k8s_deploy.yaml", "")
@@ -208,8 +208,8 @@ def _run_autoscale_sim(
     target_tpot: float,
     request_latency: float | None,
 ) -> dict:
-    """Build a TaskConfig, run autoscale simulation, collect latencies, generate DGD."""
-    # TODO(AIC): the autoscale path constructs TaskConfig directly; BackendName("auto")
+    """Build a Task, run autoscale simulation, collect latencies, generate DGD."""
+    # TODO(AIC): the autoscale path constructs the Task directly; BackendName("auto")
     # is not a valid enum value, so resolve "auto" to a concrete backend here.
     # AIC should add native auto-backend support in the autoscale path.
     if backend == "auto":
@@ -223,11 +223,16 @@ def _run_autoscale_sim(
         )
 
     local_or_hf_model = resolve_model_path(dgdr)
-    task = TaskConfig(
+    # v2 disagg Task forbids top-level worker fields; fan the shared worker spec
+    # out to both prefill_* and decode_* roles.
+    task = Task(
         serving_mode="disagg",
-        model_path=local_or_hf_model,
-        system_name=system,
-        backend_name=backend,
+        prefill_model_path=local_or_hf_model,
+        decode_model_path=local_or_hf_model,
+        prefill_system_name=system,
+        decode_system_name=system,
+        prefill_backend_name=backend,
+        decode_backend_name=backend,
         total_gpus=total_gpus,
         isl=isl,
         osl=osl,
@@ -235,9 +240,11 @@ def _run_autoscale_sim(
         tpot=target_tpot,
         request_latency=request_latency,
     )
-    runner = TaskRunner()
-    sim_result = runner.run(task, autoscale=True)
-    pareto_df = sim_result.get("pareto_df", pd.DataFrame())
+    # v2 Task.run() returns the SLA-feasible / picked DataFrame directly (autoscale
+    # picking runs inside run()); it is sorted best-first, so iloc[0] is the winner.
+    pareto_df = task.run(autoscale=True)
+    if pareto_df is None:
+        pareto_df = pd.DataFrame()
     best_latencies = {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
     if pareto_df is not None and not pareto_df.empty:
         row = pareto_df.iloc[0]
@@ -274,7 +281,7 @@ def _run_default_sim(
 ) -> dict:
     """Build default task_configs, apply load_match kwargs, run simulation, generate DGD."""
     local_or_hf_model = resolve_model_path(dgdr)
-    task_configs = build_default_task_configs(
+    task_configs = build_default_tasks(
         model_path=local_or_hf_model,
         total_gpus=total_gpus,
         system=system,
@@ -292,7 +299,7 @@ def _run_default_sim(
         load_kwargs["target_concurrency"] = dgdr.workload.concurrency
         load_kwargs["max_total_gpus"] = total_gpus
 
-    chosen, best_configs, _, _, best_latencies_map = _execute_task_configs(
+    chosen, best_configs, _, _, best_latencies_map = _execute_tasks(
         task_configs,
         mode="default",
         top_n=5,

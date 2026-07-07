@@ -314,7 +314,7 @@ class SLASpec(BaseModel):
         return "sla=" + ", ".join(statuses) if statuses else "sla=none"
 
     def aic_task_kwargs(self) -> dict[str, float | None]:
-        """Translate to `aiconfigurator.sdk.task.TaskConfig` kwargs.
+        """Translate to `aiconfigurator.sdk.task_v2.Task` kwargs.
 
         AIC's external API still uses `tpot` and `request_latency`; we keep
         those wire names untouched.

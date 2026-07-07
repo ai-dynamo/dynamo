@@ -66,6 +66,11 @@ def test_load_engine_args_estimates_aic_blocks(monkeypatch):
             "moe_tp_size": None,
             "moe_ep_size": None,
             "attention_dp_size": None,
+            "gemm_dtype": None,
+            "moe_dtype": None,
+            "fmha_dtype": None,
+            "kv_cache_dtype": None,
+            "comm_dtype": None,
         }
     ]
 
