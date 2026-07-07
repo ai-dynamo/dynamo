@@ -693,6 +693,7 @@ def test_deployment(
 
 @pytest.mark.unit
 @pytest.mark.trtllm
+@pytest.mark.multimodal
 @pytest.mark.gpu_0
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("config_file", qwen3_vl_engine_config_files)
