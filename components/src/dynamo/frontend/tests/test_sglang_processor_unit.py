@@ -10,6 +10,7 @@ Parallels test_vllm_unit.py for the vLLM backend.
 """
 
 import asyncio
+import copy
 import json
 import sys
 import types
@@ -2781,8 +2782,20 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
             sglang_tools=tools,
             force_reasoning=True,
         )
+        assert reasoning_parser is not None
+        case_tokenizer = copy.deepcopy(tokenizer)
+        detector = reasoning_parser.detector
+        # Model tokenizers keep their reasoning delimiters atomic.
+        case_tokenizer.add_special_tokens(
+            {
+                "additional_special_tokens": [
+                    detector.think_start_token,
+                    detector.think_end_token,
+                ]
+            }
+        )
         post = SglangStreamingPostProcessor(
-            tokenizer=tokenizer,
+            tokenizer=case_tokenizer,
             tool_call_parser=tool_parser,
             reasoning_parser=reasoning_parser,
             sglang_tools=tools,
@@ -2793,7 +2806,7 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
             [{"name": "get_weather", "parameters": {"city": "New York"}}]
         )
         text = f"{reasoning_output or ''}{tool_json}"
-        token_ids = tokenizer.encode(text)
+        token_ids = case_tokenizer.encode(text)
         reasoning = ""
         content = ""
         tool_calls = []
