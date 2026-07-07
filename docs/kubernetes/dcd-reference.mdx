@@ -37,8 +37,10 @@ spec:
 
 The DCD spec is `backendFramework` plus the [shared component spec](#shared-component-spec) inlined at the same level.
 
-<ParamField path="backendFramework" type="'sglang' | 'vllm' | 'trtllm'">
+<ParamField path="backendFramework" type="string">
   Inference backend framework for this component. Drives backend-specific defaults the operator injects into the `main` container.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
 
 ### Shared component spec
@@ -49,8 +51,10 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   Stable logical identifier for the component, unique within its parent DGD's `spec.components` list. Must match `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$`, 1–63 characters. For a standalone DCD the defaulting webhook populates `name` from `metadata.name`, so you rarely set it explicitly. The name is decoupled from the underlying workload name so the operator can rename child workloads (for example, hash-suffixing worker DCDs during a rolling update) without losing the identity that labels, status maps, scaling adapters, planner RBAC, and EPP filters depend on.
 </ParamField>
 
-<ParamField path="type" type="'frontend' | 'worker' | 'prefill' | 'decode' | 'planner' | 'epp'">
+<ParamField path="type" type="string">
   Role of the component within the graph. Drives port mapping, frontend detection, planner RBAC, and the pod label `nvidia.com/dynamo-component-type`. `prefill` and `decode` are first-class values for disaggregated serving and can be set directly. At most one component per graph may be `epp`.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>frontend</Badge> <Badge intent="note" minimal>worker</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>planner</Badge> <Badge intent="note" minimal>epp</Badge></span>
 </ParamField>
 
 <ParamField path="replicas" type="integer">

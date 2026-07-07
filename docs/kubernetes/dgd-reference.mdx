@@ -44,8 +44,10 @@ spec:
   Components deployed as part of this graph. Each entry carries its own stable logical `name` (unique within the list, case-insensitively). Component types are repeatable except `type: epp`, which may appear at most once. Maximum 25 components. For the full per-component field set, see [DCD Reference — Shared component spec](dcd-reference.mdx#shared-component-spec).
 </ParamField>
 
-<ParamField path="backendFramework" type="'sglang' | 'vllm' | 'trtllm'">
+<ParamField path="backendFramework" type="string">
   Backend framework for the graph. Sets backend-specific defaults the operator injects into each component's `main` container.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
 
 <ParamField path="env" type="[]core/v1.EnvVar">
@@ -72,8 +74,10 @@ spec:
   <ParamField path="restart.id" type="string" required={true}>
     Arbitrary string; any change to it initiates a restart of the graph according to the configured strategy.
   </ParamField>
-  <ParamField path="restart.strategy.type" type="'Sequential' | 'Parallel'" default="Sequential">
+  <ParamField path="restart.strategy.type" type="string" default="Sequential">
     How components are restarted.
+
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Sequential</Badge> <Badge intent="note" minimal>Parallel</Badge></span>
   </ParamField>
   <ParamField path="restart.strategy.order" type="[]string">
     Complete ordered set of component names for a sequential restart. Omit to use the controller's default order. Must not be set for parallel restarts.

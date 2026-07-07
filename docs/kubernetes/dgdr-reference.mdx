@@ -48,12 +48,16 @@ Only `model` is required; every other field has a default or is auto-detected.
   Container image for the profiling job (the planner image), for example `nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1`. For Dynamo < 1.1.0, use `dynamo-frontend`.
 </ParamField>
 
-<ParamField path="backend" type="'auto' | 'vllm' | 'sglang' | 'trtllm'" default="auto">
+<ParamField path="backend" type="string" default="auto">
   Inference backend used for profiling and deployment.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
 
-<ParamField path="searchStrategy" type="'rapid' | 'thorough'" default="rapid">
+<ParamField path="searchStrategy" type="string" default="rapid">
   Profiling depth. `rapid` performs a fast, AIC-backed sweep (~30s); `thorough` explores more configurations on real GPUs (2–4h).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>rapid</Badge> <Badge intent="note" minimal>thorough</Badge></span>
 </ParamField>
 
 <ParamField path="autoApply" type="boolean" default="true">
@@ -97,8 +101,10 @@ Only `model` is required; every other field has a default or is auto-detected.
   <ParamField path="sla.e2eLatency" type="number">
     End-to-end request latency target, in milliseconds. An alternative to specifying `ttft` + `itl`; cannot be combined with them.
   </ParamField>
-  <ParamField path="sla.optimizationType" type="'latency' | 'throughput'">
+  <ParamField path="sla.optimizationType" type="string">
     Optimization target for SLA profiling.
+
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>latency</Badge> <Badge intent="note" minimal>throughput</Badge></span>
   </ParamField>
 </Indent>
 
