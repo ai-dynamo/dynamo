@@ -58,7 +58,7 @@ CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
 CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
 LEGACY_WORKER_HASH = "legacy"
 WORKER_COMPONENT_TYPES = {"worker", "prefill", "decode"}
-WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment"}
+WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment", "LeaderWorkerSet"}
 
 
 class KubernetesConnector(PlannerConnector):
@@ -99,7 +99,7 @@ class KubernetesConnector(PlannerConnector):
         Newer operators publish the effective runtime namespace on the worker
         component status. Older operators expose only the active worker hash, so
         the planner falls back to appending that hash only for Deployment-backed
-        workers.
+        and LeaderWorkerSet-backed workers.
         """
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
         worker_status = self._get_first_worker_component_status(deployment)
@@ -119,7 +119,7 @@ class KubernetesConnector(PlannerConnector):
                 "Worker component status is not available yet; runtime namespace is indeterminate"
             )
         if not self._worker_status_uses_namespace_suffix(worker_status):
-            # Only old Deployment-backed workers used the hash as a namespace suffix.
+            # Only old Deployment/LWS-backed workers used the hash as a namespace suffix.
             return base_dynamo_namespace
         return f"{base_dynamo_namespace}-{worker_hash}"
 

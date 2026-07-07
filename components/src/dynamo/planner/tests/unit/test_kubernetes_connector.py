@@ -209,7 +209,7 @@ def test_get_worker_runtime_namespace_falls_back_to_base_for_grove(
     assert namespace == "base-ns"
 
 
-def test_get_worker_runtime_namespace_falls_back_to_base_for_leader_worker_set(
+def test_get_worker_runtime_namespace_falls_back_to_leader_worker_set_hash(
     kubernetes_connector, mock_kube_api
 ):
     mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
@@ -219,7 +219,7 @@ def test_get_worker_runtime_namespace_falls_back_to_base_for_leader_worker_set(
 
     namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
 
-    assert namespace == "base-ns"
+    assert namespace == "base-ns-abc123"
 
 
 def test_get_worker_runtime_namespace_without_hash(kubernetes_connector, mock_kube_api):
