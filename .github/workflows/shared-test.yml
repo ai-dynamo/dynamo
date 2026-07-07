@@ -173,10 +173,6 @@ jobs:
           KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
         run: |
           echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
-      - name: Hold KVBM validation pods for placement check
-        if: ${{ github.ref_name == 'fix/kvbm-ci-test-failure' && (inputs.test_type == 'KVBM Test A' || inputs.test_type == 'KVBM Test B') }}
-        shell: bash
-        run: sleep 600
       # Experimental: trialing Datadog Test Visibility. Remove if not kept.
       - name: Configure Datadog Test Visibility
         continue-on-error: true
