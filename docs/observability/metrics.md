@@ -243,11 +243,11 @@ curl http://localhost:8000/metrics
 
 #### Tokenizer Cache Metrics
 
-The hit and miss counters record request-level cache outcomes across the frontend process. The cached
-and uncached token counters report exact token totals for each served model. A partial hit increments
-both token counters because it returns a cached prefix and freshly encodes the remaining suffix. A
-full hit increments only the cached-token counter, and a full miss increments only the uncached-token
-counter.
+The hit and miss counters record one cache outcome per encode operation across the frontend process.
+A batch encode records one outcome per item. The cached and uncached token counters report exact
+token totals for each served model. When L1 is active, a partial hit increments both token counters
+because it returns a cached prefix and freshly encodes the remaining suffix. A full hit increments
+only the cached-token counter, and a full miss increments only the uncached-token counter.
 
 Use the following PromQL expression to calculate the token reuse ratio for each model over five
 minutes:
@@ -262,9 +262,11 @@ sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
 )
 ```
 
-The token counters do not increment when `DYN_TOKENIZER_CACHE=0`, when encoding fails, or when the
-cache has no registered special-token boundaries. The tiktoken cache currently has no registered
-boundaries, so its token counters remain unchanged.
+The ratio is meaningful only for a model with an active L1 cache and observed tokens. The token
+counters do not increment when `DYN_TOKENIZER_CACHE=0`, when encoding fails, or when the cache has no
+registered special-token boundaries. The tiktoken path currently has no registered boundaries, so it
+bypasses L1 and exposes zero-valued token counter series; its ratio remains undefined until the cache
+observes tokens.
 
 #### Stage and phase labels
 

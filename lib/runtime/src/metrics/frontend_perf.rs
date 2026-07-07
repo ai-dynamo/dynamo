@@ -172,44 +172,34 @@ static REGISTERED: OnceCell<()> = OnceCell::new();
 /// first does not silently prevent the metrics from being registered in the prometheus registry.
 static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
 
-/// Register frontend perf metrics with the given registry. Idempotent.
-pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
-    let _ = REGISTERED.get_or_init(|| {
-        registry.add_metric(Box::new(STAGE_REQUESTS.clone())).ok();
-        registry
-            .add_metric(Box::new(STAGE_DURATION_SECONDS.clone()))
-            .ok();
-        registry.add_metric(Box::new(TOKENIZE_SECONDS.clone())).ok();
-        registry.add_metric(Box::new(TEMPLATE_SECONDS.clone())).ok();
-        registry
-            .add_metric(Box::new(DETOKENIZE_TOTAL_US.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(DETOKENIZE_TOKEN_COUNT.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKENIZER_CACHE_HITS_TOTAL.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKENIZER_CACHE_MISSES_TOTAL.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKENIZER_CACHE_CACHED_TOKENS_TOTAL.clone()))
-            .ok();
-        registry
-            .add_metric(Box::new(TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL.clone()))
-            .ok();
-    });
+fn register_frontend_perf_metrics(registry: &MetricsRegistry) {
+    registry.add_metric(Box::new(STAGE_REQUESTS.clone())).ok();
+    registry
+        .add_metric(Box::new(STAGE_DURATION_SECONDS.clone()))
+        .ok();
+    registry.add_metric(Box::new(TOKENIZE_SECONDS.clone())).ok();
+    registry.add_metric(Box::new(TEMPLATE_SECONDS.clone())).ok();
+    registry
+        .add_metric(Box::new(DETOKENIZE_TOTAL_US.clone()))
+        .ok();
+    registry
+        .add_metric(Box::new(DETOKENIZE_TOKEN_COUNT.clone()))
+        .ok();
+    registry
+        .add_metric(Box::new(TOKENIZER_CACHE_HITS_TOTAL.clone()))
+        .ok();
+    registry
+        .add_metric(Box::new(TOKENIZER_CACHE_MISSES_TOTAL.clone()))
+        .ok();
+    registry
+        .add_metric(Box::new(TOKENIZER_CACHE_CACHED_TOKENS_TOTAL.clone()))
+        .ok();
+    registry
+        .add_metric(Box::new(TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL.clone()))
+        .ok();
 }
 
-/// Register frontend perf metrics with a raw Prometheus registry (e.g. for LLM HTTP service /metrics).
-/// Idempotent. Call this when the service exposes /metrics from its own registry.
-pub fn ensure_frontend_perf_metrics_registered_prometheus(
-    registry: &Registry,
-) -> Result<(), prometheus::Error> {
-    if PROMETHEUS_REGISTERED.get().is_some() {
-        return Ok(());
-    }
+fn register_frontend_perf_metrics_prometheus(registry: &Registry) -> Result<(), prometheus::Error> {
     registry.register(Box::new(STAGE_REQUESTS.clone()))?;
     registry.register(Box::new(STAGE_DURATION_SECONDS.clone()))?;
     registry.register(Box::new(TOKENIZE_SECONDS.clone()))?;
@@ -220,6 +210,23 @@ pub fn ensure_frontend_perf_metrics_registered_prometheus(
     registry.register(Box::new(TOKENIZER_CACHE_MISSES_TOTAL.clone()))?;
     registry.register(Box::new(TOKENIZER_CACHE_CACHED_TOKENS_TOTAL.clone()))?;
     registry.register(Box::new(TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL.clone()))?;
+    Ok(())
+}
+
+/// Register frontend perf metrics with the given registry. Idempotent.
+pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
+    let _ = REGISTERED.get_or_init(|| register_frontend_perf_metrics(registry));
+}
+
+/// Register frontend perf metrics with a raw Prometheus registry (e.g. for LLM HTTP service /metrics).
+/// Idempotent. Call this when the service exposes /metrics from its own registry.
+pub fn ensure_frontend_perf_metrics_registered_prometheus(
+    registry: &Registry,
+) -> Result<(), prometheus::Error> {
+    if PROMETHEUS_REGISTERED.get().is_some() {
+        return Ok(());
+    }
+    register_frontend_perf_metrics_prometheus(registry)?;
     let _ = PROMETHEUS_REGISTERED.set(());
     Ok(())
 }
@@ -256,14 +263,14 @@ mod tests {
         let _ = TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL.with_label_values(&[model]);
 
         let metrics_registry = MetricsRegistry::new();
-        ensure_frontend_perf_metrics_registered(&metrics_registry);
+        register_frontend_perf_metrics(&metrics_registry);
         assert_tokenizer_cache_token_metrics_registered(
             &metrics_registry.get_prometheus_registry().gather(),
             model,
         );
 
         let prometheus_registry = Registry::new();
-        ensure_frontend_perf_metrics_registered_prometheus(&prometheus_registry).unwrap();
+        register_frontend_perf_metrics_prometheus(&prometheus_registry).unwrap();
         assert_tokenizer_cache_token_metrics_registered(&prometheus_registry.gather(), model);
     }
 

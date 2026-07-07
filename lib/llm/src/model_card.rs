@@ -55,6 +55,28 @@ fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenU
     })
 }
 
+fn instrumented_tokenizer_cache(
+    raw: Arc<dyn crate::tokenizers::traits::Tokenizer>,
+    special_tokens: Vec<String>,
+    cache_bytes: usize,
+    cache_extend: bool,
+    model: &str,
+) -> Arc<dyn crate::tokenizers::traits::Tokenizer> {
+    Arc::new(
+        crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)
+            .with_extend(cache_extend)
+            .with_observer(
+                Arc::new(|| {
+                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL.inc();
+                }),
+                Arc::new(|| {
+                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL.inc();
+                }),
+            )
+            .with_token_observer(tokenizer_cache_token_observer(model)),
+    )
+}
+
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
@@ -1143,20 +1165,12 @@ impl ModelDeploymentCard {
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
                     );
-                    Arc::new(
-                        crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
-                            .with_extend(cache_extend)
-                            .with_observer(
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
-                                        .inc();
-                                }),
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
-                                        .inc();
-                                }),
-                            )
-                            .with_token_observer(tokenizer_cache_token_observer(self.name())),
+                    instrumented_tokenizer_cache(
+                        raw,
+                        specials,
+                        cache_bytes,
+                        cache_extend,
+                        self.name(),
                     )
                 } else {
                     raw
@@ -1176,26 +1190,19 @@ impl ModelDeploymentCard {
 
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
-                    // Empty specials -> L1 always misses; wrapper is a thin passthrough.
-                    // Special-token extraction for tiktoken is out of scope for v1.
+                    // Empty specials disable L1, so the wrapper bypasses cache observers.
+                    // The instrumentation helper still binds zero-valued per-model token
+                    // series, ready for future tiktoken special-token extraction.
                     tracing::info!(
                         cache_bytes,
-                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 will not hit until tiktoken special-token extraction is added)",
+                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 is disabled until tiktoken special-token extraction is added)",
                     );
-                    Arc::new(
-                        crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
-                            .with_extend(cache_extend)
-                            .with_observer(
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
-                                        .inc();
-                                }),
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
-                                        .inc();
-                                }),
-                            )
-                            .with_token_observer(tokenizer_cache_token_observer(self.name())),
+                    instrumented_tokenizer_cache(
+                        raw,
+                        Vec::new(),
+                        cache_bytes,
+                        cache_extend,
+                        self.name(),
                     )
                 } else {
                     raw
