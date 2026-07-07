@@ -126,31 +126,28 @@ navigation:
         contents:
           - page: Introduction
             path: getting-started/kubernetes-deployment.md
-          - section: Deploy with DGD
-            contents:
-            - page: DGD Walkthrough
-              path: kubernetes/dgd-guide.md
-            - page: Disaggregated Serving
-              path: features/disaggregated-serving/README.md
-            - page: Size with AIConfigurator
-              path: kubernetes/dgd-aiconfigurator.md
-            - page: Multinode Deployments
-              path: kubernetes/deployment/multinode-deployment.md
-          - section: Auto Deploy with DGDR
-            contents:
-            - page: DGDR Walkthrough
-              path: kubernetes/dgdr-guide.md
-            - page: Dynamo Profiler
-              path: components/profiler/profiler-guide.md 
-              # TODO: maybe move this to kubernetes/profiler-guide.md
-            - page: Dynamo Planner
-              path: components/planner/planner-guide.md
+          - page: Deploy with DGD
+            path: kubernetes/dgd-guide.md
+          - page: Disaggregated Serving
+            path: features/disaggregated-serving/README.md
+          - page: Size with AIConfigurator
+            path: kubernetes/dgd-aiconfigurator.md
+          - page: Multinode Deployments
+            path: kubernetes/deployment/multinode-deployment.md
           - page: Model Caching
             path: kubernetes/model-caching.md
           - page: KV Aware Routing
             path: kubernetes/dgd-kv-routing.md
           - page: KV Cache Offloading
             path: kubernetes/dgd-kv-offloading.md
+          - section: Auto Deploy with DGDR
+            contents:
+            - page: DGDR Walkthrough
+              path: kubernetes/dgdr-guide.md
+            - page: Dynamo Profiler
+              path: kubernetes/dgdr-profiler.md
+            - page: Dynamo Planner
+              path: kubernetes/dgdr-planner.md
 
       - section: Operations
         icon: screwdriver-wrench
@@ -181,12 +178,15 @@ navigation:
             path: getting-started/building-from-source.md
           - page: Minikube Setup
             path: kubernetes/deployment/minikube.md
-          - page: vLLM Deployments
-            path: backends/vllm/vllm-examples.md
-          - page: SGLang Deployments
-            path: backends/sglang/sglang-examples.md
-          - page: TRT-LLM Deployments
-            path: backends/trtllm/trtllm-examples.md
+          - section: Backends
+            collapsed: true
+            contents:
+            - page: vLLM Deployments
+              path: backends/vllm/vllm-examples.md
+            - page: SGLang Deployments
+              path: backends/sglang/sglang-examples.md
+            - page: TRT-LLM Deployments
+              path: backends/trtllm/trtllm-examples.md
           - section: Observability Setup
             collapsed: true
             contents:

@@ -508,7 +508,10 @@ svg.card-icon{
 .card-icon{
     background-color: transparent !important;
 }
-.fern-card:hover{
+/* Only linked cards (rendered as <a>) get the hover highlight. Cards without an
+   href render as <div class="fern-card"> — e.g. the "Why Dynamo" cards — and must
+   not look clickable. */
+a.fern-card:hover{
     box-shadow: 0 0 0 1px var(--nv-color-green) !important;
 }
 .fern-docs-badge{
@@ -648,6 +651,65 @@ svg.card-icon{
     border-color: var(--grayscale-a3);
     font-weight: 500;
 }
+
+/* ============================================================
+   Release Artifacts page: the Tags column renders each version
+   as a click-to-copy Badge (Fern's <Copy> wraps a <Badge> so the
+   click copies the full image reference). <Copy> paints its own
+   filled, padded chrome around the child, which shows as a grey
+   box flanking the badge. Strip that chrome inside .dynamo-tag-copy
+   so only the Badge shows; the wrapper stays clickable, so the
+   copy behavior is unchanged. Scoped to .dynamo-tag-copy so the
+   Icon-based <Copy> buttons in the Install columns keep their
+   button chrome.
+   ============================================================ */
+.dynamo-tag-copy {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.375rem;
+}
+/* Reset fill/padding/border/shadow on every wrapper the <Copy>
+   renders — matched depth-independently (any descendant that is
+   not the Badge and not inside it) so the grey box is gone no
+   matter how Fern nests the copy affordance. The Badge and its
+   own children are excluded and keep their styling. */
+.dynamo-tag-copy *:not(.fern-docs-badge):not(.fern-docs-badge *) {
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+.dynamo-tag-copy .fern-docs-badge {
+    cursor: pointer;
+}
+
+/* ============================================================
+   Release Artifacts page: the Install column renders a
+   click-to-copy button as <Copy><Icon icon="copy"/></Copy>.
+   Fern's default chrome is wider than it is tall, so the icon
+   looks cramped. Give the button uniform padding and a square
+   footprint so the icon sits centered — the compact copy-button
+   shape. Scoped to .dynamo-install-copy so the Tags-column tag
+   copies (.dynamo-tag-copy) are untouched.
+   ============================================================ */
+.dynamo-install-copy {
+    display: inline-flex;
+}
+/* Shape the button the <Copy> renders. Matched depth-independently
+   (the interactive element plus any wrapper it nests in) so the
+   uniform padding lands regardless of how Fern structures the DOM. */
+.dynamo-install-copy button,
+.dynamo-install-copy [role="button"],
+.dynamo-install-copy > * {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 0.375rem !important;
+    aspect-ratio: 1 / 1;
+    border-radius: 6px !important;
+}
+
 .fern-page-actions button:hover{
     background-color: transparent !important;
 }

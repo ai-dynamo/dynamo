@@ -66,42 +66,42 @@ Only `model` is required; every other field has a default or is auto-detected.
 
 ### Workload
 
-<ParamField path="workload" type="object">
+<ParamField path="workload" type="WorkloadSpec">
   Expected workload characteristics for SLA-based profiling.
 </ParamField>
 
 <Indent>
-  <ParamField path="workload.isl" type="integer" default="4000">
+  <ParamField path="isl" type="integer" default="4000">
     Input Sequence Length — expected average input tokens.
   </ParamField>
-  <ParamField path="workload.osl" type="integer" default="1000">
+  <ParamField path="osl" type="integer" default="1000">
     Output Sequence Length — expected average output tokens.
   </ParamField>
-  <ParamField path="workload.concurrency" type="number">
+  <ParamField path="concurrency" type="number">
     Target concurrency level. Required (or `requestRate`) when the planner is disabled.
   </ParamField>
-  <ParamField path="workload.requestRate" type="number">
+  <ParamField path="requestRate" type="number">
     Target request rate in requests per second. Required (or `concurrency`) when the planner is disabled.
   </ParamField>
 </Indent>
 
 ### SLA
 
-<ParamField path="sla" type="object">
+<ParamField path="sla" type="SLASpec">
   Service-level agreement targets that drive profiling optimization.
 </ParamField>
 
 <Indent>
-  <ParamField path="sla.ttft" type="number">
+  <ParamField path="ttft" type="number">
     Time To First Token target, in milliseconds.
   </ParamField>
-  <ParamField path="sla.itl" type="number">
+  <ParamField path="itl" type="number">
     Inter-Token Latency target, in milliseconds.
   </ParamField>
-  <ParamField path="sla.e2eLatency" type="number">
+  <ParamField path="e2eLatency" type="number">
     End-to-end request latency target, in milliseconds. An alternative to specifying `ttft` + `itl`; cannot be combined with them.
   </ParamField>
-  <ParamField path="sla.optimizationType" type="string">
+  <ParamField path="optimizationType" type="OptimizationType">
     Optimization target for SLA profiling.
 
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>latency</Badge> <Badge intent="note" minimal>throughput</Badge></span>
@@ -112,62 +112,69 @@ Only `model` is required; every other field has a default or is auto-detected.
 
 All hardware fields are auto-detected from cluster GPU nodes when omitted (requires cluster-wide mode with GPU discovery enabled). `gpuSku` is a selector that restricts which nodes are considered; the other fields are overrides passed to the profiler. If all fields are set, discovery is skipped.
 
-<ParamField path="hardware" type="object">
+<ParamField path="hardware" type="HardwareSpec">
   GPU hardware for profiling and deployment.
 </ParamField>
 
 <Indent>
-  <ParamField path="hardware.gpuSku" type="GPUSKUType">
+  <ParamField path="gpuSku" type="GPUSKUType">
     GPU type to target (see [SKU format](#sku-format)). When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose the GPU type; discovery and `totalGpus` are then restricted to matching nodes.
   </ParamField>
-  <ParamField path="hardware.vramMb" type="number">
+  <ParamField path="vramMb" type="number">
     VRAM per GPU in MiB. Auto-detected from cluster GPU nodes when omitted.
   </ParamField>
-  <ParamField path="hardware.totalGpus" type="integer">
+  <ParamField path="totalGpus" type="integer">
     GPU budget for profiling and deployment; the profiler uses it to determine parallelism and replica count. When omitted, computed by counting GPUs on discovered nodes (filtered by `gpuSku` when set), temporarily capped at 32 to limit the profiler search space. Set explicitly to override the cap.
   </ParamField>
-  <ParamField path="hardware.numGpusPerNode" type="integer">
+  <ParamField path="numGpusPerNode" type="integer">
     GPUs per node. Auto-detected when omitted.
   </ParamField>
-  <ParamField path="hardware.interconnect" type="string">
+  <ParamField path="interconnect" type="string">
     Primary GPU-to-GPU interconnect within a node, for example `nvlink` or `pcie`. Capability metadata for profiling and planning only — it does not enable any interconnect. Best-effort discovery distinguishes `nvlink` from `pcie` when omitted. An over-optimistic value can lead the planner to overestimate intra-node bandwidth and pick overly aggressive parallelism.
   </ParamField>
-  <ParamField path="hardware.rdma" type="boolean">
+  <ParamField path="rdma" type="boolean">
     Whether the cluster has RDMA-capable networking for Dynamo data movement. Capability metadata only — it does not install or configure RDMA. Best-effort discovery via node labels when omitted. A false positive can cause transports to assume RDMA is usable and fail to connect; a false negative falls back to non-RDMA transports.
   </ParamField>
 </Indent>
 
 ### Model cache
 
-<ParamField path="modelCache" type="object">
+<ParamField path="modelCache" type="ModelCacheSpec">
   Optional PVC configuration for pre-downloaded model weights. When set, weights are loaded from the PVC instead of downloading from HuggingFace. See [Model Caching](model-caching.md).
 </ParamField>
 
 <Indent>
-  <ParamField path="modelCache.pvcName" type="string">
+  <ParamField path="pvcName" type="string">
     Name of a `ReadWriteMany` PVC containing cached model weights. The PVC must exist in the same namespace as the DGDR.
   </ParamField>
-  <ParamField path="modelCache.pvcModelPath" type="string">
+  <ParamField path="pvcModelPath" type="string">
     Path to the model checkpoint directory within the PVC, for example `deepseek-r1` or `models/Llama-3.1-405B-FP8`.
   </ParamField>
-  <ParamField path="modelCache.pvcMountPath" type="string" default="/opt/model-cache">
+  <ParamField path="pvcMountPath" type="string" default="/opt/model-cache">
     Mount path for the PVC inside the container.
   </ParamField>
 </Indent>
 
 ### Features
 
-<ParamField path="features" type="object">
+<ParamField path="features" type="FeaturesSpec">
   Optional Dynamo platform features in the generated deployment.
 </ParamField>
 
 <Indent>
-  <ParamField path="features.planner" type="object">
+  <ParamField path="planner" type="runtime.RawExtension">
     Raw [PlannerConfig](../components/planner/planner-guide.md) passed to the Planner service. The presence of this field (non-null) enables the planner in the generated DGD. DGDR passes it through without field-level validation; the Planner service validates it at startup. See [Planner](#planner).
+
+    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
   </ParamField>
-  <ParamField path="features.mocker" type="object">
-    Configures the simulated (mocker) backend for testing without GPUs. Set `features.mocker.enabled: true` to deploy mocker workers instead of real inference workers.
+  <ParamField path="mocker" type="MockerSpec">
+    Configures the simulated (mocker) backend for testing without GPUs.
   </ParamField>
+  <Indent>
+    <ParamField path="enabled" type="boolean">
+      Deploy mocker workers instead of real inference workers.
+    </ParamField>
+  </Indent>
 </Indent>
 
 <Note>
@@ -176,16 +183,20 @@ All hardware fields are auto-detected from cluster GPU nodes when omitted (requi
 
 ### Overrides
 
-<ParamField path="overrides" type="object">
+<ParamField path="overrides" type="OverridesSpec">
   Customizes the profiling job and the generated DGD.
 </ParamField>
 
 <Indent>
-  <ParamField path="overrides.profilingJob" type="batch/v1.JobSpec">
+  <ParamField path="profilingJob" type="batch/v1.JobSpec">
     Overrides merged into the controller-generated profiling Job spec (for example, tolerations or node selectors). Only customizes the profiling Job — not the deployed worker pods.
+
+    <a href="https://pkg.go.dev/k8s.io/api/batch/v1#JobSpec" target="_blank">batch/v1.JobSpec</a>
   </ParamField>
-  <ParamField path="overrides.dgd" type="object">
-    A full or partial `nvidia.com/v1alpha1` DGD used as the base for the generated deployment. Fields from profiling results are merged on top. See [Generated DGD overrides](#generated-dgd-overrides).
+  <ParamField path="dgd" type="runtime.RawExtension">
+    A full or partial `nvidia.com/v1alpha1` DGD used as the base for the generated deployment; see the [DGD Reference](dgd-reference.mdx) for its fields. Values from profiling results are merged on top. See [Generated DGD overrides](#generated-dgd-overrides).
+
+    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
   </ParamField>
 </Indent>
 
@@ -388,6 +399,84 @@ All supported values: `gb200_sxm`, `gb10`, `b200_sxm`, `h200_sxm`, `h100_sxm`, `
 <Warning>
   **PCIe variants not yet supported by the profiler.** The CRD admits PCIe SKUs (`h100_pcie`, `a100_pcie`, `v100_pcie`), but the profiler does not currently ship training data for them. You can submit a DGDR with a PCIe value; the operator accepts it but profiler-assisted sizing falls back to defaults. Profiler support for PCIe SKUs is tracked as an engineering follow-up.
 </Warning>
+
+## Status
+
+The operator maintains observed state under `status`. See [Lifecycle](#lifecycle) for how `phase` and `profilingPhase` progress, and for the full condition-type list.
+
+<ParamField path="status.phase" type="DGDRPhase">
+  High-level lifecycle phase of the deployment request.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Pending</Badge> <Badge intent="note" minimal>Profiling</Badge> <Badge intent="note" minimal>Ready</Badge> <Badge intent="note" minimal>Deploying</Badge> <Badge intent="note" minimal>Deployed</Badge> <Badge intent="note" minimal>Failed</Badge></span>
+</ParamField>
+
+<ParamField path="status.profilingPhase" type="ProfilingPhase">
+  Current sub-phase of the profiling pipeline. Only meaningful while `phase` is `Profiling`; cleared when profiling completes or fails.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Initializing</Badge> <Badge intent="note" minimal>SweepingPrefill</Badge> <Badge intent="note" minimal>SweepingDecode</Badge> <Badge intent="note" minimal>SelectingConfig</Badge> <Badge intent="note" minimal>BuildingCurves</Badge> <Badge intent="note" minimal>GeneratingDGD</Badge> <Badge intent="note" minimal>Done</Badge></span>
+</ParamField>
+
+<ParamField path="status.dgdName" type="string">
+  Name of the generated or created `DynamoGraphDeployment`.
+</ParamField>
+
+<ParamField path="status.profilingJobName" type="string">
+  Name of the Kubernetes Job running the profiler.
+</ParamField>
+
+<ParamField path="status.conditions" type="[]metav1.Condition">
+  Latest observed conditions. Standard types include `Succeeded`, `Validation`, `Profiling`, `SpecGenerated`, and `DeploymentReady` — see [Conditions](#conditions).
+
+  <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
+</ParamField>
+
+<ParamField path="status.profilingResults" type="ProfilingResultsStatus">
+  Output of the profiling process — Pareto-optimal configurations and the selected deployment configuration.
+</ParamField>
+
+<Indent>
+  <ParamField path="pareto" type="[]ParetoConfig">
+    Pareto-optimal deployment configurations discovered during profiling. Each entry represents a different cost/performance trade-off.
+
+    See: [ParetoConfig](#paretoconfig)
+  </ParamField>
+  <ParamField path="selectedConfig" type="runtime.RawExtension">
+    Recommended configuration chosen by the profiler based on the SLA targets. This is the configuration used for deployment when `autoApply` is `true`.
+
+    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
+  </ParamField>
+</Indent>
+
+<ParamField path="status.deploymentInfo" type="DeploymentInfoStatus">
+  State of the deployed `DynamoGraphDeployment`. Populated once a DGD has been created (via `autoApply` or manually).
+</ParamField>
+
+<Indent>
+  <ParamField path="replicas" type="integer">
+    Desired number of replicas.
+  </ParamField>
+  <ParamField path="availableReplicas" type="integer">
+    Number of replicas that are available and ready.
+  </ParamField>
+</Indent>
+
+<ParamField path="status.observedGeneration" type="integer">
+  Most recent `metadata.generation` observed by the controller.
+</ParamField>
+
+## Additional Types
+
+Nested struct types referenced by the status fields above, broken out here to keep the field lists shallow. Types prefixed `batch/v1.`, `metav1.`, or `runtime.` are standard Kubernetes types and link to their Go package documentation instead of being expanded.
+
+### ParetoConfig
+
+A single Pareto-optimal deployment configuration discovered during profiling. Referenced by `status.profilingResults.pareto`.
+
+<ParamField path="config" type="runtime.RawExtension">
+  Full deployment configuration for this Pareto point.
+
+  <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
+</ParamField>
 
 ## Lifecycle
 
