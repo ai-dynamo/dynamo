@@ -1,6 +1,16 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+# Launch the XPU side of a heterogeneous disaggregated vLLM setup.
+#
+# This script starts:
+#   - dynamo.frontend on port 8000, acting as the HTTP frontend/proxy with KV routing
+#   - one XPU prefill worker registered with --is-prefill-worker
+#
+# Run this together with disagg_hetero_cpu_decode.sh, which starts the CPU decode
+# worker. The two workers exchange KV cache through NixlConnector over TCP, using
+# CPU buffers for cross-device compatibility
 set -e
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
@@ -22,14 +32,6 @@ python -m dynamo.frontend \
     --router-mode kv \
     --http-port 8000 \
     --router-reset-states &
-
-# One decode worker on Xeon CPU.
-VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
-python3 -m dynamo.vllm \
-    --model $MODEL \
-    --block-size $BLOCK_SIZE \
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config":{"enforce_handshake_compat": false}}' \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556", "enable_kv_cache_events":true}' &
 
 # One prefill worker on XPU.
 # When registered with --is-prefill-worker, this worker is automatically detected
