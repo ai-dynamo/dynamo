@@ -46,7 +46,7 @@ Set `OTEL_EXPORTER_OTLP_ENDPOINT` to configure the default OTLP collector endpoi
 Signal-specific endpoints are used as-is. When using the generic `OTEL_EXPORTER_OTLP_ENDPOINT` with `http/protobuf`, Dynamo appends the signal path (`/v1/logs` or `/v1/traces`). With `grpc`, the endpoint is used without a path.
 
 > [!WARNING]
-> Changed in v1.3.0: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` no longer falls back to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. It now falls back to the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, then the protocol default. A deployment that sets only the traces endpoint sends logs to the protocol default (`http://localhost:4317`), where they are silently dropped if no collector is listening. Also set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, or use the generic `OTEL_EXPORTER_OTLP_ENDPOINT` for both signals.
+> Changed in v1.3.0: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` no longer falls back to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. It now falls back to the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, then the protocol default. A deployment that sets only the traces endpoint sends logs to the protocol default (`http://localhost:4317` for `grpc`, `http://localhost:4318/v1/logs` for `http/protobuf`), where they are silently dropped if no collector is listening. Also set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, or use the generic `OTEL_EXPORTER_OTLP_ENDPOINT` for both signals.
 
 ```bash
 export OTEL_EXPORT_ENABLED=true
