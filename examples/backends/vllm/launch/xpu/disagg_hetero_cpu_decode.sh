@@ -29,6 +29,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
+    --disaggregation-mode decode \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config":{"enforce_handshake_compat": false}}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5556", "enable_kv_cache_events":true}' &
 

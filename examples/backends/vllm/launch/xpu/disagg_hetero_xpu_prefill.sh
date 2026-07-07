@@ -34,14 +34,15 @@ python -m dynamo.frontend \
     --router-reset-states &
 
 # One prefill worker on XPU.
-# When registered with --is-prefill-worker, this worker is automatically detected
+# When registered with --disaggregation-mode prefill, this worker is automatically detected
 # by the frontend, which activates an internal prefill router for KV-aware prefill routing.
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
 ZE_AFFINITY_MASK=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
+    --enforce-eager \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config":{"enforce_handshake_compat": false}}' \
-    --is-prefill-worker \
+    --disaggregation-mode prefill \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558", "enable_kv_cache_events":true}' &
 
 wait_any_exit
