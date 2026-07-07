@@ -41,6 +41,7 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     permissions:
       contents: read
+      actions: read   # list jobs for the target run (needed when run_id points at another run)
     steps:
       - name: Get Failed jobs
         id: failed-jobs
