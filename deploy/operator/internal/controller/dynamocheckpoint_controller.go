@@ -368,6 +368,8 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 	}
 
+	// Heal podSnapshotName in case the status write after the initial create was lost.
+	ckpt.Status.PodSnapshotName = snap.Name
 	return r.observePodSnapshot(ctx, ckpt, job, snap, checkpointID)
 }
 
@@ -399,6 +401,7 @@ func (r *CheckpointReconciler) handleCreatingJobGone(ctx context.Context, ckpt *
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	ckpt.Status.PodSnapshotName = snap.Name
 	return r.observePodSnapshot(ctx, ckpt, nil, snap, checkpointID)
 }
 
