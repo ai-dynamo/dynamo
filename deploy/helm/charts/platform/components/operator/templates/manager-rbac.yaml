@@ -29,8 +29,9 @@ metadata:
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
 {{- $managerRole.rules | toYaml | nindent 0 }}
-# These chart-managed permissions preserve existing grants that controller-gen
-# does not emit. Audit them separately from controller reconciliation RBAC.
+# WARNING: +kubebuilder:rbac markers are the default source for operator RBAC.
+# Add rules below only when they are inherently Helm-specific and cannot be
+# represented by markers. Audit them separately from controller reconciliation RBAC.
 - apiGroups:
   - ""
   resources:
