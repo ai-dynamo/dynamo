@@ -305,7 +305,7 @@ func TestDiscoverGPUUUIDsFallsBackToPodResourcesAfterDRAAPILookupError(t *testin
 	}
 }
 
-func TestDiscoverGPUUUIDsPrefersDRAForDRAPod(t *testing.T) {
+func TestDiscoverGPUUUIDsOrdersDRAPodByContainerOrdinal(t *testing.T) {
 	previousSocketPath := podResourcesSocketPath
 	podResourcesSocketPath = filepath.Join(t.TempDir(), "missing-kubelet.sock")
 	t.Cleanup(func() {
@@ -317,7 +317,8 @@ func TestDiscoverGPUUUIDsPrefersDRAForDRAPod(t *testing.T) {
 	namespace := "default"
 	podName := "test-pod"
 	claimName := "gpu-claim"
-	uuid := "GPU-ffffffff-1111-2222-3333-444444444444"
+	uuid0 := "GPU-aaaaaaaa-1111-2222-3333-444444444444"
+	uuid1 := "GPU-bbbbbbbb-5555-6666-7777-888888888888"
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
@@ -337,6 +338,7 @@ func TestDiscoverGPUUUIDsPrefersDRAForDRAPod(t *testing.T) {
 			Allocation: &resourcev1.AllocationResult{
 				Devices: resourcev1.DeviceAllocationResult{
 					Results: []resourcev1.DeviceRequestAllocationResult{
+						{Driver: nvidiaGPUDRADriver, Pool: poolName, Device: "gpu-1", Request: "gpu"},
 						{Driver: nvidiaGPUDRADriver, Pool: poolName, Device: "gpu-0", Request: "gpu"},
 					},
 				},
@@ -353,7 +355,13 @@ func TestDiscoverGPUUUIDsPrefersDRAForDRAPod(t *testing.T) {
 				{
 					Name: "gpu-0",
 					Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
-						resourcev1.QualifiedName("uuid"): {StringValue: &uuid},
+						resourcev1.QualifiedName("uuid"): {StringValue: &uuid0},
+					},
+				},
+				{
+					Name: "gpu-1",
+					Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						resourcev1.QualifiedName("uuid"): {StringValue: &uuid1},
 					},
 				},
 			},
@@ -365,7 +373,7 @@ func TestDiscoverGPUUUIDsPrefersDRAForDRAPod(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	got, err := DiscoverGPUUUIDs(
+	got, err := discoverGPUUUIDs(
 		ctx,
 		client,
 		podName,
@@ -373,12 +381,72 @@ func TestDiscoverGPUUUIDsPrefersDRAForDRAPod(t *testing.T) {
 		"main",
 		"/proc",
 		123,
+		func(context.Context, string, int) ([]string, error) {
+			return []string{uuid0, uuid1}, nil
+		},
 		logr.Discard(),
 	)
 	if err != nil {
 		t.Fatalf("DiscoverGPUUUIDs: %v", err)
 	}
-	if len(got) != 1 || got[0] != uuid {
-		t.Fatalf("got %v, want [%s]", got, uuid)
+	want := []string{uuid0, uuid1}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestOrderDRAUUIDsByRuntimeRejectsMismatches(t *testing.T) {
+	uuid0 := "GPU-aaaaaaaa-1111-2222-3333-444444444444"
+	uuid1 := "GPU-bbbbbbbb-5555-6666-7777-888888888888"
+	uuid2 := "GPU-cccccccc-9999-aaaa-bbbb-cccccccccccc"
+
+	tests := []struct {
+		name      string
+		allocated []string
+		visible   []string
+	}{
+		{
+			name:      "count mismatch",
+			allocated: []string{uuid0, uuid1},
+			visible:   []string{uuid0},
+		},
+		{
+			name:      "different set",
+			allocated: []string{uuid0, uuid1},
+			visible:   []string{uuid0, uuid2},
+		},
+		{
+			name:      "duplicate allocation",
+			allocated: []string{uuid0, uuid0},
+			visible:   []string{uuid0, uuid1},
+		},
+		{
+			name:      "invalid allocation UUID",
+			allocated: []string{uuid0, "not-a-gpu-uuid"},
+			visible:   []string{uuid0, uuid1},
+		},
+		{
+			name:      "duplicate visible",
+			allocated: []string{uuid0, uuid1},
+			visible:   []string{uuid0, uuid0},
+		},
+		{
+			name:      "invalid visible UUID",
+			allocated: []string{uuid0, uuid1},
+			visible:   []string{uuid0, "not-a-gpu-uuid"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := orderDRAUUIDsByRuntime(tc.allocated, tc.visible); err == nil {
+				t.Fatalf("expected error, got %v", got)
+			}
+		})
 	}
 }
