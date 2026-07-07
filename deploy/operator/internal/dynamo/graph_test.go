@@ -7035,6 +7035,302 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 	}
 }
 
+func TestGenerateBasePodSpec_ConvertedCompilationCacheMountIsNotDuplicated(t *testing.T) {
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeFrontend,
+		VolumeMounts: []v1alpha1.VolumeMount{
+			{Name: "model-cache", MountPoint: "/models"},
+			{
+				Name:                  "compilation-cache",
+				MountPoint:            "/home/dynamo/.cache/vllm",
+				UseAsCompilationCache: true,
+			},
+		},
+	}
+
+	for _, deploymentType := range []commonconsts.MultinodeDeploymentType{
+		commonconsts.MultinodeDeploymentTypeGrove,
+		commonconsts.MultinodeDeploymentTypeLWS,
+	} {
+		t.Run(string(deploymentType), func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				betaComponent(t, component),
+				BackendFrameworkVLLM,
+				nil,
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				&configv1alpha1.OperatorConfiguration{},
+				deploymentType,
+				"test-service",
+				nil,
+				nil,
+			)
+			require.NoError(t, err)
+			require.NotEmpty(t, podSpec.Containers)
+
+			var compilationCacheMounts []corev1.VolumeMount
+			for _, mount := range podSpec.Containers[0].VolumeMounts {
+				if mount.MountPath == "/home/dynamo/.cache/vllm" {
+					compilationCacheMounts = append(compilationCacheMounts, mount)
+				}
+			}
+			require.Equal(t, []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: "/home/dynamo/.cache/vllm",
+			}}, compilationCacheMounts)
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_ConvertedCompilationCacheUsesDefaultMount(t *testing.T) {
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeFrontend,
+		VolumeMounts: []v1alpha1.VolumeMount{
+			{Name: "model-cache", MountPoint: "/models"},
+			{Name: "compilation-cache", UseAsCompilationCache: true},
+		},
+	}
+
+	podSpec, err := GenerateBasePodSpec(
+		betaComponent(t, component),
+		BackendFrameworkVLLM,
+		nil,
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"test-service",
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, podSpec.Containers)
+	assert.Contains(t, podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      "compilation-cache",
+		MountPath: commonconsts.DefaultVLLMCacheMountPoint,
+	})
+}
+
+func TestApplyCompilationCacheRepairsLegacyMounts(t *testing.T) {
+	container := &corev1.Container{
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "model-cache", MountPath: "/models"},
+			{Name: "compilation-cache"},
+			{Name: "compilation-cache"},
+		},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"},
+	}
+
+	require.NoError(t, applyCompilationCache(container, component, BackendFrameworkVLLM))
+	assert.Equal(t, []corev1.VolumeMount{
+		{Name: "model-cache", MountPath: "/models"},
+		{Name: "compilation-cache", MountPath: commonconsts.DefaultVLLMCacheMountPoint},
+	}, container.VolumeMounts)
+	assert.Equal(t, commonconsts.DefaultVLLMCacheMountPoint, component.CompilationCache.MountPath)
+}
+
+func TestApplyCompilationCacheVolume(t *testing.T) {
+	const volumeName = "compilation-cache"
+	cache := &v1beta1.CompilationCacheConfig{PVCName: volumeName}
+
+	tests := []struct {
+		name            string
+		volumes         []corev1.Volume
+		expectedVolumes []corev1.Volume
+		expectedError   string
+	}{
+		{
+			name: "missing volume is added",
+			expectedVolumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+				},
+			}},
+		},
+		{
+			name: "matching PVC volume is preserved",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+				},
+			}},
+			expectedVolumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+				},
+			}},
+		},
+		{
+			name: "non-PVC volume is rejected",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			}},
+			expectedError: `compilation cache volume "compilation-cache" must reference PVC "compilation-cache"`,
+		},
+		{
+			name: "different PVC is rejected",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "other-pvc"},
+				},
+			}},
+			expectedError: `compilation cache volume "compilation-cache" references PVC "other-pvc" instead of "compilation-cache"`,
+		},
+		{
+			name: "read-only PVC is rejected",
+			volumes: []corev1.Volume{{
+				Name: volumeName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName, ReadOnly: true},
+				},
+			}},
+			expectedError: `compilation cache PVC "compilation-cache" must be writable`,
+		},
+		{
+			name: "duplicate matching PVC volumes are rejected",
+			volumes: []corev1.Volume{
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+					},
+				},
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+					},
+				},
+			},
+			expectedError: `compilation cache volume "compilation-cache" is defined more than once`,
+		},
+		{
+			name: "conflicting duplicate volume is rejected",
+			volumes: []corev1.Volume{
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: volumeName},
+					},
+				},
+				{
+					Name: volumeName,
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
+			},
+			expectedError: `compilation cache volume "compilation-cache" must reference PVC "compilation-cache"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec := &corev1.PodSpec{Volumes: append([]corev1.Volume(nil), tt.volumes...)}
+
+			err := applyCompilationCacheVolume(podSpec, cache)
+			if tt.expectedError != "" {
+				require.EqualError(t, err, tt.expectedError)
+				assert.Equal(t, tt.volumes, podSpec.Volumes)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedVolumes, podSpec.Volumes)
+		})
+	}
+}
+
+func TestApplyCompilationCacheExistingMount(t *testing.T) {
+	const mountPath = "/home/dynamo/.cache/vllm"
+
+	tests := []struct {
+		name           string
+		mounts         []corev1.VolumeMount
+		expectedMounts []corev1.VolumeMount
+		expectedError  string
+	}{
+		{
+			name: "matching writable mount is preserved",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				SubPath:   "model",
+			}},
+			expectedMounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				SubPath:   "model",
+			}},
+		},
+		{
+			name: "different volume at mount path is rejected",
+			mounts: []corev1.VolumeMount{{
+				Name:      "other-volume",
+				MountPath: mountPath,
+			}},
+			expectedError: `compilationCache.mountPath "/home/dynamo/.cache/vllm" is already used by volume "other-volume"`,
+		},
+		{
+			name: "read-only cache mount is rejected",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: mountPath,
+				ReadOnly:  true,
+			}},
+			expectedError: `compilation cache volume "compilation-cache" at "/home/dynamo/.cache/vllm" must be writable`,
+		},
+		{
+			name: "same volume at another path does not satisfy cache mount",
+			mounts: []corev1.VolumeMount{{
+				Name:      "compilation-cache",
+				MountPath: "/other-path",
+			}},
+			expectedMounts: []corev1.VolumeMount{
+				{Name: "compilation-cache", MountPath: "/other-path"},
+				{Name: "compilation-cache", MountPath: mountPath},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := &corev1.Container{
+				VolumeMounts: append([]corev1.VolumeMount(nil), tt.mounts...),
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   "compilation-cache",
+					MountPath: mountPath,
+				},
+			}
+
+			err := applyCompilationCache(container, component, BackendFrameworkVLLM)
+			if tt.expectedError != "" {
+				require.EqualError(t, err, tt.expectedError)
+				assert.Equal(t, tt.mounts, container.VolumeMounts)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedMounts, container.VolumeMounts)
+		})
+	}
+}
+
 func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{}
