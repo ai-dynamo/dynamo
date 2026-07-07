@@ -18,8 +18,8 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use flate2::read::MultiGzDecoder;
-use serde::Deserialize;
 use serde::de::IgnoredAny;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RequestTraceRecord {
@@ -40,24 +40,84 @@ pub(crate) enum TraceSchema {
     RequestV1,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct AgentContextFields {
     pub(crate) session_id: String,
     #[serde(default)]
     pub(crate) parent_session_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct RequestTraceRequestMetrics {
     pub(crate) request_id: String,
     #[serde(default)]
+    pub(crate) x_request_id: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) input_tokens: Option<u64>,
+    #[serde(default)]
     pub(crate) output_tokens: Option<u64>,
+    #[serde(default)]
+    pub(crate) cached_tokens: Option<u64>,
     #[serde(default)]
     pub(crate) request_received_ms: Option<u64>,
     #[serde(default)]
+    pub(crate) prefill_wait_time_ms: Option<f64>,
+    #[serde(default)]
+    pub(crate) prefill_time_ms: Option<f64>,
+    #[serde(default)]
+    pub(crate) ttft_ms: Option<f64>,
+    #[serde(default)]
     pub(crate) total_time_ms: Option<f64>,
     #[serde(default)]
+    pub(crate) avg_itl_ms: Option<f64>,
+    #[serde(default)]
+    pub(crate) kv_hit_rate: Option<f64>,
+    #[serde(default)]
+    pub(crate) kv_transfer_estimated_latency_ms: Option<f64>,
+    #[serde(default)]
+    pub(crate) queue_depth: Option<u64>,
+    #[serde(default)]
+    pub(crate) worker: Option<RequestTraceWorkerInfo>,
+    #[serde(default)]
     pub(crate) replay: Option<RequestTraceReplayMetrics>,
+    #[serde(default)]
+    pub(crate) finish_reason_metadata: Option<RequestTraceFinishReasonMetadata>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RequestTraceWorkerInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prefill_worker_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) prefill_dp_rank: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) decode_worker_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) decode_dp_rank: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RequestTraceFinishReasonMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) backend_finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stop_reason: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) tool_calls: Vec<RequestTraceToolCall>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RequestTraceToolCall {
+    pub(crate) choice_index: u32,
+    pub(crate) tool_call_index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -429,8 +489,7 @@ mod tests {
             request_id: "req".to_string(),
             output_tokens: Some(1),
             request_received_ms: Some(1_000),
-            total_time_ms: None,
-            replay: None,
+            ..Default::default()
         };
 
         assert_eq!(request_times(1_250, &request), (1_000, 1_250));
@@ -532,6 +591,20 @@ mod tests {
         let error = load_request_trace_records(&[file.path().to_path_buf()]).unwrap_err();
         assert!(error.to_string().contains("failed to parse"));
         assert!(format!("{error:#}").contains("unknown variant `dynamo.request.trace.v2`"));
+    }
+
+    #[test]
+    fn rejects_legacy_agent_trace_schema() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"schema":"dynamo.agent.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"request":{{"request_id":"req-1","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":2,"input_sequence_hashes":[11]}}}}}}"#
+        )
+        .unwrap();
+
+        let error = load_request_trace_records(&[file.path().to_path_buf()]).unwrap_err();
+        assert!(error.to_string().contains("failed to parse"));
+        assert!(format!("{error:#}").contains("unknown variant `dynamo.agent.trace.v1`"));
     }
 
     #[test]
