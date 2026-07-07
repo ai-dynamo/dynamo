@@ -70,6 +70,90 @@ RUN pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dis
  && pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dist/ai_dynamo-*.whl \
  && pip install --break-system-packages --no-cache-dir msgspec uvloop imageio imageio-ffmpeg
 
+# (5) UCX + NIXL, built from source exactly as container/templates/wheel_builder.Dockerfile
+#     does for CUDA — the Rubin framework bases ship no UCX/NIXL, so without this the
+#     Rust nixl-sys dlopen("libnixl.so") falls into stub mode and KV transfer / disagg
+#     is unavailable. Versions are the per-framework values from container/context.yaml
+#     (trtllm: nixl v1.0.1). The supporting native deps (hwloc, gdrcopy, libfabric) are
+#     built the same way so UCX/NIXL link identically to the templated images. Built
+#     AFTER the Dynamo wheels so the validated stub-mode build above is unchanged; NIXL
+#     is resolved at runtime via LD_LIBRARY_PATH (same wiring as the runtime templates).
+#     dnf packages from wheel_builder are mapped to their apt equivalents for Ubuntu.
+ARG NIXL_REF=v1.0.1
+ARG NIXL_UCX_REF=v1.20.x
+ARG NIXL_GDRCOPY_REF=v2.5.2
+ARG NIXL_LIBFABRIC_REPO=https://github.com/ofiwg/libfabric.git
+ARG NIXL_LIBFABRIC_REF=v2.5.1
+ARG HWLOC_VERSION=2.12.2
+ARG CUDA_MAJOR=13
+ENV CUDA_HOME=/usr/local/cuda
+
+# Build deps (apt equivalents of wheel_builder's dnf list) + meson/pybind11/tomlkit.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      autoconf automake libtool make cmake ninja-build pkg-config flex \
+      git wget curl ca-certificates clang libclang-dev protobuf-compiler \
+      libibverbs-dev rdma-core ibverbs-utils libibumad-dev librdmacm-dev ibverbs-providers \
+      libnuma-dev libcurl4-openssl-dev libssl-dev uuid-dev zlib1g-dev \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --break-system-packages --no-cache-dir --upgrade meson pybind11 patchelf tomlkit
+
+# hwloc (NIXL needs a newer hwloc than distros ship; keep in sync with upstream NIXL).
+RUN cd /tmp \
+ && HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1,2)" \
+ && wget -q "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" \
+ && tar -xzf "hwloc-${HWLOC_VERSION}.tar.gz" && cd "hwloc-${HWLOC_VERSION}" \
+ && ./configure --prefix=/usr/local --disable-nvml && make -j"$(nproc)" && make install && ldconfig \
+ && rm -rf "/tmp/hwloc-${HWLOC_VERSION}" "/tmp/hwloc-${HWLOC_VERSION}.tar.gz"
+
+# gdrcopy (UCX --with-gdrcopy). Library + headers only; the kmod lives on the host.
+RUN cd /tmp \
+ && git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git \
+ && make -C gdrcopy CUDA=${CUDA_HOME} prefix=/usr/local lib lib_install && ldconfig \
+ && rm -rf /tmp/gdrcopy
+
+# libfabric (NIXL libfabric/EFA backend).
+RUN cd /usr/local/src \
+ && git clone ${NIXL_LIBFABRIC_REPO} && cd libfabric && git checkout ${NIXL_LIBFABRIC_REF} \
+ && ./autogen.sh \
+ && ./configure --prefix=/usr/local/libfabric \
+      --disable-verbs --disable-psm3 --disable-opx --disable-usnic --disable-rstream \
+      --enable-efa --with-cuda=${CUDA_HOME} --enable-cuda-dlopen --with-gdrcopy --enable-gdrcopy-dlopen \
+ && make -j"$(nproc)" && make install \
+ && echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && ldconfig
+ENV PKG_CONFIG_PATH=/usr/local/ucx/lib/pkgconfig:/usr/local/libfabric/lib/pkgconfig:${PKG_CONFIG_PATH:-}
+
+# UCX.
+RUN cd /usr/local/src \
+ && git clone https://github.com/openucx/ucx.git && cd ucx && git checkout ${NIXL_UCX_REF} \
+ && ./autogen.sh \
+ && ./contrib/configure-release \
+      --prefix=/usr/local/ucx --enable-shared --disable-static --disable-doxygen-doc \
+      --enable-optimizations --enable-cma --enable-devel-headers \
+      --with-cuda=${CUDA_HOME} --with-verbs --with-dm --with-gdrcopy=/usr/local --with-efa --enable-mt \
+ && make -j"$(nproc)" && make -j install-strip \
+ && echo "/usr/local/ucx/lib"     > /etc/ld.so.conf.d/ucx.conf \
+ && echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && ldconfig
+
+# NIXL native SDK (meson) + Python wheel, linked against the UCX/libfabric above.
+RUN cd /usr/local/src \
+ && git clone https://github.com/ai-dynamo/nixl.git && cd nixl && git checkout ${NIXL_REF} \
+ && ./contrib/tomlutil.py --wheel-name "nixl-cu${CUDA_MAJOR}" pyproject.toml \
+ && meson setup build/ --prefix=/opt/nvidia/nvda_nixl --libdir=lib64 --buildtype=release \
+      -Dcudapath_lib=${CUDA_HOME}/lib64 -Dcudapath_inc=${CUDA_HOME}/include \
+      -Ducx_path=/usr/local/ucx -Dlibfabric_path=/usr/local/libfabric \
+ && cd build && ninja && ninja install \
+ && echo "/opt/nvidia/nvda_nixl/lib64"         > /etc/ld.so.conf.d/nixl.conf \
+ && echo "/opt/nvidia/nvda_nixl/lib64/plugins" >> /etc/ld.so.conf.d/nixl.conf && ldconfig \
+ && cd /usr/local/src/nixl && uv build . --wheel --out-dir /opt/dynamo/nixl-dist --python 3.12 \
+ && pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/nixl-dist/nixl*.whl
+
+# Match the wheel_builder/runtime NIXL + UCX env so Rust nixl-sys dlopen() and the nixl
+# Python package both resolve the copy we just built (no stub-mode fallback at runtime).
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/libfabric/lib:${LD_LIBRARY_PATH:-}
+
 ENV DYNAMO_HOME=/opt/dynamo
 WORKDIR /workspace
 ENTRYPOINT ["/bin/bash"]

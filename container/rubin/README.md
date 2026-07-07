@@ -19,7 +19,30 @@ images yet (see Gotchas).
 | `Dockerfile.sglang` | `gitlab-master.nvidia.com:5005/dl/dgx/sglang:rubin-py3-devel` | **Yes** | `blake3` |
 
 All three then: install `nats`+`etcd` → Rust + maturin → build & `pip install` the Dynamo wheels
-from source → `ENTRYPOINT bash`.
+from source → **build & install UCX + NIXL from source** → `ENTRYPOINT bash`.
+
+### UCX + NIXL (built from source)
+
+The Rubin framework bases ship **no** UCX/NIXL, so each image builds them from source using
+the exact same recipe as `container/templates/wheel_builder.Dockerfile`'s CUDA path
+(`hwloc` → `gdrcopy` → `libfabric` → `UCX` → `NIXL` via meson), with the `dnf` package list
+mapped to its Ubuntu/`apt` equivalents. Versions come from `container/context.yaml`:
+
+| Component | Version (context.yaml key) | trtllm | vllm | sglang |
+|-----------|----------------------------|--------|------|--------|
+| NIXL      | `<framework>.nixl_ref`     | `v1.0.1` | `v1.1.0` | `v1.0.1` |
+| UCX       | `nixl_ucx_ref`             | `v1.20.x` | `v1.20.x` | `v1.20.x` |
+| gdrcopy   | `nixl_gdrcopy_ref`         | `v2.5.2` | `v2.5.2` | `v2.5.2` |
+| libfabric | `nixl_libfabric_ref`       | `v2.5.1` | `v2.5.1` | `v2.5.1` |
+| hwloc     | `hwloc_version`            | `2.12.2` | `2.12.2` | `2.12.2` |
+
+Override any of these per build with `--build-arg NIXL_REF=… / NIXL_UCX_REF=… / …`. NIXL
+installs to `/opt/nvidia/nvda_nixl` (libs under `lib64`, matching the templated CUDA layout)
+and UCX to `/usr/local/ucx`; both are wired via `NIXL_PREFIX`/`NIXL_LIB_DIR`/`NIXL_PLUGIN_DIR`
+and `LD_LIBRARY_PATH` so the Rust `nixl-sys` `dlopen("libnixl.so")` resolves the real library
+at runtime instead of falling into stub mode. The build is placed **after** the Dynamo wheel
+build so Dynamo itself still compiles in the validated stub-mode path (unchanged); NIXL is
+supplied purely at runtime, exactly as the runtime templates do.
 
 ## Build (on a native arm64 Docker host, e.g. `computelab-armbuild-1`)
 
