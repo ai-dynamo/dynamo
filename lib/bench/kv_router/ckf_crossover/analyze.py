@@ -239,6 +239,15 @@ def summarize_capacity(groups, publisher_support):
             ratio_ci_high=ratio[2],
             paired_repetitions=ratio[3],
         )
+    crtc_generator_valid = {
+        record["window_ms"]: record["generator_valid"]
+        for record in records
+        if record["backend"] == "crtc"
+    }
+    for record in records:
+        record["comparison_generator_valid"] = (
+            record["generator_valid"] and crtc_generator_valid[record["window_ms"]]
+        )
     return records
 
 
@@ -258,7 +267,11 @@ def keepup_ceiling(records, backend):
 
 def stable_crossover(records, backend):
     rows = sorted(
-        (row for row in records if row["backend"] == backend),
+        (
+            row
+            for row in records
+            if row["backend"] == backend and row["comparison_generator_valid"]
+        ),
         key=lambda row: row["offered_block_ops_s"],
     )
     for index, row in enumerate(rows):
@@ -279,14 +292,15 @@ def write_capacity(records, output_dir):
         writer.writeheader()
         writer.writerows(records)
     lines = [
-        "| Backend | Window ms | Offered block ops/s | Achieved block ops/s (95% CI) | All 5 keep up | Generator valid | Ratio vs CRTC (95% CI) | Lookup p50 us | Lookup p99 us |",
-        "|---|---:|---:|---:|:---:|:---:|---:|---:|---:|",
+        "| Backend | Window ms | Offered block ops/s | Achieved block ops/s (95% CI) | All 5 keep up | Generator valid | Ratio generator valid | Ratio vs CRTC (95% CI) | Lookup p50 us | Lookup p99 us |",
+        "|---|---:|---:|---:|:---:|:---:|:---:|---:|---:|---:|",
     ]
     for row in records:
         lines.append(
             "| {backend} | {window_ms} | {offered_block_ops_s:,.0f} | "
             "{achieved_block_ops_s_mean:,.0f} [{achieved_block_ops_s_ci_low:,.0f}, {achieved_block_ops_s_ci_high:,.0f}] | "
-            "{all_keep_up} | {generator_valid} | {ratio_to_crtc:.3f} [{ratio_ci_low:.3f}, {ratio_ci_high:.3f}] | "
+            "{all_keep_up} | {generator_valid} | {comparison_generator_valid} | "
+            "{ratio_to_crtc:.3f} [{ratio_ci_low:.3f}, {ratio_ci_high:.3f}] | "
             "{lookup_service_p50_us_mean:.2f} | {lookup_service_p99_us_mean:.2f} |".format(
                 **row
             )
@@ -553,6 +567,7 @@ def write_final(trials, results_dir, output_dir, event_threads, query_concurrenc
         "Ratio vs CRTC (95% CI)",
         "Valid",
         "Generator valid",
+        "Ratio generator valid",
         "Lookup p50 us",
         "Lookup p99 us",
         "Query wait p99 us",
@@ -610,6 +625,7 @@ def write_final(trials, results_dir, output_dir, event_threads, query_concurrenc
             f"{row['ratio_to_crtc']:.3f} [{row['ratio_ci_low']:.3f}, {row['ratio_ci_high']:.3f}]",
             str(row["all_keep_up"]),
             str(row["generator_valid"]),
+            str(row["comparison_generator_valid"]),
             f"{row['lookup_service_p50_us_mean']:.2f}",
             f"{row['lookup_service_p99_us_mean']:.2f}",
             f"{row['query_wait_p99_us_mean']:.2f}",
@@ -666,6 +682,7 @@ def write_final(trials, results_dir, output_dir, event_threads, query_concurrenc
             "—",
             str(row["valid_no_backlog"]),
             str(row["generator_valid"]),
+            "—",
             f"{row['lookup_service_p50_us_mean']:.2f}",
             f"{row['lookup_service_p99_us_mean']:.2f}",
             f"{row['query_wait_p99_us_mean']:.2f}",
