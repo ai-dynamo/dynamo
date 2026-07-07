@@ -51,9 +51,17 @@ cd $DYNAMO_HOME/examples/backends/vllm
 # GPU deployment
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct
 
+# Unified backend
+bash launch/agg_multimodal.sh --unified --model Qwen/Qwen3-VL-2B-Instruct
+
 # XPU deployment
 bash launch/xpu/agg_multimodal_xpu.sh --model Qwen/Qwen3-VL-2B-Instruct
 ```
+
+The unified entry point supports HTTP, data-URL, and decoded image/video input
+in aggregated mode and forwards model processor options such as
+`mm_processor_kwargs`. Separate Encode workers and multimodal P/D remain on the
+legacy entry point until their follow-up changes land.
 
 **Image request:**
 
@@ -238,11 +246,14 @@ flowchart LR
 
 ```bash
 bash examples/backends/vllm/launch/agg_multimodal.sh \
+    --unified \
     --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
     --multimodal-embedding-cache-capacity-gb 10
 ```
 
-`dynamo.vllm` automatically configures `ec_both` mode with the `DynamoMultimodalEmbeddingCacheConnector` when the capacity is > 0.
+Both `dynamo.vllm` and the unified vLLM entry point automatically configure
+`ec_both` mode with the `DynamoMultimodalEmbeddingCacheConnector` when the
+capacity is greater than zero.
 
 **Launch with `vllm serve` (standalone, no Dynamo):**
 

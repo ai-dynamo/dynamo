@@ -280,7 +280,12 @@ trtllm_configs = {
             pytest.mark.multimodal,
             pytest.mark.nightly,
         ],
-        model="Qwen/Qwen2-VL-7B-Instruct",
+        # Must match the disagg engine configs shipped in disagg_multimodal.sh
+        # (engine_configs/qwen3-vl-2b-instruct/{prefill,decode}.yaml). Qwen2-VL-7B
+        # only ships an agg.yaml, so loading it against the 2B disagg configs
+        # crashes the worker during multimodal KV-cache profiling
+        # ("Number of mm_embeds does not match expected total").
+        model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=900,
         delayed_start=60,

@@ -2259,6 +2259,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	clique.Annotations = annotations
 
 	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName)
+	injectVolcanoSchedulerIfEnabled(clique, p.runtimeConfig)
 	return clique, nil
 }
 
@@ -2286,26 +2287,26 @@ func resolveGroveClusterTopologyDomains(ctx context.Context, kubeClient ctrlclie
 		return nil, nil
 	}
 	if kubeClient == nil {
-		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q requires a Kubernetes client to read ClusterTopology", kvt.ClusterTopologyName)
+		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q requires a Kubernetes client to read ClusterTopologyBinding", kvt.ClusterTopologyName)
 	}
 
-	ct := &grovev1alpha1.ClusterTopology{}
+	ct := &grovev1alpha1.ClusterTopologyBinding{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
 		if k8serrors.IsNotFound(err) {
-			return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopology resource that was not found", kvt.ClusterTopologyName)
+			return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopologyBinding resource that was not found", kvt.ClusterTopologyName)
 		}
-		return nil, fmt.Errorf("failed to read ClusterTopology %q for kvTransferPolicy: %w", kvt.ClusterTopologyName, err)
+		return nil, fmt.Errorf("failed to read ClusterTopologyBinding %q for kvTransferPolicy: %w", kvt.ClusterTopologyName, err)
 	}
 
 	domains := topologyDomainsFromClusterTopology(ct)
 	if !topologyDomainsContain(domains, kvt.Domain) {
-		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopology %q; available domains: %v",
+		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopologyBinding %q; available domains: %v",
 			kvt.Domain, kvt.ClusterTopologyName, domains)
 	}
 	return domains, nil
 }
 
-func topologyDomainsFromClusterTopology(ct *grovev1alpha1.ClusterTopology) []v1beta1.TopologyDomain {
+func topologyDomainsFromClusterTopology(ct *grovev1alpha1.ClusterTopologyBinding) []v1beta1.TopologyDomain {
 	if ct == nil {
 		return nil
 	}
@@ -2323,6 +2324,21 @@ func topologyDomainsContain(domains []v1beta1.TopologyDomain, want v1beta1.Topol
 		}
 	}
 	return false
+}
+
+func resolveGroveSchedulerQueue(ctx context.Context, annotations map[string]string, runtimeConfig *controller_common.RuntimeConfig) (string, error) {
+	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled && runtimeConfig.VolcanoSchedulerEnabled {
+		return "", fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
+	}
+	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
+		return "", nil
+	}
+
+	queueName, err := DetermineKaiSchedulerQueue(ctx, annotations)
+	if err != nil {
+		return "", fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
+	}
+	return queueName, nil
 }
 
 func GenerateGrovePodCliqueSet(
@@ -2345,6 +2361,9 @@ func GenerateGrovePodCliqueSet(
 	}
 	gangSet.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
+	// Volcano queue selection is consumed by Grove from the PodCliqueSet annotation.
+	// KAI-Scheduler is injected later on each clique via schedulerName and queue label.
+	injectVolcanoQueueAnnotation(gangSet, dynamoDeployment.Annotations, runtimeConfig)
 	gangSet.Spec.Replicas = 1
 	updateStrategy, err := groveUpdateStrategyFromAnnotations(dynamoDeployment.Annotations)
 	if err != nil {
@@ -2368,14 +2387,9 @@ func GenerateGrovePodCliqueSet(
 	// specToGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.
 	gangSet.Spec.Template.TopologyConstraint = specToGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
 
-	// Validate kai-scheduler queue once if kai-scheduler is enabled
-	var validatedQueueName string
-	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled {
-		var err error
-		validatedQueueName, err = DetermineKaiSchedulerQueue(ctx, dynamoDeployment.Annotations)
-		if err != nil {
-			return nil, fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
-		}
+	validatedQueueName, err := resolveGroveSchedulerQueue(ctx, dynamoDeployment.Annotations, runtimeConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	discoveryBackend := controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
