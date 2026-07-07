@@ -9,7 +9,7 @@ from typing import Any
 
 from tensorrt_llm.inputs.multimodal import apply_mm_hashes
 from tensorrt_llm.inputs.utils import load_image
-from transformers import AutoConfig
+from transformers import PretrainedConfig
 
 logger = logging.getLogger(__name__)
 
@@ -253,15 +253,15 @@ def _get_replacement_id(model_path: str) -> int:
     """
 
     try:
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        config, _ = PretrainedConfig.get_config_dict(model_path)
         # Some models (e.g. Qwen3-VL) store vocab_size in text_config, not top-level.
-        vocab_size = getattr(config, "vocab_size", None)
-        if vocab_size is None and hasattr(config, "text_config"):
-            vocab_size = getattr(config.text_config, "vocab_size", None)
+        vocab_size = config.get("vocab_size")
+        if vocab_size is None:
+            vocab_size = config.get("text_config", {}).get("vocab_size")
         if vocab_size is None:
             raise AttributeError("vocab_size not found in config or config.text_config")
         replacement_id = vocab_size + 1
-        logger.info(f"Got vocab_size={vocab_size} from AutoConfig")
+        logger.info(f"Got vocab_size={vocab_size} from config.json")
         return replacement_id
     except Exception as e:
         raise RuntimeError(

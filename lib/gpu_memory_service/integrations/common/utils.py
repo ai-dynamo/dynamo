@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
-GMS_TAGS = ("weights", "kv_cache")
 
 
 @dataclass(frozen=True)

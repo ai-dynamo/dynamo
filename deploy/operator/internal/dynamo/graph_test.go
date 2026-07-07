@@ -1161,9 +1161,9 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
-	clusterTopology := &grovev1alpha1.ClusterTopology{
+	clusterTopology := &grovev1alpha1.ClusterTopologyBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
-		Spec: grovev1alpha1.ClusterTopologySpec{
+		Spec: grovev1alpha1.ClusterTopologyBindingSpec{
 			Levels: []grovev1alpha1.TopologyLevel{
 				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
 				{Domain: grovev1alpha1.TopologyDomainRack, Key: "nvidia.com/rack"},
@@ -6385,6 +6385,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 		expectError    bool
 		expectedPVCs   []string
 		expectedMounts []corev1.VolumeMount
+		expectedInit   []corev1.VolumeMount
 	}{
 		{
 			name: "valid volumeMounts",
@@ -6405,7 +6406,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 			},
 		},
 		{
-			name: "volumeMounts keep generated PVC when podTemplate has other volumes",
+			name: "volumeMounts compose with extra main container mounts",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: commonconsts.ComponentTypeFrontend,
 				VolumeMounts: []v1alpha1.VolumeMount{
@@ -6416,6 +6417,14 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				},
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					PodSpec: &corev1.PodSpec{
+						InitContainers: []corev1.Container{
+							{
+								Name: "init",
+								VolumeMounts: []corev1.VolumeMount{
+									{Name: "test-pvc", MountPath: "/data"},
+								},
+							},
+						},
 						Volumes: []corev1.Volume{
 							{
 								Name: "config",
@@ -6427,13 +6436,22 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 							},
 						},
 					},
+					MainContainer: &corev1.Container{
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: "config", MountPath: "/config"},
+						},
+					},
 				},
 			},
 			expectError:  false,
 			expectedPVCs: []string{"test-pvc"},
 			expectedMounts: []corev1.VolumeMount{
+				{Name: "config", MountPath: "/config"},
 				{Name: "test-pvc", MountPath: "/data"},
 				{Name: "shared-memory", MountPath: "/dev/shm"},
+			},
+			expectedInit: []corev1.VolumeMount{
+				{Name: "test-pvc", MountPath: "/data"},
 			},
 		},
 		{
@@ -6538,6 +6556,10 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				if !found {
 					t.Errorf("GenerateBasePodSpec() expected volume mount %+v not found", expectedMount)
 				}
+			}
+			if tt.expectedInit != nil {
+				require.NotEmpty(t, podSpec.InitContainers)
+				assert.Equal(t, tt.expectedInit, podSpec.InitContainers[0].VolumeMounts)
 			}
 		})
 	}
@@ -9598,6 +9620,192 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 	clique := pcs.Spec.Template.Cliques[0]
 	assert.Equal(t, "svc-override", clique.Annotations["team/cost-center"],
 		"service-level annotation should take precedence over spec.metadata")
+}
+
+func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T) {
+	tests := []struct {
+		name                string
+		metadataAnnotations map[string]string
+		specAnnotations     map[string]string
+		runtimeConfig       *controller_common.RuntimeConfig
+		expectedQueue       string
+		expectQueue         bool
+	}{
+		{
+			name: "dynamo metadata annotation maps to grove annotation",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: "qa-volcano-e2e",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            true,
+				VolcanoSchedulerEnabled: true,
+			},
+			expectedQueue: "qa-volcano-e2e",
+			expectQueue:   true,
+		},
+		{
+			name: "dynamo metadata annotation is trimmed and takes precedence over spec annotation",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: " metadata-queue ",
+			},
+			specAnnotations: map[string]string{
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            true,
+				VolcanoSchedulerEnabled: true,
+			},
+			expectedQueue: "metadata-queue",
+			expectQueue:   true,
+		},
+		{
+			name: "whitespace-only metadata annotation does not override spec annotation",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: " \t ",
+			},
+			specAnnotations: map[string]string{
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            true,
+				VolcanoSchedulerEnabled: true,
+			},
+			expectedQueue: "spec-queue",
+			expectQueue:   true,
+		},
+		{
+			name: "whitespace-only metadata annotation is ignored",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: " \t ",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            true,
+				VolcanoSchedulerEnabled: true,
+			},
+			expectQueue: false,
+		},
+		{
+			name: "grove spec annotation remains a direct pass-through",
+			specAnnotations: map[string]string{
+				commonconsts.GroveAnnotationVolcanoQueue: "spec-queue",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            true,
+				VolcanoSchedulerEnabled: true,
+			},
+			expectedQueue: "spec-queue",
+			expectQueue:   true,
+		},
+		{
+			name: "metadata annotation is ignored when volcano scheduler integration is disabled",
+			metadataAnnotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: "qa-volcano-e2e",
+			},
+			runtimeConfig: &controller_common.RuntimeConfig{
+				GroveEnabled:            true,
+				VolcanoSchedulerEnabled: false,
+			},
+			expectQueue: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-dgd",
+					Namespace:   "ns",
+					Annotations: tt.metadataAnnotations,
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Annotations: tt.specAnnotations,
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: commonconsts.ComponentTypeWorker,
+							Replicas:      ptr.To(int32(1)),
+						},
+					},
+				},
+			}
+
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, tt.runtimeConfig, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			require.NotNil(t, pcs)
+			if tt.expectQueue {
+				require.NotNil(t, pcs.Annotations)
+				assert.Equal(t, tt.expectedQueue, pcs.Annotations[commonconsts.GroveAnnotationVolcanoQueue])
+				return
+			}
+			assert.NotContains(t, pcs.Annotations, commonconsts.GroveAnnotationVolcanoQueue)
+		})
+	}
+}
+
+func TestGenerateGrovePodCliqueSet_VolcanoSchedulerInjection(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: "gpu-training",
+			},
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+		},
+	}
+
+	pcs, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{GroveEnabled: true, VolcanoSchedulerEnabled: true},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, pcs.Spec.Template.Cliques, 1)
+	assert.Equal(t, "gpu-training", pcs.Annotations[commonconsts.GroveAnnotationVolcanoQueue])
+	assert.Equal(t, commonconsts.VolcanoSchedulerName, pcs.Spec.Template.Cliques[0].Spec.PodSpec.SchedulerName)
+}
+
+func TestGenerateGrovePodCliqueSet_SchedulerIntegrationMutualExclusion(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+		},
+	}
+
+	_, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{GroveEnabled: true, KaiSchedulerEnabled: true, VolcanoSchedulerEnabled: true},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kai-scheduler and volcano scheduler integrations cannot both be enabled")
 }
 
 func TestGenerateGrovePodCliqueSet_PriorityClassName(t *testing.T) {

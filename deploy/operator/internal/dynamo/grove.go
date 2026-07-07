@@ -345,6 +345,13 @@ func ResolveKaiSchedulerQueue(annotations map[string]string) string {
 	return resolveKaiSchedulerQueueName(annotations)
 }
 
+func resolveVolcanoQueueName(annotations map[string]string) string {
+	if annotations == nil {
+		return ""
+	}
+	return strings.TrimSpace(annotations[commonconsts.KubeAnnotationVolcanoQueue])
+}
+
 // injectKaiSchedulerIfEnabled injects kai-scheduler settings into a clique if kai-scheduler is enabled and grove is enabled
 func injectKaiSchedulerIfEnabled(
 	clique *grovev1alpha1.PodCliqueTemplateSpec,
@@ -372,4 +379,43 @@ func injectKaiSchedulerIfEnabled(
 		clique.Labels = make(map[string]string)
 	}
 	clique.Labels[commonconsts.KubeLabelKaiSchedulerQueue] = queueName
+}
+
+// injectVolcanoSchedulerIfEnabled injects Volcano scheduler settings into a clique if Volcano scheduler integration is enabled.
+func injectVolcanoSchedulerIfEnabled(
+	clique *grovev1alpha1.PodCliqueTemplateSpec,
+	runtimeConfig *controller_common.RuntimeConfig,
+) {
+	if !runtimeConfig.GroveEnabled || !runtimeConfig.VolcanoSchedulerEnabled {
+		return
+	}
+
+	// Check if user has manually set schedulerName - if so, respect their choice
+	if clique.Spec.PodSpec.SchedulerName != "" && clique.Spec.PodSpec.SchedulerName != commonconsts.VolcanoSchedulerName {
+		return
+	}
+
+	clique.Spec.PodSpec.SchedulerName = commonconsts.VolcanoSchedulerName
+}
+
+// injectVolcanoQueueAnnotation maps the Dynamo Volcano queue annotation onto
+// the generated PodCliqueSet annotation consumed by Grove's Volcano backend.
+func injectVolcanoQueueAnnotation(
+	gangSet *grovev1alpha1.PodCliqueSet,
+	annotations map[string]string,
+	runtimeConfig *controller_common.RuntimeConfig,
+) {
+	if !runtimeConfig.GroveEnabled || !runtimeConfig.VolcanoSchedulerEnabled {
+		return
+	}
+
+	queueName := resolveVolcanoQueueName(annotations)
+	if queueName == "" {
+		return
+	}
+
+	if gangSet.Annotations == nil {
+		gangSet.Annotations = make(map[string]string)
+	}
+	gangSet.Annotations[commonconsts.GroveAnnotationVolcanoQueue] = queueName
 }
