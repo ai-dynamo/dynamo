@@ -62,26 +62,50 @@ def init_vmm(device_type: VMMDeviceType) -> None:
         _vmm_instance = _create_vmm(device_type)
 
 
+def _detect_device_type() -> VMMDeviceType:
+    """Auto-detect the available accelerator device type at runtime.
+
+    Priority: CUDA > Other Device > fallback to CUDA (will fail at actual device use).
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return VMMDeviceType.CUDA
+    except Exception:
+        pass
+    return VMMDeviceType.CUDA
+
+
 def get_vmm() -> VMMDevice:
     """Return the process-global VMM singleton.
 
-    Raises ``RuntimeError`` if ``init_vmm()`` has not been called.
+    If ``init_vmm()`` has not been called, lazily auto-detects the device
+    type via ``_detect_device_type()`` and initializes. This preserves
+    backward compatibility for integration paths (vLLM, SGLang, TRTLLM,
+    gms-storage-client) that construct helpers without explicitly
+    bootstrapping the VMM singleton.
+
+    Explicit ``init_vmm(device_type)`` calls (e.g. from CLI ``--device-type``)
+    still take priority since they run before any ``get_vmm()`` call.
     """
     inst = _vmm_instance
     if inst is None:
-        raise RuntimeError("VMM not initialized; call init_vmm() at startup")
-    return inst
+        init_vmm(_detect_device_type())
+        inst = _vmm_instance
+    return inst  # type: ignore[return-value]
 
 
 def get_vmm_device_type() -> VMMDeviceType:
     """Return the active device type.
 
-    Raises ``RuntimeError`` if ``init_vmm()`` has not been called.
+    Lazily auto-detects if ``init_vmm()`` has not been called.
     """
     kind = _vmm_device_type
     if kind is None:
-        raise RuntimeError("VMM not initialized; call init_vmm() at startup")
-    return kind
+        init_vmm(_detect_device_type())
+        kind = _vmm_device_type
+    return kind  # type: ignore[return-value]
 
 
 def _create_vmm(device_type: VMMDeviceType) -> VMMDevice:

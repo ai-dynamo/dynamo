@@ -53,6 +53,7 @@ def _load_device(
     # Ensure the loader's main per-device thread has a current CUDA context for
     # the final synchronize/unmap/commit path.
     vmm = get_vmm()
+    vmm.ensure_initialized()
     vmm.runtime_set_device(device)
     client = GMSStorageClient(
         socket_path=get_socket_path(device),

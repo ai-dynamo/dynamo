@@ -953,18 +953,9 @@ async def test_allocation_manager_caches_exported_fd(monkeypatch):
     assert allocations.free_allocation(info.allocation_id)
 
 
-@pytest.fixture(autouse=False)
-def _init_vmm_cuda():
-    """Initialize VMM singleton for tests that use real GPU allocations."""
-    _vmm_module.init_vmm(VMMDeviceType.CUDA)
-    yield
-    _vmm_module._reset_vmm_singleton()
-
-
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
 @pytest.mark.skipif(not HAS_PYNVML, reason="pynvml is not available")
-@pytest.mark.usefixtures("_init_vmm_cuda")
 async def test_large_allocation_unblocks_after_export_fd_holder_dies(
     tmp_path,
 ):

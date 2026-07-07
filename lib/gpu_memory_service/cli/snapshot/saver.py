@@ -55,9 +55,11 @@ def _save_device(
         ",".join(shard_roots) or "-",
     )
     t0 = time.monotonic()
-    # This runs on a ThreadPoolExecutor thread; bind its CUDA device before
+    # This runs on a ThreadPoolExecutor thread; bind its device before
     # any device work, mirroring the loader's _load_device.
-    cuda_utils.cuda_runtime_set_device(device)
+    vmm = get_vmm()
+    vmm.ensure_initialized()
+    vmm.runtime_set_device(device)
     GMSStorageClient(
         output_dir,
         socket_path=get_socket_path(device),
