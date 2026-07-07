@@ -19,11 +19,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl git ca-certificates build-essential protobuf-compiler clang libclang-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# nats + etcd (arm64)
+# nats + etcd. TARGETARCH (amd64|arm64) is set by buildkit from --platform and
+# matches the nats/etcd release asset suffixes directly. Must be arch-aware: a
+# hardcoded arch ships the wrong-arch binary in the other arch's image and fails
+# at runtime with "Exec format error" (e.g. arm64 nats-server on an x86 node).
+ARG TARGETARCH
 RUN cd /tmp \
- && curl -fSL https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-linux-arm64.tar.gz | tar xz \
+ && curl -fSL https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-linux-${TARGETARCH}.tar.gz | tar xz \
  && install -m755 nats-server-*/nats-server /usr/local/bin/nats-server \
- && curl -fSL https://github.com/etcd-io/etcd/releases/download/v3.5.30/etcd-v3.5.30-linux-arm64.tar.gz | tar xz \
+ && curl -fSL https://github.com/etcd-io/etcd/releases/download/v3.5.30/etcd-v3.5.30-linux-${TARGETARCH}.tar.gz | tar xz \
  && install -m755 etcd-*/etcd etcd-*/etcdctl /usr/local/bin/ \
  && rm -rf nats-server-* etcd-*
 
