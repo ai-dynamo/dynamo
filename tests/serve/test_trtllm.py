@@ -691,7 +691,9 @@ def test_deployment(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
+@pytest.mark.unit
 @pytest.mark.trtllm
+@pytest.mark.gpu_0
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("config_file", qwen3_vl_engine_config_files)
 def test_qwen3_vl_multimodal_engine_configs_pin_torch_dtype(config_file):
