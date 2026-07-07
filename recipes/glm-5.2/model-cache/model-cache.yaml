@@ -22,6 +22,6 @@ spec:
     - ReadWriteMany
   resources:
     requests:
-      storage: 1Ti
-  # Edit this to match the target cluster.
+      storage: 1200Gi
+  # Edit this
   storageClassName: "your-storage-class-name"

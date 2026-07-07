@@ -16,7 +16,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: glm52-model-download
+  name: model-download
 spec:
   backoffLimit: 3
   completions: 1
@@ -24,12 +24,12 @@ spec:
   template:
     metadata:
       labels:
-        app: glm52-model-download
+        app: model-download
     spec:
       restartPolicy: Never
       containers:
         - name: model-download
-          image: python:3.12-slim
+          image: python:3.10-slim
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

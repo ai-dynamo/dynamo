@@ -13,17 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# AIPerf trace-replay benchmark for the GLM-5.2 B200 1P1D DGD.
+# AIPerf trace-replay benchmark for GLM-5.2 DGDs.
+#
+# One Job covers the aggregate and disaggregated B200 agentic variants. Edit
+# ENDPOINT below to select a DGD. Restart the DGD pods between independent
+# concurrency points so SGLang and Dynamo routing state are reset.
 #
 # Prerequisites:
-# - glm52-b200-tp8-kv-disagg is Ready
+# - Target DGD is Ready (see ../README.md)
 # - model-cache PVC contains TRACE_FILE
 #
 # Results: /model-cache/perf/<epoch>_<job-name>/
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: glm52-agentic-bench
+  name: glm52-bench
 spec:
   backoffLimit: 1
   activeDeadlineSeconds: 10800
@@ -32,195 +36,214 @@ spec:
   template:
     metadata:
       labels:
-        app: glm52-agentic-bench
+        app: glm52-bench
     spec:
+      # Co-locate the benchmark pod with a DGD frontend. Keep only the target
+      # DGD in values when both variants are deployed in the same namespace.
       affinity:
         podAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                  - key: nvidia.com/dynamo-component-type
-                    operator: In
-                    values:
-                      - frontend
-                  - key: nvidia.com/dynamo-graph-deployment-name
-                    operator: In
-                    values:
-                      - glm52-b200-tp8-kv-disagg
-              topologyKey: kubernetes.io/hostname
+          - labelSelector:
+              matchExpressions:
+              - key: nvidia.com/dynamo-component-type
+                operator: In
+                values:
+                - frontend
+              - key: nvidia.com/dynamo-graph-deployment-name
+                operator: In
+                values:
+                - glm52-agg-b200-agentic
+                - glm52-disagg-b200-agentic
+            topologyKey: kubernetes.io/hostname
+      # tolerations: # Uncomment and populate for tainted frontend nodes.
       containers:
-        - name: perf
-          image: python:3.12-slim
-          imagePullPolicy: IfNotPresent
-          workingDir: /workspace
-          command:
-            - /bin/bash
-            - -c
-          args:
-            - |
-              set -euo pipefail
-              ulimit -n 600000
-              apt-get update
-              apt-get install -y --no-install-recommends build-essential curl jq procps git
-              apt-get clean
-              pip install \
-                "aiperf==0.10.0" \
-                "huggingface_hub==1.16.4" \
-                "protobuf==7.35.0" \
-                "transformers==5.8.0" \
-                "tokenizers==0.22.2"
+      - name: perf
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        workingDir: /workspace
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          ulimit -n 600000
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential curl git jq procps
+          apt-get clean
+          pip install \
+            "aiperf==0.10.0" \
+            "huggingface_hub==1.16.4" \
+            "protobuf==7.35.0" \
+            "tokenizers==0.22.2" \
+            "transformers==5.8.0"
 
-              python3 - <<'PY'
-              import os
-              from huggingface_hub import snapshot_download
+          # Download tokenizer assets only. Loading the full remote model
+          # configuration in the client is unnecessary and less robust.
+          python3 - <<'PY'
+          import os
+          from huggingface_hub import snapshot_download
 
-              snapshot_download(
-                  repo_id=os.environ["TARGET_MODEL"],
-                  local_dir=os.environ["TOKENIZER_DIR"],
-                  allow_patterns=[
-                      "tokenizer*",
-                      "special_tokens_map.json",
-                      "added_tokens.json",
-                      "chat_template.jinja",
-                      "*.model",
-                      "merges.txt",
-                      "vocab.json",
-                  ],
-              )
-              PY
+          snapshot_download(
+              repo_id=os.environ["TARGET_MODEL"],
+              local_dir=os.environ["TOKENIZER_DIR"],
+              allow_patterns=[
+                  "tokenizer*",
+                  "special_tokens_map.json",
+                  "added_tokens.json",
+                  "chat_template.jinja",
+                  "*.model",
+                  "merges.txt",
+                  "vocab.json",
+              ],
+          )
+          PY
 
-              # AIPerf 0.10.0 resolves tokenizer names through the Hub inside
-              # multiprocessing workers even when the configured tokenizer is
-              # already a local directory. Accept that directory directly.
-              python3 - <<'PY'
-              from pathlib import Path
-              import aiperf.common.tokenizer as tokenizer_module
+          # AIPerf 0.10.0 resolves tokenizer names through the Hub inside
+          # multiprocessing workers. Accept an existing local directory.
+          python3 - <<'PY'
+          from pathlib import Path
+          import aiperf.common.tokenizer as tokenizer_module
 
-              module_path = Path(tokenizer_module.__file__)
-              source = module_path.read_text()
-              marker = "        from huggingface_hub import snapshot_download\n"
-              fix = (
-                  "        path = Path(name)\n"
-                  "        if path.is_dir():\n"
-                  "            return str(path)\n\n"
-              )
-              if fix not in source:
-                  if marker not in source:
-                      raise RuntimeError("AIPerf tokenizer resolver layout changed")
-                  module_path.write_text(source.replace(marker, fix + marker, 1))
-              PY
+          module_path = Path(tokenizer_module.__file__)
+          source = module_path.read_text()
+          marker = "        from huggingface_hub import snapshot_download\n"
+          fix = (
+              "        path = Path(name)\n"
+              "        if path.is_dir():\n"
+              "            return str(path)\n\n"
+          )
+          if fix not in source:
+              if marker not in source:
+                  raise RuntimeError("AIPerf tokenizer resolver layout changed")
+              module_path.write_text(source.replace(marker, fix + marker, 1))
+          PY
 
-              sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
-              export COLUMNS=200
-              EPOCH=$(date +%s)
+          sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
+          export COLUMNS=200
+          EPOCH=$(date +%s)
 
-              wait_for_model_ready() {
-                local max_attempts=${WAIT_FOR_MODEL_MAX_ATTEMPTS:-720}
-                local attempt=0
-                echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models"
-                while ! curl -sf "http://$ENDPOINT/v1/models" | \
-                  jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
-                  attempt=$((attempt + 1))
-                  if [ "$attempt" -ge "$max_attempts" ]; then
-                    echo "ERROR: model '$TARGET_MODEL' did not become ready"
-                    exit 1
-                  fi
-                  echo "[$(date '+%H:%M:%S')] not ready (${attempt}/${max_attempts})"
-                  sleep 5
-                done
-              }
-
-              if [ ! -f "$TRACE_FILE" ]; then
-                echo "ERROR: trace file not found: $TRACE_FILE"
+          wait_for_model_ready() {
+            local max_attempts=${WAIT_FOR_MODEL_MAX_ATTEMPTS:-720}
+            local attempt=0
+            echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models"
+            while ! curl -sf "http://$ENDPOINT/v1/models" | \
+              jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+              attempt=$((attempt + 1))
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "ERROR: model '$TARGET_MODEL' did not become ready after ${max_attempts} attempts"
                 exit 1
               fi
+              echo "[$(date '+%H:%M:%S')] not ready (${attempt}/${max_attempts}); sleeping 5s"
+              sleep 5
+            done
+            curl -s "http://$ENDPOINT/v1/models" | jq .
+          }
 
-              wait_for_model_ready
-              ROOT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
-              mkdir -p "$ROOT_DIR"
+          if [ ! -f "$TRACE_FILE" ]; then
+            echo "ERROR: trace file not found: $TRACE_FILE"
+            exit 1
+          fi
 
-              WARMUP_DIR="${ROOT_DIR}/warmup"
-              aiperf profile \
-                --model "$TARGET_MODEL" \
-                --tokenizer "$TOKENIZER_DIR" \
-                --tokenizer-trust-remote-code \
-                --url "http://$ENDPOINT" \
-                --streaming \
-                --ui simple \
-                --isl 8000 \
-                --osl 400 \
-                --concurrency 1 \
-                --request-count 5 \
-                --artifact-dir "$WARMUP_DIR"
+          wait_for_model_ready
+          ROOT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          mkdir -p "$ROOT_DIR"
+          echo "=============================================="
+          echo "Trace Replay Benchmark (AIPerf)"
+          echo "=============================================="
+          echo "Endpoint:      http://${ENDPOINT}"
+          echo "Model:         ${TARGET_MODEL}"
+          echo "Trace file:    ${TRACE_FILE}"
+          echo "Concurrency:   ${CONCURRENCY}"
+          echo "Artifact root: ${ROOT_DIR}"
+          echo "=============================================="
 
-              TS=$(date +'%Y%m%d_%H%M%S')
-              RUN_DIR="${ROOT_DIR}/GLM-5.2-NVFP4_trace_c${CONCURRENCY}_${TS}"
-              aiperf profile \
-                --model "$TARGET_MODEL" \
-                --tokenizer "$TOKENIZER_DIR" \
-                --tokenizer-trust-remote-code \
-                --input-file "$TRACE_FILE" \
-                --custom-dataset-type mooncake_trace \
-                --num-requests "$(wc -l < "$TRACE_FILE")" \
-                --url "http://$ENDPOINT" \
-                --streaming \
-                --use-server-token-count \
-                --extra-inputs ignore_eos:true \
-                --concurrency "$CONCURRENCY" \
-                --random-seed 42 \
-                --ui simple \
-                --artifact-dir "$RUN_DIR" \
-                --request-timeout-seconds 3900 \
-                --workers-max "$CONCURRENCY" \
-                --export-http-trace
+          WARMUP_DIR="${ROOT_DIR}/warmup"
+          mkdir -p "$WARMUP_DIR"
+          aiperf profile \
+            -m "$TARGET_MODEL" \
+            --tokenizer "$TOKENIZER_DIR" \
+            --tokenizer-trust-remote-code \
+            --url "http://$ENDPOINT" \
+            --streaming \
+            --ui simple \
+            --isl 8000 \
+            --osl 400 \
+            --concurrency 1 \
+            --request-count 5 \
+            --artifact-dir "$WARMUP_DIR"
+          echo "Warmup complete"
 
-              echo "Done. Artifacts: $ROOT_DIR"
-              find "$ROOT_DIR" -maxdepth 2 -type f -print
-          env:
-            - name: ENDPOINT
-              value: glm52-b200-tp8-kv-disagg-frontend:8000
-            - name: TRACE_FILE
-              value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
-            - name: CONCURRENCY
-              value: "64"
-            - name: TARGET_MODEL
-              value: nvidia/GLM-5.2-NVFP4
-            - name: TOKENIZER_DIR
-              value: /tmp/glm52-tokenizer
-            - name: AIPERF_HTTP_CONNECTION_LIMIT
-              value: "200"
-            - name: AIPERF_HTTP_SO_RCVTIMEO
-              value: "120"
-            - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
-              value: "3600"
-            - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
-              value: "3600"
-            - name: JOB_NAME
-              valueFrom:
-                fieldRef:
-                  apiVersion: v1
-                  fieldPath: metadata.labels['job-name']
-            - name: ROOT_ARTIFACT_DIR
-              value: /model-cache/perf
-            - name: HF_HOME
-              value: /model-cache
-            - name: PYTHONUNBUFFERED
-              value: "1"
-          envFrom:
-            - secretRef:
-                name: hf-token-secret
-          resources:
-            requests:
-              cpu: "4"
-              memory: 8Gi
-            limits:
-              cpu: "16"
-              memory: 64Gi
-          volumeMounts:
-            - name: model-cache
-              mountPath: /model-cache
+          MODEL_BASE="${TARGET_MODEL##*/}"
+          TS=$(date +'%Y%m%d_%H%M%S')
+          RUN_DIR="${ROOT_DIR}/${MODEL_BASE}_trace_c${CONCURRENCY}_${TS}"
+          mkdir -p "$RUN_DIR"
+          aiperf profile \
+            -m "$TARGET_MODEL" \
+            --tokenizer "$TOKENIZER_DIR" \
+            --tokenizer-trust-remote-code \
+            --input-file "$TRACE_FILE" \
+            --custom-dataset-type mooncake_trace \
+            --num-requests "$(wc -l < "$TRACE_FILE")" \
+            --url "http://$ENDPOINT" \
+            --streaming \
+            --use-server-token-count \
+            --extra-inputs ignore_eos:true \
+            --concurrency "$CONCURRENCY" \
+            --random-seed 42 \
+            --ui simple \
+            --artifact-dir "$RUN_DIR" \
+            --request-timeout-seconds 3900 \
+            --workers-max "$CONCURRENCY" \
+            --export-http-trace
+          echo "Concurrency ${CONCURRENCY} complete; artifacts in ${RUN_DIR}"
+          find "$ROOT_DIR" -maxdepth 2 -type f -print
+        env:
+        # --- Edit ENDPOINT to target the aggregate or disaggregated DGD. ---
+        - name: ENDPOINT
+          value: glm52-agg-b200-agentic-frontend:8000
+        - name: TRACE_FILE
+          value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+        - name: CONCURRENCY
+          value: "64"
+        # --- The remainder is shared across both variants. ---
+        - name: TARGET_MODEL
+          value: nvidia/GLM-5.2-NVFP4
+        - name: TOKENIZER_DIR
+          value: /tmp/glm52-tokenizer
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "200"
+        - name: AIPERF_HTTP_SO_RCVTIMEO
+          value: "120"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "3600"
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "3600"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /model-cache/perf
+        - name: HF_HOME
+          value: /model-cache
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        envFrom:
+        - secretRef:
+            name: hf-token-secret
+        resources:
+          requests:
+            cpu: "4"
+            memory: 8Gi
+          limits:
+            cpu: "16"
+            memory: 64Gi
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-cache
       restartPolicy: Never
       volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

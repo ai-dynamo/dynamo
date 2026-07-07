@@ -19,368 +19,335 @@
 #   prefill: 1 worker x 4 B200 GPUs (TP4 / DP4 / EP4)
 #   decode:  1 worker x 8 B200 GPUs (TP8 / DP8)
 #
-# Prerequisites:
-#   - Dynamo Platform installed
-#   - nvidia/GLM-5.2-NVFP4 available in the model-cache PVC
-#   - RDMA device plugin exposing rdma/ib
-#   - hf-token-secret in the deployment namespace
-#
 # The decode worker intentionally simulates MTP acceptance length 2.69 for
 # performance benchmarking. Remove the SGLANG_SIMULATE_ACC_* variables for
 # quality evaluation.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: glm52-b200-tp8-kv-disagg
-  labels:
-    app.kubernetes.io/name: glm52-b200-tp8-kv-disagg
-    app.kubernetes.io/part-of: dynamo
+  name: glm52-disagg-b200-agentic
 spec:
   backendFramework: sglang
   components:
-  - name: Frontend
-    replicas: 1
-    type: frontend
-    podTemplate:
-      metadata:
-        labels:
-          app.kubernetes.io/name: glm52-b200-tp8-kv-disagg
-          app.kubernetes.io/component: frontend
-      spec:
-        containers:
-        - name: main
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f
-          imagePullPolicy: IfNotPresent
-          command:
-          - /bin/bash
-          - -lc
-          args:
-          - |
-            set -euo pipefail
-            exec python3 -m dynamo.frontend \
-              --http-host 0.0.0.0 \
-              --http-port 8000 \
-              --router-mode kv \
-              --dyn-chat-processor dynamo \
-              --trust-remote-code
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-          env:
-          - name: HF_HOME
-            value: /model-cache
-          - name: HF_HUB_CACHE
-            value: /model-cache/hub
-          ports:
-          - name: http
-            containerPort: 8000
-            protocol: TCP
-          resources:
-            requests:
-              cpu: "4"
-              memory: 8Gi
-            limits:
-              cpu: "16"
-              memory: 32Gi
-          volumeMounts:
-          - name: model-cache
-            mountPath: /model-cache
-        volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
+    - name: Frontend
+      type: frontend
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --trust-remote-code
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f
+              resources: {}
+      replicas: 1
 
-  - name: prefill
-    replicas: 1
-    type: prefill
-    sharedMemorySize: 64Gi
-    podTemplate:
-      metadata:
-        labels:
-          app.kubernetes.io/name: glm52-b200-tp8-kv-disagg
-          app.kubernetes.io/component: prefill
-      spec:
-        affinity:
-          podAntiAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels:
-                  app.kubernetes.io/name: glm52-b200-tp8-kv-disagg
-                  app.kubernetes.io/component: prefill
-              topologyKey: kubernetes.io/hostname
-        nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-B200
-        tolerations:
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
-        containers:
-        - name: main
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f
-          imagePullPolicy: IfNotPresent
-          command:
-          - /bin/bash
-          - -lc
-          args:
-          - |
-            set -euo pipefail
-            ulimit -l unlimited || true
-            ulimit -n 1048576 || true
-            mkdir -p \
-              "${CUDA_CACHE_PATH}" \
-              "${FLASHINFER_CACHE_DIR}" \
-              "${SGLANG_CACHE_DIR}" \
-              "${SGLANG_DG_CACHE_DIR}" \
-              "${TRITON_CACHE_DIR}" \
-              "${TORCHINDUCTOR_CACHE_DIR}" \
-              "${TORCH_EXTENSIONS_DIR}" \
-              "${XDG_CACHE_HOME}"
-            UCX_NET_DEVICES="$(nvidia-smi topo -m | awk 'BEGIN{split("PIX PXB NODE PHB SYS", pri)} $1 ~ /^NIC[0-9]+:/ {gsub(":", "", $1); nic[$1]=$2; next} /CPU Affinity/ && /NIC/ {for (i=1; i<=NF; i++) if ($i ~ /^NIC[0-9]+$/) {idx=i+1; cols[++n]=idx; col[idx]=$i}; next} $1 ~ /^GPU[0-9]+$/ {g++; for (c=1; c<=n; c++) {idx=cols[c]; rel[g,c]=$idx}; next} END{for (r=1; r<=g; r++) for (p=1; p<=5; p++) {found=0; for (c=1; c<=n; c++) {dev=nic[col[cols[c]]]; if (rel[r,c] != pri[p] || dev == "" || dev ~ /bond/) continue; if (system("[ -d /sys/class/infiniband/" dev " ]") == 0) {found=1; if (!seen[dev]++) out=out (out ? "," : "") dev ":1"}} if (found) break} if (!out) exit 1; print out}')"
-            : "${UCX_NET_DEVICES:?no GPU-local InfiniBand devices found from nvidia-smi topo -m}"
-            export UCX_NET_DEVICES
-            export SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS="{\"ucx_devices\":\"${UCX_NET_DEVICES}\",\"ucx_error_handling_mode\":\"peer\"}"
-            echo "dynamic UCX_NET_DEVICES=${UCX_NET_DEVICES}"
-            exec python3 -m dynamo.sglang \
-              --model-path nvidia/GLM-5.2-NVFP4 \
-              --served-model-name nvidia/GLM-5.2-NVFP4 \
-              --dyn-tool-call-parser glm47 \
-              --dyn-reasoning-parser glm45 \
-              --host 0.0.0.0 \
-              --port 30000 \
-              --trust-remote-code \
-              --tensor-parallel-size 4 \
-              --data-parallel-size 4 \
-              --enable-dp-attention \
-              --ep-size 4 \
-              --quantization modelopt_fp4 \
-              --kv-cache-dtype fp8_e4m3 \
-              --context-length 500000 \
-              --mem-fraction-static 0.93 \
-              --attention-backend dsa \
-              --dsa-prefill-backend trtllm \
-              --dsa-decode-backend trtllm \
-              --moe-runner-backend flashinfer_trtllm_routed \
-              --chunked-prefill-size 16384 \
-              --max-prefill-tokens 32768 \
-              --max-running-requests 32 \
-              --disable-cuda-graph \
-              --disaggregation-mode prefill \
-              --disaggregation-transfer-backend nixl \
-              --disaggregation-bootstrap-port 12345 \
-              --speculative-algorithm EAGLE \
-              --speculative-num-steps 3 \
-              --speculative-eagle-topk 1 \
-              --speculative-num-draft-tokens 4 \
-              --enable-dp-lm-head \
-              --hicache-size 200 \
-              --enable-hierarchical-cache \
-              --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 32}' \
-              --disable-overlap-schedule \
-              --enable-metrics
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-          env:
-          - name: HF_HOME
-            value: /model-cache
-          - name: HF_HUB_CACHE
-            value: /model-cache/hub
-          - name: CUDA_CACHE_PATH
-            value: /tmp/compilation-cache/cuda
-          - name: CUDA_CACHE_MAXSIZE
-            value: "4294967296"
-          - name: FLASHINFER_CACHE_DIR
-            value: /tmp/compilation-cache/flashinfer
-          - name: SGLANG_CACHE_DIR
-            value: /tmp/compilation-cache/sglang
-          - name: SGLANG_DG_CACHE_DIR
-            value: /tmp/compilation-cache/deepgemm
-          - name: TRITON_CACHE_DIR
-            value: /tmp/compilation-cache/triton
-          - name: TORCHINDUCTOR_CACHE_DIR
-            value: /tmp/compilation-cache/torchinductor
-          - name: TORCH_EXTENSIONS_DIR
-            value: /tmp/compilation-cache/torch-extensions
-          - name: XDG_CACHE_HOME
-            value: /tmp/compilation-cache/xdg
-          - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
-            value: UCX
-          - name: UCX_TLS
-            value: cuda_ipc,cuda_copy,rc
-          ports:
-          - name: system
-            containerPort: 9090
-            protocol: TCP
-          - name: bootstrap
-            containerPort: 12345
-            protocol: TCP
-          resources:
-            requests:
-              cpu: "16"
-              memory: 900Gi
-              nvidia.com/gpu: "4"
-              rdma/ib: "4"
-            limits:
-              memory: 1Ti
-              nvidia.com/gpu: "4"
-              rdma/ib: "4"
-          securityContext:
-            runAsUser: 0
-            runAsGroup: 0
-            capabilities:
-              add:
-              - IPC_LOCK
-              - SYS_RESOURCE
-          volumeMounts:
-          - name: model-cache
-            mountPath: /model-cache
-        volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
-  - name: decode
-    replicas: 1
-    type: decode
-    sharedMemorySize: 64Gi
-    podTemplate:
-      metadata:
-        labels:
-          app.kubernetes.io/name: glm52-b200-tp8-kv-disagg
-          app.kubernetes.io/component: decode
-      spec:
-        nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-B200
-        tolerations:
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
-        containers:
-        - name: main
-          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f
-          imagePullPolicy: IfNotPresent
-          command:
-          - /bin/bash
-          - -lc
-          args:
-          - |
-            set -euo pipefail
-            ulimit -l unlimited || true
-            ulimit -n 1048576 || true
-            mkdir -p \
-              "${CUDA_CACHE_PATH}" \
-              "${FLASHINFER_CACHE_DIR}" \
-              "${SGLANG_CACHE_DIR}" \
-              "${SGLANG_DG_CACHE_DIR}" \
-              "${TRITON_CACHE_DIR}" \
-              "${TORCHINDUCTOR_CACHE_DIR}" \
-              "${TORCH_EXTENSIONS_DIR}" \
-              "${XDG_CACHE_HOME}"
-            UCX_NET_DEVICES="$(nvidia-smi topo -m | awk 'BEGIN{split("PIX PXB NODE PHB SYS", pri)} $1 ~ /^NIC[0-9]+:/ {gsub(":", "", $1); nic[$1]=$2; next} /CPU Affinity/ && /NIC/ {for (i=1; i<=NF; i++) if ($i ~ /^NIC[0-9]+$/) {idx=i+1; cols[++n]=idx; col[idx]=$i}; next} $1 ~ /^GPU[0-9]+$/ {g++; for (c=1; c<=n; c++) {idx=cols[c]; rel[g,c]=$idx}; next} END{for (r=1; r<=g; r++) for (p=1; p<=5; p++) {found=0; for (c=1; c<=n; c++) {dev=nic[col[cols[c]]]; if (rel[r,c] != pri[p] || dev == "" || dev ~ /bond/) continue; if (system("[ -d /sys/class/infiniband/" dev " ]") == 0) {found=1; if (!seen[dev]++) out=out (out ? "," : "") dev ":1"}} if (found) break} if (!out) exit 1; print out}')"
-            : "${UCX_NET_DEVICES:?no GPU-local InfiniBand devices found from nvidia-smi topo -m}"
-            export UCX_NET_DEVICES
-            export SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS="{\"ucx_devices\":\"${UCX_NET_DEVICES}\",\"ucx_error_handling_mode\":\"peer\"}"
-            echo "dynamic UCX_NET_DEVICES=${UCX_NET_DEVICES}"
-            exec python3 -m dynamo.sglang \
-              --model-path nvidia/GLM-5.2-NVFP4 \
-              --served-model-name nvidia/GLM-5.2-NVFP4 \
-              --dyn-tool-call-parser glm47 \
-              --dyn-reasoning-parser glm45 \
-              --host 0.0.0.0 \
-              --port 30000 \
-              --trust-remote-code \
-              --tp-size 8 \
-              --dp-size 8 \
-              --enable-dp-attention \
-              --moe-a2a-backend none \
-              --fp4-gemm-backend flashinfer_cutlass \
-              --enable-symm-mem \
-              --quantization modelopt_fp4 \
-              --kv-cache-dtype fp8_e4m3 \
-              --context-length 500000 \
-              --disaggregation-mode decode \
-              --disaggregation-transfer-backend nixl \
-              --disaggregation-bootstrap-port 12345 \
-              --speculative-algorithm EAGLE \
-              --speculative-num-steps 3 \
-              --speculative-eagle-topk 1 \
-              --speculative-num-draft-tokens 4 \
-              --speculative-attention-mode decode \
-              --max-running-requests 256 \
-              --cuda-graph-max-bs 256 \
-              --mem-fraction-static 0.87 \
-              --enable-metrics \
-              --speculative-moe-runner-backend flashinfer_cutlass \
-              --speculative-moe-a2a-backend none \
-              --num-continuous-decode-steps 3 \
-              --enable-flashinfer-allreduce-fusion \
-              --enable-dp-lm-head \
-              --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 32}'
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-          env:
-          - name: HF_HOME
-            value: /model-cache
-          - name: HF_HUB_CACHE
-            value: /model-cache/hub
-          - name: CUDA_CACHE_PATH
-            value: /tmp/compilation-cache/cuda
-          - name: CUDA_CACHE_MAXSIZE
-            value: "4294967296"
-          - name: FLASHINFER_CACHE_DIR
-            value: /tmp/compilation-cache/flashinfer
-          - name: SGLANG_CACHE_DIR
-            value: /tmp/compilation-cache/sglang
-          - name: SGLANG_DG_CACHE_DIR
-            value: /tmp/compilation-cache/deepgemm
-          - name: TRITON_CACHE_DIR
-            value: /tmp/compilation-cache/triton
-          - name: TORCHINDUCTOR_CACHE_DIR
-            value: /tmp/compilation-cache/torchinductor
-          - name: TORCH_EXTENSIONS_DIR
-            value: /tmp/compilation-cache/torch-extensions
-          - name: XDG_CACHE_HOME
-            value: /tmp/compilation-cache/xdg
-          - name: SGLANG_SIMULATE_ACC_LEN
-            value: "2.69"
-          - name: SGLANG_SIMULATE_ACC_METHOD
-            value: match-expected
-          - name: SGLANG_SIMULATE_ACC_TOKEN_ID
-            value: "32"
-          - name: SGLANG_DISAGGREGATION_WAITING_TIMEOUT
-            value: "3600"
-          - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
-            value: UCX
-          - name: UCX_TLS
-            value: cuda_ipc,cuda_copy,rc
-          ports:
-          - name: system
-            containerPort: 9090
-            protocol: TCP
-          - name: bootstrap
-            containerPort: 12345
-            protocol: TCP
-          resources:
-            requests:
-              cpu: "16"
-              memory: 80Gi
-              nvidia.com/gpu: "8"
-              rdma/ib: "8"
-            limits:
-              memory: 1Ti
-              nvidia.com/gpu: "8"
-              rdma/ib: "8"
-          securityContext:
-            runAsUser: 0
-            runAsGroup: 0
-            capabilities:
-              add:
-              - IPC_LOCK
-              - SYS_RESOURCE
-          volumeMounts:
-          - name: model-cache
-            mountPath: /model-cache
-        volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
+    - name: prefill
+      type: prefill
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+          containers:
+            - name: main
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -euo pipefail
+                  ulimit -l unlimited || true
+                  ulimit -n 1048576 || true
+                  mkdir -p \
+                    "${CUDA_CACHE_PATH}" \
+                    "${FLASHINFER_CACHE_DIR}" \
+                    "${SGLANG_CACHE_DIR}" \
+                    "${SGLANG_DG_CACHE_DIR}" \
+                    "${TRITON_CACHE_DIR}" \
+                    "${TORCHINDUCTOR_CACHE_DIR}" \
+                    "${TORCH_EXTENSIONS_DIR}" \
+                    "${XDG_CACHE_HOME}"
+                  UCX_NET_DEVICES="$(nvidia-smi topo -m | awk 'BEGIN{split("PIX PXB NODE PHB SYS", pri)} $1 ~ /^NIC[0-9]+:/ {gsub(":", "", $1); nic[$1]=$2; next} /CPU Affinity/ && /NIC/ {for (i=1; i<=NF; i++) if ($i ~ /^NIC[0-9]+$/) {idx=i+1; cols[++n]=idx; col[idx]=$i}; next} $1 ~ /^GPU[0-9]+$/ {g++; for (c=1; c<=n; c++) {idx=cols[c]; rel[g,c]=$idx}; next} END{for (r=1; r<=g; r++) for (p=1; p<=5; p++) {found=0; for (c=1; c<=n; c++) {dev=nic[col[cols[c]]]; if (rel[r,c] != pri[p] || dev == "" || dev ~ /bond/) continue; if (system("[ -d /sys/class/infiniband/" dev " ]") == 0) {found=1; if (!seen[dev]++) out=out (out ? "," : "") dev ":1"}} if (found) break} if (!out) exit 1; print out}')"
+                  : "${UCX_NET_DEVICES:?no GPU-local InfiniBand devices found from nvidia-smi topo -m}"
+                  export UCX_NET_DEVICES
+                  export SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS="{\"ucx_devices\":\"${UCX_NET_DEVICES}\",\"ucx_error_handling_mode\":\"peer\"}"
+                  echo "dynamic UCX_NET_DEVICES=${UCX_NET_DEVICES}"
+                  exec python3 -m dynamo.sglang \
+                    --model-path nvidia/GLM-5.2-NVFP4 \
+                    --served-model-name nvidia/GLM-5.2-NVFP4 \
+                    --dyn-tool-call-parser glm47 \
+                    --dyn-reasoning-parser glm45 \
+                    --host 0.0.0.0 \
+                    --port 30000 \
+                    --trust-remote-code \
+                    --tensor-parallel-size 4 \
+                    --data-parallel-size 4 \
+                    --enable-dp-attention \
+                    --ep-size 4 \
+                    --quantization modelopt_fp4 \
+                    --kv-cache-dtype fp8_e4m3 \
+                    --context-length 500000 \
+                    --mem-fraction-static 0.93 \
+                    --attention-backend dsa \
+                    --dsa-prefill-backend trtllm \
+                    --dsa-decode-backend trtllm \
+                    --moe-runner-backend flashinfer_trtllm_routed \
+                    --chunked-prefill-size 16384 \
+                    --max-prefill-tokens 32768 \
+                    --max-running-requests 32 \
+                    --disable-cuda-graph \
+                    --disaggregation-mode prefill \
+                    --disaggregation-transfer-backend nixl \
+                    --disaggregation-bootstrap-port 12345 \
+                    --speculative-algorithm EAGLE \
+                    --speculative-num-steps 3 \
+                    --speculative-eagle-topk 1 \
+                    --speculative-num-draft-tokens 4 \
+                    --enable-dp-lm-head \
+                    --hicache-size 200 \
+                    --enable-hierarchical-cache \
+                    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 32}' \
+                    --disable-overlap-schedule \
+                    --enable-metrics
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_CACHE
+                  value: /model-cache/hub
+                - name: CUDA_CACHE_PATH
+                  value: /tmp/compilation-cache/cuda
+                - name: CUDA_CACHE_MAXSIZE
+                  value: "4294967296"
+                - name: FLASHINFER_CACHE_DIR
+                  value: /tmp/compilation-cache/flashinfer
+                - name: SGLANG_CACHE_DIR
+                  value: /tmp/compilation-cache/sglang
+                - name: SGLANG_DG_CACHE_DIR
+                  value: /tmp/compilation-cache/deepgemm
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/compilation-cache/triton
+                - name: TORCHINDUCTOR_CACHE_DIR
+                  value: /tmp/compilation-cache/torchinductor
+                - name: TORCH_EXTENSIONS_DIR
+                  value: /tmp/compilation-cache/torch-extensions
+                - name: XDG_CACHE_HOME
+                  value: /tmp/compilation-cache/xdg
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: UCX
+                - name: UCX_TLS
+                  value: cuda_ipc,cuda_copy,rc
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  rdma/ib: "4"
+                  memory: 900Gi
+                limits:
+                  nvidia.com/gpu: "4"
+                  rdma/ib: "4"
+                  memory: 1Ti
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                failureThreshold: 120
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
+              workingDir: /workspace/
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+      replicas: 1
+
+    - name: decode
+      type: decode
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+          containers:
+            - name: main
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -euo pipefail
+                  ulimit -l unlimited || true
+                  ulimit -n 1048576 || true
+                  mkdir -p \
+                    "${CUDA_CACHE_PATH}" \
+                    "${FLASHINFER_CACHE_DIR}" \
+                    "${SGLANG_CACHE_DIR}" \
+                    "${SGLANG_DG_CACHE_DIR}" \
+                    "${TRITON_CACHE_DIR}" \
+                    "${TORCHINDUCTOR_CACHE_DIR}" \
+                    "${TORCH_EXTENSIONS_DIR}" \
+                    "${XDG_CACHE_HOME}"
+                  UCX_NET_DEVICES="$(nvidia-smi topo -m | awk 'BEGIN{split("PIX PXB NODE PHB SYS", pri)} $1 ~ /^NIC[0-9]+:/ {gsub(":", "", $1); nic[$1]=$2; next} /CPU Affinity/ && /NIC/ {for (i=1; i<=NF; i++) if ($i ~ /^NIC[0-9]+$/) {idx=i+1; cols[++n]=idx; col[idx]=$i}; next} $1 ~ /^GPU[0-9]+$/ {g++; for (c=1; c<=n; c++) {idx=cols[c]; rel[g,c]=$idx}; next} END{for (r=1; r<=g; r++) for (p=1; p<=5; p++) {found=0; for (c=1; c<=n; c++) {dev=nic[col[cols[c]]]; if (rel[r,c] != pri[p] || dev == "" || dev ~ /bond/) continue; if (system("[ -d /sys/class/infiniband/" dev " ]") == 0) {found=1; if (!seen[dev]++) out=out (out ? "," : "") dev ":1"}} if (found) break} if (!out) exit 1; print out}')"
+                  : "${UCX_NET_DEVICES:?no GPU-local InfiniBand devices found from nvidia-smi topo -m}"
+                  export UCX_NET_DEVICES
+                  export SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS="{\"ucx_devices\":\"${UCX_NET_DEVICES}\",\"ucx_error_handling_mode\":\"peer\"}"
+                  echo "dynamic UCX_NET_DEVICES=${UCX_NET_DEVICES}"
+                  exec python3 -m dynamo.sglang \
+                    --model-path nvidia/GLM-5.2-NVFP4 \
+                    --served-model-name nvidia/GLM-5.2-NVFP4 \
+                    --dyn-tool-call-parser glm47 \
+                    --dyn-reasoning-parser glm45 \
+                    --host 0.0.0.0 \
+                    --port 30000 \
+                    --trust-remote-code \
+                    --tp-size 8 \
+                    --dp-size 8 \
+                    --enable-dp-attention \
+                    --moe-a2a-backend none \
+                    --fp4-gemm-backend flashinfer_cutlass \
+                    --enable-symm-mem \
+                    --quantization modelopt_fp4 \
+                    --kv-cache-dtype fp8_e4m3 \
+                    --context-length 500000 \
+                    --disaggregation-mode decode \
+                    --disaggregation-transfer-backend nixl \
+                    --disaggregation-bootstrap-port 12345 \
+                    --speculative-algorithm EAGLE \
+                    --speculative-num-steps 3 \
+                    --speculative-eagle-topk 1 \
+                    --speculative-num-draft-tokens 4 \
+                    --speculative-attention-mode decode \
+                    --max-running-requests 256 \
+                    --cuda-graph-max-bs 256 \
+                    --mem-fraction-static 0.87 \
+                    --enable-metrics \
+                    --speculative-moe-runner-backend flashinfer_cutlass \
+                    --speculative-moe-a2a-backend none \
+                    --num-continuous-decode-steps 3 \
+                    --enable-flashinfer-allreduce-fusion \
+                    --enable-dp-lm-head \
+                    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 32}'
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_CACHE
+                  value: /model-cache/hub
+                - name: CUDA_CACHE_PATH
+                  value: /tmp/compilation-cache/cuda
+                - name: CUDA_CACHE_MAXSIZE
+                  value: "4294967296"
+                - name: FLASHINFER_CACHE_DIR
+                  value: /tmp/compilation-cache/flashinfer
+                - name: SGLANG_CACHE_DIR
+                  value: /tmp/compilation-cache/sglang
+                - name: SGLANG_DG_CACHE_DIR
+                  value: /tmp/compilation-cache/deepgemm
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/compilation-cache/triton
+                - name: TORCHINDUCTOR_CACHE_DIR
+                  value: /tmp/compilation-cache/torchinductor
+                - name: TORCH_EXTENSIONS_DIR
+                  value: /tmp/compilation-cache/torch-extensions
+                - name: XDG_CACHE_HOME
+                  value: /tmp/compilation-cache/xdg
+                - name: SGLANG_SIMULATE_ACC_LEN
+                  value: "2.69"
+                - name: SGLANG_SIMULATE_ACC_METHOD
+                  value: match-expected
+                - name: SGLANG_SIMULATE_ACC_TOKEN_ID
+                  value: "32"
+                - name: SGLANG_DISAGGREGATION_WAITING_TIMEOUT
+                  value: "3600"
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: UCX
+                - name: UCX_TLS
+                  value: cuda_ipc,cuda_copy,rc
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  rdma/ib: "8"
+                  memory: 80Gi
+                limits:
+                  nvidia.com/gpu: "8"
+                  rdma/ib: "8"
+                  memory: 1Ti
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                failureThreshold: 120
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
+              workingDir: /workspace/
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+      replicas: 1

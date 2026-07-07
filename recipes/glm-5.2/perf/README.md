@@ -3,80 +3,146 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# GLM-5.2 Agentic Benchmark
+# GLM-5.2 Benchmark Recipe
 
-[`perf.yaml`](perf.yaml) runs the NIM Turbo 64k/400/90%-KV agentic trace against
-the GLM-5.2 1P1D DGD. It follows the Kimi-K2.6 trace-replay workflow: the client
-is co-located with the frontend, waits for `/v1/models`, performs a small
-warmup, and stores raw AIPerf artifacts on the model-cache PVC.
+A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
+[`perf.yaml`](perf.yaml) — covers both GLM-5.2 DGDs. The benchmark is identical
+across variants; only `ENDPOINT` needs to change.
 
-## Defaults
+The Job waits for `GET /v1/models` on the DGD frontend to return
+`nvidia/GLM-5.2-NVFP4`, runs a short warmup, replays the configured trace at one
+`CONCURRENCY` value, and writes raw artifacts to the shared `model-cache` PVC.
+The benchmark pod is co-located with a DGD frontend through `podAffinity`.
 
-| Variable | Default |
-| --- | --- |
-| `ENDPOINT` | `glm52-b200-tp8-kv-disagg-frontend:8000` |
-| `TARGET_MODEL` | `nvidia/GLM-5.2-NVFP4` |
-| `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
-| `CONCURRENCY` | `64` |
-| `ROOT_ARTIFACT_DIR` | `/model-cache/perf` |
+## Targeting a variant
+
+Edit the `env` block in [`perf.yaml`](perf.yaml):
+
+| Variant target | `ENDPOINT` | `TRACE_FILE` |
+| --- | --- | --- |
+| B200 aggregate agentic | `glm52-agg-b200-agentic-frontend:8000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| B200 disaggregated agentic | `glm52-disagg-b200-agentic-frontend:8000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+
+If you run more than one benchmark in the same namespace, also update
+`metadata.name` and `labels.app` so Jobs and artifact directories stay
+distinct.
+
+## Dataset
+
+The benchmark replays a
+[Mooncake-format](https://github.com/kvcache-ai/Mooncake) trace through
+`--custom-dataset-type mooncake_trace`. Each JSONL line describes one request
+with `input_length`, `output_length`, and `hash_ids`.
+
+The recipe includes full, 30%, and 15% agentic traces under [`traces`](traces):
+
+```text
+traces/64k_400_90kv_agent_new_noschedule.jsonl
+traces/64k_400_90kv_agent_new_noschedule_short_30perc.jsonl
+traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+```
 
 The default 15% trace contains 3,541 requests. Its SHA-256 is
 `f20d3f2bc83dd1306cda659fbe34e7c4d85ca5497626c98bc0b1c4d2211379d0`.
 
-## Stage the trace
-
-The agentic trace assets are shared with the Kimi-K2.6 recipe. Materialize the
-Git LFS file, then copy it to the model-cache PVC:
+## Workflow
 
 ```bash
-git lfs pull --include='recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+export NAMESPACE=your-namespace
+```
+
+### 1. Deploy the DGD
+
+See the deployment instructions in the [recipe README](../README.md).
+
+### 2. Stage the trace on the PVC
+
+Materialize the Git LFS trace files, then copy them through a helper pod that
+mounts `model-cache`:
+
+```bash
+git lfs pull --include='recipes/glm-5.2/perf/traces/*.jsonl'
 
 kubectl run pvc-helper -n ${NAMESPACE} \
   --image=busybox:1.36 --restart=Never \
   --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
   --command -- sleep 3600
 
-kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /model-cache/traces
-kubectl cp \
-  recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl \
-  ${NAMESPACE}/pvc-helper:/model-cache/traces/
+kubectl cp ./traces ${NAMESPACE}/pvc-helper:/model-cache/
 ```
 
-## Run
+Keep `pvc-helper` for fetching artifacts, or delete it after staging.
+
+### 3. Run the benchmark
 
 ```bash
 kubectl apply -f perf.yaml -n ${NAMESPACE}
-kubectl logs -n ${NAMESPACE} -l job-name=glm52-agentic-bench -f
-kubectl wait --for=condition=Complete job/glm52-agentic-bench \
+kubectl logs -n ${NAMESPACE} -l job-name=glm52-bench -f
+kubectl wait --for=condition=Complete job/glm52-bench \
   -n ${NAMESPACE} --timeout=10800s
 ```
 
-The Job creates a tokenizer-only local snapshot before launching AIPerf. This
-avoids loading the model architecture config in the client and includes the
-minimal AIPerf 0.10.0 local-tokenizer-path fix needed by multiprocessing dataset
-workers.
+The Job creates a tokenizer-only local snapshot and applies the AIPerf 0.10.0
+local-tokenizer-path fix required by multiprocessing dataset workers. This is
+the GLM-specific client setup that differs from the Kimi-K2.6 template.
 
-## Fetch artifacts
+### 4. Fetch artifacts
 
 ```bash
 kubectl cp \
-  ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_glm52-agentic-bench \
+  ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_glm52-bench \
   ./results
 ```
 
-## Clean boundary for another run
-
-Reset both SGLang KV state and Dynamo frontend/router state between independent
-trace replays:
+### 5. Cleanup
 
 ```bash
-kubectl delete job glm52-agentic-bench -n ${NAMESPACE} --ignore-not-found
+kubectl delete job glm52-bench -n ${NAMESPACE}
+kubectl delete pod pvc-helper -n ${NAMESPACE}
+```
+
+## Running a concurrency sweep
+
+`perf.yaml` runs one `CONCURRENCY` value. Clear SGLang KV state and Dynamo
+frontend/router state between independent runs:
+
+```bash
+kubectl delete job glm52-bench -n ${NAMESPACE} --ignore-not-found
+
+DGD=glm52-agg-b200-agentic # or glm52-disagg-b200-agentic
 kubectl delete pods -n ${NAMESPACE} \
-  -l nvidia.com/dynamo-graph-deployment-name=glm52-b200-tp8-kv-disagg
+  -l nvidia.com/dynamo-graph-deployment-name=${DGD}
 kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
-  -l nvidia.com/dynamo-graph-deployment-name=glm52-b200-tp8-kv-disagg \
+  -l nvidia.com/dynamo-graph-deployment-name=${DGD} \
   --timeout=7200s
+
+# Update CONCURRENCY in perf.yaml before each run.
+kubectl apply -f perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/glm52-bench \
+  -n ${NAMESPACE} --timeout=10800s
 ```
 
 Do not compare partial runs. A completed run must account for successful,
 errored, and unfinished requests before reporting aggregate throughput.
+
+## Tunable environment variables
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ENDPOINT` | `glm52-agg-b200-agentic-frontend:8000` | Change per DGD variant |
+| `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | Use the full or 30% trace for longer runs |
+| `CONCURRENCY` | `64` | Single value; reset server state between values |
+| `TARGET_MODEL` | `nvidia/GLM-5.2-NVFP4` | Must match `--served-model-name` |
+
+## Artifacts
+
+Results are written to:
+
+```text
+/model-cache/perf/<epoch>_<job-name>/
+  warmup/
+  GLM-5.2-NVFP4_trace_c<concurrency>_<timestamp>/
+    profile_export.json
+    inputs.json
+    ...
+```
