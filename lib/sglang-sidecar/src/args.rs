@@ -1,17 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Command-line arguments for the SGLang sidecar.
-//!
-//! The sidecar is **endpoint-only**: the single engine-specific flag is
-//! `--openengine-endpoint`. Model identity, disaggregation role, parallelism,
-//! KV block sizing, and context length are all *discovered* from the engine
-//! over OpenEngine RPCs — there is deliberately no `--model` or
-//! `--disaggregation-mode`.
-//!
-//! The remaining flags mirror the Dynamo runtime knobs from
-//! [`dynamo_backend_common::CommonArgs`] (same names + env vars) **except**
-//! `--component` and `--disaggregation-mode`, which the engine reports.
+//! Command-line arguments and transport configuration for the SGLang gRPC sidecar.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -20,26 +10,22 @@ use std::time::Duration;
 #[derive(clap::Parser, Debug, Clone)]
 #[command(
     name = "dynamo-sglang-sidecar",
-    about = "Dynamo SGLang sidecar — drives an out-of-process SGLang engine over OpenEngine v1. \
-             Configure with only --openengine-endpoint; everything else is discovered."
+    about = "Dynamo SGLang sidecar — drives an out-of-process SGLang native gRPC server."
 )]
 pub struct Args {
-    /// `host:port` (or full URL) of the SGLang OpenEngine v1 gRPC server.
-    ///
-    /// A bare `host:port` is normalised to `http://host:port`. This is the
-    /// only engine-specific configuration the sidecar takes.
-    #[arg(long, env = "OPENENGINE_ENDPOINT")]
-    pub openengine_endpoint: String,
+    /// `host:port` (or URL) of SGLang's native `sglang.runtime.v1` service.
+    #[arg(long, visible_alias = "grpc-endpoint", env = "SGLANG_GRPC_ENDPOINT")]
+    pub sglang_endpoint: String,
 
-    /// Number of independent gRPC connections to open to the engine.
-    ///
-    /// Streaming `generate` requests are round-robined across the pool so
-    /// concurrent load is spread over multiple HTTP/2 connections rather than
-    /// funneled through one connection's serialized frame processing (the
-    /// overhead-bound throughput/stability bottleneck). This is a transport
-    /// knob, not discovery — the value is not engine-reported.
-    #[arg(long, env = "OPENENGINE_CONNECTIONS", default_value_t = 8)]
-    pub openengine_connections: usize,
+    /// Number of independent HTTP/2 connections used for generation streams.
+    #[arg(long, env = "SGLANG_GRPC_CONNECTIONS", default_value_t = 8)]
+    pub sglang_connections: usize,
+
+    /// Reachable host that decode workers use to connect to a prefill worker's
+    /// SGLang disaggregation bootstrap port. By default this is derived from
+    /// `dist_init_addr`, then from the gRPC endpoint host.
+    #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
+    pub bootstrap_host: Option<String>,
 
     /// Dynamo namespace for discovery routing.
     #[arg(long, env = "DYN_NAMESPACE", default_value = "dynamo")]
@@ -49,7 +35,7 @@ pub struct Args {
     #[arg(long, env = "DYN_ENDPOINT", default_value = "generate")]
     pub endpoint: String,
 
-    /// Comma-separated endpoint types (e.g. `chat,completions`).
+    /// Comma-separated endpoint types (for example `chat,completions`).
     #[arg(long, env = "DYN_ENDPOINT_TYPES", default_value = "chat,completions")]
     pub endpoint_types: String,
 
@@ -57,43 +43,36 @@ pub struct Args {
     #[arg(long, env = "DYN_CUSTOM_JINJA_TEMPLATE")]
     pub custom_jinja_template: Option<PathBuf>,
 
-    /// Per-attempt connect timeout, in seconds, when dialling the engine.
+    /// Per-attempt connection timeout in seconds.
     #[arg(long, default_value_t = 30)]
     pub connect_timeout_secs: u64,
 
-    /// How often (seconds) to poll `Health` while waiting for `READY`.
+    /// Delay between connection/readiness attempts in seconds.
     #[arg(long, default_value_t = 2)]
     pub health_poll_interval_secs: u64,
 
-    /// Upper bound (seconds) on how long to wait for the engine to become
-    /// reachable (bootstrap) and to reach `READY` (start).
+    /// Total startup deadline in seconds.
     #[arg(long, default_value_t = 300)]
     pub health_deadline_secs: u64,
 }
 
 impl Args {
-    /// Transport tunables distilled into [`Duration`]s.
     pub fn transport(&self) -> TransportConfig {
         TransportConfig {
             connect_timeout: Duration::from_secs(self.connect_timeout_secs),
             poll_interval: Duration::from_secs(self.health_poll_interval_secs.max(1)),
             deadline: Duration::from_secs(self.health_deadline_secs),
-            connections: self.openengine_connections.max(1),
+            connections: self.sglang_connections.max(1),
         }
     }
 }
 
-/// Connection + readiness tunables shared by bootstrap and `start`.
+/// Connection and readiness tunables shared by bootstrap and `start`.
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
-    /// Per-attempt connect timeout when dialling the gRPC server.
     pub connect_timeout: Duration,
-    /// Delay between reconnect / `Health` poll attempts.
     pub poll_interval: Duration,
-    /// Total budget for "become reachable" / "become ready".
     pub deadline: Duration,
-    /// Size of the `generate` connection pool opened in `start()`. Bootstrap
-    /// discovery always uses a single throwaway connection regardless.
     pub connections: usize,
 }
 
@@ -108,14 +87,15 @@ impl Default for TransportConfig {
     }
 }
 
-/// Normalise an endpoint into a URI tonic accepts.
-///
-/// A bare `host:port` (the common case) gets an `http://` scheme; anything
-/// that already names a scheme (`http://`, `https://`, `grpc://`) is left
-/// alone.
+/// Normalize endpoint schemes for tonic. `grpc://` and `grpcs://` are common
+/// user-facing spellings but tonic expects `http://` and `https://`.
 pub fn normalize_endpoint(raw: &str) -> String {
     let trimmed = raw.trim();
-    if trimmed.contains("://") {
+    if let Some(rest) = trimmed.strip_prefix("grpc://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = trimmed.strip_prefix("grpcs://") {
+        format!("https://{rest}")
+    } else if trimmed.contains("://") {
         trimmed.to_string()
     } else {
         format!("http://{trimmed}")
@@ -124,21 +104,16 @@ pub fn normalize_endpoint(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::normalize_endpoint;
 
     #[test]
-    fn bare_host_port_gets_http_scheme() {
-        assert_eq!(normalize_endpoint("127.0.0.1:50051"), "http://127.0.0.1:50051");
-    }
-
-    #[test]
-    fn explicit_scheme_is_preserved() {
-        assert_eq!(normalize_endpoint("https://host:443"), "https://host:443");
-        assert_eq!(normalize_endpoint("http://host:1"), "http://host:1");
-    }
-
-    #[test]
-    fn whitespace_is_trimmed() {
-        assert_eq!(normalize_endpoint("  host:9  "), "http://host:9");
+    fn normalizes_bare_and_grpc_endpoints() {
+        assert_eq!(
+            normalize_endpoint("127.0.0.1:30001"),
+            "http://127.0.0.1:30001"
+        );
+        assert_eq!(normalize_endpoint("grpc://host:7"), "http://host:7");
+        assert_eq!(normalize_endpoint("grpcs://host:8"), "https://host:8");
+        assert_eq!(normalize_endpoint(" https://host:9 "), "https://host:9");
     }
 }
