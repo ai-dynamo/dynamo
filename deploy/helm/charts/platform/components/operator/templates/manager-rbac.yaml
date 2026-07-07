@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+{{- $managerRules := required "generated manager RBAC rules are missing" (.Files.Get "files/manager-rules.yaml") }}
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.namespaceRestriction.enabled }}
 kind: Role
@@ -26,44 +27,27 @@ metadata:
   labels:
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
-# Keep these permissions aligned with deploy/operator/config/rbac/role.yaml.
-# make check-rbac accounts for the cluster-scoped auxiliary roles below.
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
+{{- $managerRules | nindent 0 }}
+# These chart-managed permissions preserve existing grants that controller-gen
+# does not emit. Audit them separately from controller reconciliation RBAC.
 - apiGroups:
   - ""
   resources:
   - persistentvolumeclaims
   verbs:
-  - create
-  - delete
-  - get
-  - list
-  - watch
+  - patch
+  - update
 - apiGroups:
   - ""
   resources:
   - secrets
   verbs:
-  - create
-  - get
-  - list
-  - update
-  - watch
+  - delete
+  - patch
 - apiGroups:
-  - discovery.k8s.io
+  - ""
   resources:
-  - endpointslices
+  - endpoints
   verbs:
   - get
   - list
@@ -73,15 +57,12 @@ rules:
   resources:
   - serviceaccounts
   verbs:
-  - create
-  - get
-  - list
-  - update
-  - watch
+  - delete
+  - patch
 - apiGroups:
-  - ""
+  - admissionregistration.k8s.io
   resources:
-  - services
+  - mutatingwebhookconfigurations
   verbs:
   - create
   - delete
@@ -91,99 +72,9 @@ rules:
   - update
   - watch
 - apiGroups:
-  - grove.io
+  - apiextensions.k8s.io
   resources:
-  - podcliquesets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - grove.io
-  resources:
-  - podcliques
-  - podcliquescalinggroups
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - grove.io
-  resources:
-  - podcliques/scale
-  - podcliquescalinggroups/scale
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - apps
-  resources:
-  - deployments
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - authentication.k8s.io
-  resources:
-  - tokenreviews
-  verbs:
-  - create
-- apiGroups:
-  - authorization.k8s.io
-  resources:
-  - subjectaccessreviews
-  verbs:
-  - create
-- apiGroups:
-  - autoscaling
-  resources:
-  - horizontalpodautoscalers
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - jobs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - events
+  - customresourcedefinitions
   verbs:
   - create
   - delete
@@ -197,84 +88,22 @@ rules:
   resources:
   - pods
   verbs:
-  - delete
-  - deletecollection
-  - get
-  - list
-  - patch
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - nodes
-  - pods/log
-  verbs:
-  - get
-- apiGroups:
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
   - create
-  - delete
-  - get
-  - list
-  - patch
   - update
-  - watch
 - apiGroups:
-  - networking.istio.io
-  resources:
-  - destinationrules
-  - virtualservices
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - ingressclasses
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - ingresses
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - resource.k8s.io
-  resources:
-  - resourceclaimtemplates
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - inference.networking.k8s.io
+  - inference.networking.x-k8s.io
   resources:
   - inferencepools
+  - inferenceobjectives
+  - inferencemodelrewrites
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamoworkermetadatas
   verbs:
   - create
   - delete
@@ -286,12 +115,15 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocheckpoints
-  - dynamocomponentdeployments
-  - dynamographdeploymentrequests
-  - dynamographdeployments
-  - dynamographdeploymentscalingadapters
-  - dynamomodels
+  - dynamographdeploymentscalingadapters/scale
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterrolebindings
   verbs:
   - create
   - delete
@@ -300,102 +132,28 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamocheckpoints/finalizers
-  - dynamocomponentdeployments/finalizers
-  - dynamographdeploymentrequests/finalizers
-  - dynamographdeployments/finalizers
-  - dynamomodels/finalizers
-  - podsnapshots/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - nvidia.com
-  resources:
-  - podsnapshots
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamocheckpoints/status
-  - dynamocomponentdeployments/status
-  - dynamographdeploymentrequests/status
-  - dynamographdeployments/status
-  - dynamographdeploymentscalingadapters/status
-  - dynamomodels/status
-  - podsnapshots/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
   - clusterroles
   verbs:
-  - get
-  - list
-  - watch
+  - create
+  - delete
+  - patch
+  - update
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
   - rolebindings
   verbs:
-  - create
-  - delete
-  - get
-  - list
-  - update
-  - watch
+  - patch
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
   - roles
   verbs:
-  - create
-  - get
-  - list
-  - update
-  - watch
-- apiGroups:
-  - leaderworkerset.x-k8s.io
-  resources:
-  - leaderworkersets
-  verbs:
-  - create
   - delete
-  - get
-  - list
   - patch
-  - update
-  - watch
-- apiGroups:
-  - scheduling.volcano.sh
-  resources:
-  - podgroups
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - apps
-  resources:
-  - daemonsets
-  verbs:
-  - get
-  - list
-  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.namespaceRestriction.enabled }}
