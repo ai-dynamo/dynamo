@@ -1,0 +1,96 @@
+# Reusable Slack failure notifier shared by the Post-merge and Nightly CI pipelines.
+# Collects the calling run's failed jobs and, if any are reportable, posts an alert
+# to Slack. Called via `uses: ./.github/workflows/notify-slack.yml`.
+name: Notify Slack
+
+on:
+  workflow_call:
+    inputs:
+      pipeline_name:
+        description: "Human-readable pipeline name, used in the alert header (e.g. Post-merge, Nightly)."
+        required: true
+        type: string
+      runs_on:
+        description: "Runner label for the notifier job."
+        required: false
+        type: string
+        default: ubuntu-slim
+      ignored_jobs:
+        description: |
+          Newline-separated substrings; failed jobs whose names contain any of them are
+          excluded from Slack reporting (see ops-support).
+        required: false
+        type: string
+        default: |
+          build-xpu
+          test-xpu
+    secrets:
+      SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL:
+        required: true
+
+jobs:
+  notify-slack:
+    name: Notify Slack
+    runs-on: ${{ inputs.runs_on }}
+    permissions:
+      contents: read
+    steps:
+      - name: Get Failed jobs
+        id: failed-jobs
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IGNORED_JOBS: ${{ inputs.ignored_jobs }}
+        run: |
+          JOBS_JSON=$(mktemp)
+          # --fail + --retry-all-errors: retry transient API errors (5xx / secondary
+          # rate limits) and fail loudly on a genuine non-200 instead of writing an
+          # error body that later trips up jq with "Cannot iterate over null".
+          curl -sS --fail --retry 3 --retry-all-errors --retry-delay 3 \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            >$JOBS_JSON
+
+          # Turn the newline-separated IGNORED_JOBS list into a trimmed, non-empty JSON array for jq.
+          IGNORED_JSON=$(printf '%s\n' "$IGNORED_JOBS" | jq -R 'gsub("^\\s+|\\s+$";"")' | jq -s 'map(select(length > 0))')
+
+          # Drop any failed job whose name contains one of the ignored substrings.
+          FAILED_JOBS=$(jq -r --argjson ignored "$IGNORED_JSON" '(.jobs // [])[] | select(.conclusion == "failure") | select(.name as $n | ($ignored | any(. as $i | $n | contains($i))) | not) | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
+          echo $FAILED_JOBS
+          {
+            echo "FAILED_JOBS<<EOF"
+            echo "$FAILED_JOBS"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+          # Skip the Slack alert when there are no reportable failures (e.g. only IGNORED_JOBS failed).
+          if [ -n "$(echo "$FAILED_JOBS" | tr -d '[:space:]')" ]; then
+            echo "has_failures=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_failures=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Notify Slack
+        if: steps.failed-jobs.outputs.has_failures == 'true'
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
+        with:
+          webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            blocks:
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: ":alert: *Github ${{ inputs.pipeline_name }} Pipeline Failure*"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "<https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }}|Workflow Summary>"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "${{ env.FAILED_JOBS }}"
+              - type: "section"
+                text:
+                  type: mrkdwn
+                  text: "@dynamo-ops-agent please investigate and post a preliminary debug with clear next steps for @ops-support to action, address, and drive to closure."
