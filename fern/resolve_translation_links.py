@@ -147,6 +147,12 @@ def main() -> int:
         required=True,
         help="version slug the translated pages belong to, e.g. dev",
     )
+    ap.add_argument(
+        "--pages-dir",
+        default="pages-dev",
+        help="translation subtree to process, mirroring the base pages dir "
+        "(pages-dev, or pages-vX.Y.Z for a release snapshot)",
+    )
     args = ap.parse_args()
 
     slugs = build_slug_map(args.nav)
@@ -154,7 +160,7 @@ def main() -> int:
 
     for lang_dir in sorted(p for p in args.translations_root.iterdir() if p.is_dir()):
         lang = lang_dir.name
-        pages_root = lang_dir / "pages-dev"
+        pages_root = lang_dir / args.pages_dir
         if not pages_root.is_dir():
             continue
         for page in sorted(pages_root.rglob("*")):
@@ -162,9 +168,10 @@ def main() -> int:
                 continue
             rel = page.relative_to(pages_root)  # mirrors docs/<rel>
             # links were authored from fern/translations/<lang>/pages-dev/<rel>
-            # in the source repo (same layout the sync publishes)
+            # in the source repo; version snapshots keep the same depth, so
+            # the deep-relative arithmetic is unchanged
             virtual_dir = (
-                PurePosixPath("fern/translations") / lang / "pages-dev" / rel.parent
+                PurePosixPath("fern/translations") / lang / args.pages_dir / rel.parent
             )
 
             def repl(m: re.Match) -> str:
@@ -180,7 +187,9 @@ def main() -> int:
                 if not target.endswith(PAGE_EXT):
                     return m.group(0)
                 q = PurePosixPath(os.path.normpath(str(virtual_dir / target)))
-                mirror_prefix = PurePosixPath("fern/translations") / lang / "pages-dev"
+                mirror_prefix = (
+                    PurePosixPath("fern/translations") / lang / args.pages_dir
+                )
                 if q.is_relative_to(mirror_prefix):
                     doc_rel = str(q.relative_to(mirror_prefix))
                 elif q.is_relative_to("docs"):

@@ -445,14 +445,36 @@ jobs:
           echo "Created docs-checkout/fern/pages-$TAG/"
           ls -la "docs-checkout/fern/pages-$TAG/" | head -20
 
+          # Snapshot the translation mirrors alongside the base pages so the
+          # tagged version pairs its locales (see #11195). Same mirror-path
+          # convention as dev: fern/translations/<lang>/pages-$TAG/<path>
+          # pairs with fern/pages-$TAG/<path>.
+          if [ -d source-checkout/fern/translations ]; then
+            for lang_dir in source-checkout/fern/translations/*/; do
+              lang=$(basename "$lang_dir")
+              if [ -d "$lang_dir/pages-dev" ]; then
+                echo "Snapshotting translations for $lang -> pages-$TAG..."
+                rm -rf "docs-checkout/fern/translations/$lang/pages-$TAG"
+                mkdir -p "docs-checkout/fern/translations/$lang/pages-$TAG"
+                rsync -a "$lang_dir/pages-dev/" "docs-checkout/fern/translations/$lang/pages-$TAG/"
+              fi
+            done
+          fi
+
       - name: Update GitHub links to version tag
         run: |
           TAG="${{ steps.version.outputs.tag }}"
 
           echo "Pinning GitHub links from main to $TAG in docs-checkout/fern/pages-$TAG/..."
 
+          # Base pages plus any translation snapshots for this tag.
+          SNAP_DIRS="docs-checkout/fern/pages-$TAG"
+          for d in docs-checkout/fern/translations/*/"pages-$TAG"; do
+            [ -d "$d" ] && SNAP_DIRS="$SNAP_DIRS $d"
+          done
+
           # Pin tree/main and blob/main links before callout conversion.
-          find "docs-checkout/fern/pages-$TAG" -type f \( -name "*.md" -o -name "*.mdx" \) | while read -r file; do
+          find $SNAP_DIRS -type f \( -name "*.md" -o -name "*.mdx" \) | while read -r file; do
             if grep -q "github.com/ai-dynamo/dynamo/tree/main" "$file"; then
               echo "Updating tree links: $file"
               sed -i "s|github.com/ai-dynamo/dynamo/tree/main|github.com/ai-dynamo/dynamo/tree/$TAG|g" "$file"
@@ -460,7 +482,7 @@ jobs:
           done
 
           # Also update blob/main references (for direct file links)
-          find "docs-checkout/fern/pages-$TAG" -type f \( -name "*.md" -o -name "*.mdx" \) | while read -r file; do
+          find $SNAP_DIRS -type f \( -name "*.md" -o -name "*.mdx" \) | while read -r file; do
             if grep -q "github.com/ai-dynamo/dynamo/blob/main" "$file"; then
               echo "Updating blob links: $file"
               sed -i "s|github.com/ai-dynamo/dynamo/blob/main|github.com/ai-dynamo/dynamo/blob/$TAG|g" "$file"
@@ -475,7 +497,26 @@ jobs:
 
           echo "Converting callouts in pages-$TAG/ with the tag's convert_callouts.py..."
           python3 source-checkout/fern/convert_callouts.py --dir "docs-checkout/fern/pages-$TAG"
+          for d in docs-checkout/fern/translations/*/"pages-$TAG"; do
+            [ -d "$d" ] && python3 source-checkout/fern/convert_callouts.py --dir "$d"
+          done
           echo "Callout conversion complete."
+
+      - name: Resolve relative links in translated snapshot
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          # Rewrites relative page links in the translation snapshot to site
+          # URLs under this tag's version slug, from the tag's nav (see
+          # fern/resolve_translation_links.py). GITHUB_SHA is the tag commit,
+          # so GitHub-fallback links pin to the release.
+          if compgen -G "docs-checkout/fern/translations/*/pages-$TAG" > /dev/null; then
+            pip install --quiet pyyaml
+            python3 source-checkout/fern/resolve_translation_links.py \
+              --nav source-checkout/docs/index.yml \
+              --translations-root docs-checkout/fern/translations \
+              --site-root /dynamo --version-slug "$TAG" --pages-dir "pages-$TAG"
+          fi
 
       - name: Create version config file
         run: |
