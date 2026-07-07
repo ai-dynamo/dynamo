@@ -219,10 +219,10 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 |-----------------|---------------|-------|
 | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
-| 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
+| 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.11 |
 | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.11 |
 
-Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
+Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x and 1.4.x expect the `ClusterTopologyBinding` API.
 
 After installing them separately, enable Dynamo integration:
 
