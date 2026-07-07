@@ -29,6 +29,12 @@ from dynamo.planner.core.load.predictors import (
 )
 from dynamo.planner.core.types import TrafficObservation, WorkerCapabilities
 from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
+from dynamo.planner.plugins.types import (
+    ObservationData,
+    PipelineContext,
+    PredictStageRequest,
+    TrafficMetrics,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -65,6 +71,16 @@ def _make_config(
     cfg.optimization_target = "sla"
     cfg.speculative_nextn = 0
     return cfg
+
+
+def _predict_request(num_req, isl, osl):
+    return PredictStageRequest(
+        context=PipelineContext(
+            observations=ObservationData(
+                traffic=TrafficMetrics(duration_s=60, num_req=num_req, isl=isl, osl=osl)
+            )
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +144,60 @@ class TestBuiltinLoadPredictIdleTraffic:
         assert plugin._num_req_predictor.data_buffer == [10, 0, 0]
         assert plugin._isl_predictor.data_buffer == [512, 512, 512]
         assert plugin._osl_predictor.data_buffer == [128, 128, 128]
+
+    @pytest.mark.asyncio
+    async def test_resumed_traffic_exits_quiescent_idle_fast_path(self):
+        plugin = BuiltinLoadPredict(_make_config(), WorkerCapabilities())
+
+        await plugin.Predict(_predict_request(10, 512, 128))
+        await plugin.Predict(_predict_request(0, 0, 0))
+        for _ in range(100):
+            response = await plugin.Predict(_predict_request(0, 0, 0))
+            assert response.predictions.predicted_num_req == 0
+            assert response.predictions.predicted_isl == 512
+            assert response.predictions.predicted_osl == 128
+
+        response = await plugin.Predict(_predict_request(20, 2048, 512))
+
+        assert response.predictions.predicted_num_req == 20
+        assert response.predictions.predicted_isl == 2048
+        assert response.predictions.predicted_osl == 512
+        assert plugin._num_req_predictor.data_buffer == [10, 0, 20]
+        assert plugin._isl_predictor.data_buffer == [512, 512, 2048]
+        assert plugin._osl_predictor.data_buffer == [128, 128, 512]
+
+    @pytest.mark.asyncio
+    async def test_stateful_kalman_predictor_keeps_idle_cadence(self):
+        config = _make_config()
+        config.load_predictor = "kalman"
+        plugin = BuiltinLoadPredict(config, WorkerCapabilities())
+
+        await plugin.Predict(_predict_request(10, 512, 128))
+        for _ in range(10):
+            await plugin.Predict(_predict_request(0, 0, 0))
+
+        assert len(plugin._num_req_predictor.data_buffer) == 11
+        assert len(plugin._isl_predictor.data_buffer) == 11
+        assert len(plugin._osl_predictor.data_buffer) == 11
+        assert plugin._quiescent_idle_prediction is None
+
+    @pytest.mark.asyncio
+    async def test_quiescent_prophet_keeps_timestamp_cadence(self):
+        config = _make_config()
+        config.load_predictor = "prophet"
+        plugin = BuiltinLoadPredict(config, WorkerCapabilities())
+
+        await plugin.Predict(_predict_request(10, 512, 128))
+        await plugin.Predict(_predict_request(0, 0, 0))
+        for _ in range(10):
+            await plugin.Predict(_predict_request(0, 0, 0))
+
+        assert plugin._num_req_predictor.curr_step == 12
+        assert plugin._isl_predictor.curr_step == 12
+        assert plugin._osl_predictor.curr_step == 12
+        assert len(plugin._num_req_predictor.data_buffer) == 12
+        assert len(plugin._isl_predictor.data_buffer) == 12
+        assert len(plugin._osl_predictor.data_buffer) == 12
 
     def test_leading_idle_windows_do_not_seed_request_shape(self):
         plugin = BuiltinLoadPredict(_make_config(), WorkerCapabilities())

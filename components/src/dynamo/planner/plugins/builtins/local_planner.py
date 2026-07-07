@@ -116,6 +116,7 @@ class BuiltinLoadPredict:
         self._last_observed_isl: float | None = None
         self._last_observed_osl: float | None = None
         self._seen_live_traffic = False
+        self._quiescent_idle_prediction: tuple[float, float, float] | None = None
         self._last_kv_hit_rate: float | None = None
         self._last_accept_length: float = 1.0
 
@@ -137,6 +138,7 @@ class BuiltinLoadPredict:
             if hasattr(predictor, "reset_idle_skip"):
                 predictor.reset_idle_skip()
         self._seen_live_traffic = False
+        self._quiescent_idle_prediction = None
 
     def _observe_load(self, traffic: TrafficObservation) -> None:
         self._num_req_predictor.add_data_point(traffic.num_req)
@@ -164,6 +166,9 @@ class BuiltinLoadPredict:
 
     def _observe_traffic(self, traffic: TrafficObservation) -> None:
         self._observe_load(traffic)
+        self._observe_runtime_metadata(traffic)
+
+    def _observe_runtime_metadata(self, traffic: TrafficObservation) -> None:
         if traffic.kv_hit_rate is not None and not math.isnan(traffic.kv_hit_rate):
             self._last_kv_hit_rate = traffic.kv_hit_rate
         if traffic.accept_length is not None and math.isfinite(traffic.accept_length):
@@ -216,10 +221,39 @@ class BuiltinLoadPredict:
         if metrics is None:
             return PredictStageResponse(reason="no_traffic_data")
 
-        self._observe_traffic(_traffic_observation(metrics))
-        nr, isl, osl = self._predict_load()
+        traffic = _traffic_observation(metrics)
+        if traffic.num_req == 0 and self._quiescent_idle_prediction is not None:
+            # Once the request predictor has reached zero, identical idle
+            # windows cannot affect a throughput decision. Coalesce them until
+            # traffic resumes instead of repeatedly updating/refitting three
+            # statistical models. Runtime metadata remains live while idle.
+            if self._config.load_predictor == "prophet":
+                # Prophet fits from scratch, so retaining each cheap sample
+                # preserves its bounded history and timestamp cadence without
+                # paying for a fit whose zero-demand result is unused.
+                self._observe_traffic(traffic)
+            else:
+                self._observe_runtime_metadata(traffic)
+            nr, isl, osl = self._quiescent_idle_prediction
+        else:
+            self._observe_traffic(traffic)
+            nr, isl, osl = self._predict_load()
         if nr is None or isl is None or osl is None:
+            self._quiescent_idle_prediction = None
             return PredictStageResponse(reason="predict_failed")
+
+        if (
+            traffic.num_req == 0
+            and self._seen_live_traffic
+            and nr <= 0
+            # Constant is exact and Prophet refits from retained samples.
+            # ARIMA and Kalman carry incremental state, so they must keep
+            # observing every interval even after forecasting zero.
+            and self._config.load_predictor in ("constant", "prophet")
+        ):
+            self._quiescent_idle_prediction = (nr, isl, osl)
+        elif traffic.num_req > 0:
+            self._quiescent_idle_prediction = None
 
         return PredictStageResponse(
             predictions=PredictionData(
