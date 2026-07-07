@@ -3519,6 +3519,7 @@ _Appears in:_
 | `grove` _[GroveConfiguration](#groveconfiguration)_ | Grove orchestrator configuration |  |  |
 | `lws` _[LWSConfiguration](#lwsconfiguration)_ | LWS orchestrator configuration |  |  |
 | `kaiScheduler` _[KaiSchedulerConfiguration](#kaischedulerconfiguration)_ | KaiScheduler configuration |  |  |
+| `volcanoScheduler` _[VolcanoSchedulerConfiguration](#volcanoschedulerconfiguration)_ | VolcanoScheduler configuration |  |  |
 
 
 #### RBACConfiguration
@@ -3612,6 +3613,22 @@ _Appears in:_
 | `istio` _[IstioMeshConfiguration](#istiomeshconfiguration)_ | Istio holds Istio-specific settings. Only used when Provider is "istio". |  |  |
 
 
+
+
+#### VolcanoSchedulerConfiguration
+
+
+
+VolcanoSchedulerConfiguration holds Volcano scheduler settings.
+
+
+
+_Appears in:_
+- [OrchestratorConfiguration](#orchestratorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets. |  |  |
 
 
 #### WebhookServer
