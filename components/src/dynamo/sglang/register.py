@@ -13,6 +13,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -27,13 +28,13 @@ from dynamo.llm import (
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
+    get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
-SGLANG_HICACHE_CAPACITY_RUNTIME_KEY = "sglang_hicache_capacity"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
@@ -341,15 +342,6 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
         return False
 
 
-def _get_hicache_capacity_runtime_data(
-    scheduler_info: dict[str, Any],
-) -> Optional[dict[str, int]]:
-    host_total_tokens = scheduler_info.get("hicache_host_total_tokens")
-    if not isinstance(host_total_tokens, (int, float)) or host_total_tokens <= 0:
-        return None
-    return {"host_total_tokens": int(host_total_tokens)}
-
-
 async def _get_runtime_config(
     engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
@@ -497,18 +489,19 @@ async def _get_runtime_config(
         return runtime_config
 
     try:
-        hicache_capacity_runtime_data = _get_hicache_capacity_runtime_data(
-            scheduler_info
+        offloading_capacity = get_hicache_native_offloading_capacity(
+            server_args, scheduler_info
         )
-        if hicache_capacity_runtime_data is not None:
+        if offloading_capacity is not None:
             runtime_config.set_engine_specific(
-                SGLANG_HICACHE_CAPACITY_RUNTIME_KEY,
-                json.dumps(hicache_capacity_runtime_data),
+                NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY,
+                json.dumps(offloading_capacity),
             )
-            logging.info("Published SGLang HiCache capacity runtime metadata.")
+            logging.info("Published native offloading capacity from SGLang HiCache.")
     except Exception as e:
         logging.warning(
-            "Failed to attach SGLang HiCache capacity runtime metadata: %s", e
+            "Failed to attach native offloading capacity from SGLang HiCache: %s",
+            e,
         )
 
     return runtime_config
