@@ -1124,9 +1124,7 @@ impl OpenAIPreprocessor {
             }))
             .await;
 
-            for ((type_str, _content_part), result) in
-                fetch_tasks.into_iter().zip(results.into_iter())
-            {
+            for ((type_str, _content_part), result) in fetch_tasks.into_iter().zip(results) {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
                 let rdma_descriptor = result?;
 
