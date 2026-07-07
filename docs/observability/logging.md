@@ -29,7 +29,7 @@ enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 | `DYN_SKIP_SGLANG_LOG_FORMATTING` | Disable Dynamo's SGLang log configuration | `false` | `true` |
 | `OTEL_SERVICE_NAME` | Service name for trace and span information | `dynamo` | `dynamo-frontend` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP export of both traces and logs | `false` | `true` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Default OTLP endpoint for traces and logs when signal-specific endpoints are unset | `http://localhost:4317` (`grpc`) / `http://localhost:4318` (`http/protobuf`) | `http://collector:4317` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Default OTLP endpoint for traces and logs when signal-specific endpoints are unset | `http://localhost:4317` (`grpc`) / `http://localhost:4318` (`http/protobuf`) | `http://otel-collector:4317` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Override endpoint for traces, used as-is | unset | `http://tempo:4317` |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Override endpoint for logs, used as-is | unset | `http://loki-collector:4317` |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | Default OTLP protocol for traces and logs | `grpc` | `http/protobuf` |
