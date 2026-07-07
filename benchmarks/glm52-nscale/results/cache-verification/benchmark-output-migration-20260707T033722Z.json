@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "completed_at": "2026-07-07T03:37:22Z",
+  "source": {
+    "pvc": "glm52-benchmark-artifacts",
+    "pvc_uid": "9588b5d3-775d-4e3b-848b-cb5ffba88fda",
+    "storage_class": "vast",
+    "mount_mode": "read_only",
+    "retained": true
+  },
+  "destination": {
+    "pvc": "glm52-benchmark-output",
+    "pvc_uid": "a732b044-f121-43c3-94da-399e1b731657",
+    "pv": "pvc-a732b044-f121-43c3-94da-399e1b731657",
+    "storage_class": "cinder",
+    "access_modes": [
+      "ReadWriteOnce"
+    ],
+    "capacity": "1Ti",
+    "reclaim_policy": "Retain"
+  },
+  "identity": {
+    "regular_files": 5040,
+    "directories": 1541,
+    "symlinks": 0,
+    "bytes": 673879115,
+    "source_tree_sha256": "fa69bfe9c128f9b9282265e54431f8ba95796061d12b8bc723de6758f055b668",
+    "destination_tree_sha256": "fa69bfe9c128f9b9282265e54431f8ba95796061d12b8bc723de6758f055b668",
+    "marker_sha256": "4a3bbd039d2355a26c48e7d8018679cc8dd54bfd5e45a1fd303da82e28f4e8e4"
+  },
+  "requirements": {
+    "required_absent": [
+      "swebench/results/vllm-serve-ab-r2/verified"
+    ],
+    "required_files": {
+      "swebench/results/dynamo-vllm-ab/verified/task-images.json": "39c96a5fdec81852fb0342556ba8c0922f1bb54854e79ed2661b6e6981bb5a21"
+    }
+  },
+  "runner_cutover": {
+    "pod_uid": "dd468454-2054-4ef9-a8b1-c82678bdbf12",
+    "rendered_manifest_sha256": "145ad171e3a1b533ece497c96430d8ebfd43dac2bbb61b11ed75932b5b177a6c",
+    "source_commit": "71df933dd01394bf54e1d5cc25a0f666bd91dd9e",
+    "runner_restart_count": 0,
+    "dind_restart_count": 0,
+    "runner_parent_device": 238,
+    "runner_output_device": 64784,
+    "dind_parent_device": 238,
+    "dind_output_device": 64784,
+    "marker_verified_in_both_containers": true,
+    "prefill_checkpoint_restored": {
+      "files": 507,
+      "directories": 1,
+      "bytes": 804078,
+      "tree_sha256": "b529bad556711d1b0f65de264dad25bca1c02d370365445791400bb9bb4d18ec",
+      "completion_gate": "500/500 PASS"
+    }
+  }
+}

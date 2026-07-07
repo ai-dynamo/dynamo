@@ -169,3 +169,14 @@ SPDX-License-Identifier: Apache-2.0
   and DinD containers, while VAST remains at the parent `/artifacts` for harness environments.
   Migration is source-read-only and requires the authoritative Verified manifest plus an absent
   `vllm-serve-ab-r2` replay target before publishing an exact hashed copy.
+- The read-only output migration completed at `2026-07-07T03:37:22Z`: 5,040 files,
+  1,541 directories, 673,879,115 bytes, and identical source/destination tree SHA-256
+  `fa69bfe9c128f9b9282265e54431f8ba95796061d12b8bc723de6758f055b668`. The 1 TiB
+  Cinder PV is `Retain`; both runner containers see VAST device 238 at `/artifacts` and Cinder
+  device 64784 at `/artifacts/glm52-nscale`, with marker SHA-256
+  `4a3bbd039d2355a26c48e7d8018679cc8dd54bfd5e45a1fd303da82e28f4e8e4` and zero restarts.
+  The exact completed prefill checkpoint was restored and passed its 500/500 gate again.
+- The first fresh `vllm-serve` A/B deployment preflight after cutover made no changes: the pinned
+  8-GPU node had seven GPUs requested by unrelated namespaces, leaving one of the required four
+  free. The campaign namespace retained zero GPU requests and no serving resources; wait for the
+  same pinned node rather than changing hardware.
