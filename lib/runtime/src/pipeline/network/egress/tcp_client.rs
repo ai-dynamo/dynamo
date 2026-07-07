@@ -155,11 +155,13 @@ struct PendingRequest {
 
 /// Buffered TCP writer for header coalescing and chunked payload writes.
 ///
-/// Small protocol/header chunks are coalesced into `flattened_writes`, while
-/// large payloads stay as `Bytes` chunks in `write_buf`. This preserves the
-/// zero-copy payload path without turning deep drains into a heap-allocated
-/// iovec list or an unbounded all-available-request batch.
+/// Protocol headers and payloads smaller than `WRITE_FLATTEN_THRESHOLD` are
+/// coalesced into `flattened_writes`, while larger payloads stay as `Bytes`
+/// chunks in `write_buf`. This preserves the large-payload zero-copy path
+/// without turning deep drains into a heap-allocated iovec list or an
+/// unbounded all-available-request batch.
 struct TcpWriteBuffer {
+    // Moving or relocating these Bytes handles does not copy their backing buffers.
     write_buf: VecDeque<Bytes>,
     flattened_writes: BytesMut,
     write_buf_len: usize,
@@ -204,6 +206,7 @@ impl TcpWriteBuffer {
 
         self.write_buf_len += buf.len();
         if buf.len() < WRITE_FLATTEN_THRESHOLD {
+            // One bounded copy coalesces small chunks and limits writev fragmentation.
             self.flattened_writes.extend_from_slice(&buf);
         } else {
             self.flush_flattened();
