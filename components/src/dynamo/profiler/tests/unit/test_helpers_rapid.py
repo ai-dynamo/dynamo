@@ -166,6 +166,28 @@ class TestRunNaiveFallback:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    def test_warns_when_sla_targets_are_absent(self, caplog):
+        """Naive fallback uses a generic label when no latency target is set."""
+        dgdr = _make_dgdr(sla=SLASpec(ttft=None, itl=None, e2eLatency=None))
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
+
+        assert "SLA is unverified (requested SLA)" in caplog.text
+        assert "ttft=" not in caplog.text
+        assert "itl=" not in caplog.text
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
     def test_with_pvc_passes_pvc_overrides(self):
         """When modelCache.pvcName is set, PVC overrides are injected into generator params."""
         dgdr = _make_dgdr(
