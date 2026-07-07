@@ -141,6 +141,7 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     server_args = SimpleNamespace(
         context_length=4096,
         disaggregation_mode=None,
+        hicache_write_policy="write_back",
         max_prefill_tokens=None,
         page_size=16,
         speculative_algorithm="NONE",
