@@ -97,7 +97,7 @@ func TestCheckpointCreatePodSnapshot_CreateErrorEmitsEvent(t *testing.T) {
 	}
 	r := makeCheckpointReconcilerWithInterceptor(checkpointTestScheme(), funcs, ckpt)
 
-	_, err := r.createPodSnapshot(context.Background(), ckpt, testHash, "worker-xyz")
+	_, err := r.createPodSnapshot(context.Background(), ckpt, testHash, podNamed("worker-xyz"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "create PodSnapshot")
 	assert.True(t, drainEvent(t, r, "PodSnapshotCreateFailed"), "expected a PodSnapshotCreateFailed event")

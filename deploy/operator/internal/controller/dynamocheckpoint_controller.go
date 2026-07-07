@@ -316,18 +316,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 	job := &batchv1.Job{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: ckpt.Status.JobName}, job); err != nil {
 		if apierrors.IsNotFound(err) {
-			ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
-			ckpt.Status.Message = "checkpoint job was deleted"
-			meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-				Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
-				Status:  metav1.ConditionFalse,
-				Reason:  "JobDeleted",
-				Message: "Checkpoint job was deleted",
-			})
-			if err := r.Status().Update(ctx, ckpt); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, nil
+			return r.handleCreatingJobGone(ctx, ckpt)
 		}
 		return ctrl.Result{}, err
 	}
@@ -363,10 +352,13 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			return ctrl.Result{}, perr
 		}
 
-		created, cerr := r.createPodSnapshot(ctx, ckpt, checkpointID, pod.Name)
+		created, cerr := r.createPodSnapshot(ctx, ckpt, checkpointID, pod)
 		if cerr != nil {
+			if errors.Is(cerr, errPodSnapshotNameConflict) {
+				return r.failCreating(ctx, ckpt, "PodSnapshotNameConflict", cerr.Error())
+			}
 			if commonController.IgnoreIntermediateError(cerr) != nil {
-				r.updateFailedStatus(ctx, ckpt, cerr)
+				return r.failCreating(ctx, ckpt, "PodSnapshotCreateFailed", cerr.Error())
 			}
 			return ctrl.Result{}, cerr
 		}
@@ -379,11 +371,43 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 	return r.observePodSnapshot(ctx, ckpt, job, snap, checkpointID)
 }
 
+// handleCreatingJobGone resolves a Creating checkpoint whose Job no longer exists. The checkpoint
+// Job carries a TTL (snapshotprotocol.DefaultCheckpointJobTTLSeconds), so a missing Job is the
+// expected end state of a finished capture: the owned PodSnapshot, not the Job, is the source of
+// truth. Only when no owned PodSnapshot exists can nothing ever complete the checkpoint.
+func (r *CheckpointReconciler) handleCreatingJobGone(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
+	snap, err := r.findOwnedPodSnapshot(ctx, ckpt)
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
+		ckpt.Status.Message = "checkpoint job was deleted"
+		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
+			Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+			Status:  metav1.ConditionFalse,
+			Reason:  "JobDeleted",
+			Message: "Checkpoint job was deleted",
+		})
+		if err := r.Status().Update(ctx, ckpt); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	checkpointID, err := checkpoint.CheckpointID(ckpt)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	return r.observePodSnapshot(ctx, ckpt, nil, snap, checkpointID)
+}
+
 // observePodSnapshot maps the owned PodSnapshot's status (and the Job's failure hang guard) onto the
 // DynamoCheckpoint phase. The snapshot is resolved and owner-confirmed by the
 // caller, so this never re-reads it by name. Completion cascades up from PodSnapshotContent →
 // PodSnapshot → DynamoCheckpoint, so this never reads the Job's terminal annotation. The Job is read
-// only on the non-terminal path (the terminal PodSnapshot result always wins).
+// only on the non-terminal path (the terminal PodSnapshot result always wins); it may be nil when
+// the Job is already gone (TTL-reaped), in which case the hang guard is skipped.
 func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, snap *nvidiacomv1alpha1.PodSnapshot, checkpointID string) (ctrl.Result, error) {
 	// A PodSnapshot can fail before it is bound (e.g. the PodSnapshotReconciler rejects the
 	// source pod), so always observe Failed. Ready is only meaningful once bound.
@@ -443,8 +467,12 @@ func podSnapshotConditionMessage(snap *nvidiacomv1alpha1.PodSnapshot, condType s
 	return ""
 }
 
-// checkpointJobFailed reports whether the Job has a True JobFailed condition.
+// checkpointJobFailed reports whether the Job has a True JobFailed condition. A nil Job (already
+// deleted) reports false — with the Job gone there is nothing left to hang-guard.
 func checkpointJobFailed(job *batchv1.Job) (bool, string) {
+	if job == nil {
+		return false, ""
+	}
 	for _, condition := range job.Status.Conditions {
 		if condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue {
 			message := "checkpoint job failed"

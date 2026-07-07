@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -34,6 +35,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// errPodSnapshotNameConflict marks an existing PodSnapshot at the checkpoint's deterministic name
+// that is not controlled by this checkpoint — a terminal name collision, not a cache race.
+var errPodSnapshotNameConflict = errors.New("existing PodSnapshot belongs to another owner")
 
 // podSnapshotName returns the PodSnapshot name for a checkpoint: the DynamoCheckpoint's own name.
 // The name may change in a future naming scheme, so the controller never reconstructs it for
@@ -96,21 +101,16 @@ func (r *CheckpointReconciler) findOwnedPodSnapshot(ctx context.Context, ckpt *n
 }
 
 // createPodSnapshot creates this checkpoint's PodSnapshot. The caller has confirmed (via
-// findOwnedPodSnapshot) that none exists, so this is a pure create: a plain Create, not an SSA
-// upsert. On AlreadyExists — a stale informer cache that missed an existing object — it returns a
-// non-terminal error so the reconcile requeues and the next owner-filtered lookup picks the object up.
-func (r *CheckpointReconciler) createPodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, sourcePodName string) (*nvidiacomv1alpha1.PodSnapshot, error) {
-	snap := buildPodSnapshot(ckpt, checkpointID, sourcePodName)
+// findOwnedPodSnapshot) that none exists, so this is a pure create. On AlreadyExists the object is
+// classified: cache lag (ours) is adopted; a foreign owner is terminal.
+func (r *CheckpointReconciler) createPodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID string, pod *corev1.Pod) (*nvidiacomv1alpha1.PodSnapshot, error) {
+	snap := buildPodSnapshot(ckpt, checkpointID, pod)
 	if err := ctrl.SetControllerReference(ckpt, snap, r.Scheme()); err != nil {
 		return nil, err
 	}
 	if err := r.Create(ctx, snap); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// A PodSnapshot with this name already exists but the owner-filtered List in
-			// findOwnedPodSnapshot missed it (cache lag). AlreadyExists is non-terminal
-			// (IgnoreIntermediateError), so just requeue: the next reconcile's lookup finds and
-			// observes it. No adopt/ownership probe here — keep the create path simple.
-			return nil, fmt.Errorf("PodSnapshot %q already exists, requeueing: %w", snap.Name, err)
+			return r.classifyExistingPodSnapshot(ctx, ckpt, snap.Name, err)
 		}
 		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "PodSnapshotCreateFailed", err.Error())
 		return nil, fmt.Errorf("create PodSnapshot %q: %w", snap.Name, err)
@@ -119,10 +119,31 @@ func (r *CheckpointReconciler) createPodSnapshot(ctx context.Context, ckpt *nvid
 	return snap, nil
 }
 
+// classifyExistingPodSnapshot resolves what holds the checkpoint's deterministic PodSnapshot name
+// after a Create AlreadyExists. Cache lag (the object is ours but the informer hasn't synced) is
+// harmless: return the existing object so the caller can observe it without an extra reconcile.
+// A foreign owner is a permanent name collision: return errPodSnapshotNameConflict (terminal).
+// A re-read NotFound means the cache is still behind: surface the original AlreadyExists so the
+// caller requeues.
+func (r *CheckpointReconciler) classifyExistingPodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, name string, createErr error) (*nvidiacomv1alpha1.PodSnapshot, error) {
+	existing := &nvidiacomv1alpha1.PodSnapshot{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: name}, existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("PodSnapshot %q already exists but is not yet in cache, requeueing: %w", name, createErr)
+		}
+		return nil, fmt.Errorf("get existing PodSnapshot %q: %w", name, err)
+	}
+	if !metav1.IsControlledBy(existing, ckpt) {
+		return nil, fmt.Errorf("%w: PodSnapshot %q is not controlled by checkpoint %q", errPodSnapshotNameConflict, name, ckpt.Name)
+	}
+	return existing, nil
+}
+
 // buildPodSnapshot constructs the desired PodSnapshot for a checkpoint. The name is the checkpoint's
 // own name; the SnapshotOwnerLabel is the stable lookup/search key and CheckpointIDLabel is retained
-// for observability.
-func buildPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, sourcePodName string) *nvidiacomv1alpha1.PodSnapshot {
+// for observability. The source pod's UID is pinned so the PodSnapshotReconciler rejects a
+// same-named recreation instead of capturing the wrong workload.
+func buildPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID string, pod *corev1.Pod) *nvidiacomv1alpha1.PodSnapshot {
 	return &nvidiacomv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
@@ -138,7 +159,7 @@ func buildPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, so
 		},
 		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
 			Source: nvidiacomv1alpha1.PodSnapshotSource{
-				PodRef: nvidiacomv1alpha1.PodReference{Name: sourcePodName},
+				PodRef: nvidiacomv1alpha1.PodReference{Name: pod.Name, UID: pod.UID},
 			},
 		},
 	}
