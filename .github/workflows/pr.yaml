@@ -863,9 +863,7 @@ jobs:
     needs: [changed-files, trtllm-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -1042,10 +1040,8 @@ jobs:
     name: TRTLLM DynamoCheckpoint Operator Setup
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
+      (needs.changed-files.outputs.snapshot == 'true') &&
+      needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
     permissions:
@@ -1169,9 +1165,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-trtllm, snapshot-agent]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-operator-checkpoint-trtllm.result == 'success' &&
       needs.snapshot-agent.result == 'success'
     runs-on: prod-deploy-tester-v1
@@ -1348,9 +1342,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, snapshot-placeholder-trtllm, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-snapshot-agent-checkpoint-trtllm.result == 'success' &&
       needs.snapshot-placeholder-trtllm.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
@@ -1459,9 +1451,7 @@ jobs:
     name: TRTLLM DynamoCheckpoint Cleanup
     if: |
       always() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     needs: [changed-files, deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, deploy-test-checkpoint-trtllm]
     runs-on: prod-deploy-tester-v1
     steps:
