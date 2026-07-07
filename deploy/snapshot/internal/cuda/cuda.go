@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -341,30 +344,116 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 	return timings, nil
 }
 
+// HasJobFile reports whether the checkpointed CUDA processes are coordinated
+// through a cuda-checkpoint job file. The decision mirrors Dynamo's
+// checkpoint-time WrapLaunchJob choice, read back from the container
+// entrypoint: an entrypoint wrapped with `cuda-checkpoint --launch-job`
+// coordinates all CUDA processes through one job, and cuda-checkpoint
+// requires operations on processes in a job to run sequentially. An unknown
+// entrypoint fails closed and is treated as having a job file.
+//
+// Workloads that join a cuda-checkpoint job by other means (for example by
+// setting the job-file environment variable themselves) are outside the
+// Dynamo checkpoint contract and are not detected here.
+func HasJobFile(entrypointArgs []string) (bool, string) {
+	if len(entrypointArgs) == 0 {
+		return true, "container entrypoint is unknown"
+	}
+	if path.Base(entrypointArgs[0]) == "cuda-checkpoint" && slices.Contains(entrypointArgs, "--launch-job") {
+		return true, "container entrypoint is wrapped with cuda-checkpoint --launch-job"
+	}
+	return false, "container entrypoint is not wrapped with cuda-checkpoint --launch-job"
+}
+
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) (RestorePhaseTimings, error) {
-	var timings RestorePhaseTimings
+// When concurrent is true (the checkpoint manifest recorded no cuda-checkpoint
+// job file), per-PID operations within each phase run concurrently; otherwise
+// they run serially. All restores must succeed before any unlock starts.
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, concurrent bool, log logr.Logger) (RestorePhaseTimings, error) {
+	return restoreAndUnlockProcessTree(
+		ctx,
+		cudaPIDs,
+		concurrent,
+		func(ctx context.Context, pid int) error {
+			return restoreProcess(ctx, pid, deviceMap, log)
+		},
+		func(ctx context.Context, pid int) error {
+			return unlock(ctx, pid, log)
+		},
+		getState,
+		log,
+	)
+}
+
+func restoreAndUnlockProcessTree(
+	ctx context.Context,
+	cudaPIDs []int,
+	concurrent bool,
+	restore func(context.Context, int) error,
+	unlock func(context.Context, int) error,
+	getProcessState func(context.Context, int) (string, error),
+	log logr.Logger,
+) (timings RestorePhaseTimings, err error) {
+	mode := "serial"
+	if concurrent {
+		mode = "concurrent"
+	}
+	log.Info("Selected CUDA restore execution mode", "mode", mode, "pid_count", len(cudaPIDs))
 
 	start := time.Now()
-	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			return timings, err
-		}
+	defer func() {
+		timings.TotalDuration = time.Since(start)
+	}()
+
+	if err := runPIDOperations(ctx, cudaPIDs, "restore", concurrent, restore); err != nil {
+		return timings, err
 	}
 
-	for _, pid := range cudaPIDs {
-		if err := unlock(ctx, pid, log); err != nil {
-			timings.TotalDuration = time.Since(start)
-			state, stateErr := getState(ctx, pid)
-			if stateErr == nil && state == "running" {
-				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
-				continue
-			}
-			return timings, err
+	tolerantUnlock := func(ctx context.Context, pid int) error {
+		err := unlock(ctx, pid)
+		if err == nil {
+			return nil
 		}
+		state, stateErr := getProcessState(ctx, pid)
+		if stateErr == nil && state == "running" {
+			log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
+			return nil
+		}
+		return err
 	}
-	timings.TotalDuration = time.Since(start)
+	if err := runPIDOperations(ctx, cudaPIDs, "unlock", concurrent, tolerantUnlock); err != nil {
+		return timings, err
+	}
 
 	return timings, nil
+}
+
+// runPIDOperations runs op for each PID, serially or one goroutine per PID,
+// and joins failures in input PID order.
+func runPIDOperations(ctx context.Context, pids []int, action string, concurrent bool, op func(context.Context, int) error) error {
+	errs := make([]error, len(pids))
+	wrap := func(pid int, err error) error {
+		if err == nil {
+			return nil
+		}
+		return fmt.Errorf("CUDA %s failed for pid %d: %w", action, pid, err)
+	}
+
+	if !concurrent {
+		for i, pid := range pids {
+			errs[i] = wrap(pid, op(ctx, pid))
+		}
+		return errors.Join(errs...)
+	}
+
+	var wg sync.WaitGroup
+	for i, pid := range pids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = wrap(pid, op(ctx, pid))
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
