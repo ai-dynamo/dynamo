@@ -24,6 +24,13 @@ on:
         default: |
           build-xpu
           test-xpu
+      run_id:
+        description: |
+          Run whose jobs are inspected for failures (and linked in the alert). Defaults to
+          the calling run; override only to replay a specific run, e.g. for testing.
+        required: false
+        type: string
+        default: ""
     secrets:
       SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL:
         required: true
@@ -41,7 +48,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IGNORED_JOBS: ${{ inputs.ignored_jobs }}
+          TARGET_RUN_ID: ${{ inputs.run_id }}
+          THIS_RUN_ID: ${{ github.run_id }}
         run: |
+          # Default to the calling run; inputs.run_id overrides it (e.g. to replay a real failure).
+          RUN_ID="${TARGET_RUN_ID:-$THIS_RUN_ID}"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
           JOBS_JSON=$(mktemp)
           # --fail + --retry-all-errors: retry transient API errors (5xx / secondary
           # rate limits) and fail loudly on a genuine non-200 instead of writing an
@@ -49,7 +62,7 @@ jobs:
           curl -sS --fail --retry 3 --retry-all-errors --retry-delay 3 \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${RUN_ID}/jobs?per_page=100" \
             >$JOBS_JSON
 
           # Turn the newline-separated IGNORED_JOBS list into a trimmed, non-empty JSON array for jq.
@@ -85,7 +98,7 @@ jobs:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: "<https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }}|Workflow Summary>"
+                  text: "<https://github.com/${{ github.repository }}/actions/runs/${{ steps.failed-jobs.outputs.run_id }}|Workflow Summary>"
               - type: "section"
                 text:
                   type: mrkdwn
@@ -93,4 +106,4 @@ jobs:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: "@dynamo-ops-agent please investigate and post a preliminary debug with clear next steps for @ops-support to action, address, and drive to closure."
+                  text: "<@U0AQRCAT0R4> please investigate and post a preliminary debug with clear next steps for @ops-support to action, address, and drive to closure."

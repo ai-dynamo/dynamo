@@ -1,0 +1,25 @@
+# TEMPORARY test harness for the reusable Slack notifier — DELETE before merge.
+# Manually dispatch it against a real historical failed run to verify the alert
+# posts, renders, and pings @dynamo-ops-agent end to end.
+name: _test-notify-slack
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "A real failed run id to replay through the notifier."
+        required: true
+        default: "28834174736"
+      pipeline_name:
+        description: "Header label."
+        required: false
+        default: "TEST"
+
+jobs:
+  notify:
+    uses: ./.github/workflows/notify-slack.yml
+    with:
+      pipeline_name: ${{ inputs.pipeline_name }}
+      runs_on: ubuntu-slim
+      run_id: ${{ inputs.run_id }}
+    secrets: inherit
