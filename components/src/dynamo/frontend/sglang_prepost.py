@@ -60,8 +60,7 @@ class SglangPreprocessResult:
 #
 # A static, per-server boolean is plenty: per-request decoding of prompt
 # tails adds latency on the hot path with nothing to show for it. The
-# per-request knobs live downstream (``separate_reasoning``,
-# ``chat_template_kwargs.enable_thinking``), matching sglang's API.
+# per-request reasoning knobs live downstream, matching sglang's API.
 _FORCE_REASONING_PATTERNS = (
     # qwen3-family: <|im_start|>assistant\n<think>\n
     re.compile(r"<\|im_start\|>assistant\\n<think>\\n"),
@@ -133,6 +132,8 @@ def resolve_request_force_reasoning(
       * MiniMax-M3 defaults to adaptive, but SGLang still enables the
         reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
         explicitly ``"disabled"``.
+      * Mistral is enabled only when ``reasoning_effort`` is present and not
+        ``"none"``.
       * opt-in families (``deepseek-v3``/``gemma4``): off by default,
         enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
       * anything else: follow the statically-detected template default.
@@ -147,6 +148,12 @@ def resolve_request_force_reasoning(
 
     if reasoning_parser_name == "minimax-m3":
         return kwargs.get("thinking_mode") != "disabled"
+
+    if reasoning_parser_name == "mistral":
+        reasoning_effort = request.get("reasoning_effort")
+        if reasoning_effort is None:
+            reasoning_effort = kwargs.get("reasoning_effort")
+        return reasoning_effort is not None and reasoning_effort != "none"
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
@@ -701,24 +708,23 @@ def preprocess_chat_request(
 
     ``template_force_reasoning`` is the static per-server flag derived from
     the chat template (see :func:`detect_force_reasoning_from_template`);
-    the effective per-request value combines it with client knobs
-    (``separate_reasoning``, ``chat_template_kwargs.{thinking,enable_thinking}``).
+    the effective per-request value combines it with the configured parser and
+    request-level thinking controls.
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
     request = _normalize_openai_thinking_template_kwargs(request)
     messages = _materialize_messages(request.get("messages", []))
 
-    # Per-request client escape hatch: skip reasoning parsing entirely when
-    # the client sends ``separate_reasoning=False`` -- thinking text then
-    # lands in ``delta.content`` instead of ``delta.reasoning_content``.
-    effective_reasoning_parser_name = (
-        reasoning_parser_name if _client_wants_separate_reasoning(request) else None
-    )
+    # Generation mode is independent of whether the client wants reasoning
+    # separated into reasoning_content or retained in content.
     force_reasoning = resolve_request_force_reasoning(
         request,
-        effective_reasoning_parser_name,
+        reasoning_parser_name,
         template_force_reasoning,
+    )
+    effective_reasoning_parser_name = (
+        reasoning_parser_name if _client_wants_separate_reasoning(request) else None
     )
 
     # Convert tools to SGLang format (done once, shared with parser creation)

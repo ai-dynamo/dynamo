@@ -46,6 +46,7 @@ from dynamo.frontend.sglang_processor import (
     _load_chat_template,
     _map_finish_reason,
     _normalize_eos_token_ids,
+    _preprocess_worker,
     _runtime_config_parser_name,
     _tokenizer_eos_token_ids,
 )
@@ -649,6 +650,190 @@ def test_minimax_m3_force_reasoning_uses_thinking_mode():
         )
         is False
     )
+
+
+@pytest.mark.parametrize(
+    ("request_data", "expected"),
+    [
+        ({}, False),
+        ({"reasoning_effort": "none"}, False),
+        ({"reasoning_effort": "high"}, True),
+        ({"chat_template_kwargs": {"reasoning_effort": "medium"}}, True),
+    ],
+)
+def test_mistral_force_reasoning_uses_reasoning_effort(request_data, expected):
+    """Mistral follows SGLang's explicit non-none reasoning-effort rule."""
+    assert (
+        resolve_request_force_reasoning(
+            request_data, "mistral", template_default=False
+        )
+        is expected
+    )
+
+
+def _mistral_guided_request(tool_choice):
+    return {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Check the weather."}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+        "tool_choice": tool_choice,
+        "reasoning_effort": "high",
+    }
+
+
+def _qwen_guided_request_without_separation(tool_choice):
+    request = _mistral_guided_request(tool_choice)
+    request.pop("reasoning_effort")
+    request["separate_reasoning"] = False
+    return request
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_mistral_high_effort_sets_reasoning_gate_inline(tokenizer, tool_choice):
+    """Inline preprocessing enables SGLang's gate for required and named tools."""
+    routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=routed_engine,
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="mistral",
+        eos_token_ids=None,
+    )
+
+    async def collect():
+        return [
+            item
+            async for item in processor.generator(_mistral_guided_request(tool_choice))
+        ]
+
+    asyncio.run(collect())
+    assert routed_engine.requests[0]["require_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_mistral_high_effort_sets_reasoning_gate_pool(
+    tokenizer, tool_choice, monkeypatch
+):
+    """Pool-worker preprocessing enables the same required and named gates."""
+    monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+    monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", "qwen25")
+    monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "mistral")
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+
+    result = _preprocess_worker(
+        _mistral_guided_request(tool_choice), MODEL, eos_token_ids=None
+    )
+    assert result.force_reasoning is True
+    assert result.dynamo_preproc["require_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_qwen_separate_reasoning_false_keeps_generation_gate(tokenizer, tool_choice):
+    """Response placement does not disable Qwen's guided reasoning gate."""
+    request = _qwen_guided_request_without_separation(tool_choice)
+    result = preprocess_chat_request(
+        request,
+        tokenizer=tokenizer,
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="qwen3",
+    )
+
+    assert result.force_reasoning is True
+    assert result.reasoning_parser is None
+    assert _guided_tool_choice_requires_reasoning(request, result.force_reasoning)
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_qwen_separate_reasoning_false_sets_gate_inline(tokenizer, tool_choice):
+    """Inline preprocessing forwards the generation gate without a reasoner."""
+    routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=routed_engine,
+        tool_call_parser_name="qwen25",
+        reasoning_parser_name="qwen3",
+        eos_token_ids=None,
+    )
+
+    async def collect():
+        return [
+            item
+            async for item in processor.generator(
+                _qwen_guided_request_without_separation(tool_choice)
+            )
+        ]
+
+    asyncio.run(collect())
+    assert routed_engine.requests[0]["require_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_weather"}},
+    ],
+)
+def test_qwen_separate_reasoning_false_sets_gate_pool(
+    tokenizer, tool_choice, monkeypatch
+):
+    """Pool preprocessing forwards the gate while omitting response parsing."""
+    monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+    monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", "qwen25")
+    monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "qwen3")
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+
+    result = _preprocess_worker(
+        _qwen_guided_request_without_separation(tool_choice),
+        MODEL,
+        eos_token_ids=None,
+    )
+    assert result.force_reasoning is True
+    assert result.dynamo_preproc["require_reasoning"] is True
+    assert result.effective_reasoning_parser_name is None
 
 
 @pytest.mark.parametrize(

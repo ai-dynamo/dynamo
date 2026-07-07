@@ -25,18 +25,23 @@ Dynamo turns a model's raw tool-call and reasoning markup into structured `tool_
 ## The pairing rule
 
 - The **`--dyn-*` parser flags pair with the `dynamo` chat processor** and go on the **worker**: `--dyn-tool-call-parser`, `--dyn-reasoning-parser`.
-- The **bare `--tool-call-parser` / `--reasoning-parser` flags pair with `vllm` / `sglang`** and go on the **frontend**.
+- The **bare `--tool-call-parser` / `--reasoning-parser` flags pair with `vllm` / `sglang`** and normally go on the **frontend**.
 
-Tool calling and reasoning are independent — set one, the other, or both — but always from the same family as your chat processor. You never mix the two families.
+Tool calling and reasoning are independent — set one, the other, or both. One
+exception applies to vLLM structured output and SGLang required/named tool
+choice: also set the engine's native `--reasoning-parser` on the worker. The
+native parser gates the grammar while `--dyn-reasoning-parser` constructs the
+response. Native and Dynamo tool-call parsers remain mutually exclusive.
 
 ## What does NOT make sense
 
 | Combination | Why it's wrong |
 |---|---|
-| `--dyn-chat-processor dynamo` + `--tool-call-parser` / `--reasoning-parser` | The bare flags drive the engine-fallback path; the default Dynamo path uses the `--dyn-` flags. Use `--dyn-tool-call-parser` / `--dyn-reasoning-parser`. |
+| `--dyn-chat-processor dynamo` + `--tool-call-parser` | Native and Dynamo tool-call parsers both construct tool calls. Use `--dyn-tool-call-parser`. |
+| `--dyn-chat-processor dynamo` + `--reasoning-parser` without `--dyn-reasoning-parser` | The native parser can gate structured output but does not populate Dynamo's `reasoning_content`. Configure both reasoning parsers. |
 | `--dyn-chat-processor vllm`/`sglang` + `--dyn-tool-call-parser` / `--dyn-reasoning-parser` | The `--dyn-` flags only drive Dynamo's native parser; an engine processor reads its own `--tool-call-parser` / `--reasoning-parser`. |
 | `--dyn-chat-processor vllm`/`sglang` on TRT-LLM | TRT-LLM engine fallback is a work in progress. Use the default `dynamo` processor. |
-| Reusing a parser name across families | The registries differ — e.g. Dynamo `deepseek_v3` vs vLLM/SGLang `deepseekv3`, Dynamo `nemotron3` vs vLLM `nemotron_v3`. Use the name from the registry that matches your chat processor. |
+| Assuming parser names match across registries | Names can differ — e.g. Dynamo `deepseek_v3` vs vLLM/SGLang `deepseekv3`, Dynamo `nemotron3` vs vLLM `nemotron_v3`. Resolve each flag against its own registry. |
 
 ## Examples
 
@@ -47,11 +52,12 @@ Default (Dynamo-native) — the common case. The same `--dyn-*` flags work on ev
 python -m dynamo.frontend
 python -m dynamo.frontend --dyn-chat-processor dynamo
 
-# Worker selects the Dynamo parsers — same flags on vLLM, SGLang, or TRT-LLM:
+# Workers select the Dynamo parsers. vLLM and SGLang also select their native
+# reasoner when reasoning can precede structured output:
 python -m dynamo.vllm   --model Qwen/Qwen3-0.6B \
-  --dyn-tool-call-parser hermes --dyn-reasoning-parser qwen3
+  --dyn-tool-call-parser hermes --reasoning-parser qwen3 --dyn-reasoning-parser qwen3
 python -m dynamo.sglang --model Qwen/Qwen3-0.6B \
-  --dyn-tool-call-parser hermes --dyn-reasoning-parser qwen3
+  --dyn-tool-call-parser hermes --reasoning-parser qwen3 --dyn-reasoning-parser qwen3
 python -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B \
   --dyn-tool-call-parser hermes --dyn-reasoning-parser qwen3
 ```

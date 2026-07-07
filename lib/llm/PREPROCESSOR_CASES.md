@@ -143,7 +143,7 @@ if you know the answer, fill it in.
 | `harmony` (tool) / `gpt_oss` (reasoning) | **YES** | — | — | — | Channels: `<\|channel\|>analysis<\|message\|>...<\|end\|>`. gpt-oss-20B/120B. |
 | `gemma4` (tool + reasoning) | **YES** | `enable_thinking=false` | — | — | Prompt trigger: `<\|think\|>` in the system turn. Parser-visible reasoning output: `<\|channel>thought\n...<channel\|>`. |
 | `kimi_k25` (reasoning) | ? — markers are `<\|tool_calls_section_*\|>`, likely YES | `thinking=false` | — | OFF when last_is_tool (currently global) | Special-token markers in K2/K2.5/K2.6. |
-| `deepseek_v3` (tool) | ? — Unicode markers (`<｜tool_calls_section_begin｜>`); likely YES | — | — | — | DSv3 grammar. |
+| `deepseek_v3` / `deepseek_v3_1` (tool + reasoning) | ? — Unicode markers (`<｜tool_calls_section_begin｜>`); likely YES | opt in with `thinking=true` | — | — | Force-reasoning aliases use shape-aware guided JSON parsing. |
 | `deepseek_v3_2` / `deepseek_v4` (DSML) | ? — DSML markers (`<｜DSML｜tool_calls>`); likely YES | `thinking=false` / `thinking_mode=chat` | — | **NEEDS ON** even when last_is_tool (V4 formatter seeds `<think>`); see #8901 | DSv3.2 / DSv4 grammar. |
 | `deepseek_r1` (reasoning) | NO (uses plain `<think>`) | `thinking=false` | — | — | DeepSeek-R1. |
 | `nemotron_deci` (tool) | ? | — | — | — | Nemotron tool parser. |
@@ -152,7 +152,7 @@ if you know the answer, fill it in.
 | `hermes` (tool) | NO | — | — | — | Plain XML `<tool_call>...</tool_call>`. |
 | `qwen3_coder` (tool) | NO | — | — | — | Plain XML `<tool_call><function=...>`. |
 | `pythonic` (tool) | NO | — | — | — | Python list literal. |
-| `mistral` (tool) | NO | — | — | — | `[TOOL_CALLS]` plain text. |
+| `mistral` (tool + reasoning) | **YES** for reasoning | disabled unless `reasoning_effort` is present and not `none` | — | — | `[TOOL_CALLS]` tool text; `[THINK]...[/THINK]` reasoning. |
 | `phi4` (tool) | NO | — | — | — | `functools[...]` plain text. |
 | `minimax_m2` (tool) / `minimax_append_think` (reasoning) | NO | — | — | OFF on `tool_choice=required/named` (universal, PRE.4) | XML markers, plain text. |
 | `glm47` (tool) | NO | — | — | — | Plain XML. |
