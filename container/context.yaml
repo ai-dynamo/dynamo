@@ -77,8 +77,7 @@ vllm:
     runtime_image_tag: v0.24.0
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
   flashinf_ref: v0.6.8.post1
-  # Must match the major/minor of the bundled vLLM runtime image above;
-  # a mismatch fails at import time (vllm_omni imports vLLM internals).
+  # Must match the bundled vLLM runtime image above; a mismatch fails at import.
   vllm_omni_ref: "v0.24.0"
   nixl_ref: v1.1.0
   max_jobs: "10"

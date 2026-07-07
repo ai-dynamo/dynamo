@@ -5,8 +5,7 @@
 
 from .version_check import check_vllm_omni_compatibility
 
-# Fail fast on a vLLM / vLLM-Omni version mismatch, which otherwise
-# surfaces as an opaque ImportError deep inside vllm_omni.
+# Fail fast on a vLLM / vLLM-Omni version mismatch (else an opaque ImportError).
 check_vllm_omni_compatibility()
 
 from .base_handler import BaseOmniHandler  # noqa: E402
