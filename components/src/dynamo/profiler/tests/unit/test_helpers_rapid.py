@@ -9,6 +9,7 @@ the end-to-end test suite.
 """
 
 import copy
+import logging
 from unittest.mock import patch
 
 import pandas as pd
@@ -118,6 +119,50 @@ class TestRunNaiveFallback:
         ):
             result = _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
         assert result["dgd_config"] is None
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_warns_when_ttft_itl_sla_is_unverified(self, caplog):
+        """Naive fallback warns that requested TTFT/ITL targets were not evaluated."""
+        dgdr = _make_dgdr(sla=SLASpec(ttft=1.0, itl=1.0))
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
+
+        assert "SLA is unverified (ttft=1.0ms, itl=1.0ms)" in caplog.text
+        assert "model=Qwen/Qwen3-32B, system=l40s, backend=vllm" in caplog.text
+        assert "may not meet the requested SLA" in caplog.text
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_warns_when_e2e_sla_is_unverified(self, caplog):
+        """Naive fallback reports an end-to-end target without fake TTFT/ITL values."""
+        dgdr = _make_dgdr(sla=SLASpec(ttft=None, itl=None, e2eLatency=35000.0))
+        with (
+            patch(
+                "dynamo.profiler.rapid.build_naive_generator_params",
+                return_value=copy.deepcopy(_FAKE_GENERATOR_PARAMS),
+            ),
+            patch(
+                "dynamo.profiler.rapid.generate_backend_artifacts",
+                return_value={},
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            _run_naive_fallback(dgdr, "Qwen/Qwen3-32B", 4, "l40s", "vllm")
+
+        assert "SLA is unverified (e2eLatency=35000.0ms)" in caplog.text
+        assert "ttft=" not in caplog.text
+        assert "itl=" not in caplog.text
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
