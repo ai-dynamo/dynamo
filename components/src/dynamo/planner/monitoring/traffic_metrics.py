@@ -61,6 +61,19 @@ class Metrics:
     kv_hit_rate: Optional[float] = None
     accept_length: Optional[float] = None
 
+    def normalize_idle_nans(self) -> list[str]:
+        """Replace undefined averages only for a confirmed idle window."""
+        if self.num_req != 0:
+            return []
+
+        normalized: list[str] = []
+        for field_name in ("ttft", "itl", "isl", "osl", "request_duration"):
+            value = getattr(self, field_name)
+            if value is not None and math.isnan(value):
+                setattr(self, field_name, 0.0)
+                normalized.append(field_name)
+        return normalized
+
     def is_valid(self) -> bool:
         """Check if all required metrics are valid (not None and not NaN)."""
         required = [
@@ -348,11 +361,11 @@ class PrometheusAPIClient:
     def get_avg_kv_hit_rate(self, interval: str, model_name: str) -> Optional[float]:
         """Average predicted KV cache hit rate (0.0-1.0) from the router.
 
-        Only available when metrics_source == "router" (the histogram lives on
-        the LocalRouter component). In disagg deployments the scrape is
-        namespace-filtered, so if the planner's ``dynamo_namespace`` matches
-        the prefill pool, the returned value pools only prefill-router
-        observations.
+        The histogram lives on the router component, but it can be exposed on
+        the frontend scrape endpoint when the frontend runs in KV router mode.
+        Query the router component metric regardless of the traffic metrics
+        source so deployments can keep frontend-sourced request/ISL/OSL metrics
+        while still using router-sourced KV hit rate.
 
         Returns ``None`` (not ``0.0``) on missing data — Prometheus scrape
         gaps must not be confused with a real "no reuse" signal: the state
@@ -361,8 +374,6 @@ class PrometheusAPIClient:
         every scrape failure. The caller's ``_clamp_kv_hit_rate(None)``
         falls back to no-discount behavior, which is the safe choice.
         """
-        if self.metrics_source != "router":
-            return None
         full_metric_name = (
             f"{prometheus_names.name_prefix.COMPONENT}_"
             f"{prometheus_names.router.KV_HIT_RATE}"

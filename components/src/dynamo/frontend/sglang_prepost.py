@@ -22,9 +22,13 @@ from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
+from sglang.srt.parser.jinja_template_utils import (
+    detect_jinja_template_content_format,
+    process_content_for_template_format,
+)
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
-from .utils import random_call_id
+from .utils import PreprocessError, random_call_id
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +93,28 @@ def detect_force_reasoning_from_template(chat_template: str | None) -> bool:
 # Reasoning parsers that default to "thinking on" unless the client
 # explicitly opts out via chat_template_kwargs. Mirrors sglang's
 # serving_chat._get_reasoning_from_request table.
-_THINKING_BY_DEFAULT = {"qwen3", "glm45", "nemotron_3", "interns1", "kimi_k2"}
+_THINKING_BY_DEFAULT = {
+    "qwen3",
+    "glm45",
+    "nemotron_3",
+    "interns1",
+    "kimi_k2",
+}
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
+
+_SGLANG_PARSER_NAME_ALIASES = {
+    # Dynamo's Rust parser registry accepts these MiniMax-M3 aliases. SGLang
+    # builds that include MiniMax-M3 expose the parser as "minimax-m3".
+    "minimax_m3": "minimax-m3",
+    "minimax_m3_nom": "minimax-m3",
+    "minimax-m3-nom": "minimax-m3",
+}
+
+
+def _normalize_sglang_parser_name(parser_name: str | None) -> str | None:
+    if not parser_name:
+        return parser_name
+    return _SGLANG_PARSER_NAME_ALIASES.get(parser_name, parser_name)
 
 
 def resolve_request_force_reasoning(
@@ -106,16 +130,23 @@ def resolve_request_force_reasoning(
       * opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
         default, ``chat_template_kwargs.enable_thinking=False`` (or
         ``thinking=False`` for ``kimi_k2``) disables it.
+      * MiniMax-M3 defaults to adaptive, but SGLang still enables the
+        reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
+        explicitly ``"disabled"``.
       * opt-in families (``deepseek-v3``/``gemma4``): off by default,
         enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
       * anything else: follow the statically-detected template default.
     """
+    reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
     if not reasoning_parser_name:
         return False
 
     kwargs = (
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
+
+    if reasoning_parser_name == "minimax-m3":
+        return kwargs.get("thinking_mode") != "disabled"
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
@@ -254,6 +285,7 @@ def create_parsers(
         if tool_choice == "required" or _is_named_tool_choice(tool_choice):
             tool_call_parser = JsonArrayParser()
         elif tool_call_parser_name:
+            tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
             tool_call_parser = FunctionCallParser(
                 tools=sglang_tools,
                 tool_call_parser=tool_call_parser_name,
@@ -264,6 +296,7 @@ def create_parsers(
         tool_choice
     )
     if reasoning_parser_name and not guided_decoding_active:
+        reasoning_parser_name = _normalize_sglang_parser_name(reasoning_parser_name)
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
@@ -365,16 +398,27 @@ def _normalize_openai_thinking_template_kwargs(
     chat_template_kwargs = dict(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
+
+    def setdefault_reasoning(enabled: bool) -> None:
+        # Different SGLang model families consult different template toggles.
+        chat_template_kwargs.setdefault("thinking", enabled)
+        chat_template_kwargs.setdefault("enable_thinking", enabled)
+        chat_template_kwargs.setdefault(
+            "thinking_mode", "enabled" if enabled else "disabled"
+        )
+
     thinking = request.get("thinking")
-    if "thinking" not in chat_template_kwargs:
-        if isinstance(thinking, bool):
-            chat_template_kwargs["thinking"] = thinking
-        elif isinstance(thinking, dict):
-            thinking_type = thinking.get("type")
-            if thinking_type == "enabled":
-                chat_template_kwargs["thinking"] = True
-            elif thinking_type == "disabled":
-                chat_template_kwargs["thinking"] = False
+    if isinstance(thinking, bool):
+        setdefault_reasoning(thinking)
+    elif isinstance(thinking, dict):
+        thinking_type = thinking.get("type")
+        if thinking_type == "enabled":
+            setdefault_reasoning(True)
+        elif thinking_type == "disabled":
+            setdefault_reasoning(False)
+
+    if request.get("reasoning_effort") == "none":
+        setdefault_reasoning(False)
 
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
@@ -388,6 +432,14 @@ def _render_deepseek_v4_prompt_token_ids(
     tokenizer,
     template_tools: list[dict[str, Any]] | None,
 ) -> list[int]:
+    """Render DeepSeek-V4 prompt token ids via SGLang's ``encoding_dsv4``.
+
+    DeepSeek-V4 ships no HF ``chat_template``; SGLang builds the prompt with
+    ``encode_messages`` instead. Flatten each message's content to plain text,
+    re-serialize tool_call ``arguments`` to the JSON string the V4 encoder
+    expects, attach the tool schemas to the system message, then tokenize the
+    rendered prompt.
+    """
     try:
         from sglang.srt.entrypoints.openai.encoding_dsv4 import encode_messages
     except ImportError as exc:
@@ -404,6 +456,22 @@ def _render_deepseek_v4_prompt_token_ids(
             msg["content"] = ""
         else:
             msg["content"] = _flatten_message_content(content)
+
+        # encoding_dsv4.encode_arguments_to_dsml expects tool_call.arguments as
+        # the OpenAI-wire JSON *string* (it json.loads() internally).
+        # _normalize_assistant_tool_call_arguments parses arguments to a dict for
+        # Jinja chat templates, but a dict reaching this V4 encoder trips its
+        # json.loads() fallback into a single name="arguments" parameter wrapping
+        # the whole object — which the model then imitates, emitting a spurious
+        # nested {"arguments": {...}} on its next call. SGLang native keeps this
+        # path string-typed (serving_chat.py only dict-parses for the Jinja
+        # branch); mirror that by re-serializing here.
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if isinstance(fn, dict) and isinstance(fn.get("arguments"), (dict, list)):
+                fn["arguments"] = json.dumps(fn["arguments"], ensure_ascii=False)
 
     if template_tools:
         if not encoding_messages or encoding_messages[0].get("role") != "system":
@@ -499,6 +567,7 @@ def build_tool_call_guided_decoding(
             ),
         )
     elif tool_call_parser_name:
+        tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
         parser = FunctionCallParser(
             tools=sglang_tools,
             tool_call_parser=tool_call_parser_name,
@@ -524,6 +593,46 @@ def build_tool_call_guided_decoding(
     return None
 
 
+def build_response_format_guided_decoding(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build Dynamo guided decoding from OpenAI chat response_format."""
+    response_format = request.get("response_format")
+    if not isinstance(response_format, dict):
+        return None
+
+    response_format_type = response_format.get("type")
+    if response_format_type == "json_object":
+        return {"json": {"type": "object"}}
+    if response_format_type == "structural_tag":
+        return {"structural_tag": response_format}
+    if response_format_type != "json_schema":
+        return None
+
+    json_schema = response_format.get("json_schema")
+    if isinstance(json_schema, dict):
+        schema = json_schema.get("schema")
+    else:
+        schema = response_format.get("schema")
+    if schema is None:
+        raise PreprocessError(
+            "schema is required for json_schema response format request."
+        )
+    if not isinstance(schema, dict):
+        raise PreprocessError(
+            "schema must be a JSON object for json_schema response format request."
+        )
+    if not isinstance(json_schema, dict):
+        # This only the effective schema mutation from SGLang's
+        # ChatCompletionRequest.set_json_schema(), not the full response_format
+        # normalization into {"json_schema": {"name", "schema", "strict"}}.
+        schema = copy.deepcopy(schema)
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("strict", None)
+    return {"json": schema}
+
+
 def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
     """Flatten ``apply_chat_template`` output to ``list[int]``.
 
@@ -535,6 +644,38 @@ def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
     if isinstance(ids, dict):
         ids = ids.get("input_ids", prompt_token_ids)
     return list(ids)
+
+
+def _normalize_messages_for_template(
+    messages: list[dict[str, Any]], tokenizer: Any
+) -> list[dict[str, Any]]:
+    """Normalize OpenAI media chunks (``image_url``/``video_url``/``audio_url``)
+    to the simple ``image``/``video``/``audio`` types most VLM chat templates
+    branch on. Without this, templates that gate placeholder emission on
+    ``item.type == 'image'`` never fire for raw OpenAI input, and the
+    rendered prompt has no slot for the media bytes that
+    ``extract_mm_urls()`` forwards in parallel. Mirrors the equivalent
+    step in sglang's own OpenAI server and dynamo's Rust default path.
+    """
+    chat_template = getattr(tokenizer, "chat_template", None) or ""
+    content_format = detect_jinja_template_content_format(chat_template)
+    # The media-data side outputs are discarded: dynamo's separate
+    # ``extract_mm_urls()`` channel is the source of truth for the worker.
+    image_sink: list = []
+    video_sink: list = []
+    audio_sink: list = []
+    modality_sink: list = []
+    return [
+        process_content_for_template_format(
+            msg,
+            content_format,
+            image_data=image_sink,
+            video_data=video_sink,
+            audio_data=audio_sink,
+            modalities=modality_sink,
+        )
+        for msg in messages
+    ]
 
 
 def preprocess_chat_request(
@@ -551,7 +692,7 @@ def preprocess_chat_request(
     ``template_force_reasoning`` is the static per-server flag derived from
     the chat template (see :func:`detect_force_reasoning_from_template`);
     the effective per-request value combines it with client knobs
-    (``separate_reasoning``, ``chat_template_kwargs.enable_thinking``).
+    (``separate_reasoning``, ``chat_template_kwargs.{thinking,enable_thinking}``).
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
@@ -625,8 +766,10 @@ def preprocess_chat_request(
         if (reasoning_effort := request.get("reasoning_effort")) is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
 
+        template_messages = _normalize_messages_for_template(messages, tokenizer)
+
         prompt_token_ids = _normalize_prompt_token_ids(
-            tokenizer.apply_chat_template(messages, **template_kwargs)
+            tokenizer.apply_chat_template(template_messages, **template_kwargs)
         )
 
     # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder
@@ -638,11 +781,20 @@ def preprocess_chat_request(
         sglang_tools=sglang_tools,
         force_reasoning=force_reasoning,
     )
-    guided_decoding = build_tool_call_guided_decoding(
+    response_format_guided_decoding = build_response_format_guided_decoding(request)
+    tool_call_guided_decoding = build_tool_call_guided_decoding(
         request,
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
+    if (
+        response_format_guided_decoding is not None
+        and tool_call_guided_decoding is not None
+    ):
+        logger.warning(
+            "Tool-call guided decoding will be ignored because of response_format already exists."
+        )
+    guided_decoding = response_format_guided_decoding or tool_call_guided_decoding
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,
@@ -771,18 +923,22 @@ class SglangStreamingPostProcessor:
         history_tool_calls_count: int = 0,
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
+        eos_token_ids: list[int] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
         self.reasoning_parser = reasoning_parser
         self.history_tool_calls_count = history_tool_calls_count
         self._sglang_tools = sglang_tools or []
-        self._tool_call_parser_name = tool_call_parser_name
+        self._tool_call_parser_name = _normalize_sglang_parser_name(
+            tool_call_parser_name
+        )
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a tool call parser is active so
         # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
         self._skip_special_tokens = tool_call_parser is None
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
+        self._eos_token_ids = set(eos_token_ids or [])
 
         self._all_token_ids: list[int] = []
         # Tool call accumulation.  SGLang's streaming parser returns
@@ -798,6 +954,13 @@ class SglangStreamingPostProcessor:
         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
+
+    def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
+        if not self._eos_token_ids:
+            return token_ids
+        while token_ids and token_ids[-1] in self._eos_token_ids:
+            token_ids.pop()
+        return token_ids
 
     def _tool_call_id(self, name: str, index: int) -> str:
         return _tool_call_id_for_parser(
@@ -857,6 +1020,8 @@ class SglangStreamingPostProcessor:
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
+        if finish_reason:
+            token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
 
         delta_text = self._incremental_decode(token_ids) if token_ids else ""
 

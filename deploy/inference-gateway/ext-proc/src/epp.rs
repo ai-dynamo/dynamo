@@ -92,11 +92,7 @@ impl Router {
     ///
     /// This waits for at least one decode worker to appear, fetches the model
     /// card, initializes the preprocessor, and creates both routers.
-    pub async fn from_discovery(
-        namespace: &str,
-        component: &str,
-        enforce_disagg: bool,
-    ) -> Result<Self> {
+    pub async fn from_discovery(namespace: &str, component: &str) -> Result<Self> {
         validate_kube_discovery_mode()?;
 
         let runtime = Runtime::from_settings()?;
@@ -165,10 +161,13 @@ impl Router {
             block_size,
             Some(prefill_config),
             None,
-            enforce_disagg,
+            None,
             model_name.clone(),
             actual_namespace.to_string(),
             enable_eagle,
+            // ext-proc constructs no KvWorkerMonitor; overload publishing is
+            // unused on this path (matches the prior namespace-lookup miss).
+            None,
         );
 
         spawn_prefill_discovery_watcher(drt.clone(), actual_namespace.to_string(), prefill_tx);
@@ -196,14 +195,12 @@ impl Router {
         })
     }
 
-    /// Tokenize a JSON request body and extract the router-relevant
-    /// `priority_jump` from `nvext.agent_hints.priority`.
+    /// Tokenize a JSON request body and extract router queue priorities.
     ///
-    /// Returns `(token_ids, priority_jump)`. `priority_jump` is `0.0` when no
-    /// hint is present. Mirrors the standalone Dynamo preprocessor lift in
-    /// `lib/llm/src/preprocessor.rs` so this gateway path produces the same
-    /// queue ordering as a non-GAIE deployment.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64)> {
+    /// Returns `(token_ids, priority_jump, strict_priority)`. Priorities default
+    /// to zero when absent. Mirrors the standalone Dynamo preprocessor lift in
+    /// `lib/llm/src/preprocessor.rs`.
+    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64, u32)> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
@@ -211,6 +208,7 @@ impl Router {
             serde_json::from_str(request_json)?;
 
         let priority_jump = extract_priority_jump(&request);
+        let strict_priority = extract_strict_priority(&request);
 
         let formatted_prompt = self
             .preprocessor
@@ -218,7 +216,11 @@ impl Router {
             .unwrap_or_default();
 
         let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
-        Ok((encoding.token_ids().to_vec(), priority_jump))
+        Ok((
+            encoding.token_ids().to_vec(),
+            priority_jump,
+            strict_priority,
+        ))
     }
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
@@ -290,13 +292,13 @@ impl Router {
 
     /// Route a prefill request. Returns (worker_id, dp_rank).
     ///
-    /// `priority_jump` is forwarded to the prefill scheduler queue so that
-    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
-    /// arrivals when the router queue is active.
+    /// Queue priorities are forwarded to the prefill scheduler. `priority_jump`
+    /// adjusts the policy score, while `strict_priority` selects the primary tier.
     pub async fn route_prefill(
         &self,
         tokens: &[u32],
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
     ) -> Result<(u64, Option<u32>)> {
         if let Some(ref ids) = allowed_worker_ids {
@@ -310,9 +312,9 @@ impl Router {
             .query_prefill_worker(
                 tokens,
                 None,
-                false,
                 None,
                 priority_jump,
+                strict_priority,
                 allowed_worker_ids,
                 RoutingConstraints::default(),
             )
@@ -320,33 +322,28 @@ impl Router {
             .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
 
         match outcome {
+            // Advisory only: the gateway owns dispatch and lifecycle state.
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
-            // Surface backpressure as an error so the caller's
-            // enforce_disagg / aggregated-fallback logic in `pick()` can
-            // decide whether to fail the request or fall back to decode-only.
-            PrefillQueryOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => Err(anyhow::anyhow!(
-                "Prefill router backpressure: {:?} (queued_isl_tokens={}, max={:?})",
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens
+            PrefillQueryOutcome::QueueRejected { rejection } => Err(anyhow::anyhow!(
+                "Prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
+                rejection.policy_class,
+                rejection.limit_kind,
+                rejection.current,
+                rejection.limit
             )),
         }
     }
 
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
     ///
-    /// `priority_jump` is forwarded to the decode scheduler queue so that
-    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
-    /// arrivals when the router queue is active.
+    /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
+    /// adjusts the policy score, while `strict_priority` selects the primary tier.
     pub async fn route_decode(
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
         priority_jump: f64,
+        strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
     ) -> Result<(WorkerWithDpRank, u32)> {
         if let Some(ref ids) = allowed_worker_ids {
@@ -364,6 +361,7 @@ impl Router {
                 false,
                 None,
                 priority_jump,
+                strict_priority,
                 None,
                 allowed_worker_ids,
                 RoutingConstraints::default(),
@@ -483,6 +481,17 @@ fn extract_priority_jump(
                 .or(h.latency_sensitivity)
         })
         .unwrap_or(0.0)
+}
+
+fn extract_strict_priority(
+    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> u32 {
+    request
+        .nvext
+        .as_ref()
+        .and_then(|n| n.agent_hints.as_ref())
+        .and_then(|h| h.strict_priority)
+        .unwrap_or(0)
 }
 
 struct DiscoveredModelBootstrap {
@@ -902,39 +911,26 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, priority_jump) = self
+        let (tokens, priority_jump, strict_priority) = self
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
 
         // Try prefill routing first (disaggregated mode).
         //
-        // If the prefill router is not activated (no prefill workers
-        // discovered yet, or the inner router has been deactivated), this
-        // returns an error. Behavior on that error depends on
-        // `DYN_ENFORCE_DISAGG`:
-        //
-        // * `enforce_disagg = false` (default): fall back to aggregated
-        //   (decode-only) routing — matches `PrefillRouter::generate`.
-        // * `enforce_disagg = true`: surface the error to Envoy and let the
-        //   request fail. Silently downgrading to aggregated would defeat
-        //   the operator's explicit "strict disagg" policy.
+        // If the prefill router is not activated (no prefill workers discovered yet, or the inner
+        // router has been deactivated), fall back to aggregated routing.
         let prefill_result = self
-            .route_prefill(&tokens, priority_jump, allowed_worker_ids.clone())
+            .route_prefill(
+                &tokens,
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids.clone(),
+            )
             .await;
 
         let is_disaggregated = match &prefill_result {
             Ok(_) => true,
             Err(e) => {
-                if self.prefill_router.enforce_disagg() {
-                    tracing::warn!(
-                        error = %e,
-                        request_id = %req.request_id,
-                        "Prefill routing failed under DYN_ENFORCE_DISAGG=true; failing request"
-                    );
-                    return Err(PickError::RoutingFailed(format!(
-                        "prefill routing failed under enforce_disagg: {e}"
-                    )));
-                }
                 tracing::debug!(
                     error = %e,
                     "Prefill routing failed; falling back to aggregated mode"
@@ -948,7 +944,13 @@ impl EndpointPicker for Router {
         // booking ID independent of x-request-id, handle cancellation races, roll
         // back endpoint-resolution failures, and never forward to an unbooked fallback.
         let (decode_worker, _overlap) = self
-            .route_decode(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)
+            .route_decode(
+                &tokens,
+                is_disaggregated,
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids,
+            )
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
@@ -998,14 +1000,17 @@ impl EndpointPicker for Router {
         }
 
         // Build routing headers matching the Go EPP's disagg plugin:
-        // x-worker-instance-id, x-dp-rank, x-prefill-instance-id,
-        // x-prefill-dp-rank, x-dynamo-routing-mode
+        // x-dynamo-worker-instance-id, x-dynamo-dp-rank,
+        // x-dynamo-prefill-instance-id, x-dynamo-prefill-dp-rank, x-dynamo-routing-mode
         let mut headers = vec![
             (
-                "x-worker-instance-id".to_string(),
+                "x-dynamo-worker-instance-id".to_string(),
                 format!("{}", decode_worker.worker_id),
             ),
-            ("x-dp-rank".to_string(), decode_worker.dp_rank.to_string()),
+            (
+                "x-dynamo-dp-rank".to_string(),
+                decode_worker.dp_rank.to_string(),
+            ),
         ];
 
         if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
@@ -1014,11 +1019,11 @@ impl EndpointPicker for Router {
                 "disaggregated".to_string(),
             ));
             headers.push((
-                "x-prefill-instance-id".to_string(),
+                "x-dynamo-prefill-instance-id".to_string(),
                 format!("{}", prefill_worker_id),
             ));
             if let Some(rank) = prefill_dp_rank {
-                headers.push(("x-prefill-dp-rank".to_string(), rank.to_string()));
+                headers.push(("x-dynamo-prefill-dp-rank".to_string(), rank.to_string()));
             }
         } else {
             headers.push((
@@ -1107,5 +1112,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(extract_priority_jump(&without_nvext), 0.0);
+    }
+
+    #[test]
+    fn strict_priority_lifted_from_agent_hints() {
+        let with_priority: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "nvext": {"agent_hints": {"strict_priority": 9}}
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(extract_strict_priority(&with_priority), 9);
+
+        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}]
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(extract_strict_priority(&without_nvext), 0);
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(feature = "runtime-protocols")]
+#[cfg(any(feature = "metrics", feature = "runtime-protocols"))]
 use std::sync::Arc;
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 use std::sync::OnceLock;
@@ -154,21 +154,53 @@ pub const METRIC_WARNING_DUPLICATE_STORE: &str = "duplicate_store";
 const KV_CACHE_EVENTS_APPLIED_SUFFIX: &str = "kv_cache_events_applied";
 #[cfg(feature = "metrics")]
 const KV_CACHE_EVENTS_APPLIED_NAME: &str = "dynamo_kvrouter_kv_cache_events_applied";
+#[cfg(feature = "metrics")]
+const KV_CACHE_EVENTS_APPLIED_HELP: &str = "Total number of KV cache events applied to index";
+#[cfg(feature = "metrics")]
+const KV_CACHE_EVENTS_APPLIED_LABELS: &[&str] = &["event_type", "status"];
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 const KV_CACHE_EVENT_WARNINGS_SUFFIX: &str = "kv_cache_event_warnings";
 #[cfg(feature = "metrics")]
 const KV_CACHE_EVENT_WARNINGS_NAME: &str = "dynamo_kvrouter_kv_cache_event_warnings";
+#[cfg(feature = "metrics")]
+const KV_CACHE_EVENT_WARNINGS_HELP: &str =
+    "Total number of suspicious KV cache events seen by the router indexer";
+#[cfg(feature = "metrics")]
+const KV_CACHE_EVENT_WARNINGS_LABELS: &[&str] = &["warning_kind"];
 
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
 
 impl KvIndexerMetrics {
-    #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+    #[cfg(feature = "metrics")]
     fn new(kv_cache_events_applied: IntCounterVec, kv_cache_event_warnings: IntCounterVec) -> Self {
         Self {
             kv_cache_events_applied,
             kv_cache_event_warnings,
         }
+    }
+
+    #[cfg(feature = "metrics")]
+    fn new_prometheus() -> Result<Self, prometheus::Error> {
+        Ok(Self::new(
+            IntCounterVec::new(
+                Opts::new(KV_CACHE_EVENTS_APPLIED_NAME, KV_CACHE_EVENTS_APPLIED_HELP),
+                KV_CACHE_EVENTS_APPLIED_LABELS,
+            )?,
+            IntCounterVec::new(
+                Opts::new(KV_CACHE_EVENT_WARNINGS_NAME, KV_CACHE_EVENT_WARNINGS_HELP),
+                KV_CACHE_EVENT_WARNINGS_LABELS,
+            )?,
+        ))
+    }
+
+    /// Creates and registers a shared metrics instance in `registry`.
+    #[cfg(feature = "metrics")]
+    pub fn new_registered(registry: &prometheus::Registry) -> Result<Arc<Self>, prometheus::Error> {
+        let metrics = Arc::new(Self::new_prometheus()?);
+        registry.register(Box::new(metrics.kv_cache_events_applied.clone()))?;
+        registry.register(Box::new(metrics.kv_cache_event_warnings.clone()))?;
+        Ok(metrics)
     }
 
     /// Creates a new KvIndexerMetrics from a Component, memoizing the result in
@@ -182,14 +214,14 @@ impl KvIndexerMetrics {
                     match (
                         component.metrics().create_intcountervec(
                             KV_CACHE_EVENTS_APPLIED_SUFFIX,
-                            "Total number of KV cache events applied to index",
-                            &["event_type", "status"],
+                            KV_CACHE_EVENTS_APPLIED_HELP,
+                            KV_CACHE_EVENTS_APPLIED_LABELS,
                             &[],
                         ),
                         component.metrics().create_intcountervec(
                             KV_CACHE_EVENT_WARNINGS_SUFFIX,
-                            "Total number of suspicious KV cache events seen by the router indexer",
-                            &["warning_kind"],
+                            KV_CACHE_EVENT_WARNINGS_HELP,
+                            KV_CACHE_EVENT_WARNINGS_LABELS,
                             &[],
                         ),
                     ) {
@@ -216,24 +248,7 @@ impl KvIndexerMetrics {
     /// This may be used for tests or as a fallback for when a MetricsRegistry is not available / has errored.
     #[cfg(feature = "metrics")]
     pub fn new_unregistered() -> Self {
-        Self {
-            kv_cache_events_applied: IntCounterVec::new(
-                Opts::new(
-                    KV_CACHE_EVENTS_APPLIED_NAME,
-                    "Total number of KV cache events applied to index",
-                ),
-                &["event_type", "status"],
-            )
-            .unwrap(),
-            kv_cache_event_warnings: IntCounterVec::new(
-                Opts::new(
-                    KV_CACHE_EVENT_WARNINGS_NAME,
-                    "Total number of suspicious KV cache events seen by the router indexer",
-                ),
-                &["warning_kind"],
-            )
-            .unwrap(),
-        }
+        Self::new_prometheus().expect("valid KV indexer metric definitions")
     }
 
     /// Creates a no-op metrics instance when Prometheus support is disabled.

@@ -38,6 +38,25 @@ import (
 
 const backendFrameworkSGLang = "sglang"
 
+func TestIsDynamoGraphDeploymentConversionAnnotation(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{key: annDGDSpec, want: true},
+		{key: annDGDStatus, want: true},
+		{key: "nvidia.com/dgd-future", want: true},
+		{key: "nvidia.com/generated-dgd-spec", want: false},
+		{key: "example.com/dgd-spec", want: false},
+	}
+
+	for _, test := range tests {
+		if got := IsDynamoGraphDeploymentConversionAnnotation(test.key); got != test.want {
+			t.Errorf("IsDynamoGraphDeploymentConversionAnnotation(%q) = %t, want %t", test.key, got, test.want)
+		}
+	}
+}
+
 // roundTripFromV1beta1 converts a v1beta1 DGD to v1alpha1 and back, returning
 // the final v1beta1 object. For any valid v1beta1 input V the returned V'
 // must equal V (syntactic round-trip invariant).
@@ -111,6 +130,7 @@ func TestDGD_RoundTrip_Empty(t *testing.T) {
 
 func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	replicas := int32(2)
+	minAvailable := int32(1)
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "min", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -119,7 +139,9 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 				{
 					ComponentName: "worker",
 					ComponentType: v1beta1.ComponentTypeWorker,
-					Replicas:      &replicas},
+					Replicas:      &replicas,
+					MinAvailable:  &minAvailable,
+				},
 			},
 		},
 	}
@@ -1991,6 +2013,29 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("v1beta1_roundtrip_cluster_topology_policy", func(t *testing.T) {
+		src := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "topo-cluster", Namespace: "ns"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &v1beta1.KvTransferPolicy{
+						ClusterTopologyName: "grove-topology",
+						Domain:              v1beta1.TopologyDomain("rack"),
+						Enforcement:         v1beta1.KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		got := roundTripFromV1beta1(t, src)
+		if diff := cmp.Diff(src, got); diff != "" {
+			t.Errorf("v1beta1 round-trip mismatch (-want +got):\n%s", diff)
+		}
+	})
+
 	t.Run("v1alpha1_roundtrip", func(t *testing.T) {
 		src := &DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "topo-alpha", Namespace: "ns"},
@@ -2004,6 +2049,29 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 						LabelKey:    "topology.kubernetes.io/zone",
 						Domain:      TopologyDomain("zone"),
 						Enforcement: KvTransferEnforcementRequired,
+					},
+				},
+			},
+		}
+		got := roundTripFromV1alpha1(t, src)
+		if diff := cmp.Diff(src.Spec.Experimental, got.Spec.Experimental); diff != "" {
+			t.Errorf("v1alpha1 round-trip Experimental mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("v1alpha1_roundtrip_cluster_topology_policy", func(t *testing.T) {
+		src := &DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "topo-alpha-cluster", Namespace: "ns"},
+			Spec: DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*DynamoComponentDeploymentSharedSpec{
+					"worker": {ComponentType: "worker"},
+				},
+				Experimental: &DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &KvTransferPolicy{
+						ClusterTopologyName: "grove-topology",
+						Domain:              TopologyDomain("rack"),
+						Enforcement:         KvTransferEnforcementRequired,
 					},
 				},
 			},

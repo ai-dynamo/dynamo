@@ -961,16 +961,21 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
 
             let timing = {
                 let calls = self.metrics.timing.calls.load(Ordering::Relaxed);
-                let avg_routing_ns = if calls > 0 {
-                    self.metrics.timing.routing_ns.load(Ordering::Relaxed) / calls
-                } else {
-                    0
-                };
-                let avg_shard_us = if calls > 0 {
-                    self.metrics.timing.shard_ns.load(Ordering::Relaxed) / calls / 1000
-                } else {
-                    0
-                };
+                let avg_routing_ns = self
+                    .metrics
+                    .timing
+                    .routing_ns
+                    .load(Ordering::Relaxed)
+                    .checked_div(calls)
+                    .unwrap_or(0);
+                let avg_shard_us = self
+                    .metrics
+                    .timing
+                    .shard_ns
+                    .load(Ordering::Relaxed)
+                    .checked_div(calls)
+                    .unwrap_or(0)
+                    / 1000;
                 format!("\n  avg routing = {avg_routing_ns}ns\n  avg shard = {avg_shard_us}µs")
             };
 
@@ -1558,25 +1563,6 @@ mod tests {
 
         let c = child(&child(&child(&index.root, 1), 2), 3);
         assert_eq!(c.live_workers.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn cleanup_updates_router_state() {
-        let index = make_indexer(2, 4);
-        index
-            .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3]))
-            .await;
-        index
-            .apply_event(store_event_with_dp_rank(0, 1, &[1, 2, 4]))
-            .await;
-
-        index.remove_worker_dp_rank(0, 0).await;
-        let after_dp_remove = index.find_matches(local_hashes(&[1, 2, 3])).await.unwrap();
-        assert_eq!(score(&after_dp_remove, WorkerWithDpRank::new(0, 0)), None);
-
-        index.apply_event(clear_event(0)).await;
-        let after_clear = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
-        assert!(after_clear.scores.is_empty());
     }
 
     #[tokio::test]

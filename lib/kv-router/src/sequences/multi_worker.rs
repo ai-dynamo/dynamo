@@ -74,6 +74,12 @@ pub trait SequencePublisher: Send + Sync {
         blocks: usize,
         tokens: usize,
     );
+
+    /// Observe that a worker/dp_rank is currently registered in the router.
+    fn observe_worker_registered(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
+
+    /// Observe that a worker/dp_rank was removed from the router.
+    fn observe_worker_removed(&self, _worker: &WorkerWithDpRank, _worker_type: &str) {}
 }
 
 /// Abstraction over event subscription for replica sync.
@@ -103,6 +109,12 @@ pub enum ReplicaWorkerPolicy {
     LazyRegister,
     /// Drop replica events until the worker rank has been registered locally.
     RequireRegistered,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SequenceTrackerOptions {
+    replica_worker_policy: ReplicaWorkerPolicy,
+    expiry_enabled: bool,
 }
 
 /// Errors that can occur during sequence management operations.
@@ -182,6 +194,29 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         )
     }
 
+    /// Create a tracker that relies exclusively on explicit request lifecycle events.
+    pub fn new_without_expiry(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+    ) -> Self {
+        Self::new_with_options(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                expiry_enabled: false,
+            },
+        )
+    }
+
     /// Create a tracker with an explicit worker-admission policy for replica events.
     pub fn new_with_replica_worker_policy(
         publisher: P,
@@ -192,10 +227,42 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker_type: &'static str,
         replica_worker_policy: ReplicaWorkerPolicy,
     ) -> Self {
+        Self::new_with_options(
+            publisher,
+            block_size,
+            dp_range,
+            replica_sync,
+            router_id,
+            worker_type,
+            SequenceTrackerOptions {
+                replica_worker_policy,
+                expiry_enabled: true,
+            },
+        )
+    }
+
+    fn new_with_options(
+        publisher: P,
+        block_size: usize,
+        dp_range: HashMap<u64, (u32, u32)>,
+        replica_sync: bool,
+        router_id: u64,
+        worker_type: &'static str,
+        options: SequenceTrackerOptions,
+    ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
-        let workers = WorkerTable::new(block_size, &dp_range);
-        let prompt_registry = PromptRegistry::new(workers.workers());
+        let workers = if options.expiry_enabled {
+            WorkerTable::new(block_size, &dp_range)
+        } else {
+            WorkerTable::new_without_expiry(block_size, &dp_range)
+        };
+        let initial_workers: Vec<_> = workers.workers().collect();
+        let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());
+        let publisher = Arc::new(publisher);
+        for worker in &initial_workers {
+            publisher.observe_worker_registered(worker, worker_type);
+        }
 
         Self {
             workers: RwLock::new(workers),
@@ -203,12 +270,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             prompt_registry,
             block_size,
             router_id,
-            publisher: Arc::new(publisher),
+            publisher,
             remote_state_updates,
             #[cfg(test)]
             remote_state_update_count: AtomicUsize::new(0),
             replica_sync,
-            replica_worker_policy,
+            replica_worker_policy: options.replica_worker_policy,
             worker_type,
         }
     }
@@ -421,6 +488,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     fn apply_worker_topology_change(&self, change: WorkerTopologyChange) {
         for removed in &change.removed {
             self.request_index.remove_worker_requests(removed.worker);
+            self.publisher
+                .observe_worker_removed(&removed.worker, self.worker_type);
+        }
+        for worker in &change.added {
+            self.publisher
+                .observe_worker_registered(worker, self.worker_type);
         }
         self.prompt_registry.apply_topology_change(change);
     }
@@ -518,8 +591,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// This is used during generation to track output blocks as they are created.
     /// The decay_fraction represents how "temporary" the block is based on generation progress.
-    // TODO: output blocks are not replicated via replica_sync — add an
-    // ActiveSequenceEventData variant if cross-instance accuracy matters.
+    // NOTE: Output blocks remain local and are intentionally not replicated because their
+    // frequency would consume disproportionate replica-sync network bandwidth.
     pub fn add_output_block(
         &self,
         request_id: &RequestId,
@@ -763,10 +836,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     pub(super) fn ensure_worker_registered(&self, worker: WorkerWithDpRank) {
-        if self.workers.read().index.contains_key(&worker) {
-            return;
+        {
+            let table = self.workers.read();
+            if table.index.contains_key(&worker) {
+                return;
+            }
         }
 
+        self.ensure_worker_registered_after_miss(worker);
+    }
+
+    fn ensure_worker_registered_after_miss(&self, worker: WorkerWithDpRank) {
+        // Called only after any read guard has been dropped.
         let mut table = self.workers.write();
         if table.index.contains_key(&worker) {
             return;
@@ -795,16 +876,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             lora_name,
         } = req;
 
-        if lazily_register_worker {
-            self.ensure_worker_registered(worker);
-        }
+        let mut attempted_lazy_registration = false;
 
-        let (expired_request_ids, load) = {
+        let (expired_request_ids, load) = loop {
             let table = self.workers.read();
-            let &idx = table
-                .index
-                .get(&worker)
-                .ok_or(SequenceError::WorkerNotFound { worker })?;
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                if !lazily_register_worker || attempted_lazy_registration {
+                    return Err(SequenceError::WorkerNotFound { worker });
+                }
+                attempted_lazy_registration = true;
+                self.ensure_worker_registered_after_miss(worker);
+                continue;
+            };
             if let Err(existing_worker) =
                 self.request_index
                     .try_insert_request(request_id.clone(), worker, lora_name)
@@ -831,7 +915,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 outcome.membership_delta,
                 load,
             );
-            (outcome.expired_request_ids, load)
+            break (outcome.expired_request_ids, load);
         };
 
         self.request_index
@@ -1190,6 +1274,8 @@ mod tests {
         single_loads: Mutex<Vec<ActiveLoad>>,
         load_batches: Mutex<Vec<Vec<ActiveLoad>>>,
         observations: Mutex<Vec<(WorkerWithDpRank, usize, usize)>>,
+        registered: Mutex<Vec<WorkerWithDpRank>>,
+        removed: Mutex<Vec<WorkerWithDpRank>>,
     }
 
     impl RecordingPublisherState {
@@ -1201,6 +1287,8 @@ mod tests {
             self.single_loads.lock().unwrap().clear();
             self.load_batches.lock().unwrap().clear();
             self.observations.lock().unwrap().clear();
+            self.registered.lock().unwrap().clear();
+            self.removed.lock().unwrap().clear();
         }
     }
 
@@ -1237,6 +1325,14 @@ mod tests {
                 .unwrap()
                 .push((*worker, blocks, tokens));
         }
+
+        fn observe_worker_registered(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
+            self.state.registered.lock().unwrap().push(*worker);
+        }
+
+        fn observe_worker_removed(&self, worker: &WorkerWithDpRank, _worker_type: &str) {
+            self.state.removed.lock().unwrap().push(*worker);
+        }
     }
 
     fn make_recording_sequences(
@@ -1257,6 +1353,31 @@ mod tests {
             "test",
         );
         (sequences, state)
+    }
+
+    #[test]
+    fn worker_topology_observes_registered_and_removed_workers() {
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 2))]));
+        assert_eq!(
+            *state.registered.lock().unwrap(),
+            vec![WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(1, 1)]
+        );
+
+        state.clear();
+        sequences
+            .register_worker(WorkerDpRange::new(2, 0, 1))
+            .unwrap();
+        assert_eq!(
+            *state.registered.lock().unwrap(),
+            vec![WorkerWithDpRank::new(2, 0)]
+        );
+
+        state.clear();
+        sequences.unregister_worker(1).unwrap();
+        assert_eq!(
+            *state.removed.lock().unwrap(),
+            vec![WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(1, 1)]
+        );
     }
 
     fn replica_add(
@@ -1745,6 +1866,56 @@ mod tests {
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
         assert_eq!(active_request_count(&sequences, worker), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_expiry_requires_explicit_cleanup_for_all_workers() {
+        let sequences = ActiveSequencesMultiWorker::new_without_expiry(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            false,
+            0,
+            "test",
+        );
+        let initial_worker = WorkerWithDpRank::new(1, 0);
+        let dynamic_worker = WorkerWithDpRank::new(2, 0);
+        sequences
+            .register_worker(WorkerDpRange::new(2, 0, 1))
+            .unwrap();
+
+        for (request_id, token_sequence, worker) in [
+            ("initial", vec![1, 2], initial_worker),
+            ("dynamic", vec![3], dynamic_worker),
+        ] {
+            sequences
+                .add_request(
+                    SequenceRequest {
+                        request_id: request_id.to_string(),
+                        token_sequence: Some(token_sequence),
+                        track_prefill_tokens: true,
+                        expected_output_tokens: None,
+                        prefill_load_hint: tracking_hint(4),
+                        worker,
+                        lora_name: None,
+                    },
+                    Instant::now(),
+                )
+                .unwrap();
+        }
+
+        tokio::time::advance(Duration::from_secs(331)).await;
+        sequences.force_expire_requests_across_all_workers();
+
+        assert_eq!(active_request_count(&sequences, initial_worker), 1);
+        assert_eq!(active_request_count(&sequences, dynamic_worker), 1);
+        assert_eq!(sequences.active_blocks().get(&initial_worker), Some(&2));
+        assert_eq!(sequences.active_blocks().get(&dynamic_worker), Some(&1));
+
+        let now = Instant::now();
+        sequences.free(&"initial".to_string(), now).unwrap();
+        sequences.free(&"dynamic".to_string(), now).unwrap();
+        sequences.assert_completely_drained(now);
     }
 
     #[tokio::test(start_paused = true)]

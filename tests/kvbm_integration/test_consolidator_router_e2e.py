@@ -43,10 +43,12 @@ if HAS_TRTLLM:
 # Test markers
 pytestmark = [
     pytest.mark.kvbm,
+    pytest.mark.kvbm_consolidator,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,
-    pytest.mark.pre_merge,
+    pytest.mark.h100,
+    pytest.mark.post_merge,
     pytest.mark.skipif(not (HAS_VLLM or HAS_TRTLLM), reason="requires vllm or trtllm"),
 ]
 
@@ -401,6 +403,12 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
     # Set ZMQ port for TensorRT-LLM consolidator
     if engine == "trtllm":
         env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
+    elif engine == "vllm":
+        # Enable forward-pass metrics (InstrumentedScheduler + FpmEventRelay).
+        # One serial worker per test and the suite pins fixed ports, so the
+        # canonical FPM default port is safe here. (trtllm uses FpmDirectPublisher
+        # and ignores this var, so it's only set for vLLM.)
+        env["DYN_FORWARDPASS_METRIC_PORT"] = "20380"
 
     # Create separate log directory for worker to avoid conflicts with frontend
     worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
@@ -767,9 +775,11 @@ class TestConsolidatorRouterE2E:
             model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
 
             # Fixed cache tier sizes
+            block_size = 16
             g1_gpu_blocks = 10  # Very small GPU cache to force evictions
             g2_cpu_blocks = 5  # Smaller than GPU but large enough to retain blocks
             g3_disk_blocks = 5  # Smaller than GPU but large enough to retain blocks
+            max_model_len = g1_gpu_blocks * block_size
 
             # Compute optimal test parameters for this configuration
             test_params = compute_deduplication_test_params(
@@ -794,6 +804,10 @@ class TestConsolidatorRouterE2E:
                     "--enable-prefix-caching",
                     "--num-gpu-blocks-override",
                     str(g1_gpu_blocks),
+                    "--block-size",
+                    str(block_size),
+                    "--max-model-len",
+                    str(max_model_len),
                 ]
             else:  # trtllm
                 # Create TensorRT-LLM config file with KVBM connector
@@ -837,6 +851,10 @@ class TestConsolidatorRouterE2E:
             # Set ZMQ port for TensorRT-LLM consolidator
             if engine == "trtllm":
                 worker_env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
+            elif engine == "vllm":
+                # Enable forward-pass metrics (InstrumentedScheduler + relay);
+                # canonical default port, safe for this serial fixed-port suite.
+                worker_env["DYN_FORWARDPASS_METRIC_PORT"] = "20380"
 
             worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
             worker_log_dir.mkdir(parents=True, exist_ok=True)

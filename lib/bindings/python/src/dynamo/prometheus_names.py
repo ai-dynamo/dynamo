@@ -156,6 +156,22 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Number of requests pending in the router's scheduler queue (gauge per worker_type)
     ROUTER_QUEUE_PENDING_REQUESTS = "router_queue_pending_requests"
+    # Number of replicas allocated for a LoRA adapter
+    LORA_REPLICA_FACTOR = "lora_replica_factor"
+    # Whether a LoRA adapter is actively receiving traffic (1=active, 0=inactive)
+    LORA_IS_ACTIVE = "lora_is_active"
+    # Estimated load (windowed request count) for a LoRA adapter
+    LORA_ESTIMATED_LOAD = "lora_estimated_load"
+    # Raw arrival count (windowed rate counter) for a LoRA adapter
+    LORA_RAW_ARRIVAL_COUNT = "lora_raw_arrival_count"
+    # Number of in-flight (active) requests for a LoRA adapter
+    LORA_ACTIVE_REQUESTS = "lora_active_requests"
+    # Total LoRA loads (new placements) this controller tick
+    LORA_CHURN_LOADS_TOTAL = "lora_churn_loads_total"
+    # Total LoRA unloads (removed placements) this controller tick
+    LORA_CHURN_UNLOADS_TOTAL = "lora_churn_unloads_total"
+    # MCF solver overflow count (unplaceable replicas)
+    LORA_OVERFLOW_COUNT = "lora_overflow_count"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
     # Label name for tokenizer operation
@@ -333,6 +349,8 @@ class router:
     REMOTE_INDEXER_QUERY_FAILURES_TOTAL = "router_remote_indexer_query_failures_total"
     # Total number of remote indexer routing-decision writes that failed
     REMOTE_INDEXER_WRITE_FAILURES_TOTAL = "router_remote_indexer_write_failures_total"
+    # Number of workers expected to publish KV events but missing query endpoints
+    KV_EVENT_SOURCE_MISMATCH_WORKERS = "router_kv_event_source_mismatch_workers"
     # Time to first token observed at the router (seconds)
     TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
     # Average inter-token latency observed at the router (seconds)
@@ -343,6 +361,8 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Whether the router currently has a worker/dp_rank registered (1 = registered)
+    WORKER_REGISTERED = "router_worker_registered"
 
 
 class router_request:

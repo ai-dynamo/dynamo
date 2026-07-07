@@ -16,8 +16,10 @@ use tokio::sync::{Mutex, Semaphore};
 use super::worker_query_directory::{DiscoveredQueryEndpoint, WorkerQueryEndpointDirectory};
 #[cfg(test)]
 use super::worker_query_endpoint::WorkerKvQueryEngine;
+use super::worker_query_health::spawn_kv_event_source_health_monitor;
 use super::worker_query_state::{LiveEventAction, PendingDrainAction, RecoveryKey, WorkerState};
 use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
+use crate::discovery::RuntimeConfigWatch;
 use crate::kv_router::Indexer;
 use dynamo_kv_router::{
     indexer::WorkerKvQueryResponse,
@@ -62,8 +64,11 @@ pub struct WorkerQueryClient {
     /// Indexer for applying recovered events and worker removals.
     indexer: Indexer,
     worker_states: DashMap<WorkerId, Arc<Mutex<WorkerState>>>,
-    query_endpoints: WorkerQueryEndpointDirectory,
+    query_endpoints: Arc<WorkerQueryEndpointDirectory>,
     recovery_semaphore: Arc<Semaphore>,
+    /// Per-rank cancellation for in-flight recovery tasks; cancelled on rank
+    /// removal so retry backoff stops polling workers that no longer exist.
+    recovery_cancels: DashMap<RecoveryKey, tokio_util::sync::CancellationToken>,
 }
 
 impl WorkerQueryClient {
@@ -77,26 +82,57 @@ impl WorkerQueryClient {
             transport,
             indexer,
             worker_states: DashMap::new(),
-            query_endpoints: WorkerQueryEndpointDirectory::default(),
+            query_endpoints: Arc::new(WorkerQueryEndpointDirectory::default()),
             recovery_semaphore: Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
+            recovery_cancels: DashMap::new(),
         })
     }
 
-    /// Create a new WorkerQueryClient and spawn its background discovery loop.
+    /// Create a new WorkerQueryClient and spawn its background discovery and KV event
+    /// source health-monitor loops.
     ///
     /// The background loop watches `ComponentEndpoints` discovery for query endpoints,
     /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
     /// events when all dp_ranks for a worker disappear.
-    pub async fn spawn(component: Component, indexer: Indexer) -> Result<Arc<Self>> {
+    /// The health monitor compares those endpoints with runtime worker configuration
+    /// and reports workers whose expected KV event sources are missing.
+    pub async fn spawn(
+        component: Component,
+        indexer: Indexer,
+        workers_with_configs: RuntimeConfigWatch,
+        model: String,
+        worker_type: &'static str,
+    ) -> Result<Arc<Self>> {
         let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
         let client = Self::new(component.clone(), indexer, transport);
 
+        let discovery_cancel = component.drt().primary_token();
+        // TODO: Parent recovery tasks with a router-scoped token once the subscriber
+        // lifecycle owns one instead of relying on the runtime-wide token.
+        let health_cancel = discovery_cancel.child_token();
+        spawn_kv_event_source_health_monitor(
+            component.clone(),
+            workers_with_configs,
+            client.query_endpoints.clone(),
+            model,
+            worker_type,
+            health_cancel.clone(),
+        );
+
         let client_bg = client.clone();
-        let cancel_token = component.drt().primary_token();
         tokio::spawn(async move {
-            if let Err(e) = client_bg.run_discovery_loop(cancel_token).await {
-                tracing::error!("WorkerQueryClient discovery loop failed: {e}");
+            match client_bg.run_discovery_loop(discovery_cancel.clone()).await {
+                Err(error) => {
+                    tracing::error!(%error, "WorkerQueryClient discovery loop failed");
+                }
+                Ok(()) if !discovery_cancel.is_cancelled() => {
+                    tracing::error!(
+                        "WorkerQueryClient discovery stream ended unexpectedly; stopping the KV event source health monitor because endpoint state may be stale"
+                    );
+                }
+                Ok(()) => {}
             }
+            health_cancel.cancel();
         });
 
         Ok(client)
@@ -280,6 +316,15 @@ impl WorkerQueryClient {
             worker_state.is_empty()
         };
 
+        // Stop any in-flight recovery retry/backoff loop for this rank.  This
+        // runs AFTER the rank teardown above: a racing spawn either passed its
+        // liveness check before `remove_rank` (so its token is already
+        // registered and cancelled here), or it observes the rank as gone and
+        // exits on its own.
+        if let Some((_, cancel)) = self.recovery_cancels.remove(&(worker_id, dp_rank)) {
+            cancel.cancel();
+        }
+
         if should_remove_worker {
             tracing::warn!("WorkerQueryClient: all dp_ranks gone for worker {worker_id}, removing");
             self.worker_states.remove(&worker_id);
@@ -362,22 +407,77 @@ impl WorkerQueryClient {
         let client = self.clone();
 
         tokio::spawn(async move {
-            // Add jitter only for full-restore (start_event_id is None)
-            // to permute semaphore acquisition order and reduce thundering herd risk on initial discovery.
-            // This distributes load when multiple routers start simultaneously.
-            if start_event_id.is_none() {
-                let jitter_us = rand::rng().random_range(0..3000u64);
-                tokio::time::sleep(Duration::from_micros(jitter_us)).await;
-            }
-
-            let Ok(_permit) = client.recovery_semaphore.clone().acquire_owned().await else {
-                return;
+            // Re-check liveness under the worker-state lock, then register the
+            // cancellation token only if the rank is still present. Removal holds
+            // this same lock to drop the rank before it drains `recovery_cancels`,
+            // so a token registered here is guaranteed to be observed — and
+            // cancelled — by that drain. A rank that is already gone registers
+            // nothing, so a spawn that loses the removal race cannot leak an entry
+            // that no later teardown would reclaim.
+            let cancel = {
+                let live = match client.worker_states.get(&key.0).map(|e| e.clone()) {
+                    Some(worker_state) => {
+                        let worker_state = worker_state.lock().await;
+                        // TODO(#10580 follow-up): pre-existing ABA case — if removing
+                        // the final rank deletes `WorkerState` and rediscovery
+                        // recreates it at epoch 0, a stale follow-up still carrying
+                        // epoch 0 can pass this check against the freshly discovered
+                        // endpoint. Out of scope for the #10580 fix (the base branch
+                        // already has a resettable epoch + dynamic target resolution);
+                        // a follow-up should fold the endpoint/rank incarnation into
+                        // the recovery identity, or use a generation that survives
+                        // removal.
+                        (worker_state.epoch == epoch && worker_state.ranks.contains_key(&key.1))
+                            .then(|| client.recovery_cancels.entry(key).or_default().clone())
+                    }
+                    None => None,
+                };
+                let Some(cancel) = live else {
+                    tracing::debug!(
+                        "Skipping recovery for worker {} dp_rank {}: rank removed or epoch changed",
+                        key.0,
+                        key.1
+                    );
+                    return;
+                };
+                cancel
             };
 
-            let result = client
-                .fetch_recovery_response(key.0, key.1, start_event_id, end_event_id)
-                .await;
-            client.finish_recovery_task(key, epoch, result).await;
+            let recovery = async {
+                // Add jitter only for full-restore (start_event_id is None)
+                // to permute semaphore acquisition order and reduce thundering herd risk on initial discovery.
+                // This distributes load when multiple routers start simultaneously.
+                if start_event_id.is_none() {
+                    let jitter_us = rand::rng().random_range(0..3000u64);
+                    tokio::time::sleep(Duration::from_micros(jitter_us)).await;
+                }
+
+                let _permit = client
+                    .recovery_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .ok()?;
+
+                Some(
+                    client
+                        .fetch_recovery_response(key.0, key.1, start_event_id, end_event_id)
+                        .await,
+                )
+            };
+
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    tracing::debug!("Recovery cancelled for worker {} dp_rank {}", key.0, key.1);
+                    return;
+                }
+                result = recovery => result,
+            };
+
+            if let Some(result) = result {
+                client.finish_recovery_task(key, epoch, result).await;
+            }
         });
     }
 
@@ -1055,6 +1155,67 @@ mod tests {
 
         assert_eq!(transport.cancelled_instances(), vec![endpoint_id]);
         wait_for(|| !rank_state_matches(&client, key, |_| true)).await;
+        kv_indexer.flush().await;
+    }
+
+    #[tokio::test]
+    async fn test_removed_query_endpoint_stops_recovery_retries() {
+        let (client, transport, kv_indexer) = make_test_client("remove-stops-retries").await;
+        let key = (100, 4);
+        let endpoint_name = worker_kv_indexer_query_endpoint_for_worker(key.0, key.1);
+        let target = make_instance(endpoint_name, 11);
+        let endpoint_id = target.endpoint_instance_id();
+
+        // Queue a single failing attempt; the failure schedules retries with
+        // exponential backoff, and any retry would call the transport again.
+        let started = Arc::new(Notify::new());
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: Some(started.clone()),
+                release: None,
+                response: Err("transient failure".to_string()),
+            },
+        );
+
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                worker_id: key.0,
+                dp_rank: key.1,
+                target,
+            })
+            .await;
+        started.notified().await;
+
+        // Removing the rank mid-backoff must cancel the in-flight recovery.
+        client
+            .handle_removed_query_endpoint(key.0, key.1, endpoint_id)
+            .await;
+        wait_for(|| client.recovery_cancels.is_empty()).await;
+
+        // A non-cancelled task would retry after RECOVERY_INITIAL_BACKOFF_MS.
+        tokio::time::sleep(Duration::from_millis(3 * RECOVERY_INITIAL_BACKOFF_MS)).await;
+        assert_eq!(transport.call_count(), 1);
+        kv_indexer.flush().await;
+    }
+
+    #[tokio::test]
+    async fn test_spawn_recovery_for_removed_rank_does_not_query() {
+        let (client, transport, kv_indexer) = make_test_client("spawn-after-remove").await;
+
+        // A follow-up spawn can race rank removal (the spawn decision happens
+        // outside the worker-state lock). With no rank state, the task's
+        // liveness check must drop it before it ever queries the transport — and
+        // without registering a cancellation token that no later teardown would
+        // ever reclaim.
+        client.spawn_recovery_task((1, 0), 0, Some(5), None);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(transport.call_count(), 0);
+        assert!(
+            client.recovery_cancels.is_empty(),
+            "a spawn that lost the removal race must not leak a recovery_cancels entry"
+        );
         kv_indexer.flush().await;
     }
 

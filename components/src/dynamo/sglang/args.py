@@ -21,13 +21,21 @@ from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.model_fetch import fetch_model
+from dynamo.common.snapshot.lifecycle import (
+    configure_snapshot_capture_env,
+    is_snapshot_enabled,
+)
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import enable_disjoint_streaming_output
+from dynamo.sglang._compat import (
+    enable_disjoint_streaming_output,
+    ensure_sglang_tensor_image_size,
+)
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
+PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 
 
 class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
@@ -61,6 +69,48 @@ class Config:
             return DisaggregationMode.AGGREGATED
 
 
+def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
+    """Return the worker role when the selected path does not create an FPM relay."""
+    if is_snapshot_enabled():
+        return "snapshot"
+    if dynamo_config.embedding_worker:
+        return "embedding"
+    if (
+        dynamo_config.multimodal_encode_worker
+        or dynamo_config.multimodal_worker
+        or dynamo_config.dedicated_mm_encoder
+    ):
+        return "dedicated multimodal"
+    if dynamo_config.image_diffusion_worker:
+        return "image diffusion"
+    if dynamo_config.video_generation_worker:
+        return "video generation"
+    return None
+
+
+def _forward_pass_metrics_source(
+    dynamo_config: DynamoConfig, *, fpm_trace_relay_supported: bool = True
+) -> Optional[str]:
+    """Resolve the FPM opt-in source while preserving the legacy port switch."""
+    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT"):
+        return "DYN_FORWARDPASS_METRIC_PORT"
+    if not dynamo_config.fpm_trace:
+        return None
+
+    unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
+    if unsupported_role is None and not fpm_trace_relay_supported:
+        unsupported_role = "unified backend"
+    if unsupported_role is None:
+        return "--fpm-trace/DYN_FPM_TRACE"
+
+    logging.warning(
+        "--fpm-trace/DYN_FPM_TRACE is enabled, but SGLang %s workers do not create a Dynamo "
+        "FPM relay. Trace-based FPM activation is disabled for this worker.",
+        unsupported_role,
+    )
+    return None
+
+
 def use_modelexpress_remote_instance(args: Any) -> bool:
     return (
         getattr(args, "load_format", None) == "remote_instance"
@@ -69,8 +119,14 @@ def use_modelexpress_remote_instance(args: Any) -> bool:
     )
 
 
+def is_object_storage_path(model_path: str) -> bool:
+    return model_path.startswith(("s3://", "gs://", "az://"))
+
+
 def should_fetch_model(args: Any, model_path: str) -> bool:
     if os.path.exists(model_path):
+        return False
+    if is_object_storage_path(model_path):
         return False
     return not use_modelexpress_remote_instance(args)
 
@@ -84,9 +140,9 @@ def _preprocess_for_encode_config(
     return {
         "server_args": config.server_args,
         "dynamo_args": config.dynamo_args,
-        "serving_mode": config.serving_mode.value
-        if config.serving_mode is not None
-        else "None",
+        "serving_mode": (
+            config.serving_mode.value if config.serving_mode is not None else "None"
+        ),
     }
 
 
@@ -104,6 +160,20 @@ def _has_cli_flag(args: list[str], flag: str) -> bool:
     return any(arg == flag or arg.startswith(f"{flag}=") for arg in args)
 
 
+def _get_last_cli_flag_value(args: list[str], flag: str) -> Optional[str]:
+    """Return the last CLI flag value from '--flag val' or '--flag=val' form."""
+    prefix = f"{flag}="
+    value = None
+    for idx, arg in enumerate(args):
+        if arg.startswith(prefix):
+            value = arg[len(prefix) :]
+        if arg == flag:
+            if idx + 1 >= len(args):
+                continue
+            value = args[idx + 1]
+    return value
+
+
 def _remove_cli_flag_and_value(args: list[str], flag: str) -> list[str]:
     """Remove a flag from CLI args, supporting '--flag val' and '--flag=val' forms."""
     updated: list[str] = []
@@ -119,6 +189,73 @@ def _remove_cli_flag_and_value(args: list[str], flag: str) -> list[str]:
             continue
         updated.append(arg)
     return updated
+
+
+def _set_cli_flag_value(args: list[str], flag: str, value: str) -> list[str]:
+    """Set a flag value once, preserving argparse's last-value-wins behavior."""
+    updated = _remove_cli_flag_and_value(args, flag)
+    updated.extend([flag, value])
+    return updated
+
+
+def _normalize_multimodal_disaggregation_args(
+    unknown: list[str], dynamo_config: "DynamoConfig"
+) -> list[str]:
+    """Map Dynamo's canonical multimodal args to SGLang's current flags."""
+    disaggregation_mode = _get_last_cli_flag_value(unknown, "--disaggregation-mode")
+    if disaggregation_mode is None:
+        if dynamo_config.dedicated_mm_encoder and not dynamo_config.multimodal_worker:
+            raise ValueError(
+                "--dedicated-mm-encoder requires --disaggregation-mode=pd, "
+                "--disaggregation-mode=prefill, or --disaggregation-mode=decode."
+            )
+        return unknown
+
+    requested_disaggregation_mode = disaggregation_mode
+    if disaggregation_mode in {
+        DisaggregationMode.AGGREGATED.value,
+        PREFILL_DECODE_DISAGGREGATION_MODE,
+    }:
+        unknown = _set_cli_flag_value(unknown, "--disaggregation-mode", "null")
+        disaggregation_mode = "null"
+
+    if disaggregation_mode == DisaggregationMode.ENCODE.value:
+        if dynamo_config.dedicated_mm_encoder:
+            raise ValueError(
+                "--dedicated-mm-encoder is for PD/P/D workers that consume or "
+                "forward embeddings from a separate encode worker. Do not "
+                "combine it with --disaggregation-mode=encode."
+            )
+        if not dynamo_config.enable_multimodal:
+            logging.warning(
+                "--disaggregation-mode=encode is only valid for SGLang "
+                "multimodal EPD; treating it as --enable-multimodal "
+                "--disaggregation-mode=encode for this release."
+            )
+            dynamo_config.enable_multimodal = True
+        dynamo_config.multimodal_encode_worker = True
+        return _remove_cli_flag_and_value(unknown, "--disaggregation-mode")
+
+    internal_multimodal_role = (
+        requested_disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE
+        or disaggregation_mode in {"prefill", "decode"}
+    )
+    if dynamo_config.dedicated_mm_encoder and not internal_multimodal_role:
+        raise ValueError(
+            "--dedicated-mm-encoder only applies to --disaggregation-mode=pd, "
+            "--disaggregation-mode=prefill, or --disaggregation-mode=decode."
+        )
+
+    if (
+        dynamo_config.enable_multimodal
+        and dynamo_config.dedicated_mm_encoder
+        and not dynamo_config.multimodal_encode_worker
+        and not dynamo_config.multimodal_worker
+        and internal_multimodal_role
+    ):
+        dynamo_config.multimodal_worker = True
+
+    return unknown
 
 
 def _load_disagg_config_section(config_path: str, config_key: str) -> dict[str, Any]:
@@ -172,12 +309,16 @@ def _dump_disagg_config_section(disagg_config: dict[str, Any]) -> str:
     return temp_path
 
 
-async def parse_args(args: list[str]) -> Config:
+async def parse_args(
+    args: list[str], *, fpm_trace_relay_supported: bool = True
+) -> Config:
     """Parse CLI arguments and return combined configuration.
     Download the model if necessary.
 
     Args:
         args: Command-line argument strings.
+        fpm_trace_relay_supported: Whether this entry point constructs the
+            Dynamo relay required for trace-based FPM activation.
 
     Returns:
         Config object with server_args and dynamo_args.
@@ -237,6 +378,9 @@ async def parse_args(args: list[str]) -> Config:
     if "--config" in unknown:
         config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
         unknown = config_merger.merge_config_with_args(unknown)
+
+    unknown = _normalize_multimodal_disaggregation_args(unknown, dynamo_config)
+    dynamo_config.validate_multimodal_topology()
 
     parsed_args = sglang_only_parser.parse_args(unknown)
 
@@ -346,6 +490,9 @@ async def parse_args(args: list[str]) -> Config:
     if should_fetch_model(parsed_args, model_path):
         await fetch_model(model_path)
 
+    if is_snapshot_enabled():
+        configure_snapshot_capture_env()
+
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
     # fetch_model (download the model) here, in `parse_args`. `parse_args` should not
     # contain code to download a model, it should only parse the args.
@@ -385,6 +532,8 @@ async def parse_args(args: list[str]) -> Config:
         )
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)
+        if server_args.get_model_config().is_multimodal:
+            ensure_sglang_tensor_image_size()
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(
@@ -428,11 +577,13 @@ async def parse_args(args: list[str]) -> Config:
     )
 
     # Enable forward pass metrics from dynamo env var if configured
-    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT") and not getattr(
-        server_args, "enable_forward_pass_metrics", False
-    ):
+    fpm_source = _forward_pass_metrics_source(
+        dynamo_config,
+        fpm_trace_relay_supported=fpm_trace_relay_supported,
+    )
+    if fpm_source and not getattr(server_args, "enable_forward_pass_metrics", False):
         server_args.enable_forward_pass_metrics = True
-        logging.info("Enabled forward_pass_metrics from DYN_FORWARDPASS_METRIC_PORT")
+        logging.info("Enabled forward_pass_metrics from %s", fpm_source)
 
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None

@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
-use tokio::sync::Notify;
-use tokio::sync::mpsc::Sender;
-use tokio::task::JoinHandle;
+use tokio::sync::{Mutex, Notify, mpsc::Sender};
+use tokio::task::{JoinHandle, JoinSet};
 
 use anyhow::Context as _;
 use dashmap::{DashMap, DashSet};
@@ -34,6 +37,7 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
+    local_model::runtime_config::TokenizerBackend,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -60,6 +64,8 @@ use crate::{
 use super::ModelManager;
 use crate::namespace::NamespaceFilter;
 
+const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Constructs the WorkerSet storage key as `{namespace}:{model_type}:{worker_type}`.
 ///
 /// Each `(namespace, model_type, worker_type)` combination gets its own
@@ -81,6 +87,56 @@ fn worker_set_key(
     let mt = model_type.as_vec().join("|");
     let wt = effective_worker_type(worker_type, model_type).as_str();
     format!("{}:{}:{}", namespace, mt, wt)
+}
+
+fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelCardInstanceId> {
+    match instance {
+        DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint,
+            instance_id,
+            model_suffix,
+            ..
+        } => Ok(ModelCardInstanceId {
+            namespace: namespace.clone(),
+            component: component.clone(),
+            endpoint: endpoint.clone(),
+            instance_id: *instance_id,
+            model_suffix: model_suffix.clone(),
+        }),
+        _ => anyhow::bail!("Unexpected discovery instance type (expected ModelCard)"),
+    }
+}
+
+/// A source card is fully represented locally only after both the per-instance
+/// card and the shared WorkerSet have been recorded. `handle_put` can save the
+/// card before later pipeline construction fails, so either check alone would
+/// allow a failed registration to escape reconciliation.
+fn is_registration_complete(
+    manager: &ModelManager,
+    mcid: &ModelCardInstanceId,
+    card: &ModelDeploymentCard,
+) -> bool {
+    let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
+    manager
+        .get_model_card(&mcid.to_path())
+        .is_some_and(|saved| saved.name() == card.name() && saved.mdcsum() == card.mdcsum())
+        && manager.get_model(card.name()).is_some_and(|model| {
+            model.has_worker_set(&ws_key) && model.is_checksum_compatible(&ws_key, card.mdcsum())
+        })
+}
+
+fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
+    card.worker_type == Some(WorkerType::Encode)
+        || card.media_decoder.is_some()
+        || card.model_type.supports_images()
+        || card.model_type.supports_videos()
+        || card
+            .needs
+            .iter()
+            .flatten()
+            .any(|worker_type| *worker_type == WorkerType::Encode)
 }
 
 /// Resolve the effective [`WorkerType`] for a card during the
@@ -131,13 +187,24 @@ pub struct ModelWatcher {
     /// Wakes tasks blocked in `recover_concurrent_registration` when a
     /// `RegistrationGuard` drops (i.e. a registration completes or panics).
     registration_notify: Notify,
-    /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
-    /// can await a racing put before proceeding with cleanup.
-    pending_puts: DashMap<String, JoinHandle<()>>,
+    /// Tracks in-flight `handle_put` tasks by instance path so a later operation
+    /// can cancel a superseded registration.
+    pending_puts: DashMap<String, PendingPut>,
+    /// Serializes state changes for one model-card instance. The generation
+    /// fence preserves discovery-event order even when spawned tasks acquire
+    /// the per-instance lock in a different order.
+    instance_operations: DashMap<String, Arc<InstanceOperation>>,
+    /// Maps an MDC instance path to the LoRA adapter name recorded in the pre-spawn state-tracker
+    /// addition, so a removal whose model card was never durably saved (handle_put failed before
+    /// save) can still remove exactly that adapter from the tracker instead of leaving phantom
+    /// state or wiping a live worker (R4-2 / RR3-3).
+    pending_lora_adds: DashMap<String, String>,
     /// Frontend's `--model-path`. Threaded into `download_config` so
     /// `file://` slots can fall back here when the worker's path is
     /// unreachable on this host.
     local_model_path: Option<PathBuf>,
+    /// Frontend-level tokenizer backend override for discovered model cards.
+    tokenizer_backend: Option<TokenizerBackend>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -184,6 +251,46 @@ struct RegistrationGuard<'a> {
     notify: &'a Notify,
 }
 
+struct PendingPut {
+    generation: u64,
+    handle: JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct InstanceOperation {
+    generation: AtomicU64,
+    lock: Mutex<()>,
+}
+
+impl InstanceOperation {
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn begin(&self) -> u64 {
+        self.generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    fn reserve_after(&self, expected: u64) -> Option<u64> {
+        let next = expected.wrapping_add(1);
+        self.generation
+            .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| next)
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.current_generation() == generation
+    }
+}
+
+enum DeleteOutcome {
+    Superseded,
+    Processed(Option<String>),
+}
+
 impl Drop for RegistrationGuard<'_> {
     fn drop(&mut self) {
         self.set.remove(&self.key);
@@ -217,7 +324,10 @@ impl ModelWatcher {
             registering_worker_sets: DashSet::new(),
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
+            instance_operations: DashMap::new(),
+            pending_lora_adds: DashMap::new(),
             local_model_path: None,
+            tokenizer_backend: None,
         }
     }
 
@@ -227,6 +337,68 @@ impl ModelWatcher {
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
         self.local_model_path = path;
+    }
+
+    pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
+        self.tokenizer_backend = tokenizer_backend;
+    }
+
+    fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
+        if let Some(tokenizer_backend) = self.tokenizer_backend {
+            card.runtime_config.tokenizer_backend = Some(tokenizer_backend);
+        }
+    }
+
+    fn instance_operation(&self, key: &str) -> Arc<InstanceOperation> {
+        self.instance_operations
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(InstanceOperation::default()))
+            .clone()
+    }
+
+    fn begin_instance_operation(&self, key: &str) -> (Arc<InstanceOperation>, u64) {
+        let operation = self.instance_operation(key);
+        let generation = operation.begin();
+        (operation, generation)
+    }
+
+    fn observe_instance_operation(&self, key: &str) -> (Arc<InstanceOperation>, u64) {
+        let operation = self.instance_operation(key);
+        let generation = operation.current_generation();
+        (operation, generation)
+    }
+
+    fn prune_instance_operation(&self, key: &str, operation: &Arc<InstanceOperation>) {
+        self.instance_operations.remove_if(key, |_, current| {
+            Arc::ptr_eq(current, operation) && Arc::strong_count(current) == 2
+        });
+    }
+
+    fn seed_lora_state_for_put(&self, mcid: &ModelCardInstanceId, card: &ModelDeploymentCard) {
+        use crate::kv_router::protocols::WorkerWithDpRank;
+
+        let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+        if let Some(adapter_name) =
+            seed_lora_state_from_card(self.manager.lora_state_tracker(), worker, card)
+        {
+            self.pending_lora_adds.insert(mcid.to_path(), adapter_name);
+        }
+    }
+
+    async fn handle_put_if_current(
+        &self,
+        mcid: &ModelCardInstanceId,
+        card: &mut ModelDeploymentCard,
+        operation: &InstanceOperation,
+        generation: u64,
+    ) -> Option<anyhow::Result<()>> {
+        let _guard = operation.lock.lock().await;
+        if !operation.is_current(generation) {
+            return None;
+        }
+
+        self.seed_lora_state_for_put(mcid, card);
+        Some(self.handle_put(mcid, card).await)
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -250,7 +422,44 @@ impl ModelWatcher {
         mut discovery_stream: DiscoveryStream,
         namespace_filter: NamespaceFilter,
     ) {
-        while let Some(result) = discovery_stream.next().await {
+        let mut reconciliation = tokio::time::interval(RECONCILIATION_INTERVAL);
+        reconciliation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // list_and_watch supplies the initial snapshot. Consume the immediate
+        // first tick so reconciliation begins after one complete interval.
+        reconciliation.tick().await;
+        let mut reconciliation_tasks = JoinSet::new();
+
+        loop {
+            let result = tokio::select! {
+                result = discovery_stream.next() => {
+                    let Some(result) = result else {
+                        break;
+                    };
+                    result
+                }
+                _ = reconciliation.tick(), if reconciliation_tasks.is_empty() => {
+                    let watcher = Arc::clone(&self);
+                    let namespace_filter = namespace_filter.clone();
+                    reconciliation_tasks.spawn(async move {
+                        if let Err(err) = watcher.reconcile(&namespace_filter).await {
+                            tracing::warn!(
+                                error = format!("{err:#}"),
+                                "Frontend model registration reconciliation failed"
+                            );
+                        }
+                    });
+                    continue;
+                }
+                result = reconciliation_tasks.join_next(), if !reconciliation_tasks.is_empty() => {
+                    if let Some(Err(err)) = result {
+                        tracing::warn!(
+                            error = %err,
+                            "Frontend model registration reconciliation task failed"
+                        );
+                    }
+                    continue;
+                }
+            };
             let event = match result {
                 Ok(event) => event,
                 Err(err) => {
@@ -305,6 +514,8 @@ impl ModelWatcher {
                         continue;
                     }
 
+                    self.apply_tokenizer_backend_override(&mut card);
+
                     // If a WorkerSet already exists for this (model, namespace, type),
                     // validate that the new worker's checksum matches. Different
                     // WorkerSets (different namespaces) are allowed to have different checksums to support rolling updates.
@@ -333,14 +544,18 @@ impl ModelWatcher {
                     // HuggingFace config download for one model cannot block
                     // discovery events for all subsequent models.
                     //
-                    // The JoinHandle is stored in `pending_puts` so that a
-                    // subsequent `handle_delete` for the same instance can
-                    // await the in-flight put before attempting cleanup.
+                    // The per-instance operation generation preserves event
+                    // order if this task is scheduled after a later operation.
                     let instance_key = mcid.to_path();
+                    let task_key = instance_key.clone();
+                    let (operation, generation) = self.begin_instance_operation(&instance_key);
                     let watcher = Arc::clone(&self);
                     let handle = tokio::spawn(async move {
-                        match watcher.handle_put(&mcid, &mut card).await {
-                            Ok(()) => {
+                        match watcher
+                            .handle_put_if_current(&mcid, &mut card, &operation, generation)
+                            .await
+                        {
+                            Some(Ok(())) => {
                                 tracing::info!(
                                     model_name = card.name(),
                                     namespace = mcid.namespace,
@@ -348,7 +563,7 @@ impl ModelWatcher {
                                 );
                                 watcher.notify_on_model.notify_waiters();
                             }
-                            Err(err) => {
+                            Some(Err(err)) => {
                                 tracing::error!(
                                     model_name = card.name(),
                                     namespace = mcid.namespace,
@@ -356,7 +571,15 @@ impl ModelWatcher {
                                     "Error adding model from discovery",
                                 );
                             }
+                            None => {
+                                tracing::debug!(
+                                    key = %task_key,
+                                    generation,
+                                    "Skipping superseded model registration"
+                                );
+                            }
                         }
+                        watcher.prune_instance_operation(&task_key, &operation);
                         // Note: we intentionally do NOT remove from pending_puts here.
                         // Only the watch loop (on duplicate events) and handle_delete
                         // manage pending_puts, avoiding a race where a completed task's
@@ -371,10 +594,11 @@ impl ModelWatcher {
                     // The only case that hits this branch is the etcd watch replaying the same
                     // worker's Added event (reconnect or re-sync) — where cancelling the earlier
                     // redundant task is exactly what we want.
-                    if let Some((_, old_handle)) = self.pending_puts.remove(&instance_key) {
-                        old_handle.abort();
+                    if let Some((_, old_put)) = self.pending_puts.remove(&instance_key) {
+                        old_put.handle.abort();
                     }
-                    self.pending_puts.insert(instance_key, handle);
+                    self.pending_puts
+                        .insert(instance_key, PendingPut { generation, handle });
                 }
                 DiscoveryEvent::Removed(id) => {
                     // Extract ModelCardInstanceId from the removal event
@@ -388,16 +612,24 @@ impl ModelWatcher {
                         }
                     };
 
+                    let instance_key = model_card_instance_id.to_path();
+                    let (operation, generation) = self.begin_instance_operation(&instance_key);
                     match self
-                        .handle_delete(model_card_instance_id, &namespace_filter)
+                        .handle_delete(
+                            model_card_instance_id,
+                            &namespace_filter,
+                            operation,
+                            generation,
+                        )
                         .await
                     {
-                        Ok(Some(model_name)) => {
+                        Ok(DeleteOutcome::Processed(Some(model_name))) => {
                             tracing::info!(model_name, "removed model");
                         }
-                        Ok(None) => {
+                        Ok(DeleteOutcome::Processed(None)) => {
                             // There are other instances running this model, nothing to do
                         }
+                        Ok(DeleteOutcome::Superseded) => {}
                         Err(e) => {
                             tracing::error!(error = %e, "error removing model");
                         }
@@ -405,6 +637,216 @@ impl ModelWatcher {
                 }
             }
         }
+
+        reconciliation_tasks.abort_all();
+        while reconciliation_tasks.join_next().await.is_some() {}
+    }
+
+    /// Compare the local frontend registry with a fresh discovery snapshot.
+    /// Missing or incomplete source cards are retried through `handle_put`; a
+    /// locally recorded card absent from the snapshot is removed through
+    /// `handle_delete`. The snapshot is sorted so repeated failures are logged
+    /// and retried in a deterministic order.
+    async fn reconcile(self: &Arc<Self>, namespace_filter: &NamespaceFilter) -> anyhow::Result<()> {
+        // Snapshot local keys and their operation generations before awaiting
+        // discovery. A registration that starts after this point advances its
+        // generation and prevents this snapshot from deleting the fresh card.
+        let local_entries = self
+            .manager
+            .get_model_card_keys()
+            .into_iter()
+            .map(|key| {
+                let (operation, generation) = self.observe_instance_operation(&key);
+                (key, operation, generation)
+            })
+            .collect::<Vec<_>>();
+
+        let mut instances = self.drt.discovery().list(DiscoveryQuery::AllModels).await?;
+        instances.sort_by_key(|instance| {
+            model_card_instance_id(instance)
+                .map(|mcid| mcid.to_path())
+                .unwrap_or_default()
+        });
+
+        let mut desired_keys = HashSet::with_capacity(instances.len());
+        let mut retry_count = 0usize;
+
+        for instance in instances {
+            let mcid = match model_card_instance_id(&instance) {
+                Ok(mcid) => mcid,
+                Err(err) => {
+                    tracing::error!(
+                        error = format!("{err:#}"),
+                        "Unexpected discovery entry during model reconciliation"
+                    );
+                    continue;
+                }
+            };
+            if !namespace_filter.matches(&mcid.namespace) {
+                continue;
+            }
+
+            // Record the source key before deserializing the card. A malformed
+            // source entry must not cause a valid local entry with the same key
+            // to be treated as stale and deleted.
+            desired_keys.insert(mcid.to_path());
+
+            let mut card = match instance.deserialize_model::<ModelDeploymentCard>() {
+                Ok(card) => card,
+                Err(err) => {
+                    tracing::error!(
+                        %err,
+                        instance_id = mcid.instance_id,
+                        "Failed to deserialize model card during reconciliation"
+                    );
+                    continue;
+                }
+            };
+            self.apply_tokenizer_backend_override(&mut card);
+
+            if !is_registration_complete(&self.manager, &mcid, &card)
+                && self.retry_model_registration(mcid, card).await
+            {
+                retry_count += 1;
+            }
+        }
+
+        let mut stale_entries = Vec::new();
+        for (key, operation, generation) in local_entries {
+            let mcid = match ModelCardInstanceId::from_path(&key) {
+                Ok(mcid) => mcid,
+                Err(err) => {
+                    tracing::warn!(%err, key, "Ignoring malformed local model-card key");
+                    continue;
+                }
+            };
+            if namespace_filter.matches(&mcid.namespace) && !desired_keys.contains(&key) {
+                stale_entries.push((key, mcid, operation, generation));
+            }
+        }
+        stale_entries.sort_by(|left, right| left.0.cmp(&right.0));
+        let stale_entry_count = stale_entries.len();
+
+        let mut removed_stale_count = 0usize;
+        let mut superseded_stale_count = 0usize;
+        for (key, mcid, operation, snapshot_generation) in stale_entries {
+            let Some(delete_generation) = operation.reserve_after(snapshot_generation) else {
+                superseded_stale_count += 1;
+                tracing::debug!(
+                    key = %key,
+                    snapshot_generation,
+                    current_generation = operation.current_generation(),
+                    "Skipping stale cleanup superseded after reconciliation snapshot"
+                );
+                continue;
+            };
+            match self
+                .handle_delete(&mcid, namespace_filter, operation, delete_generation)
+                .await
+            {
+                Ok(DeleteOutcome::Processed(_)) => removed_stale_count += 1,
+                Ok(DeleteOutcome::Superseded) => superseded_stale_count += 1,
+                Err(err) => {
+                    tracing::error!(
+                        key = %key,
+                        error = format!("{err:#}"),
+                        "Error removing stale model during reconciliation"
+                    );
+                }
+            }
+        }
+
+        tracing::debug!(
+            expected_model_cards = desired_keys.len(),
+            retried_model_cards = retry_count,
+            removed_stale_model_cards = removed_stale_count,
+            superseded_stale_model_cards = superseded_stale_count,
+            failed_stale_model_cards =
+                stale_entry_count.saturating_sub(removed_stale_count + superseded_stale_count),
+            "Completed frontend model registration reconciliation"
+        );
+        Ok(())
+    }
+
+    /// Start one reconciliation retry unless the original event-driven
+    /// registration for this instance is still running. Completed failed tasks
+    /// remain in `pending_puts`, so they are replaced here by the retry task.
+    async fn retry_model_registration(
+        self: &Arc<Self>,
+        mcid: ModelCardInstanceId,
+        mut card: ModelDeploymentCard,
+    ) -> bool {
+        let instance_key = mcid.to_path();
+        if self
+            .pending_puts
+            .get(&instance_key)
+            .is_some_and(|pending| !pending.handle.is_finished())
+        {
+            return false;
+        }
+
+        let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
+        if let Some(model) = self.manager.get_model(card.name())
+            && !model.is_checksum_compatible(&ws_key, card.mdcsum())
+        {
+            tracing::error!(
+                model_name = card.name(),
+                namespace = mcid.namespace,
+                new_checksum = card.mdcsum(),
+                "Reconciliation found a model-card checksum that does not match the existing WorkerSet. \
+                 Drain all old workers in this namespace before deploying a new version."
+            );
+            return false;
+        }
+
+        tracing::warn!(
+            model_name = card.name(),
+            namespace = mcid.namespace,
+            instance_key,
+            "Retrying incomplete frontend model registration from discovery snapshot"
+        );
+
+        let task_key = instance_key.clone();
+        let (operation, generation) = self.begin_instance_operation(&instance_key);
+        let watcher = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            match watcher
+                .handle_put_if_current(&mcid, &mut card, &operation, generation)
+                .await
+            {
+                Some(Ok(())) => {
+                    tracing::info!(
+                        model_name = card.name(),
+                        namespace = mcid.namespace,
+                        "Reconciled model registration"
+                    );
+                    watcher.notify_on_model.notify_waiters();
+                }
+                Some(Err(err)) => {
+                    tracing::error!(
+                        model_name = card.name(),
+                        namespace = mcid.namespace,
+                        error = format!("{err:#}"),
+                        "Model registration reconciliation retry failed"
+                    );
+                }
+                None => {
+                    tracing::debug!(
+                        key = %task_key,
+                        generation,
+                        "Skipping superseded model registration retry"
+                    );
+                }
+            }
+            watcher.prune_instance_operation(&task_key, &operation);
+        });
+
+        if let Some((_, old_put)) = self.pending_puts.remove(&instance_key) {
+            old_put.handle.abort();
+        }
+        self.pending_puts
+            .insert(instance_key, PendingPut { generation, handle });
+        true
     }
 
     /// Handle a worker removal. Cleans up per-namespace WorkerSets and the Model itself
@@ -413,58 +855,182 @@ impl ModelWatcher {
         &self,
         mcid: &ModelCardInstanceId,
         namespace_filter: &NamespaceFilter,
+        operation: Arc<InstanceOperation>,
+        generation: u64,
+    ) -> anyhow::Result<DeleteOutcome> {
+        let key = mcid.to_path();
+
+        let operation_guard = match tokio::time::timeout(
+            Duration::from_secs(60),
+            operation.lock.lock(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                if !operation.is_current(generation) {
+                    self.prune_instance_operation(&key, &operation);
+                    return Ok(DeleteOutcome::Superseded);
+                }
+
+                if let Some((_, pending)) = self
+                    .pending_puts
+                    .remove_if(&key, |_, pending| pending.generation < generation)
+                {
+                    pending.handle.abort();
+                    let _ = pending.handle.await;
+                }
+                tracing::warn!(
+                    key = %key,
+                    "Timed out waiting for an earlier model registration; aborted it before delete"
+                );
+                operation.lock.lock().await
+            }
+        };
+
+        if !operation.is_current(generation) {
+            drop(operation_guard);
+            self.prune_instance_operation(&key, &operation);
+            tracing::debug!(
+                key = %key,
+                generation,
+                current_generation = operation.current_generation(),
+                "Skipping superseded model removal"
+            );
+            return Ok(DeleteOutcome::Superseded);
+        }
+
+        // An earlier put either released the operation lock or is waiting on
+        // it with an obsolete generation. Cancel its task before mutating the
+        // local card and WorkerSet state.
+        if let Some((_, pending)) = self
+            .pending_puts
+            .remove_if(&key, |_, pending| pending.generation < generation)
+        {
+            pending.handle.abort();
+            let _ = pending.handle.await;
+        }
+
+        let result = self.handle_delete_serialized(mcid, namespace_filter).await;
+        drop(operation_guard);
+        self.prune_instance_operation(&key, &operation);
+        result.map(DeleteOutcome::Processed)
+    }
+
+    async fn handle_delete_serialized(
+        &self,
+        mcid: &ModelCardInstanceId,
+        namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<String>> {
         let key = mcid.to_path();
 
-        // If there is an in-flight handle_put for this instance, wait for it
-        // to complete before we attempt cleanup. Without this, a Removed event
-        // arriving while handle_put is still downloading HF config would fail
-        // to find the model card, leaving a stale registration.
-        if let Some((_, mut handle)) = self.pending_puts.remove(&key) {
-            tracing::debug!(key = %key, "awaiting in-flight handle_put before delete");
-            // Ignore join errors (panic in the spawned task) — we still proceed
-            // with cleanup since the put may have partially registered the model.
-            match tokio::time::timeout(Duration::from_secs(60), &mut handle).await {
-                Ok(_) => {}
-                Err(_) => {
-                    // Abort the timed-out task so it cannot register the model
-                    // after we proceed with deletion.
-                    handle.abort();
-                    let _ = handle.await;
-                    tracing::warn!(
-                        key = %key,
-                        "Timed out waiting for in-flight handle_put, aborted and proceeding with delete"
-                    );
-                }
-            }
-        }
-        let card = match self.manager.remove_model_card(&key) {
+        let card = match self.manager.get_model_card(&key) {
             Some(card) => card,
             None => {
+                // The card was never durably saved (e.g. an Added event whose handle_put failed
+                // before save, after the pre-spawn tracker addition). Reconcile tracker state at
+                // the right granularity:
+                //   - base worker card (`model_suffix == None`): the worker instance is gone, so
+                //     clear it entirely;
+                //   - LoRA-adapter card (`model_suffix == Some`): remove ONLY that adapter, using
+                //     the name recorded in `pending_lora_adds`, so a still-live worker's other
+                //     adapters/capacity are untouched (RR3-3 / R4-2).
+                use crate::kv_router::protocols::WorkerWithDpRank;
+                let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+                if mcid.model_suffix.is_none() {
+                    self.manager
+                        .lora_state_tracker()
+                        .handle_worker_removal(worker);
+                    // Sweep any pending fallback entries for this worker's LoRA cards so they
+                    // can't linger if their own remove events never arrive (RF-2).
+                    let prefix = format!("{}/", mcid.to_path());
+                    self.pending_lora_adds
+                        .retain(|k, _| !k.starts_with(&prefix));
+                } else if let Some((_, lora_name)) = self.pending_lora_adds.remove(&key) {
+                    self.manager
+                        .lora_state_tracker()
+                        .handle_mdc_removal(worker, &lora_name);
+                }
                 tracing::warn!(
                     key = %key,
-                    "ModelDeploymentCard already absent during removal; ignoring duplicate or stale remove event"
+                    "ModelDeploymentCard absent during removal; reconciled LoRA tracker state from pending add"
                 );
                 return Ok(None);
             }
         };
         let model_name = card.name().to_string();
-        let worker_namespace = &mcid.namespace;
-        let worker_component = &mcid.component;
-        let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
 
-        // Query discovery for all remaining instances of this model
+        // Complete the only fallible discovery query before removing local
+        // state. If discovery is temporarily unavailable, retaining the card
+        // lets the next reconciliation pass retry this stale entry instead of
+        // losing the key while leaving its WorkerSet behind.
         let active_instances = self
             .cards_for_model_with_endpoints(&model_name, namespace_filter)
             .await
             .with_context(|| model_name.clone())?;
 
-        // Check if instances of the SAME component remain in this namespace.
-        // In disaggregated deployments, prefill and decode are different components
-        // in the same namespace, so we must check at the component level to avoid
-        // removing one type's WorkerSet while the other still has workers.
-        let component_has_instances = active_instances.iter().any(|(eid, _)| {
-            eid.namespace == *worker_namespace && eid.component == *worker_component
+        let card = match self.manager.remove_model_card(&key) {
+            Some(card) => card,
+            None => {
+                tracing::debug!(
+                    key = %key,
+                    "ModelDeploymentCard was removed by concurrent cleanup"
+                );
+                return Ok(None);
+            }
+        };
+
+        // Feed the LoRA state tracker now that any in-flight handle_put has completed and the
+        // card is available (N2 — avoids the race where a Removed event outran the add). A LoRA
+        // adapter card unregisters just that adapter; the base worker card means the worker
+        // instance is gone, so drop its capacity + all loaded-LoRA bookkeeping (F4/F5).
+        {
+            use crate::kv_router::protocols::WorkerWithDpRank;
+            let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+            match card.lora {
+                Some(ref lora_info) => self
+                    .manager
+                    .lora_state_tracker()
+                    .handle_mdc_removal(worker, &lora_info.name),
+                None => self
+                    .manager
+                    .lora_state_tracker()
+                    .handle_worker_removal(worker),
+            }
+        }
+        // The card-based cleanup above is authoritative; drop the pending fallback entry for a
+        // LoRA card, or sweep all of this worker's suffixed entries for a base card (RF-2).
+        if card.lora.is_some() {
+            self.pending_lora_adds.remove(&key);
+        } else {
+            let prefix = format!("{}/", mcid.to_path());
+            self.pending_lora_adds
+                .retain(|k, _| !k.starts_with(&prefix));
+        }
+
+        let worker_namespace = &mcid.namespace;
+        let worker_component = &mcid.component;
+        let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
+
+        // Check if instances of the SAME role and component remain in
+        // this namespace. In disaggregated deployments, prefill and
+        // decode are different components in the same namespace -- so
+        // checking only (ns, component) is necessary but not sufficient.
+        // Encode workers can share a (ns, component) with Aggregated, so
+        // we ALSO require the remaining instance to map to the same
+        // computed `ws_key` (which folds in worker_type for Encode). If
+        // we used only (ns, component), removing the last Encode
+        // instance from a namespace that still has an Aggregated worker
+        // in the same component would see "instances exist" and skip
+        // remove_worker_set, leaking the Encode WorkerSet forever.
+        let component_has_instances = active_instances.iter().any(|(eid, other_card)| {
+            eid.namespace == *worker_namespace
+                && eid.component == *worker_component
+                && worker_set_key(
+                    &eid.namespace,
+                    other_card.model_type,
+                    other_card.worker_type,
+                ) == ws_key
         });
 
         if !component_has_instances {
@@ -482,7 +1048,7 @@ impl ModelWatcher {
             //
             // PREFILL teardown (cached endpoint is stale): drop everything for
             // this key and deactivate the decode-side router so requests fall
-            // back to aggregated mode (or fail cleanly with `enforce_disagg`).
+            // back to aggregated mode.
             //
             // DECODE teardown: keep `PrefillReady` (the cached endpoint is still
             // valid for future decode rebuilds — that's PR 8965's primary
@@ -900,6 +1466,31 @@ impl ModelWatcher {
                     None
                 };
 
+            // Create the worker monitor for this WorkerSet BEFORE the prefill router so the
+            // monitor can be handed directly to PrefillRouter::new. Each WorkerSet gets its own
+            // monitor (1-to-1), scoped to this WorkerSet's Client/namespace. The monitor tracks
+            // Prometheus metrics (active_decode_blocks, active_prefill_tokens, worker TTFT/ITL
+            // cleanup); thresholds control overload detection. The monitor and prefill router are
+            // created together here, so the monitor is passed into the prefill router directly.
+            //
+            // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
+            // so that overload-state updates (via set_overloaded_instances) are visible to the
+            // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
+            // Using a different Client instance would cause the PushRouter to never see
+            // overloaded workers, since each Client::new() creates independent ArcSwap state.
+            let worker_monitor = if needs_preprocessed_routing {
+                let monitor_client = kv_chooser
+                    .as_ref()
+                    .map(|chooser| chooser.client().clone())
+                    .unwrap_or_else(|| client.clone());
+                Some(KvWorkerMonitor::new(
+                    monitor_client,
+                    router_config.load_threshold_config.clone(),
+                ))
+            } else {
+                None
+            };
+
             // Create prefill chooser once if we're building pipelines
             // Both chat and completions will share the same prefill chooser instance
             let model_name = card.name().to_string();
@@ -921,35 +1512,15 @@ impl ModelWatcher {
                             card.kv_cache_block_size,
                             Some(prefill_config),
                             self.prefill_load_estimator.clone(),
-                            router_config.enforce_disagg,
+                            router_config.session_affinity_ttl_secs,
                             model_name.clone(),
                             namespace.clone(),
                             prefill_enable_eagle,
+                            // Hand the monitor directly so the prefill Client can be attached
+                            // to it on activation (no namespace lookup).
+                            worker_monitor.clone(),
                         )
                     })
-            } else {
-                None
-            };
-
-            // Create a new worker monitor for this WorkerSet. Each WorkerSet gets its own
-            // monitor (1-to-1) since each monitor is scoped to this WorkerSet's Client/namespace.
-            // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
-            // worker TTFT/ITL cleanup). The thresholds control overload detection behavior only.
-            //
-            // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
-            // so that overload-state updates (via set_overloaded_instances) are visible to the
-            // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
-            // Using a different Client instance would cause the PushRouter to never see
-            // overloaded workers, since each Client::new() creates independent ArcSwap state.
-            let worker_monitor = if needs_preprocessed_routing {
-                let monitor_client = kv_chooser
-                    .as_ref()
-                    .map(|chooser| chooser.client().clone())
-                    .unwrap_or_else(|| client.clone());
-                Some(KvWorkerMonitor::new(
-                    monitor_client,
-                    router_config.load_threshold_config.clone(),
-                ))
             } else {
                 None
             };
@@ -970,7 +1541,8 @@ impl ModelWatcher {
                         worker_monitor.clone(),
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
-                        router_config.enforce_disagg,
+                        uses_multimodal_cache_routing(card),
+                        router_config.session_affinity_ttl_secs,
                     )
                     .await
                     .context("build_preprocessed_routing")?,
@@ -1106,9 +1678,7 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
             }
@@ -1117,9 +1687,7 @@ impl ModelWatcher {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
@@ -1251,7 +1819,8 @@ impl ModelWatcher {
         let mut results = Vec::with_capacity(instances.len());
         for instance in instances {
             match instance.deserialize_model::<ModelDeploymentCard>() {
-                Ok(card) => {
+                Ok(mut card) => {
+                    self.apply_tokenizer_backend_override(&mut card);
                     let endpoint_id = match &instance {
                         dynamo_runtime::discovery::DiscoveryInstance::Model {
                             namespace,
@@ -1311,9 +1880,188 @@ impl ModelWatcher {
     }
 }
 
+/// Seed the LoRA state tracker from a worker's MDC.
+///
+/// - Adapter card (`card.lora` is `Some`): register the loaded adapter (which also records the
+///   worker's capacity) and return the adapter name so the caller can track it for failed-save
+///   removal reconciliation.
+/// - Base worker card advertising `runtime_config.max_gpu_lora_count`: seed capacity-only (no
+///   phantom adapter) so the controller sees idle-but-LoRA-capable workers before the first
+///   adapter load. Returns `None`.
+/// - Otherwise (non-LoRA worker): no-op, returns `None`.
+///
+/// Split out of the discovery loop so the base-card capacity data flow is unit-testable without
+/// constructing a full `ModelWatcher`.
+fn seed_lora_state_from_card(
+    state_tracker: &crate::lora::LoraStateTracker,
+    worker: crate::kv_router::protocols::WorkerWithDpRank,
+    card: &ModelDeploymentCard,
+) -> Option<String> {
+    if let Some(lora_info) = card.lora.as_ref() {
+        state_tracker.handle_mdc_addition(worker, lora_info);
+        Some(lora_info.name.clone())
+    } else if let Some(capacity) = card.runtime_config.max_gpu_lora_count {
+        state_tracker.set_worker_capacity(worker, capacity);
+        None
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_card::ModelDeploymentCard;
+
+    #[test]
+    fn base_card_with_capacity_seeds_idle_lora_capable_worker() {
+        // jh-nv (watcher base-card seeding): a base worker card (lora=None) carrying
+        // runtime_config.max_gpu_lora_count must seed capacity-only so the controller sees the
+        // idle LoRA-capable worker before any adapter loads. Pins the base-card -> capacity flow
+        // that the discovery loop relies on.
+        let st = crate::lora::LoraStateTracker::new();
+        let worker = crate::kv_router::protocols::WorkerWithDpRank::new(7, 0);
+        let mut card = ModelDeploymentCard::with_name_only("base-model");
+        card.runtime_config.max_gpu_lora_count = Some(4);
+        assert!(card.lora.is_none());
+
+        let adapter = seed_lora_state_from_card(&st, worker, &card);
+        assert_eq!(adapter, None, "a base card registers no adapter name");
+        assert_eq!(
+            st.list_workers(),
+            vec![worker],
+            "idle LoRA-capable worker must be visible to the controller"
+        );
+        assert_eq!(st.total_lora_slots(), 4);
+    }
+
+    #[test]
+    fn base_card_without_capacity_seeds_nothing() {
+        // A non-LoRA base card must not seed any worker capacity.
+        let st = crate::lora::LoraStateTracker::new();
+        let card = ModelDeploymentCard::with_name_only("base-model");
+        assert!(card.runtime_config.max_gpu_lora_count.is_none());
+
+        let adapter = seed_lora_state_from_card(
+            &st,
+            crate::kv_router::protocols::WorkerWithDpRank::new(1, 0),
+            &card,
+        );
+        assert_eq!(adapter, None);
+        assert!(
+            st.list_workers().is_empty(),
+            "a non-LoRA base card must not seed capacity"
+        );
+    }
+
+    #[test]
+    fn adapter_card_registers_adapter_and_returns_name() {
+        // An adapter card registers the loaded adapter (+capacity) and returns its name so the
+        // caller can track it in pending_lora_adds.
+        let st = crate::lora::LoraStateTracker::new();
+        let worker = crate::kv_router::protocols::WorkerWithDpRank::new(3, 0);
+        let mut card = ModelDeploymentCard::with_name_only("base-model");
+        card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-x".to_string(),
+            max_gpu_lora_count: Some(2),
+        });
+
+        let adapter = seed_lora_state_from_card(&st, worker, &card);
+        assert_eq!(adapter.as_deref(), Some("adapter-x"));
+        assert!(st.is_loaded("adapter-x", &worker));
+        assert_eq!(st.total_lora_slots(), 2);
+    }
+
+    #[test]
+    fn registration_is_complete_only_after_card_and_worker_set_exist() {
+        let manager = ModelManager::new();
+        let mcid = ModelCardInstanceId {
+            namespace: "deployment-a".to_string(),
+            component: "backend".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 7,
+            model_suffix: None,
+        };
+        let mut card = ModelDeploymentCard::with_name_only("llama");
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Aggregated);
+
+        assert!(!is_registration_complete(&manager, &mcid, &card));
+
+        // `do_worker_set_registration` saves the card before all pipeline
+        // construction has completed. A failure after this point must remain a
+        // reconciliation candidate.
+        manager
+            .save_model_card(&mcid.to_path(), card.clone())
+            .unwrap();
+        assert!(!is_registration_complete(&manager, &mcid, &card));
+
+        let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
+        manager.add_worker_set(
+            card.name(),
+            &ws_key,
+            WorkerSet::new(
+                mcid.namespace.clone(),
+                "stale-checksum".to_string(),
+                card.clone(),
+            ),
+        );
+        assert!(
+            !is_registration_complete(&manager, &mcid, &card),
+            "a WorkerSet from a different model-card checksum must be retried"
+        );
+
+        manager.add_worker_set(
+            card.name(),
+            &ws_key,
+            WorkerSet::new(
+                mcid.namespace.clone(),
+                card.mdcsum().to_string(),
+                card.clone(),
+            ),
+        );
+        assert!(is_registration_complete(&manager, &mcid, &card));
+
+        manager.remove_model_card(&mcid.to_path());
+        assert!(!is_registration_complete(&manager, &mcid, &card));
+    }
+
+    #[test]
+    fn stale_cleanup_cannot_reserve_after_a_new_registration() {
+        let operation = InstanceOperation::default();
+        let snapshot_generation = operation.current_generation();
+
+        let registration_generation = operation.begin();
+
+        assert!(operation.is_current(registration_generation));
+        assert_eq!(operation.reserve_after(snapshot_generation), None);
+    }
+
+    #[tokio::test]
+    async fn newer_registration_waits_for_cleanup_and_remains_current() {
+        let operation = Arc::new(InstanceOperation::default());
+        let cleanup_generation = operation
+            .reserve_after(operation.current_generation())
+            .expect("cleanup should reserve the unchanged snapshot generation");
+        let cleanup_guard = operation.lock.lock().await;
+
+        let registration_generation = operation.begin();
+        assert!(!operation.is_current(cleanup_generation));
+
+        let registration_operation = Arc::clone(&operation);
+        let registration = tokio::spawn(async move {
+            let _guard = registration_operation.lock.lock().await;
+            registration_operation.is_current(registration_generation)
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !registration.is_finished(),
+            "the newer registration must wait until cleanup releases the instance lock"
+        );
+
+        drop(cleanup_guard);
+        assert!(registration.await.unwrap());
+    }
 
     #[test]
     fn test_is_model_type_list_empty_on_empty_manager() {
@@ -1425,5 +2173,24 @@ mod tests {
         );
         let prefill = worker_set_key("ns1", ModelType::empty(), Some(WorkerType::Prefill));
         assert_ne!(decode, prefill);
+    }
+
+    #[test]
+    fn worker_set_key_encode_and_aggregated_coexist_in_same_namespace() {
+        // Regression for the Encode/Aggregated key collision: Encode and
+        // Aggregated workers in the same namespace MUST map to different keys,
+        // so both can register without an MDC checksum mismatch. Under the
+        // role-in-key scheme, an Encode worker registers surface-less
+        // (ModelType::empty()) and lands in `{ns}::encode`, while Aggregated
+        // keeps its `{ns}:chat|completions:aggregated` bucket.
+        let agg_key = worker_set_key(
+            "dynamo",
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Aggregated),
+        );
+        let enc_key = worker_set_key("dynamo", ModelType::empty(), Some(WorkerType::Encode));
+        assert_ne!(agg_key, enc_key);
+        assert_eq!(agg_key, "dynamo:chat|completions:aggregated");
+        assert_eq!(enc_key, "dynamo::encode");
     }
 }

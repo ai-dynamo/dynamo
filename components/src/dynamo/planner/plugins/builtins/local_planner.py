@@ -113,6 +113,9 @@ class BuiltinLoadPredict:
         self._num_req_predictor = predictor_cls(config)
         self._isl_predictor = predictor_cls(config)
         self._osl_predictor = predictor_cls(config)
+        self._last_observed_isl: float | None = None
+        self._last_observed_osl: float | None = None
+        self._seen_live_traffic = False
         self._last_kv_hit_rate: float | None = None
         self._last_accept_length: float = 1.0
 
@@ -124,9 +127,7 @@ class BuiltinLoadPredict:
         if self._config.optimization_target != "sla":
             return
         for obs in observations:
-            self._num_req_predictor.add_data_point(obs.num_req)
-            self._isl_predictor.add_data_point(obs.isl)
-            self._osl_predictor.add_data_point(obs.osl)
+            self._observe_load(obs)
         log.info("Warmed builtin load predictors with %d intervals", len(observations))
         for predictor in (
             self._num_req_predictor,
@@ -135,11 +136,34 @@ class BuiltinLoadPredict:
         ):
             if hasattr(predictor, "reset_idle_skip"):
                 predictor.reset_idle_skip()
+        self._seen_live_traffic = False
+
+    def _observe_load(self, traffic: TrafficObservation) -> None:
+        self._num_req_predictor.add_data_point(traffic.num_req)
+
+        if traffic.num_req > 0:
+            self._seen_live_traffic = True
+            if math.isfinite(traffic.isl):
+                self._last_observed_isl = traffic.isl
+            if math.isfinite(traffic.osl):
+                self._last_observed_osl = traffic.osl
+
+        isl = traffic.isl
+        osl = traffic.osl
+        if traffic.num_req == 0 and self._seen_live_traffic:
+            # Average request lengths are undefined in an idle window. Carry the
+            # last observed request shape forward so time-based predictors still
+            # advance once per interval without learning artificial zero lengths.
+            isl = self._last_observed_isl if self._last_observed_isl is not None else 0
+            osl = self._last_observed_osl if self._last_observed_osl is not None else 0
+
+        if math.isfinite(isl):
+            self._isl_predictor.add_data_point(isl)
+        if math.isfinite(osl):
+            self._osl_predictor.add_data_point(osl)
 
     def _observe_traffic(self, traffic: TrafficObservation) -> None:
-        self._num_req_predictor.add_data_point(traffic.num_req)
-        self._isl_predictor.add_data_point(traffic.isl)
-        self._osl_predictor.add_data_point(traffic.osl)
+        self._observe_load(traffic)
         if traffic.kv_hit_rate is not None and not math.isnan(traffic.kv_hit_rate):
             self._last_kv_hit_rate = traffic.kv_hit_rate
         if traffic.accept_length is not None and math.isfinite(traffic.accept_length):
