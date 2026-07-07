@@ -22,6 +22,14 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      build_snapshot_agent:
+        description: 'Build and push snapshot-agent image'
+        type: boolean
+        default: false
+      build_vllm_placeholder:
+        description: 'Build and push vLLM snapshot placeholder image'
+        type: boolean
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -52,7 +60,7 @@ jobs:
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [init]
-    if: inputs.build_vllm
+    if: inputs.build_vllm || inputs.build_vllm_placeholder
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -125,6 +133,58 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # SNAPSHOT (build-only)
+  # ============================================================================
+
+  snapshot-agent:
+    needs: [init]
+    if: inputs.build_snapshot_agent
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: agent
+          image_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
+  snapshot-placeholder-vllm:
+    name: vLLM Snapshot Placeholder
+    needs: [init, vllm-copy-to-acr]
+    if: inputs.build_vllm_placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push vLLM snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-vllm-placeholder
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
+
+  # ============================================================================
   # OPERATOR (build-only)
   # ============================================================================
 
@@ -194,7 +254,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, snapshot-agent, snapshot-placeholder-vllm, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
