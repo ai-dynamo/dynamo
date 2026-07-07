@@ -294,7 +294,7 @@ impl ZmqSubTransport {
 
     /// Create a subscriber whose single socket can be connected to and
     /// disconnected from publisher endpoints as discovery changes.
-    pub async fn dynamic(topic: &str, channel_capacity: usize) -> Result<Self> {
+    pub(crate) async fn dynamic(topic: &str, channel_capacity: usize) -> Result<Self> {
         // tmq only exposes builders that bind or connect. A SUB connect is
         // asynchronous, so using then immediately disconnecting an unbound
         // inproc endpoint gives us a configured socket without network I/O.
@@ -305,7 +305,10 @@ impl ZmqSubTransport {
             .subscribe(topic.as_bytes())?;
         socket.get_socket().disconnect(placeholder)?;
 
-        let (broadcast_tx, _) = broadcast::channel(channel_capacity);
+        // This queue only hands off to DynamicSubscriber's dedicated forwarding
+        // task. Cap its eager allocation while retaining enough headroom for a
+        // burst spanning many publisher connections.
+        let (broadcast_tx, _) = broadcast::channel(channel_capacity.min(16_384));
         let (endpoint_tx, endpoint_rx) = mpsc::unbounded_channel();
         let pump_handle =
             Self::start_dynamic_socket_pump(socket, broadcast_tx.clone(), endpoint_rx);
@@ -317,14 +320,14 @@ impl ZmqSubTransport {
         })
     }
 
-    pub async fn connect_endpoint(&self, endpoint: &str) -> Result<()> {
+    pub(crate) async fn connect_endpoint(&self, endpoint: &str) -> Result<()> {
         self.send_endpoint_command(|response| {
             EndpointCommand::Connect(endpoint.to_string(), response)
         })
         .await
     }
 
-    pub async fn disconnect_endpoint(&self, endpoint: &str) -> Result<()> {
+    pub(crate) async fn disconnect_endpoint(&self, endpoint: &str) -> Result<()> {
         self.send_endpoint_command(|response| {
             EndpointCommand::Disconnect(endpoint.to_string(), response)
         })

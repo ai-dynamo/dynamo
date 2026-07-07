@@ -63,9 +63,8 @@ impl DynamicSubscriber {
         let sub_transport = Arc::new(ZmqSubTransport::dynamic(&self.topic, channel_cap).await?);
         let mut zmq_stream = sub_transport.subscribe(&self.topic).await?;
 
-        // Keep the existing bounded handoff semantics. The transport's
-        // broadcast channel uses the same capacity, so both queues remain
-        // bounded under a slow consumer.
+        // Keep the existing bounded merged-handoff semantics under a slow
+        // consumer. The transport itself has a small queue feeding this task.
         let forward_cancel = self.cancel_token.clone();
         let event_tx_for_pump = event_tx.clone();
         tokio::spawn(async move {
