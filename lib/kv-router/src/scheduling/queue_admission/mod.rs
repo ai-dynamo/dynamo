@@ -16,3 +16,9 @@ pub enum DispatchIntent {
 pub enum QueueAdmissionConfig {
     SessionAware {},
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PolicyClassAdmissionController {
+    None,
+    SessionAware,
+}

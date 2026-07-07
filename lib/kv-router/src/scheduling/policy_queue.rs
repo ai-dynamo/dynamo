@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::queue_admission::DispatchIntent;
+use super::queue_admission::{
+    DispatchIntent, PolicyClassAdmissionController, QueueAdmissionConfig,
+};
 use crate::protocols::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +141,7 @@ struct ClassCandidate {
 
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
+    admission: PolicyClassAdmissionController,
     pending: BinaryHeap<PolicyQueueEntry<T>>,
     held: HashMap<u64, PolicyQueueEntry<T>>,
     ready_by_worker: HashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
@@ -162,7 +165,10 @@ impl<T> PolicyClassQueue<T> {
         match intent {
             DispatchIntent::Any => self.pending.push(entry),
             DispatchIntent::Exact(worker) => {
-                debug_assert!(self.config.queue_admission.is_some());
+                debug_assert!(matches!(
+                    self.admission,
+                    PolicyClassAdmissionController::SessionAware
+                ));
                 self.ready_by_worker.entry(worker).or_default().push(entry);
             }
         }
@@ -235,13 +241,22 @@ impl<T> PolicyQueue<T> {
                 .classes()
                 .iter()
                 .cloned()
-                .map(|config| PolicyClassQueue {
-                    config,
-                    pending: BinaryHeap::new(),
-                    held: HashMap::new(),
-                    ready_by_worker: HashMap::new(),
-                    stats: PolicyQueueStats::default(),
-                    deficit: 0,
+                .map(|config| {
+                    let admission = match config.queue_admission.as_ref() {
+                        None => PolicyClassAdmissionController::None,
+                        Some(QueueAdmissionConfig::SessionAware {}) => {
+                            PolicyClassAdmissionController::SessionAware
+                        }
+                    };
+                    PolicyClassQueue {
+                        config,
+                        admission,
+                        pending: BinaryHeap::new(),
+                        held: HashMap::new(),
+                        ready_by_worker: HashMap::new(),
+                        stats: PolicyQueueStats::default(),
+                        deficit: 0,
+                    }
                 })
                 .collect(),
             next_class: 0,
@@ -371,7 +386,10 @@ impl<T> PolicyQueue<T> {
             return Err((rejection, payload));
         }
         assert!(
-            class.config.queue_admission.is_some(),
+            matches!(
+                class.admission,
+                PolicyClassAdmissionController::SessionAware
+            ),
             "held request requires a queue_admission class"
         );
         let entry_id = self.next_enqueue_seq;
@@ -405,7 +423,7 @@ impl<T> PolicyQueue<T> {
         prepare: impl FnOnce(&mut T, DispatchIntent),
     ) -> bool {
         let class = &mut self.classes[class_index];
-        if class.config.queue_admission.is_none() {
+        if matches!(class.admission, PolicyClassAdmissionController::None) {
             return false;
         }
         let Some(mut entry) = class.held.remove(&entry_id) else {
