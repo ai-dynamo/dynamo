@@ -44,8 +44,13 @@ rewritten to their GitHub source URL (with a warning) -- a relative path
 would naive-join into a dead link on the rendered page.
 
 Usage:
+    # dev sync (default --pages-dir pages-dev)
     resolve_translation_links.py --nav docs/index.yml \
         --translations-root fern/translations --site-root /dynamo --version-slug dev
+    # release snapshot
+    resolve_translation_links.py --nav docs/index.yml \
+        --translations-root fern/translations --site-root /dynamo \
+        --version-slug vX.Y.Z --pages-dir pages-vX.Y.Z --github-ref vX.Y.Z
 
 Delete this script (and re-shallow the deep-relative links) once Fern
 resolves relative links in translated content natively.
