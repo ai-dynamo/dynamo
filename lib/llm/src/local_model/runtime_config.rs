@@ -290,6 +290,13 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.total_kv_blocks
     }
 
+    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
+        self.runtime_data
+            .get("sglang_hicache_capacity")?
+            .get("host_total_tokens")?
+            .as_u64()
+    }
+
     fn taints(&self) -> &HashSet<String> {
         &self.taints
     }
@@ -636,6 +643,21 @@ mod tests {
         assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
         let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
+    }
+
+    #[test]
+    fn sglang_hicache_exposes_native_offloading_capacity() {
+        use dynamo_kv_router::WorkerConfigLike;
+
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .set_engine_specific(
+                "sglang_hicache_capacity",
+                serde_json::json!({"host_total_tokens": 300}),
+            )
+            .unwrap();
+
+        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
     }
 
     #[test]
