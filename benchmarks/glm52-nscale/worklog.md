@@ -157,3 +157,15 @@ SPDX-License-Identifier: Apache-2.0
   still exposed to the saturated shared ancestor. The validated 329-entry checkpoint was retained
   as recovery evidence and copied identically into the runner's 40 GiB workspace for the remaining
   prefill. Official benchmark output still requires dedicated-volume isolation before clean replay.
+- The recovered Verified prefill completed 500/500 at `2026-07-07T03:08:00Z`; the executable
+  gate independently confirmed all 500 catalog entries, unchanged manifest SHA-256
+  `39c96a5fdec81852fb0342556ba8c0922f1bb54854e79ed2661b6e6981bb5a21`, and unchanged cache
+  binding. The runner-local checkpoint was exported before pod replacement: 507 files,
+  804,078 bytes, content-only tree SHA-256
+  `e8c9c3dbaaf23c2031ef4e9b388f0607392dfd41ac3994bafe02fbb0212e3ad1`, and strict
+  file/directory tree SHA-256 `b529bad556711d1b0f65de264dad25bca1c02d370365445791400bb9bb4d18ec`.
+- Output-volume recovery keeps the immutable `eval/` source unchanged. A top-level Kustomize
+  overlay mounts a retained 1 TiB Cinder PVC only at `/artifacts/glm52-nscale` in the runner
+  and DinD containers, while VAST remains at the parent `/artifacts` for harness environments.
+  Migration is source-read-only and requires the authoritative Verified manifest plus an absent
+  `vllm-serve-ab-r2` replay target before publishing an exact hashed copy.

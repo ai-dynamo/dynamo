@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: glm52-eval-runner
+spec:
+  containers:
+    - name: runner
+      volumeMounts:
+        - name: campaign-output
+          mountPath: /artifacts/glm52-nscale
+          subPath: glm52-nscale
+    - name: dind
+      volumeMounts:
+        - name: campaign-output
+          mountPath: /artifacts/glm52-nscale
+          subPath: glm52-nscale
+  volumes:
+    - name: campaign-output
+      persistentVolumeClaim:
+        claimName: glm52-benchmark-output

@@ -56,6 +56,7 @@ its values.
 campaign.env                  pinned model/runtime campaign configuration
 campaign.local.env.example    untracked cluster-placement template
 deploy/                       manifests and lifecycle scripts
+artifact-storage/             pin-safe Cinder output migration and runner overlay
 eval/                         pinned harness setup and execution wrappers
 results/                      committed task-level summaries and score tables
 report/                       report generator and final self-contained HTML
@@ -69,6 +70,10 @@ self-contained HTML report.
 
 ## Current status
 
+One of 40 official cells is imported: Dynamo + vLLM A/B SWE-bench Verified resolved
+436/500 instances for an official score of 87.2%. The exact 500-image Verified cache
+prefill completed and passed its executable catalog/binding gate. Its 507-file
+runner-local checkpoint was exported before the pin-safe Cinder output-volume cutover.
 Deployment recipes, source/runtime attestations, and harness completeness gates are ready.
 Dynamo + vLLM passed exact text, forced-tool, automatic-tool, and BFCL validation smokes.
 A corrected Terminal-Bench validation run completed all three pinned tasks at 3/3 reward
@@ -76,4 +81,4 @@ with zero exceptions. Those observations predate the canonical 409,600-token run
 binding and are validation evidence only; no comparative score has been imported. The
 serving stack is torn down and the evaluation runner is idle while the immutable campaign
 source is pinned. Full BFCL remains gated on a `SERPAPI_API_KEY` for its 200 official
-web-search cases. Do not interpret the placeholder report as benchmark results.
+web-search cases.

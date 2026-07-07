@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-07T03:10:34Z",
+  "suite": "verified",
+  "state": "complete",
+  "started_at": "2026-07-06T21:30:46Z",
+  "completed_at": "2026-07-07T03:08:00Z",
+  "total": 500,
+  "completed": 500,
+  "remaining": 0,
+  "initial_cached": 17,
+  "cold_fill_required": 483,
+  "final_catalog_verified": 500,
+  "source_manifest_sha256": "39c96a5fdec81852fb0342556ba8c0922f1bb54854e79ed2661b6e6981bb5a21",
+  "cache_binding_sha256": "7173f3ba3fdc1f94a41ce1736ca064729ca1274b8de13faa1137655a65a66ad8",
+  "prefill_script_sha256": "5183886b7d1ca08ef14b4f378a7a868d46728c34673ebb50d8b68bf837603cef",
+  "quota_last_observed_before_pull": "92;w=3600",
+  "completion_gate": "cache/require-complete.sh PASS",
+  "export": {
+    "logical_path": "cache-prefill/verified-20260707T030800Z",
+    "files": 507,
+    "directories": 1,
+    "bytes": 804078,
+    "content_tree_sha256": "e8c9c3dbaaf23c2031ef4e9b388f0607392dfd41ac3994bafe02fbb0212e3ad1",
+    "strict_tree_sha256": "b529bad556711d1b0f65de264dad25bca1c02d370365445791400bb9bb4d18ec"
+  }
+}

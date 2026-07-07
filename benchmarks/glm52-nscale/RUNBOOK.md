@@ -40,6 +40,27 @@ hashes the former store, binds the marker hash to the new PVC, and retains both
 storage backends. Emergency VAST rollback uses the committed
 `cache/registry-mirror-vast-rollback.yaml` manifest.
 
+The campaign output subtree uses a second, nested Cinder mount so VAST remains
+available for persistent harness environments while raw benchmark output avoids the
+shared ancestor quota. For the existing campaign, complete the image prefill, export
+its runner-local checkpoint, then perform the one-time read-only migration and runner
+cutover:
+
+```bash
+snapshot=/Users/rmccormick/codex/glm52-campaign-artifacts/cache-prefill/verified-20260707T030800Z
+benchmarks/glm52-nscale/artifact-storage/migrate.sh
+benchmarks/glm52-nscale/eval/teardown-runner.sh
+benchmarks/glm52-nscale/artifact-storage/deploy-runner.sh
+benchmarks/glm52-nscale/artifact-storage/restore-prefill.sh "${snapshot}"
+benchmarks/glm52-nscale/artifact-storage/assert-ready.sh
+```
+
+This overlay is deliberately outside `eval/`: the pinned evaluator source stays at
+the immutable campaign commit. Migration hashes an exact VAST-to-Cinder copy, retains
+both PVs, verifies the authoritative task-image manifest, and requires the clean
+`vllm-serve-ab-r2` replay target to be absent. The old failed attempt remains rejected
+evidence; the clean replay uses the new run name.
+
 `campaign.source_commit` must name the immutable scaffold commit. Runner sync and
 deployment both refuse source drift from that commit. `deploy-runner.sh` never deletes a
 live runner implicitly; use `teardown-runner.sh` only after `assert-runner-idle.sh` passes.
@@ -95,6 +116,7 @@ rows additionally require `SERPAPI_API_KEY` through the optional
 For every cell:
 
 ```bash
+benchmarks/glm52-nscale/artifact-storage/assert-ready.sh
 benchmarks/glm52-nscale/deploy/deploy.sh "${variant}" "${phase}"
 benchmarks/glm52-nscale/deploy/smoke.sh "${variant}"
 # Execute exactly one guarded suite command below.
@@ -154,6 +176,9 @@ the next fresh server until `cache/prefill.sh status verified` reports
 `cache_binding_matches=true`; see `cache/README.md` for the command and evidence
 paths. The implementation is Verified-only; Pro's shared multi-tag repository
 needs a separate tag-aware path.
+
+The native-vLLM A/B recovery cell uses `run_name=vllm-serve-ab-r2`; do not reuse
+the immutable failed `vllm-serve-ab` run metadata.
 
 ## Guarded Terminal-Bench command
 
