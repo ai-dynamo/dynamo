@@ -34,6 +34,7 @@ import (
 	apiextensionsvalidation "k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	apitest "k8s.io/apiextensions-apiserver/pkg/test"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -372,6 +373,17 @@ func TestSharedSpecValidatorV1Alpha1_Validate(t *testing.T) {
 			calculatedNamespace: "default-my-dgd",
 			wantErr:             true,
 			errMsg:              `spec.services[decode].annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "invalid": must be "mp" or "ray"`,
+		},
+		{
+			name: "invalid service annotation without a field path",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					"nvidia.com/vllm-distributed-executor-backend": "invalid",
+				},
+			},
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              `annotation nvidia.com/vllm-distributed-executor-backend has invalid value "invalid": must be "mp" or "ray"`,
 		},
 		{
 			name: "checkpoint without gpuMemoryService is accepted",
@@ -863,6 +875,192 @@ func TestSharedSpecValidatorV1Alpha1_Failover_ModeConstraints(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
+	minAvailable := int32(1)
+	replicas := int32(2)
+	frontendSidecar := "missing"
+	sharedMemorySize := resource.MustParse("-1Gi")
+	spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "epp",
+		ComponentType: nvidiacomv1beta1.ComponentTypeEPP,
+		PodTemplate: &corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
+			},
+			Spec: corev1.PodSpec{
+				Containers:     []corev1.Container{{Name: consts.MainContainerName}, {Name: "sidecar"}},
+				InitContainers: []corev1.Container{{Name: "init"}},
+			},
+		},
+		Replicas:         &replicas,
+		MinAvailable:     &minAvailable,
+		Multinode:        &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+		SharedMemorySize: &sharedMemorySize,
+		EPPConfig: &nvidiacomv1beta1.EPPConfig{
+			ConfigMapRef: &corev1.ConfigMapKeySelector{},
+		},
+		FrontendSidecar: &frontendSidecar,
+	}
+	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
+
+	errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, field.NewPath("spec", "components").Index(0), false)
+	assertFieldPaths(t, errs, []string{
+		"spec.components[0].minAvailable",
+		"spec.components[0].sharedMemorySize",
+		"spec.components[0].type",
+		"spec.components[0].multinode",
+		"spec.components[0].replicas",
+		"spec.components[0].eppConfig.configMapRef.name",
+		"spec.components[0].frontendSidecar",
+	})
+}
+
+func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T) {
+	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
+	componentPath := field.NewPath("spec", "components").Index(0)
+
+	t.Run("requires pod template", func(t *testing.T) {
+		name := "frontend"
+		spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{FrontendSidecar: &name}
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true)
+		assertFieldPaths(t, errs, []string{
+			"spec.components[0].podTemplate.spec.containers",
+		})
+	})
+
+	t.Run("rejects empty name", func(t *testing.T) {
+		name := ""
+		spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			PodTemplate:     &corev1.PodTemplateSpec{},
+			FrontendSidecar: &name,
+		}
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true)
+		assertFieldPaths(t, errs, []string{
+			"spec.components[0].frontendSidecar",
+		})
+	})
+
+	t.Run("accepts matching container", func(t *testing.T) {
+		name := "frontend"
+		spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			PodTemplate: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: name, Image: "frontend:latest"}}},
+			},
+			FrontendSidecar: &name,
+		}
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true)
+		assertFieldPaths(t, errs, nil)
+	})
+}
+
+func TestValidateComponentCheckpointJobConfigFieldPaths(t *testing.T) {
+	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
+	fldPath := field.NewPath("spec", "components").Index(0).Child("experimental", "checkpoint", "job")
+	job := &nvidiacomv1beta1.ComponentCheckpointJobConfig{GMSClientContainers: []string{"saver"}}
+
+	errs := validation.validateComponentCheckpointJobConfig(job, fldPath, nil)
+	assertFieldPaths(t, errs, []string{
+		"spec.components[0].experimental.checkpoint.job.gmsClientContainers",
+	})
+	errs = validation.validateComponentCheckpointJobConfig(
+		job,
+		fldPath,
+		&nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeInterPod},
+	)
+	assertFieldPaths(t, errs, []string{"spec.components[0].experimental.checkpoint.job.gmsClientContainers"})
+	errs = validation.validateComponentCheckpointJobConfig(
+		job,
+		fldPath,
+		&nvidiacomv1beta1.GPUMemoryServiceSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+	)
+	assertFieldPaths(t, errs, nil)
+	errs = validation.validateComponentCheckpointJobConfig(
+		&nvidiacomv1beta1.ComponentCheckpointJobConfig{},
+		fldPath,
+		nil,
+	)
+	assertFieldPaths(t, errs, nil)
+}
+
+func TestValidateDynamoComponentDeploymentSharedSpecV1alpha1FrontendSidecarFieldPaths(t *testing.T) {
+	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
+	fldPath := field.NewPath("spec", "services").Key("frontend")
+	frontendSidecar := &nvidiacomv1alpha1.FrontendSidecarSpec{
+		Image: "frontend:latest",
+		Envs:  []corev1.EnvVar{{Name: "TOKEN", Value: "do-not-leak-this-value"}},
+	}
+	spec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{FrontendSidecar: frontendSidecar}
+	errs := validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo")
+	assertFieldPaths(t, errs, nil)
+	spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{}}
+	errs = validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo")
+	assertFieldPaths(t, errs, nil)
+	spec.ExtraPodSpec.PodSpec.Containers = []corev1.Container{{Name: consts.FrontendSidecarContainerName}}
+	errs = validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "dynamo")
+	assertFieldPaths(t, errs, []string{"spec.services[frontend].frontendSidecar"})
+	if errs[0].BadValue != "" {
+		t.Fatalf("error BadValue = %#v, want an empty non-sensitive scalar", errs[0].BadValue)
+	}
+	if strings.Contains(errs.ToAggregate().Error(), "do-not-leak-this-value") {
+		t.Fatalf("error = %q, must not expose frontend sidecar environment values", errs.ToAggregate())
+	}
+}
+
+func TestValidateExperimentalSpecDoesNotExposePodTemplate(t *testing.T) {
+	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
+	fldPath := field.NewPath("spec", "components").Index(0).Child("experimental")
+	gms := &nvidiacomv1beta1.GPUMemoryServiceSpec{
+		ExtraClientPods: []nvidiacomv1beta1.GMSClientPodSpec{{
+			Name: "client",
+			PodTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: consts.MainContainerName,
+				Env:  []corev1.EnvVar{{Name: "TOKEN", Value: "do-not-leak-this-value"}},
+			}}}},
+		}},
+	}
+
+	errs := validation.validateExperimentalSpec(
+		&nvidiacomv1beta1.ExperimentalSpec{GPUMemoryService: gms},
+		fldPath,
+		nvidiacomv1beta1.ComponentTypeWorker,
+		corev1.ResourceRequirements{},
+	)
+	assertFieldPaths(t, errs, []string{"spec.components[0].experimental.gpuMemoryService"})
+	if errs[0].BadValue != "" {
+		t.Fatalf("error BadValue = %#v, want an empty non-sensitive scalar", errs[0].BadValue)
+	}
+	if strings.Contains(errs.ToAggregate().Error(), "do-not-leak-this-value") {
+		t.Fatalf("error = %q, must not expose GPU memory service pod template values", errs.ToAggregate())
+	}
+}
+
+func TestValidateDynamoComponentDeploymentSharedSpecV1alpha1WarningsAndErrors(t *testing.T) {
+	legacyNamespace := "legacy"
+	spec := &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		DynamoNamespace: &legacyNamespace,
+		Annotations: map[string]string{
+			consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
+		},
+	}
+
+	//nolint:staticcheck // SA1019: Intentionally testing the deprecated compatibility warning.
+	spec.Autoscaling = &nvidiacomv1alpha1.Autoscaling{Enabled: true}
+	fldPath := field.NewPath("spec", "services").Key("worker")
+	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
+
+	errs := validation.validateDynamoComponentDeploymentSharedSpecV1alpha1(spec, fldPath, "replacement")
+	if len(validation.warnings) != 2 {
+		t.Fatalf("warnings = %v, want 2 compatibility warnings", validation.warnings)
+	}
+	if !strings.Contains(validation.warnings[0], "spec.services[worker].dynamoNamespace") ||
+		!strings.Contains(validation.warnings[1], "spec.services[worker].autoscaling") {
+		t.Fatalf("warnings = %v, want structural field paths", validation.warnings)
+	}
+	assertFieldPaths(t, errs, []string{
+		"spec.services[worker].annotations[nvidia.com/vllm-distributed-executor-backend]",
+	})
 }
 
 // contains checks if s contains substr

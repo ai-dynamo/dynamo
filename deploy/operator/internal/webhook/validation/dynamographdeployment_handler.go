@@ -58,6 +58,7 @@ type dynamoGraphDeploymentV1Alpha1Handler struct {
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
+// mgr must not be nil.
 // operatorPrincipal is the full Kubernetes SA username of the operator, used to authorize
 // replica changes on scaling-adapter-enabled components (#7656).
 // groveEnabled reflects the operator's runtime Grove configuration.
@@ -143,13 +144,13 @@ func (h *DynamoGraphDeploymentHandler) validateUpdate(
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
 		logger.Error(err, "failed to get admission request from context, replica changes for DGDSA-enabled services will be rejected")
-		// userInfo remains nil - validateReplicasChanges will fail closed
+		// userInfo remains nil, so scaling-adapter replica validation fails closed.
 	} else {
 		userInfo = &req.UserInfo
 	}
 
 	// Validate stateful rules (immutability + replicas protection)
-	updateWarnings, err := validator.ValidateUpdate(oldDeployment, newDeployment, userInfo, h.operatorPrincipal)
+	updateWarnings, err := validator.ValidateUpdate(ctx, oldDeployment, newDeployment, userInfo, h.operatorPrincipal)
 	if err != nil {
 		username := "<unknown>"
 		if userInfo != nil {

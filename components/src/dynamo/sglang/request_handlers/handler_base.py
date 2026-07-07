@@ -43,6 +43,7 @@ from dynamo.llm import (
 )
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import start_profile_compat
 from dynamo.sglang.args import Config
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -669,9 +670,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         self.serving_mode = config.serving_mode
         self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
         self.enable_trace = getattr(config.server_args, "enable_trace", False)
-        self.enable_session_radix_cache = getattr(
-            config.server_args, "enable_session_radix_cache", False
-        )
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
@@ -878,7 +876,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         Args:
             body: Dict with profiling parameters passed to start_profile.
         """
-        await self.engine.tokenizer_manager.start_profile(**body)
+        await start_profile_compat(self.engine.tokenizer_manager, body)
         return {"status": "ok", "message": "Profiling started"}
 
     async def stop_profile(self, body: dict) -> dict:
@@ -1018,16 +1016,6 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
-
-    def _session_id(self, request: Dict[str, Any]) -> Optional[str]:
-        if not self.enable_session_radix_cache:
-            return None
-        session_id = (request.get("agent_context") or {}).get("session_id")
-        return session_id if isinstance(session_id, str) and session_id else None
-
-    def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        session_id = self._session_id(request)
-        return {"session_params": {"id": session_id}} if session_id else {}
 
     @staticmethod
     def _get_guided_decoding_params(
