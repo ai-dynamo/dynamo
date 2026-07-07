@@ -453,11 +453,15 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [config, vllm-build]
     if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        test_type: ['KVBM Test A', 'KVBM Test B']
     uses: ./.github/workflows/shared-test.yml
     with:
       dd_env: post-merge
       test_suite_name: kvbm
-      test_type: KVBM Test
+      test_type: ${{ matrix.test_type }}
       # KVBM post-merge coverage currently targets the aws-dev-02 H100 cluster.
       amd_runner: aws-dev-02-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
