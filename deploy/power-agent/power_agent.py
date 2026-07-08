@@ -77,6 +77,36 @@ logger = logging.getLogger("power_agent")
 
 POWER_ANNOTATION_KEY = "dynamo.nvidia.com/gpu-power-limit"
 RECONCILE_INTERVAL_S = 15
+
+# Pod-LIST timeouts. These exist so a SIGTERM that lands while the reconcile
+# loop is blocked in the apiserver LIST cannot eat the whole pod termination
+# grace period: without a bound, `run()`'s `finally` (which restores caps)
+# cannot execute until the LIST returns, so a throttled/stuck apiserver would
+# let kubelet SIGKILL the agent with managed caps still live.
+#
+# Two bounds, defense in depth:
+#   * K8S_LIST_SERVER_TIMEOUT_S — the apiserver-side `timeout_seconds` LIST
+#     parameter, so the server itself abandons the watch-cache read.
+#   * K8S_LIST_CLIENT_TIMEOUT_S — the client-side `_request_timeout`, covering
+#     connection/read stalls the server timeout cannot (for example, a dead
+#     connection or a server that never answers). It is best-effort rather than
+#     a strict wall-clock deadline; kept slightly above the server bound so the
+#     server's own timeout is what normally fires.
+#
+# NOTE: `_request_timeout` is NOT a hard wall-clock deadline: it does not bound
+# every source of elapsed time, including DNS and incrementally arriving response
+# data. That is exactly why transport retries are disabled on this agent's API
+# client (see `_build_k8s_core_v1`) — the 15s reconcile loop is the only retry
+# policy, so the LIST delay is substantially limited even though it is not an
+# exact wall-clock bound. This is an always-on steady-state timeout, not a
+# shutdown-only one; we accept that (superseding the earlier "no client timeout"
+# stance) because shutdown-time cap restoration outweighs the steady-state
+# retry-amplification risk, and disabling transport retries removes the
+# amplification sttts originally warned about. A 20s/25s budget is loose enough
+# for normal API Priority and Fairness backpressure while still leaving
+# meaningful cleanup headroom inside the default 60s pod grace period.
+K8S_LIST_SERVER_TIMEOUT_S = 20
+K8S_LIST_CLIENT_TIMEOUT_S = 25
 # Sourced from `managed_state` so every launch path (and the actuator's
 # separate `import power_agent` module copy) agrees on one location.
 _MANAGED_STATE_PATH = managed_state.MANAGED_STATE_PATH
@@ -790,6 +820,34 @@ def _release_managed_gpu(
 
 
 # ---------------------------------------------------------------------------
+# Kubernetes client
+# ---------------------------------------------------------------------------
+
+
+def _build_k8s_core_v1() -> "k8s_client.CoreV1Api":
+    """Build a CoreV1Api whose transport does NOT retry.
+
+    The default ``kubernetes`` client retries requests at the urllib3 layer.
+    For the pod LIST that is the wrong policy on two counts: (1) a retried LIST
+    multiplies apiserver load exactly when it is already throttling under
+    Priority & Fairness (the amplification sttts flagged), and (2) transport
+    retries stretch the effective wall-clock time of a single
+    ``list_pods_on_node`` call, undermining the SIGTERM grace-period budget the
+    LIST timeouts are meant to protect.
+
+    The reconcile loop already retries at the application level every
+    ``RECONCILE_INTERVAL_S`` and treats a failed LIST as a fail-safe skip, so
+    transport-level retries add nothing but risk here. Disable them (retries=0)
+    on a dedicated client so this choice is local to the Power Agent and does
+    not mutate global client state.
+    """
+    configuration = k8s_client.Configuration.get_default_copy()
+    # urllib3 Retry(0) → no retries; the reconcile loop is the retry policy.
+    configuration.retries = 0
+    return k8s_client.CoreV1Api(k8s_client.ApiClient(configuration))
+
+
+# ---------------------------------------------------------------------------
 # SIGTERM handler
 # ---------------------------------------------------------------------------
 
@@ -1257,7 +1315,7 @@ class PowerAgent:
             k8s_config.load_incluster_config()
         except ConfigException:
             k8s_config.load_kube_config()
-        self._core_v1 = k8s_client.CoreV1Api()
+        self._core_v1 = _build_k8s_core_v1()
 
     def _list_pods_on_node(self) -> Optional[list]:
         """List all pods scheduled on this node.
@@ -1299,16 +1357,29 @@ class PowerAgent:
             # GPU ownership is still checked from host PIDs each cycle, and a
             # stale pod view delays convergence rather than changing the
             # failure-path contract.
+            # Bound the LIST on BOTH sides so a stuck/throttled apiserver
+            # substantially limits the delay before graceful shutdown cleanup:
+            #   * timeout_seconds — apiserver-side LIST deadline;
+            #   * _request_timeout — client-side (connect, read) deadline for
+            #     stalls the server timeout can't cover.
+            # A timeout raises, which the `except` below maps to the `None`
+            # fail-safe (skip the cycle, freeze last-known-good caps). Transport
+            # retries are disabled on this client (see `_build_k8s_core_v1`), so
+            # a timeout is not silently multiplied into extra apiserver load.
             if self.k8s_namespace:
                 result = self._core_v1.list_namespaced_pod(
                     namespace=self.k8s_namespace,
                     field_selector=field_selector,
                     resource_version="0",
+                    timeout_seconds=K8S_LIST_SERVER_TIMEOUT_S,
+                    _request_timeout=K8S_LIST_CLIENT_TIMEOUT_S,
                 )
             else:
                 result = self._core_v1.list_pod_for_all_namespaces(
                     field_selector=field_selector,
                     resource_version="0",
+                    timeout_seconds=K8S_LIST_SERVER_TIMEOUT_S,
+                    _request_timeout=K8S_LIST_CLIENT_TIMEOUT_S,
                 )
             return result.items
         except Exception as e:
@@ -1359,6 +1430,16 @@ class PowerAgent:
         its GPU. Operators should alert on
         `k8s_list_failures_total > 0 over 5m`.
         """
+        # Shutdown fast-path: if SIGTERM already landed, do NOT start a new
+        # cycle. A cycle issues a pod LIST (network I/O that can block under
+        # apiserver throttling) and GPU writes; starting one here would delay
+        # `run()`'s `finally` cleanup and risk kubelet SIGKILL before caps are
+        # restored. `run()` still executes `_shutdown_cleanup` from its
+        # `finally`, so returning early loses no restoration work.
+        if _shutdown.is_set():
+            logger.info("Shutdown requested — skipping reconcile cycle.")
+            return
+
         # Flush any release OR acquisition whose durable write failed on a
         # previous cycle BEFORE listing pods, so it retries even during a
         # Kubernetes API outage (the retry touches only the state volume, not

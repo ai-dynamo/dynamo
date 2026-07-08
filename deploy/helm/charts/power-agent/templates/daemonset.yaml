@@ -5,6 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 {{- if .Values.daemonset.enabled }}
+{{- include "power-agent.validateTerminationGracePeriod" . -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -38,8 +39,11 @@ spec:
       hostPID: true
       # Graceful shutdown restores default TGP on managed GPUs before exit
       # (the reconcile loop runs the restore after SIGTERM, not the signal
-      # handler itself). Give it headroom to finish within the grace period.
-      terminationGracePeriodSeconds: 30
+      # handler itself). Give it headroom to finish within the grace period;
+      # the pod LIST best-effort bounds (see power_agent.py
+      # K8S_LIST_*_TIMEOUT_S) substantially limit cleanup delay if SIGTERM lands
+      # mid-LIST. Configurable so operators on high-density nodes can extend it.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       # NVIDIA Container Toolkit injects libnvidia-ml.so via the `nvidia`
       # runtime class. Pairing with NVIDIA_VISIBLE_DEVICES=all in the
       # container env exposes every GPU on the node WITHOUT consuming a

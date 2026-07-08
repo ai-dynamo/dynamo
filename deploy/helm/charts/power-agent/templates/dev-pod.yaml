@@ -31,6 +31,7 @@
 # 'managed_state'`.
 
 {{- if .Values.dev.enabled }}
+{{- include "power-agent.validateTerminationGracePeriod" . -}}
 apiVersion: v1
 kind: Pod
 metadata:
@@ -43,7 +44,7 @@ spec:
   serviceAccountName: {{ include "power-agent.serviceAccountName" . }}
   hostPID: true                          # /proc/{pid}/cgroup readback
   restartPolicy: Never                   # let it stay Failed if it crashes so we can read logs
-  terminationGracePeriodSeconds: 30      # graceful shutdown restores TGP
+  terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}  # graceful shutdown restores TGP
   runtimeClassName: {{ .Values.runtimeClassName | quote }}
   nodeName: {{ .Values.dev.nodeName | quote }}
   {{- with .Values.tolerations }}

@@ -220,6 +220,18 @@ not both enabled, and that dev mode has a pinned nodeName. Surfaces at
 {{- end -}}
 
 {{/*
+Validate the pod termination grace period. SIGTERM cleanup restores managed GPU
+caps from run()'s finally after any in-flight pod LIST returns, so very small
+values defeat the safety invariant this knob exists to protect.
+*/}}
+{{- define "power-agent.validateTerminationGracePeriod" -}}
+{{- $grace := int .Values.terminationGracePeriodSeconds -}}
+{{- if lt $grace 60 -}}
+{{- fail (printf "terminationGracePeriodSeconds=%d is too low for safe Power Agent shutdown; must be >= 60 seconds so SIGTERM cleanup has time to restore managed GPU caps after an in-flight pod LIST returns. Default is 60." $grace) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Validate the actuator selection. Catches typos at `helm install` /
 `helm template` time so the operator doesn't discover their mistake
 when the pod CrashLoopBackOffs with argparse's terse "invalid choice"

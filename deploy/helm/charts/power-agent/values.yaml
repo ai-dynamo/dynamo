@@ -121,6 +121,18 @@ agent:
     #     Agent's next 15-s reconcile (which re-issues dcgmConfigSet),
     #     same as NVML.
 
+# Pod termination grace period (seconds). On SIGTERM the agent restores each
+# managed GPU's default power cap before exit; that cleanup runs from the
+# reconcile loop's `finally`, AFTER any in-flight pod LIST returns. The LIST is
+# best-effort bounded client- and server-side (K8S_LIST_*_TIMEOUT_S in
+# power_agent.py) to substantially limit cleanup delay, but the default is set
+# to 60s (2× the previous 30s) to leave headroom for the LIST to return and for
+# per-GPU restore on high-density nodes. Kubelet SIGKILLs the pod when this
+# elapses, so values below 60s are rejected by the chart; too-small values risk
+# killing the agent mid-cleanup and leaving managed caps live. Applies to both
+# DaemonSet and dev-pod modes.
+terminationGracePeriodSeconds: 60
+
 # NVIDIA container toolkit needs both runtimeClassName: nvidia AND
 # NVIDIA_VISIBLE_DEVICES=all to inject libnvidia-ml.so AND expose every GPU
 # WITHOUT consuming a nvidia.com/gpu resource claim. Same pattern DCGM

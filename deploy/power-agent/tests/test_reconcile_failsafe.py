@@ -17,7 +17,7 @@ still drive a normal reconcile pass.
 """
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import power_agent
 from power_agent import PowerAgent
@@ -70,12 +70,29 @@ class TestListPodsExplicitResult(unittest.TestCase):
 
         _, kwargs = core_v1.list_pod_for_all_namespaces.call_args
         self.assertEqual(kwargs.get("resource_version"), "0")
-        # Do not add a client-side read timeout here. A timed-out LIST can still
-        # be expensive server-side, and retrying every reconcile cycle can make
-        # apiserver load worse under priority-and-fairness throttling. Rely on
-        # apiserver-side throttling/backpressure instead.
-        self.assertNotIn("_request_timeout", kwargs)
         core_v1.list_namespaced_pod.assert_not_called()
+
+    def test_cluster_scoped_list_is_bounded_both_sides(self):
+        """The cluster-scoped LIST must carry BOTH an apiserver-side
+        ``timeout_seconds`` and a client-side ``_request_timeout`` so a
+        throttled/stuck apiserver substantially limits how long it can delay
+        SIGTERM cleanup (sttts P1). This intentionally supersedes the earlier
+        "no client timeout" stance: transport retries are disabled on this
+        client, so the amplification risk that motivated the old stance is
+        controlled (see test_k8s_client_disables_transport_retries)."""
+        core_v1 = MagicMock()
+        core_v1.list_pod_for_all_namespaces.return_value = MagicMock(items=[])
+        agent = _make_agent(core_v1)
+
+        agent._list_pods_on_node()
+
+        _, kwargs = core_v1.list_pod_for_all_namespaces.call_args
+        self.assertEqual(
+            kwargs.get("timeout_seconds"), power_agent.K8S_LIST_SERVER_TIMEOUT_S
+        )
+        self.assertEqual(
+            kwargs.get("_request_timeout"), power_agent.K8S_LIST_CLIENT_TIMEOUT_S
+        )
 
     def test_namespaced_list_served_from_watch_cache(self):
         """The namespace-scoped LIST also passes resource_version="0"."""
@@ -89,8 +106,34 @@ class TestListPodsExplicitResult(unittest.TestCase):
         _, kwargs = core_v1.list_namespaced_pod.call_args
         self.assertEqual(kwargs.get("resource_version"), "0")
         self.assertEqual(kwargs.get("namespace"), "dynamo")
-        self.assertNotIn("_request_timeout", kwargs)
         core_v1.list_pod_for_all_namespaces.assert_not_called()
+
+    def test_namespaced_list_is_bounded_both_sides(self):
+        """The namespace-scoped LIST carries the same dual timeout bounds."""
+        core_v1 = MagicMock()
+        core_v1.list_namespaced_pod.return_value = MagicMock(items=[])
+        agent = _make_agent(core_v1)
+        agent.k8s_namespace = "dynamo"
+
+        agent._list_pods_on_node()
+
+        _, kwargs = core_v1.list_namespaced_pod.call_args
+        self.assertEqual(
+            kwargs.get("timeout_seconds"), power_agent.K8S_LIST_SERVER_TIMEOUT_S
+        )
+        self.assertEqual(
+            kwargs.get("_request_timeout"), power_agent.K8S_LIST_CLIENT_TIMEOUT_S
+        )
+
+    def test_client_timeout_at_least_server_timeout(self):
+        """The client-side bound must be >= the server-side bound so the
+        apiserver's own timeout is what normally fires; a client timeout below
+        the server timeout would pre-empt graceful server-side abort on every
+        slow-but-progressing LIST."""
+        self.assertGreaterEqual(
+            power_agent.K8S_LIST_CLIENT_TIMEOUT_S,
+            power_agent.K8S_LIST_SERVER_TIMEOUT_S,
+        )
 
 
 class TestReconcileFailSafe(unittest.TestCase):
@@ -161,6 +204,57 @@ class TestReconcileStopsOnShutdown(unittest.TestCase):
         agent.reconcile_once()
 
         agent._reconcile_gpu.assert_not_called()
+
+    def test_early_guard_skips_pod_list_when_shutdown_already_set(self):
+        """The top-of-cycle guard must return BEFORE issuing the pod LIST when
+        SIGTERM has already landed. This is the crux of the P1 fix: starting a
+        new LIST here (network I/O that can block under apiserver throttling)
+        would delay run()'s finally cleanup and risk kubelet SIGKILL before caps
+        are restored. Assert the guard short-circuits ahead of persistence
+        flushes and the LIST."""
+        core_v1 = MagicMock()
+        core_v1.list_pod_for_all_namespaces.return_value = MagicMock(items=[])
+        agent = _make_agent(core_v1, device_count=2)
+        agent._reconcile_gpu = MagicMock()
+        power_agent._shutdown.set()
+
+        with patch.object(power_agent, "_flush_pending_retirements") as retirements:
+            with patch.object(
+                power_agent, "_flush_pending_acquisitions"
+            ) as acquisitions:
+                agent.reconcile_once()
+
+        retirements.assert_not_called()
+        acquisitions.assert_not_called()
+        core_v1.list_pod_for_all_namespaces.assert_not_called()
+        core_v1.list_namespaced_pod.assert_not_called()
+        agent.metrics.k8s_list_failures_total.inc.assert_not_called()
+
+
+class TestK8sClientTransport(unittest.TestCase):
+    """The agent's CoreV1Api must be built on a client whose transport does NOT
+    retry: a retried pod LIST amplifies apiserver load under P&F throttling
+    (sttts's original concern) AND stretches a single LIST's wall-clock time,
+    both of which the reconcile loop's own 15s application-level retry already
+    covers. Disabling transport retries is what keeps the best-effort
+    client-side LIST timeout from being silently multiplied."""
+
+    def test_k8s_client_disables_transport_retries(self):
+        fake_config = MagicMock()
+        fake_client_mod = MagicMock()
+        fake_client_mod.Configuration.get_default_copy.return_value = fake_config
+
+        with patch.object(power_agent, "k8s_client", fake_client_mod):
+            power_agent._build_k8s_core_v1()
+
+        # retries set to 0 on the per-agent configuration copy...
+        self.assertEqual(fake_config.retries, 0)
+        # ...and CoreV1Api built on an ApiClient using THAT configuration, so
+        # the choice is local to the agent and does not mutate global state.
+        fake_client_mod.ApiClient.assert_called_once_with(fake_config)
+        fake_client_mod.CoreV1Api.assert_called_once_with(
+            fake_client_mod.ApiClient.return_value
+        )
 
 
 class TestReconcileDeviceCountRefresh(unittest.TestCase):
