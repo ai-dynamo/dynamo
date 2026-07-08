@@ -15,7 +15,6 @@ caller, and the shutdown lifecycle behaves.
 
 import asyncio
 import threading
-import time
 
 import pytest
 
@@ -27,6 +26,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_0,
     pytest.mark.multimodal,
+    pytest.mark.timeout(30),
 ]
 
 
@@ -428,6 +428,7 @@ def test_concurrent_start_starts_one_worker():
     b = ThreadedMicroBatcher(_echo, on_start=on_start)
     outcomes: list[str] = []
     out_lock = threading.Lock()
+    outcome_recorded = threading.Event()
     gate = threading.Barrier(2)
 
     def do_start():
@@ -439,6 +440,7 @@ def test_concurrent_start_starts_one_worker():
             tag = "rejected"
         with out_lock:
             outcomes.append(tag)
+            outcome_recorded.set()
 
     t1 = threading.Thread(target=do_start)
     t2 = threading.Thread(target=do_start)
@@ -448,9 +450,7 @@ def test_concurrent_start_starts_one_worker():
         assert entered.wait(timeout=5.0), "winner never reached on_start"
         # Winner is parked in on_start (state still NEW, _thread published). The
         # loser must already be rejected — the window a state-only guard misses.
-        deadline = time.monotonic() + 5.0
-        while not outcomes and time.monotonic() < deadline:
-            time.sleep(0.005)
+        assert outcome_recorded.wait(timeout=5.0), "loser did not finish start()"
         assert outcomes == [
             "rejected"
         ], f"loser not rejected while winner parked: {outcomes}"
