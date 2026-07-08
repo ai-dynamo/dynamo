@@ -286,6 +286,10 @@ impl<T> PolicyQueue<T> {
         !self.classes[class_index].is_empty()
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
+        self.classes.iter().flat_map(PolicyClassQueue::entries)
+    }
+
     /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
     /// accounting while preserving each retained entry's scheduling key.
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
