@@ -24,6 +24,7 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+bytemuck = "1.22"
 
 [features]
 testing = []

@@ -23,6 +23,8 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use dynamo_kv_hashing::compute_salt_hash;
+
 use crate::source::EventSource;
 use crate::tracker::{StoreInput, Tracker};
 use crate::wire::vllm_in::{KvEventBatch, RawKvEvent};
@@ -137,13 +139,11 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
                 return;
             }
 
-            let token_chunks: Vec<Vec<u32>> =
-                token_ids.chunks(block_size).map(|c| c.to_vec()).collect();
-
-            if token_chunks.len() != block_hashes.len() {
+            let token_chunk_count = token_ids.chunks(block_size).len();
+            if token_chunk_count != block_hashes.len() {
                 tracing::warn!(
                     "Token chunks ({}) don't match block hashes ({}), skipping event",
-                    token_chunks.len(),
+                    token_chunk_count,
                     block_hashes.len()
                 );
                 return;
@@ -153,18 +153,26 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             let cache_namespace = cache_namespace
                 .filter(|namespace| !namespace.is_empty())
                 .map(Arc::<str>::from);
+            let salt_hash = cache_namespace.as_deref().and_then(|cache_namespace| {
+                compute_salt_hash(Some(cache_namespace), lora_name.as_deref()).ok()
+            });
 
-            for (i, block_hash) in block_hashes.into_iter().enumerate() {
+            for (block_hash, token_chunk) in
+                block_hashes.into_iter().zip(token_ids.chunks(block_size))
+            {
                 let hash_str = block_hash.into_u64().to_string();
-                tracker.handle_store_input(StoreInput::new(
-                    engine_source,
-                    hash_str.clone(),
-                    current_parent.clone(),
-                    token_chunks[i].clone(),
-                    block_size,
-                    lora_name.clone(),
-                    cache_namespace.clone(),
-                ));
+                tracker.handle_store_input(
+                    StoreInput::new(
+                        engine_source,
+                        hash_str.clone(),
+                        current_parent.clone(),
+                        token_chunk.to_vec(),
+                        block_size,
+                        lora_name.clone(),
+                        cache_namespace.clone(),
+                    )
+                    .with_precomputed_salt_hash(salt_hash),
+                );
                 current_parent = Some(hash_str);
             }
         }

@@ -15,17 +15,16 @@
 //! - Publish REMOVE only when the last source drops the block.
 //! - Repeated stores from the same source with the same external hash are idempotent.
 //!
-//! Hash synthesis for external (vLLM / TRT-LLM) sources delegates entirely to
-//! [`dynamo_kv_hashing`]: the consolidator builds a single-block [`Request`] for each
-//! event, gets the [`BlockHash`] via [`Request::block_hashes`], and chains via
+//! Hash synthesis for external (vLLM / TRT-LLM) sources uses the canonical
+//! [`dynamo_kv_hashing`] salt and block hash functions, then chains via
 //! [`PositionalLineageHash::extend`] from the parent's PLH. KVBM events arrive with a
 //! PLH already computed by the upstream registry.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use dynamo_kv_hashing::Request;
-use dynamo_tokens::PositionalLineageHash;
+use dynamo_kv_hashing::{compute_block_hash, compute_salt_hash};
+use dynamo_tokens::{PositionalLineageHash, SaltHash};
 use kvbm_logical::{BlockRegistry, SequenceHash, registry::BlockRegistrationHandle};
 
 use crate::source::EventSource;
@@ -58,6 +57,7 @@ pub(crate) struct StoreInput {
     block_size: usize,
     lora_name: Option<String>,
     cache_namespace: Option<Arc<str>>,
+    precomputed_salt_hash: Option<SaltHash>,
 }
 
 impl StoreInput {
@@ -78,7 +78,13 @@ impl StoreInput {
             block_size,
             lora_name,
             cache_namespace,
+            precomputed_salt_hash: None,
         }
+    }
+
+    pub(crate) fn with_precomputed_salt_hash(mut self, salt_hash: Option<SaltHash>) -> Self {
+        self.precomputed_salt_hash = salt_hash;
+        self
     }
 }
 
@@ -130,27 +136,28 @@ impl Tracker {
     }
 
     /// Compute the PLH for a single block given its parent PLH (or none for root).
-    /// Hashing goes through [`dynamo_kv_hashing::Request`] so vLLM / TRT-LLM ingress
-    /// matches what kvbm-logical's `BlockRegistry::register_block` produces for the
-    /// same `(tokens, lora_name)` input.
+    /// Hashing uses the canonical `dynamo-kv-hashing` primitives so vLLM / TRT-LLM
+    /// ingress matches what kvbm-logical's `BlockRegistry::register_block` produces.
     fn compute_plh(
         parent_plh: Option<PositionalLineageHash>,
         token_ids: &[u32],
         block_size: usize,
         lora_name: Option<&str>,
         cache_namespace: Option<&str>,
+        salt_hash: Option<SaltHash>,
     ) -> Option<PositionalLineageHash> {
-        let request = Request::builder()
-            .tokens(token_ids.to_vec())
-            .lora_name(lora_name.map(str::to_string))
-            .salt(cache_namespace.map(str::to_string))
-            .build()
-            .ok()?;
-        let blocks = request.into_blocks(block_size as u32).ok()?;
-        let first = blocks.first()?;
+        if block_size == 0 || token_ids.len() < block_size {
+            return None;
+        }
+        let salt_hash = match salt_hash {
+            Some(hash) => hash,
+            None => compute_salt_hash(cache_namespace, lora_name).ok()?,
+        };
+        let block_hash =
+            compute_block_hash(bytemuck::cast_slice(&token_ids[..block_size]), salt_hash);
         Some(match parent_plh {
-            None => first.plh,
-            Some(parent) => parent.extend(first.block_hash),
+            None => PositionalLineageHash::root(block_hash),
+            Some(parent) => parent.extend(block_hash),
         })
     }
 
@@ -188,6 +195,7 @@ impl Tracker {
             block_size,
             lora_name,
             cache_namespace,
+            precomputed_salt_hash,
         } = input;
         let parent_key = parent_external_hash
             .as_ref()
@@ -222,6 +230,7 @@ impl Tracker {
             block_size,
             lora_name.as_deref(),
             cache_namespace.as_deref(),
+            precomputed_salt_hash,
         ) {
             Some(h) => h,
             None => {
@@ -455,6 +464,7 @@ impl Tracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_hashing::Request;
     use pretty_assertions::assert_eq;
 
     fn tracker() -> Tracker {
@@ -978,6 +988,7 @@ mod tests {
 #[cfg(test)]
 mod proptest_tracker {
     use super::*;
+    use dynamo_kv_hashing::Request;
     use proptest::prelude::*;
 
     /// Catalogue of canonical PLHs for a deterministic chain of 12 blocks, used by

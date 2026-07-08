@@ -4805,6 +4805,7 @@ name = "kvbm-consolidator"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "dynamo-kv-hashing",
  "dynamo-kv-router",
  "dynamo-tokens",
