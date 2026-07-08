@@ -281,17 +281,18 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	reconcileResult, err := r.reconcileResources(ctx, dynamoDeployment)
-	if err != nil {
-		logger.Error(err, "failed to reconcile the resources")
-		reason = "failed_to_reconcile_the_resources"
-		return ctrl.Result{}, err
-	}
 
 	state = reconcileResult.State
 	reason = reconcileResult.Reason
 	message = reconcileResult.Message
 	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
 	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
+
+	if err != nil {
+		logger.Error(err, "failed to reconcile the resources")
+		reason = "failed_to_reconcile_the_resources"
+		return ctrl.Result{}, err
+	}
 
 	// Override state based on rolling update status if a rolling update is in progress
 	if dynamoDeployment.Status.RollingUpdate != nil {
@@ -506,16 +507,10 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 		// single-node GMS components stall in the in-progress list because the
 		// corresponding PodClique never exists.
 		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
-		var readinessErr error
 		if usesPCSG {
-			isReady, reason, _, readinessErr = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		} else {
-			isReady, reason, _, readinessErr = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
-		}
-		if readinessErr != nil {
-			logger.Error(readinessErr, "failed to check component readiness", "componentName", componentName, "resourceName", resourceName)
-			updatedInProgress = append(updatedInProgress, componentName)
-			continue
+			isReady, reason, _, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		}
 		if !isReady {
 			logger.V(1).Info("component not ready", "componentName", componentName, "resourceName", resourceName, "reason", reason)
@@ -667,14 +662,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 		logger.Error(err, "failed to sync the Grove GangSet")
 		return nil, fmt.Errorf("failed to sync the Grove GangSet: %w", err)
 	}
-	allComponentsReady, reason, componentStatuses, err := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get Grove component readiness: %w", err)
-	}
 	syncedGrovePodCliqueSetAsResource, err := commoncontroller.NewResourceWithComponentStatuses(
 		syncedGrovePodCliqueSet,
 		func() (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
+			allComponentsReady, reason, componentStatuses := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
 			if !allComponentsReady {
 				return false, reason, componentStatuses
 			}

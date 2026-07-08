@@ -195,9 +195,13 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		"scheduleGatedReplicas", scheduleGatedReplicas,
 	)
 
-	serviceStatus.Replicas = podClique.Status.Replicas
-	serviceStatus.UpdatedReplicas = podClique.Status.UpdatedReplicas
-	serviceStatus.ReadyReplicas = &readyReplicas
+	serviceStatus := v1beta1.ComponentReplicaStatus{
+		ComponentKind:   v1beta1.ComponentKindPodClique,
+		ComponentNames:  []string{resourceName},
+		Replicas:        podClique.Status.Replicas,
+		UpdatedReplicas: podClique.Status.UpdatedReplicas,
+		ReadyReplicas:   &readyReplicas,
+	}
 
 	if observedGeneration == nil {
 		logger.V(1).Info("PodClique observedGeneration is nil", "resourceName", resourceName)
@@ -301,9 +305,13 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 		"scheduledReplicas", scheduledReplicas,
 	)
 
-	serviceStatus.Replicas = pcsg.Status.Replicas
-	serviceStatus.UpdatedReplicas = pcsg.Status.UpdatedReplicas
-	serviceStatus.AvailableReplicas = &availableReplicas
+	serviceStatus := v1beta1.ComponentReplicaStatus{
+		ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
+		ComponentNames:    []string{resourceName},
+		Replicas:          pcsg.Status.Replicas,
+		UpdatedReplicas:   pcsg.Status.UpdatedReplicas,
+		AvailableReplicas: &availableReplicas,
+	}
 
 	if observedGeneration == nil {
 		logger.V(1).Info("PodCliqueScalingGroup observedGeneration is nil", "resourceName", resourceName)

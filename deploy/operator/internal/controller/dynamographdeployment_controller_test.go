@@ -44,7 +44,6 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,7 +53,6 @@ import (
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -592,92 +590,6 @@ func TestDynamoGraphDeploymentReconciler_reconcileResources_ValidatesGMSResource
 	g.Expect(err).To(gomega.HaveOccurred())
 	g.Expect(err.Error()).To(gomega.ContainSubstring("requires DRA"))
 	g.Expect(err.Error()).To(gomega.ContainSubstring("explicitly disabled"))
-}
-
-func TestDynamoGraphDeploymentReconciler_ReconcilePreservesStatusOnGroveReadinessError(t *testing.T) {
-	ctx := context.Background()
-	s := newDynamoGraphDeploymentControllerTestScheme(t)
-	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-			UID:       types.UID("dgd-uid"),
-		},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-				{
-					ComponentName: "frontend",
-					ComponentType: v1beta1.ComponentTypeFrontend,
-					Replicas:      ptr.To(int32(1)),
-				},
-			},
-		},
-		Status: v1beta1.DynamoGraphDeploymentStatus{
-			Components: map[string]v1beta1.ComponentReplicaStatus{
-				"frontend": {
-					ComponentKind:     v1beta1.ComponentKindPodClique,
-					ComponentNames:    []string{"test-dgd-0-frontend"},
-					Replicas:          3,
-					UpdatedReplicas:   2,
-					ReadyReplicas:     ptr.To(int32(1)),
-					AvailableReplicas: ptr.To(int32(1)),
-				},
-			},
-			Restart: &v1beta1.RestartStatus{
-				ObservedID: "known-restart",
-				Phase:      v1beta1.RestartPhaseRestarting,
-				InProgress: []string{"frontend"},
-			},
-		},
-	}
-	controller_common.AddFinalizer(dgd)
-	wantComponents := dgd.Status.Components
-	wantRestart := dgd.Status.Restart
-
-	podCliqueGetCalled := false
-	fakeKubeClient := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(dgd).
-		WithStatusSubresource(dgd).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*grovev1alpha1.PodClique); ok {
-					podCliqueGetCalled = true
-					return fmt.Errorf("transient PodClique API error")
-				}
-				return c.Get(ctx, key, obj, opts...)
-			},
-		}).
-		Build()
-	reconciler := &DynamoGraphDeploymentReconciler{
-		Client:   fakeKubeClient,
-		Recorder: record.NewFakeRecorder(100),
-		Config: &configv1alpha1.OperatorConfiguration{
-			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"},
-		},
-		RuntimeConfig: &controller_common.RuntimeConfig{GroveEnabled: true},
-		ScaleClient:   &mockScaleClient{},
-		DockerSecretRetriever: &mockDockerSecretRetriever{
-			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
-				return nil, nil
-			},
-		},
-	}
-
-	_, err := reconciler.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace},
-	})
-	require.ErrorContains(t, err, "transient PodClique API error")
-	require.True(t, podCliqueGetCalled, "expected reconciliation to reach Grove PodClique readiness")
-
-	stored := &v1beta1.DynamoGraphDeployment{}
-	require.NoError(t, fakeKubeClient.Get(ctx, client.ObjectKeyFromObject(dgd), stored))
-	assert.Equal(t, wantComponents, stored.Status.Components)
-	assert.Equal(t, wantRestart, stored.Status.Restart)
-	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
-	require.NotNil(t, ready)
-	assert.Equal(t, "failed_to_reconcile_the_resources", ready.Reason)
 }
 
 func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_ToleratesNonGMSComponents(t *testing.T) {
@@ -2362,27 +2274,6 @@ func Test_reconcileGroveResources(t *testing.T) {
 		wantErrSubstring       string
 		interceptorFuncs       interceptor.Funcs
 	}{
-		{
-			name: "PodClique API error is propagated",
-			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
-				BackendFramework: "vllm",
-				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-					"frontend": {
-						ComponentType: string(commonconsts.ComponentTypeFrontend),
-						Replicas:      ptr.To(int32(1)),
-					},
-				},
-			},
-			wantErrSubstring: "transient API error",
-			interceptorFuncs: interceptor.Funcs{
-				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-					if _, ok := obj.(*grovev1alpha1.PodClique); ok {
-						return fmt.Errorf("transient API error")
-					}
-					return c.Get(ctx, key, obj, opts...)
-				},
-			},
-		},
 		{
 			name: "singular frontend service with 2 replicas - creates a PodClique with 2 replicas - ready",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
