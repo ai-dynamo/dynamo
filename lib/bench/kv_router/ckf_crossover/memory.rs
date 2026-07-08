@@ -9,6 +9,7 @@ pub struct MemorySnapshot {
     pub rss_bytes: u64,
     pub pss_bytes: Option<u64>,
     pub uss_bytes: Option<u64>,
+    pub swap_bytes: Option<u64>,
 }
 
 pub fn memory_snapshot() -> anyhow::Result<MemorySnapshot> {
@@ -32,6 +33,7 @@ pub fn memory_snapshot() -> anyhow::Result<MemorySnapshot> {
             rss_bytes: value("Rss").unwrap_or(0),
             pss_bytes: value("Pss"),
             uss_bytes: Some(private_clean + private_dirty),
+            swap_bytes: value("Swap"),
         });
     }
 
@@ -45,6 +47,7 @@ pub fn memory_snapshot() -> anyhow::Result<MemorySnapshot> {
             rss_bytes: rss_kb * 1024,
             pss_bytes: None,
             uss_bytes: None,
+            swap_bytes: None,
         })
     }
 }

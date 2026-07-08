@@ -9,6 +9,7 @@ use anyhow::Context;
 use dynamo_kv_router::ConcurrentRadixTreeCompressed;
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::ThreadPoolIndexer;
+use dynamo_kv_router::indexer::concurrent_radix_tree_compressed::CrtcStructureStats;
 use dynamo_kv_router::indexer::{
     EventEnqueueCompletion, KvIndexerInterface, KvRouterError, SyncIndexer,
 };
@@ -117,6 +118,10 @@ impl CrtcBackend {
 
     pub fn touch_for_benchmark(&self) {
         self.indexer.backend().touch_for_benchmark();
+    }
+
+    pub fn structure_stats(&self) -> CrtcStructureStats {
+        self.indexer.backend().structure_stats()
     }
 
     pub async fn flush(&self) -> anyhow::Result<(QueueMetrics, CrtcCompletionMetrics)> {

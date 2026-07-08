@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+#[cfg(feature = "bench")]
+use serde::Serialize;
 use std::collections::VecDeque;
 #[cfg(feature = "bench")]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,6 +24,7 @@ use crate::cleanup::{CleanupGuard, CleanupState};
 use crate::lookup_update::update_arc_lookup_for_keys;
 use crate::protocols::*;
 
+mod children;
 mod node;
 mod types;
 use node::*;
@@ -53,6 +56,75 @@ struct CrtcBenchMetrics {
     node_splits: AtomicU64,
     lookup_repair_scans: AtomicU64,
     lookup_repair_entries: AtomicU64,
+}
+
+#[cfg(feature = "bench")]
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CrtcCardinalityBuckets {
+    pub zero: u64,
+    pub one: u64,
+    pub two_to_four: u64,
+    pub five_to_sixteen: u64,
+    pub above_sixteen: u64,
+}
+
+#[cfg(feature = "bench")]
+impl CrtcCardinalityBuckets {
+    fn record(&mut self, value: usize) {
+        match value {
+            0 => self.zero += 1,
+            1 => self.one += 1,
+            2..=4 => self.two_to_four += 1,
+            5..=16 => self.five_to_sixteen += 1,
+            _ => self.above_sixteen += 1,
+        }
+    }
+}
+
+#[cfg(feature = "bench")]
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CrtcEdgeLengthBuckets {
+    pub zero: u64,
+    pub one: u64,
+    pub two_to_sixteen: u64,
+    pub seventeen_to_sixty_four: u64,
+    pub sixty_five_to_128: u64,
+    pub above_128: u64,
+}
+
+#[cfg(feature = "bench")]
+impl CrtcEdgeLengthBuckets {
+    fn record(&mut self, value: usize) {
+        match value {
+            0 => self.zero += 1,
+            1 => self.one += 1,
+            2..=16 => self.two_to_sixteen += 1,
+            17..=64 => self.seventeen_to_sixty_four += 1,
+            65..=128 => self.sixty_five_to_128 += 1,
+            _ => self.above_128 += 1,
+        }
+    }
+}
+
+#[cfg(feature = "bench")]
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CrtcStructureStats {
+    pub node_count: u64,
+    pub node_size_bytes: usize,
+    pub node_state_size_bytes: usize,
+    pub child_fanout: CrtcCardinalityBuckets,
+    pub edge_lengths: CrtcEdgeLengthBuckets,
+    pub full_worker_cardinality: CrtcCardinalityBuckets,
+    pub cutoff_cardinality: CrtcCardinalityBuckets,
+    pub promoted_child_maps: u64,
+    pub total_child_entries: u64,
+    pub total_child_capacity: u64,
+    pub total_edge_entries: u64,
+    pub total_edge_index_capacity: u64,
+    pub total_full_worker_entries: u64,
+    pub total_full_worker_capacity: u64,
+    pub total_cutoff_entries: u64,
+    pub total_cutoff_capacity: u64,
 }
 
 #[cfg(feature = "bench")]
@@ -112,6 +184,26 @@ impl ConcurrentRadixTreeCompressed {
         while let Some(node) = pending.pop() {
             node.touch_for_benchmark(&mut pending);
         }
+    }
+
+    #[cfg(feature = "bench")]
+    pub fn structure_stats(&self) -> CrtcStructureStats {
+        let mut stats = CrtcStructureStats {
+            node_size_bytes: std::mem::size_of::<Node>(),
+            node_state_size_bytes: std::mem::size_of::<crate::indexer::compressed_radix::NodeState>(
+            ),
+            ..CrtcStructureStats::default()
+        };
+        let mut pending = vec![self.root.clone()];
+        pending.extend(self.anchor_nodes.iter().map(|entry| entry.value().clone()));
+        let mut visited = FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !visited.insert(Arc::as_ptr(&node) as usize) {
+                continue;
+            }
+            node.accumulate_structure_stats(&mut stats, &mut pending);
+        }
+        stats
     }
 
     #[cfg(test)]

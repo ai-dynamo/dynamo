@@ -5,15 +5,13 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
-use dashmap::DashMap;
 use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
+use super::children::{ChildInsertResult, NodeChildren};
 use super::types::*;
 use crate::indexer::compressed_radix::NodeState;
 use crate::protocols::*;
-
-type NodeChildren = DashMap<LocalBlockHash, SharedNode, FxBuildHasher>;
 
 fn record_last_matched_hash(
     last_matched_hashes: &mut Option<&mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
@@ -107,15 +105,9 @@ impl Node {
         children: FxHashMap<LocalBlockHash, SharedNode>,
     ) -> Self {
         let internal = !children.is_empty();
-        // NOTE(perf): Reducing child-map sharding substantially lowered memory
-        // usage but regressed throughput. Treat custom sharding as an explicit
-        // memory tradeoff rather than a throughput optimization.
-        // NOTE(perf): Lazily allocating this map only after a node became
-        // internal also saved memory but regressed throughput under contention.
-        let children_map = DashMap::with_hasher(FxBuildHasher);
-        for (key, child) in children {
-            children_map.insert(key, child);
-        }
+        // Sparse nodes stay inline. Branching nodes promote once to the default
+        // sharded map and retain its existing concurrency model.
+        let children_map = NodeChildren::from_entries(children);
 
         Self {
             shape_gate: RwLock::new(()),
@@ -178,13 +170,8 @@ impl Node {
 
     pub(super) fn take_children(&self) -> Vec<SharedNode> {
         let _gate = self.shape_gate.write();
-        let children: Vec<_> = self
-            .children
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
-        if !children.is_empty() {
-            self.children.clear();
+        let children = self.children.values_snapshot();
+        if self.children.clear_children() {
             self.shape_version.fetch_add(1, Ordering::Release);
         }
         children
@@ -193,15 +180,12 @@ impl Node {
     #[cfg(test)]
     pub(super) fn children_snapshot(&self) -> Vec<SharedNode> {
         let _gate = self.shape_gate.read();
-        self.children
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect()
+        self.children.values_snapshot()
     }
 
     pub(super) fn push_children_into(&self, queue: &mut VecDeque<SharedNode>) {
         let _gate = self.shape_gate.read();
-        queue.extend(self.children.iter().map(|entry| entry.value().clone()));
+        queue.extend(self.children.values_snapshot());
     }
 
     #[cfg(feature = "bench")]
@@ -221,23 +205,47 @@ impl Node {
         for worker in &state.full_edge_workers {
             std::hint::black_box(worker);
         }
-        for child in &self.children {
-            std::hint::black_box(child.key());
-            queue.push(child.value().clone());
+        for (key, child) in self.children.entries_snapshot() {
+            std::hint::black_box(key);
+            queue.push(child);
         }
     }
 
+    #[cfg(feature = "bench")]
+    pub(super) fn accumulate_structure_stats(
+        &self,
+        stats: &mut super::CrtcStructureStats,
+        pending: &mut Vec<SharedNode>,
+    ) {
+        let _gate = self.shape_gate.read();
+        let state = self.state.read();
+        let children = self.children.entries_snapshot();
+
+        stats.node_count += 1;
+        stats.child_fanout.record(children.len());
+        stats.edge_lengths.record(state.edge.len());
+        stats
+            .full_worker_cardinality
+            .record(state.full_edge_workers.len());
+        stats.cutoff_cardinality.record(state.worker_cutoffs.len());
+        stats.promoted_child_maps += u64::from(self.children.is_promoted());
+        stats.total_child_entries += children.len() as u64;
+        stats.total_child_capacity += self.children.capacity() as u64;
+        stats.total_edge_entries += state.edge.len() as u64;
+        stats.total_edge_index_capacity += state.edge_index.capacity() as u64;
+        stats.total_full_worker_entries += state.full_edge_workers.len() as u64;
+        stats.total_full_worker_capacity += state.full_edge_workers.capacity() as u64;
+        stats.total_cutoff_entries += state.worker_cutoffs.len() as u64;
+        stats.total_cutoff_capacity += state.worker_cutoffs.capacity() as u64;
+        pending.extend(children.into_iter().map(|(_, child)| child));
+    }
+
     pub(super) fn child_edges_snapshot(&self) -> Vec<(LocalBlockHash, SharedNode)> {
-        self.children
-            .iter()
-            .map(|entry| (*entry.key(), entry.value().clone()))
-            .collect()
+        self.children.entries_snapshot()
     }
 
     pub(super) fn child_snapshot(&self, local_hash: LocalBlockHash) -> Option<SharedNode> {
-        self.children
-            .get(&local_hash)
-            .map(|entry| entry.value().clone())
+        self.children.get_cloned(local_hash)
     }
 
     pub(super) fn contains_edge_hash(&self, hash: ExternalSequenceBlockHash) -> bool {
@@ -286,19 +294,14 @@ impl Node {
 
         // A concurrent split is either visible in this snapshot or starts after
         // the target coverage is gone and therefore cannot copy it forward.
-        let children = self
-            .children
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
+        let children = self.children.values_snapshot();
         drop(state);
         self.clear_children_if_unreachable(should_clear_children);
         children
     }
 
     fn clear_children_if_unreachable(&self, should_clear_children: bool) {
-        if should_clear_children && !self.children.is_empty() {
-            self.children.clear();
+        if should_clear_children && self.children.clear_children() {
             self.shape_version.fetch_add(1, Ordering::Release);
         }
     }
@@ -306,11 +309,11 @@ impl Node {
     pub(super) fn live_children(&self) -> Vec<SharedNode> {
         let _gate = self.shape_gate.read();
         self.children
-            .iter()
-            .filter_map(|entry| {
-                let child = entry.value();
+            .values_snapshot()
+            .into_iter()
+            .filter_map(|child| {
                 (child.state.read().has_any_workers() || !child.children.is_empty())
-                    .then(|| child.clone())
+                    .then_some(child)
             })
             .collect()
     }
@@ -320,11 +323,11 @@ impl Node {
         let state = self.state.read();
         let live_children: Vec<_> = self
             .children
-            .iter()
-            .filter_map(|entry| {
-                let child = entry.value();
+            .values_snapshot()
+            .into_iter()
+            .filter_map(|child| {
                 (child.state.read().has_any_workers() || !child.children.is_empty())
-                    .then(|| child.clone())
+                    .then_some(child)
             })
             .collect();
 
@@ -564,7 +567,7 @@ impl Node {
         self.apply_edge_shape_update(shape_version, |state, children| {
             let split = self.split_at_locked(state, split_pos);
             state.promote_to_full(worker);
-            children.insert(tail_first_local, tail_node.clone());
+            children.insert_or_replace(tail_first_local, tail_node.clone());
             (SplitStoreOutcome::Done { split, tail_node }, true)
         })
         .unwrap_or(SplitStoreOutcome::Stale)
@@ -611,10 +614,7 @@ impl Node {
                 return ParentChildPlan::StaleParent { hash };
             }
 
-            if let Some(child) = children
-                .get(&first_local)
-                .map(|entry| entry.value().clone())
-            {
+            if let Some(child) = children.get_cloned(first_local) {
                 return ParentChildPlan::Descend(child);
             }
 
@@ -635,14 +635,9 @@ impl Node {
                 return InsertChildOutcome::Stale;
             }
             if self.internal.load(Ordering::Acquire) {
-                return match self.children.entry(first_local) {
-                    dashmap::mapref::entry::Entry::Occupied(entry) => {
-                        InsertChildOutcome::Existing(entry.get().clone())
-                    }
-                    dashmap::mapref::entry::Entry::Vacant(entry) => {
-                        entry.insert(child.clone());
-                        InsertChildOutcome::Inserted(child)
-                    }
+                return match self.children.insert_if_absent(first_local, child.clone()) {
+                    ChildInsertResult::Existing(existing) => InsertChildOutcome::Existing(existing),
+                    ChildInsertResult::Inserted => InsertChildOutcome::Inserted(child),
                 };
             }
         }
@@ -651,12 +646,9 @@ impl Node {
         if self.shape_version.load(Ordering::Acquire) != shape_version {
             return InsertChildOutcome::Stale;
         }
-        match self.children.entry(first_local) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => {
-                InsertChildOutcome::Existing(entry.get().clone())
-            }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(child.clone());
+        match self.children.insert_if_absent(first_local, child.clone()) {
+            ChildInsertResult::Existing(existing) => InsertChildOutcome::Existing(existing),
+            ChildInsertResult::Inserted => {
                 self.internal.store(true, Ordering::Release);
                 self.shape_version.fetch_add(1, Ordering::Release);
                 InsertChildOutcome::Inserted(child)
@@ -703,12 +695,9 @@ impl Node {
             state.full_edge_workers.insert(*worker);
         }
 
-        let suffix_children: FxHashMap<_, _> = self
-            .children
-            .iter()
-            .map(|entry| (*entry.key(), entry.value().clone()))
-            .collect();
-        self.children.clear();
+        let suffix_children: FxHashMap<_, _> =
+            self.children.entries_snapshot().into_iter().collect();
+        self.children.clear_children();
 
         let suffix = Arc::new(Node::from_state_and_children(
             NodeState {
@@ -719,7 +708,8 @@ impl Node {
             },
             suffix_children,
         ));
-        self.children.insert(suffix_first_local, suffix.clone());
+        self.children
+            .insert_or_replace(suffix_first_local, suffix.clone());
         self.internal.store(true, Ordering::Release);
 
         SplitLookupData { suffix }
@@ -846,8 +836,7 @@ impl Node {
             && input.seq_pos + edge_match_len < input.sequence.len()
         {
             self.children
-                .get(&input.sequence.at(input.seq_pos + edge_match_len))
-                .map(|entry| entry.value().clone())
+                .get_cloned(input.sequence.at(input.seq_pos + edge_match_len))
         } else {
             None
         };
@@ -863,13 +852,13 @@ impl Node {
 
     pub(super) fn remove_child_if_stale_leaf(&self, key: LocalBlockHash, child: &SharedNode) {
         let _parent_gate = self.shape_gate.write();
-        let still_attached = self
-            .children
-            .get(&key)
-            .is_some_and(|current| Arc::ptr_eq(current.value(), child));
-        if !still_attached {
+        let Some(current) = self.children.get_cloned(key) else {
+            return;
+        };
+        if !Arc::ptr_eq(&current, child) {
             return;
         }
+        drop(current);
 
         let Some(_child_gate) = child.shape_gate.try_write() else {
             return;
@@ -881,8 +870,9 @@ impl Node {
             return;
         }
 
-        self.children.remove(&key);
-        self.shape_version.fetch_add(1, Ordering::Release);
+        if self.children.remove_if_same(key, child) {
+            self.shape_version.fetch_add(1, Ordering::Release);
+        }
     }
 }
 

@@ -55,6 +55,7 @@ xxhash-rust = { workspace = true }
 flume = "0.12.0"
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
+arc-swap = "1.9.1"
 
 rustc-hash = "2.1.1"
 

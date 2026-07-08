@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use anyhow::{Context, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
+use dynamo_kv_router::indexer::concurrent_radix_tree_compressed::CrtcStructureStats;
 use dynamo_kv_router::indexer::cuckoo::{
     CuckooDcConfig, CuckooFrameEnvelope, CuckooFrameIndexer, CuckooIndexerConfig,
     CuckooIndexerMode, CuckooPublication, SnapshotProducer,
@@ -141,10 +142,12 @@ struct MemoryResult {
     rss_bytes: u64,
     pss_bytes: Option<u64>,
     uss_bytes: Option<u64>,
+    swap_bytes: Option<u64>,
     num_dcs: usize,
     memberships_per_dc: usize,
     authoritative_filter_bytes: u64,
     derived_transposed_bytes: u64,
+    crtc_structure: Option<CrtcStructureStats>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -288,6 +291,7 @@ async fn measure_memory(
             backend.touch_for_benchmark();
             trim_allocator();
             let snapshot = memory_snapshot()?;
+            let structure = backend.structure_stats();
             std::hint::black_box(&backend);
             Ok(memory_result(
                 measured_code_sha,
@@ -297,6 +301,7 @@ async fn measure_memory(
                 memberships_per_dc,
                 (0, 0),
                 snapshot,
+                Some(structure),
             ))
         }
         MemoryMode::CkfNative | MemoryMode::CkfTransposed => {
@@ -350,6 +355,7 @@ async fn measure_memory(
                     },
                 ),
                 snapshot,
+                None,
             ))
         }
         MemoryMode::RelayProducer => {
@@ -392,6 +398,7 @@ async fn measure_memory(
                 memberships_per_dc,
                 (filter_bytes, 0),
                 snapshot,
+                None,
             ))
         }
     }
@@ -405,6 +412,7 @@ fn memory_result(
     memberships_per_dc: usize,
     structure_bytes: (u64, u64),
     snapshot: memory::MemorySnapshot,
+    crtc_structure: Option<CrtcStructureStats>,
 ) -> MemoryResult {
     let (authoritative_filter_bytes, derived_transposed_bytes) = structure_bytes;
     MemoryResult {
@@ -415,10 +423,12 @@ fn memory_result(
         rss_bytes: snapshot.rss_bytes,
         pss_bytes: snapshot.pss_bytes,
         uss_bytes: snapshot.uss_bytes,
+        swap_bytes: snapshot.swap_bytes,
         num_dcs,
         memberships_per_dc,
         authoritative_filter_bytes,
         derived_transposed_bytes,
+        crtc_structure,
     }
 }
 
