@@ -20,13 +20,9 @@ use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-<<<<<<< HEAD
-use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
-=======
-use dynamo_llm::protocols::common::extensions::NvExt;
+use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, NvExt, request_cache_salt};
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::Prompt;
->>>>>>> c3eec5e2db (feat(ext-proc): support /v1/completions tokenization in Rust EPP)
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -215,18 +211,12 @@ impl Router {
 
     /// Tokenize a JSON request body and extract router queue priorities.
     ///
-<<<<<<< HEAD
     /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority)`.
-    /// Priorities default to zero when absent. Mirrors the standalone Dynamo
-    /// preprocessor lift in `lib/llm/src/preprocessor.rs`.
+    /// Priorities default to zero when absent. Supports both
+    /// `/v1/chat/completions` and `/v1/completions` bodies; the request kind is
+    /// discriminated by a non-empty `messages` array (chat) versus a `prompt`
+    /// (completions), mirroring the removed Go EPP `BuildOpenAIRequest`.
     pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
-=======
-    /// Returns `(token_ids, priority_jump, strict_priority)`. Priorities default
-    /// to zero when absent. Supports both `/v1/chat/completions` and
-    /// `/v1/completions` bodies; the request kind is discriminated by a
-    /// non-empty `messages` array (chat) versus a `prompt` (completions),
-    /// mirroring the removed Go EPP `BuildOpenAIRequest`.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64, u32)> {
         let value: serde_json::Value = serde_json::from_str(request_json)?;
         let has_messages = value
             .get("messages")
@@ -239,22 +229,16 @@ impl Router {
     }
 
     /// Tokenize a `/v1/chat/completions` body via the chat template.
-    fn tokenize_chat(&self, request_json: &str) -> Result<(Vec<u32>, f64, u32)> {
->>>>>>> c3eec5e2db (feat(ext-proc): support /v1/completions tokenization in Rust EPP)
+    fn tokenize_chat(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(request_json)?;
 
-<<<<<<< HEAD
-        let priority_jump = extract_priority_jump(&request);
-        let strict_priority = extract_strict_priority(&request);
-        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
-=======
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
->>>>>>> c3eec5e2db (feat(ext-proc): support /v1/completions tokenization in Rust EPP)
+        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
         let formatted_prompt = self
             .preprocessor
@@ -278,11 +262,15 @@ impl Router {
     /// so routing reuses the same tokenization path as chat requests. Batched
     /// prompts route on the first entry, since KV prefix locality is computed
     /// per prompt.
-    fn tokenize_completion(&self, request_json: &str) -> Result<(Vec<u32>, f64, u32)> {
+    fn tokenize_completion(
+        &self,
+        request_json: &str,
+    ) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
         let request: NvCreateCompletionRequest = serde_json::from_str(request_json)?;
 
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
+        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
         let tokens = match completion_prompt_token_ids(&request.inner.prompt) {
             Some(ids) => ids,
@@ -291,7 +279,7 @@ impl Router {
             }
         };
 
-        Ok((tokens, priority_jump, strict_priority))
+        Ok((tokens, cache_namespace, priority_jump, strict_priority))
     }
 
     /// Wrap `text` as a single user chat message and tokenize it through the
@@ -302,7 +290,7 @@ impl Router {
             "messages": [{"role": "user", "content": text}],
         })
         .to_string();
-        let (tokens, _, _) = self.tokenize_chat(&chat_json)?;
+        let (tokens, _, _, _) = self.tokenize_chat(&chat_json)?;
         Ok(tokens)
     }
 
