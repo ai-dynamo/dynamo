@@ -1301,30 +1301,15 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                     .as_deref(),
                 env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
             );
-            let logs_protocol = resolve_signal_otlp_protocol(
-                protocol,
-                std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL)
-                    .ok()
-                    .as_deref(),
-                env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
-            );
             let generic_endpoint =
                 std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT).ok();
             let traces_endpoint_env =
                 std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).ok();
-            let logs_endpoint_env =
-                std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).ok();
             let traces_endpoint = resolve_otlp_endpoint(
                 traces_protocol,
                 traces_endpoint_env,
                 generic_endpoint.clone(),
                 "/v1/traces",
-            );
-            let logs_endpoint = resolve_otlp_endpoint(
-                logs_protocol,
-                logs_endpoint_env,
-                generic_endpoint,
-                "/v1/logs",
             );
 
             let resource = opentelemetry_sdk::Resource::builder_empty()
@@ -1346,8 +1331,25 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
 
             // Build the OTLP log exporter, unless log export is disabled
             // (traces-only mode for collectors that accept traces but not
-            // logs).
+            // logs). Logs protocol/endpoint resolution also lives inside the
+            // branch so a misconfigured logs protocol cannot warn when log
+            // export is off.
             let logger_provider_opt = if otlp_logs_enabled() {
+                let logs_protocol = resolve_signal_otlp_protocol(
+                    protocol,
+                    std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL)
+                        .ok()
+                        .as_deref(),
+                    env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
+                );
+                let logs_endpoint_env =
+                    std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).ok();
+                let logs_endpoint = resolve_otlp_endpoint(
+                    logs_protocol,
+                    logs_endpoint_env,
+                    generic_endpoint,
+                    "/v1/logs",
+                );
                 let log_exporter = build_log_exporter(logs_protocol, &logs_endpoint)?;
 
                 Some(
