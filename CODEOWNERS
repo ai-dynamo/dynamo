@@ -64,6 +64,7 @@
 
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /tests/router/                                                                                @ai-dynamo/dynamo-router-codeowners
+/examples/router/policy-class-queues.yaml                                                     @ai-dynamo/dynamo-router-codeowners
 
 # === backend-vllm  (@ai-dynamo/dynamo-vllm-codeowners) ===
 /examples/backends/vllm/                                                                      @ai-dynamo/dynamo-vllm-codeowners
@@ -136,13 +137,9 @@
 /SECURITY.md                                                                                  @ai-dynamo/dynamo-process-codeowners
 /.claude/skills                                                                               @ai-dynamo/dynamo-process-codeowners
 /.agents/skills/                                                                              @ai-dynamo/dynamo-process-codeowners
-/ATTRIBUTIONS.md                                                                              @ai-dynamo/dynamo-process-codeowners
 /CONTRIBUTING.md                                                                              @ai-dynamo/dynamo-process-codeowners
-/ATTRIBUTIONS-Go.md                                                                           @ai-dynamo/dynamo-process-codeowners
+/CONTRIBUTORS.md                                                                              @ai-dynamo/dynamo-process-codeowners
 /CODE_OF_CONDUCT.md                                                                           @ai-dynamo/dynamo-process-codeowners
-/ATTRIBUTIONS-Rust.md                                                                         @ai-dynamo/dynamo-process-codeowners
-/ATTRIBUTIONS-Python.md                                                                       @ai-dynamo/dynamo-process-codeowners
-/ATTRIBUTIONS-container-frontend.md                                                           @ai-dynamo/dynamo-process-codeowners
 
 # === operator  (@ai-dynamo/dynamo-operator-codeowners) ===
 /deploy/                                                                                      @ai-dynamo/dynamo-operator-codeowners
@@ -174,12 +171,9 @@
 /lib/mocker/                                                                                  @ai-dynamo/dynamo-performance-codeowners
 /lib/runtime/                                                                                 @ai-dynamo/dynamo-runtime-codeowners
 /lib/data-gen/                                                                                @ai-dynamo/dynamo-performance-codeowners
-/lib/renderer/                                                                                @ai-dynamo/dynamo-multimodal-codeowners
 /lib/kv-router/                                                                               @ai-dynamo/dynamo-router-codeowners
-/lib/protocols/                                                                               @ai-dynamo/dynamo-frontend-codeowners
 /lib/bindings/c/                                                                              @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/kv/                                                                              @ai-dynamo/dynamo-kv-memory-codeowners
-/lib/tokenizers/                                                                              @ai-dynamo/dynamo-frontend-codeowners
 /deploy/snapshot/                                                                             @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/grpc/                                                                            @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http/                                                                            @ai-dynamo/dynamo-frontend-codeowners
@@ -246,12 +240,10 @@
 /components/src/dynamo/common/multimodal/                                                     @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/trtllm/multimodal/                                                     @ai-dynamo/dynamo-multimodal-codeowners
 /benchmarks/omni/image/aiperf_image_gen.sh                                                    @ai-dynamo/dynamo-multimodal-codeowners
-/lib/bindings/python/tests/test_parsers.py                                                    @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/thunderagent_router/                                                   @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/vllm/multimodal_utils/                                                 @ai-dynamo/dynamo-multimodal-codeowners
 /lib/llm/tests/test_streaming_tool_parsers.rs                                                 @ai-dynamo/dynamo-frontend-codeowners
 /tests/router/test_router_e2e_with_vllm_xpu.py                                                @ai-dynamo/dynamo-xpu-codeowners
-/components/src/dynamo/common/utils/snapshot.py                                               @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                                              @ai-dynamo/dynamo-multimodal-codeowners
 /container/templates/sglang_xpu_framework.Dockerfile                                          @ai-dynamo/dynamo-xpu-codeowners
 /lib/bindings/python/src/dynamo/nixl_connect/__init__.py                                      @ai-dynamo/dynamo-kv-memory-codeowners
@@ -397,6 +389,7 @@
 /deploy/operator/Dockerfile                                                                   @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners
 /deploy/snapshot/Dockerfile                                                                   @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-ops-codeowners
 /container/Dockerfile.template                                                                @ai-dynamo/dynamo-ops-codeowners
+/deploy/power-agent/Dockerfile                                                                @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners
 /examples/diffusers/Dockerfile                                                                @ai-dynamo/dynamo-diffusion-codeowners @ai-dynamo/dynamo-ops-codeowners
 /container/templates/aws.Dockerfile                                                           @ai-dynamo/dynamo-ops-codeowners
 /container/templates/dev.Dockerfile                                                           @ai-dynamo/dynamo-ops-codeowners
@@ -407,6 +400,7 @@
 /deploy/inference-gateway/epp/Dockerfile                                                      @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-ops-codeowners
 /recipes/nemotron-3-nano-omni/Dockerfile                                                      @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-ops-codeowners
 /container/templates/local_dev.Dockerfile                                                     @ai-dynamo/dynamo-ops-codeowners
+/container/templates/compliance.Dockerfile                                                    @ai-dynamo/dynamo-ops-codeowners
 /examples/backends/tritonserver/Dockerfile                                                    @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
 /container/templates/dynamo_base.Dockerfile                                                   @ai-dynamo/dynamo-ops-codeowners
 /container/templates/vllm_runtime.Dockerfile                                                  @ai-dynamo/dynamo-ops-codeowners
