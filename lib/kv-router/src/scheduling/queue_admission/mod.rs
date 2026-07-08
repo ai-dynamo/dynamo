@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::marker::PhantomData;
-
 use serde::Deserialize;
 use serde_yaml::Mapping;
 
@@ -27,17 +25,13 @@ impl AdmissionId {
 /// Accessors are added only when a strategy demonstrates a generic need for
 /// them; the actor-owned scheduling request is intentionally not exposed.
 #[derive(Debug, Clone, Copy)]
-pub struct AdmissionRequest<'a> {
+pub struct AdmissionRequest {
     id: AdmissionId,
-    _borrowed: PhantomData<&'a ()>,
 }
 
-impl AdmissionRequest<'_> {
+impl AdmissionRequest {
     pub fn new(id: AdmissionId) -> Self {
-        Self {
-            id,
-            _borrowed: PhantomData,
-        }
+        Self { id }
     }
 
     pub fn id(&self) -> AdmissionId {
@@ -98,7 +92,7 @@ pub enum AdmissionAction {
 /// requests together, so no terminal events are delivered after shutdown
 /// begins.
 pub trait PolicyClassAdmissionStrategy: Send {
-    fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision;
+    fn admit(&mut self, request: AdmissionRequest) -> AdmissionDecision;
 
     fn on_event(&mut self, _event: AdmissionEvent) -> Vec<AdmissionAction> {
         Vec::new()
@@ -120,7 +114,7 @@ mod tests {
     struct ReadyStrategy;
 
     impl PolicyClassAdmissionStrategy for ReadyStrategy {
-        fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, request: AdmissionRequest) -> AdmissionDecision {
             assert_eq!(request.id(), AdmissionId::new(7));
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
