@@ -76,13 +76,6 @@ expression: redacted_events(&text)
     }
   },
   {
-    "event": "content_block_stop",
-    "data": {
-      "type": "content_block_stop",
-      "index": 1
-    }
-  },
-  {
     "event": "content_block_delta",
     "data": {
       "type": "content_block_delta",
@@ -105,6 +98,13 @@ expression: redacted_events(&text)
     }
   },
   {
+    "event": "content_block_stop",
+    "data": {
+      "type": "content_block_stop",
+      "index": 1
+    }
+  },
+  {
     "event": "message_delta",
     "data": {
       "type": "message_delta",
@@ -112,7 +112,7 @@ expression: redacted_events(&text)
         "stop_reason": "tool_use"
       },
       "usage": {
-        "input_tokens": 63,
+        "input_tokens": 42,
         "output_tokens": 18
       }
     }

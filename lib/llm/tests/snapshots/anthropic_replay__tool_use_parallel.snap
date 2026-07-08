@@ -92,7 +92,7 @@ expression: redacted_events(&text)
         "stop_reason": "tool_use"
       },
       "usage": {
-        "input_tokens": 64,
+        "input_tokens": 50,
         "output_tokens": 22
       }
     }

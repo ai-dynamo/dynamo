@@ -70,7 +70,7 @@ expression: redacted_events(&text)
         "stop_reason": "end_turn"
       },
       "usage": {
-        "input_tokens": 3,
+        "input_tokens": 7,
         "output_tokens": 3
       }
     }
