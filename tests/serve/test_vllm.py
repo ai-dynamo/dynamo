@@ -175,7 +175,7 @@ vllm_configs = {
             pytest.mark.profiled_vram_gib(20),
             pytest.mark.timeout(900),
             # 8B + gated Llama base model -> nightly only (needs HF_TOKEN + VRAM).
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
         ],
         model="meta-llama/Meta-Llama-3.1-8B-Instruct",
         request_payloads=[
