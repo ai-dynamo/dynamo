@@ -18,9 +18,9 @@ workers in the disaggregated variants, so those are listed as `prefill / decode`
 | Variant (`vllm/…`) | Model | GPUs | Prefill / Decode | MoE backend | Spec. decode | `max_model_len` | Disagg fabric |
 |---|---|---|---|---|---|---|---|
 | `deepseek-v4-pro/vllm/agg-b200-agentic` | `nvidia/DeepSeek-V4-Pro-NVFP4` | 8× B200 | TP8 + EP | FLASHINFER_TRTLLM | MTP-2 | 1,048,576 | — |
-| `deepseek-v4-pro/vllm/agg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Pro` | 8× H200 | TP8 + EP | vLLM default ³ | none | 86,016 ¹ | — |
+| `deepseek-v4-pro/vllm/agg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Pro` | 8× H200 | TP8 + EP | MARLIN | none | 86,016 ¹ | — |
 | `deepseek-v4-pro/vllm/disagg-b200-agentic` | `nvidia/DeepSeek-V4-Pro-NVFP4` | 16× B200 | TP8+EP / TP8+EP | FLASHINFER_TRTLLM | none / MTP-2 | 1,048,576 | NIXL GDR |
-| `deepseek-v4-pro/vllm/disagg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Pro` | 32× H200 (1P·3D) | TP8+EP / TP8+EP | vLLM default ³ | none | 86,016 ¹ | NIXL GDR ² |
+| `deepseek-v4-pro/vllm/disagg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Pro` | 32× H200 (1P·3D) | TP8+EP / TP8+EP | MARLIN | none | 86,016 ¹ | NIXL GDR ² |
 | `deepseek-v4-flash/vllm/agg-b200-agentic` | `nvidia/DeepSeek-V4-Flash-NVFP4` | 4× B200 | TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | — |
 | `deepseek-v4-flash/vllm/agg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Flash` | 4× H200 | DP4 + TP1 + EP | MARLIN (FLASHINFER_MLA attn) | MTP-1 | 1,048,576 | — |
 | `deepseek-v4-flash/vllm/disagg-b200-agentic` | `nvidia/DeepSeek-V4-Flash-NVFP4` | 8× B200 | TP4 / TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | NIXL GDR |
@@ -34,15 +34,8 @@ cache do not fit in H200 memory (OOM at load / during `determine_available_memor
 than ~86k tokens are rejected, so the H200 Pro variants cannot serve the longest contexts the B200
 (1M) recipes can. B200 and H200-Flash keep the full 1M window.
 
-² **H200 disaggregated uses NIXL over RDMA / GDR** (`NCCL_IB_DISABLE=0`, `rdma/ib` resources, per-rank
-`VLLM_GPU_NIC_PCIE_MAPPING`) — this is the fabric the shipped **Flash H200 4P3D** (213.3 tps/GPU,
-c128 full-run) and **Pro H200 disagg** numbers were measured on. The baked `VLLM_GPU_NIC_PCIE_MAPPING`
-is **node-topology-specific** (an 8×H200 + 8×CX-7 node); regenerate it for your hardware (see "RDMA
-per-rank NIC mapping" below). For a cluster with no RDMA fabric, fall back to TCP (`NCCL_IB_DISABLE=1`,
-`NCCL_NET=Socket`, drop `rdma/ib`).
+² **H200 disaggregated uses NIXL over RDMA/GDR.** See [Per-rank NIC mapping](#per-rank-nic-mapping-b200--h200-disaggregated) for what it needs and why.
 
-³ The H200 Pro variants do not pin `--moe-backend`; vLLM auto-selects its default MoE kernel for the
-public FP8/BF16 path.
 
 ## Optimization targets
 
@@ -56,16 +49,22 @@ Benchmarks replay [Mooncake-format](https://github.com/kvcache-ai/Mooncake) trac
 
 Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), full agentic trace, default temperature.
 
-| Variant | Workload | Concurrency | User tok/s | System tok/s/GPU |
+Variant keys match the [Configurations](#configurations) table (`${MODEL}/vllm/${MODE}-${SKU}-agentic`).
+
+| Variant (`vllm/…`) | Workload | Concurrency | User tok/s | System tok/s/GPU |
 |---|---|---:|---:|---:|
-| Pro AGG B200 | Agentic | 13 | 51.3 | 72.8 |
-| Pro DisAgg B200 | Agentic | 28 | 51.3 | 77.3 |
-| Pro AGG H200 | Agentic | 8 | 53.2 | 45.9 |
-| Pro DisAgg H200 | Agentic | 16 | 52.6 | 24.3 |
-| Flash AGG B200 | Agentic | 38 | 50.6 | 362.1 |
-| Flash DisAgg B200 | Agentic | 72 | 70.1 | 340.8 |
-| Flash AGG H200 | Agentic | 16 | 50.7 | 145.4 |
-| Flash DisAgg H200 | Agentic | 32 | 62.1 | 183.0 |
+| `deepseek-v4-pro/vllm/agg-b200-agentic` | Agentic | 13 | 51.3 | 72.8 |
+| `deepseek-v4-pro/vllm/disagg-b200-agentic` | Agentic | 28 | 51.3 | 77.3 |
+| `deepseek-v4-pro/vllm/agg-h200-agentic` | Agentic | 8 | 53.2 | 45.9 |
+| `deepseek-v4-pro/vllm/disagg-h200-agentic` | Agentic | 32 | 50.5 | 43.9 |
+| `deepseek-v4-flash/vllm/agg-b200-agentic` | Agentic | 38 | 50.6 | 362.1 |
+| `deepseek-v4-flash/vllm/disagg-b200-agentic` | Agentic | 72 | 70.1 | 340.8 |
+| `deepseek-v4-flash/vllm/agg-h200-agentic` | Agentic | 16 | 50.7 | 145.4 |
+| `deepseek-v4-flash/vllm/disagg-h200-agentic` | Agentic | 128 | 55.3 | 213.3 |
+
+**AGG figures are single-replica floor-picks** (best tok/s/GPU at user_p50 ≥ 50). AGG scales by deploying
+independent replicas; KV-routed *multi*-replica AGG does **not** improve per-GPU throughput — see
+[Known limitations](#known-limitations).
 
 ## Prerequisites
 
@@ -111,10 +110,32 @@ First worker launch loads weights and captures CUDA graphs and can take tens of 
 
 ## Per-rank NIC mapping (B200 & H200 disaggregated)
 
-All disaggregated variants (B200 **and** H200) move the KV cache over **NIXL GDR**, which needs each GPU
-mapped to its closest RDMA NIC via `VLLM_GPU_NIC_PCIE_MAPPING` (`GPU_BDF=NIC_BDF,…`, [vLLM #42083](https://github.com/vllm-project/vllm/pull/42083)).
-**This value is cluster-specific** — the map shipped in the B200 disagg manifests is the node layout we
-benchmarked and will not match a different cluster. Regenerate it on a target node:
+**Why it's needed.** In disaggregated serving the prefill workers stream the KV cache to the decode workers'
+GPUs over InfiniBand using **GPU-Direct RDMA (GDR)**. Each tensor-parallel rank should transfer over the RDMA
+NIC on **its own PCIe switch** (its affine NIC); if several ranks are forced onto the **same** NIC they
+oversubscribe it and GPU-direct registration collapses to slow host-staging — **~0.76 GB/s with 4 ranks on
+one NIC vs ~15–25 GB/s with one NIC per rank (~25× slower)**. Our disagg recipe originally pinned every rank
+to one device (`UCX_NET_DEVICES=mlx5_0:1`), triggering exactly this. `VLLM_GPU_NIC_PCIE_MAPPING`
+(`VLLM_NIC_SELECTION_VARS=UCX_NET_DEVICES:1`, [vLLM #42083](https://github.com/vllm-project/vllm/pull/42083))
+assigns each rank its PCIe-affine NIC and restores GDR. **This is a general tensor-parallel NIC-assignment
+requirement, not a DeepSeek-V4 property** — any TP>1 NIXL disaggregated worker pinned to a single NIC collapses
+the same way, and DSV4's "packed" KV layout (investigated at length) was ruled out as the cause.
+
+**Scope: disaggregated only.** Only recipes that ship **disaggregated** over GDR use this. Aggregated recipes
+have no cross-worker KV transfer and ignore `VLLM_GPU_NIC_PCIE_MAPPING` (empty ⇒ no-op). Among the recommended
+picks that's **Pro B200 DisAgg** and **Flash H200 4P3D**.
+
+**Providing the affine NIC per rank.** Set `VLLM_GPU_NIC_PCIE_MAPPING` to the node's `GPU_BDF=NIC_BDF` pairs
+so each rank uses its PCIe-affine NIC (regenerate per node type — below). This assumes the cluster exposes
+each pod the RDMA NICs affine to its GPUs; the map references those NIC BDFs, so it **breaks if the cluster
+injects a different NIC set** — derive it from the pod's actual `/sys/class/infiniband` rather than hard-coding.
+Note there is no "just auto-select" shortcut: pinning all ranks to one NIC degrades to **single-NIC
+host-staging (~20× slower, but still functional)**, while *unsetting* `UCX_NET_DEVICES` to expose all NICs can
+**fail NIXL backend creation** — the working fast path is exactly one affine NIC per rank, which this map
+constructs. With no RDMA fabric at all, fall back to TCP: `NCCL_IB_DISABLE=1`, `NCCL_NET=Socket`, and drop the
+`rdma/ib` resource requests.
+
+Regenerate the map on a target node:
 
 ```bash
 # 1) GPU PCIe BDFs, in device order:
@@ -138,12 +159,14 @@ Set the same map on **both** the prefill and decode workers. After deploy, confi
 NIXL registering the CUDA/GDR path (~15–17 GB/s KV transfer). A wrong or missing map degrades to slow
 TCP transfer or fails NIXL setup.
 
-## Known issues
+## Known limitations
 
+- **Multi-replica AGG does not scale per-GPU.** With `DYN_ROUTER_MODE=kv`, the KV-affinity router
+  concentrates the 90%-reuse agentic prefixes onto a few replicas, so KV-routed *multi*-replica AGG lands
+  *below* single-replica per-GPU throughput (measured N=7, `router_temperature=1.0`: Flash B200 293 vs 362,
+  H200 121 vs 145 tok/s/GPU). Deploy AGG as **independent single-replica DGDs** for linear scaling; the
+  disaggregated variants are the multi-worker path.
 - **Workers run as `runAsUser: 0`.** FlashInfer's TRT-LLM FP4 MoE JIT writes cubins into a
   root-owned `site-packages` directory, which a non-root user cannot write during
   `determine_available_memory`. The fix (make that directory group-writable in the image) is tracked
   separately; drop `runAsUser: 0` once it lands.
-- **Image tag is a staging build.** Manifests pin
-  `nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702`
-  (see the `TODO(post-PR)` in each manifest); replace with the Dynamo CI `deepseek-v4` vllm-runtime tag.

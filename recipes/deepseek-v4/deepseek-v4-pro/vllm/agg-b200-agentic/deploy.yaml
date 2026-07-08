@@ -1,20 +1,17 @@
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: dsv4-pro-agg-b200-agentic
 spec:
   backendFramework: vllm
-  pvcs:
-  - name: model-cache
-    create: false
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
-          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc.4-cuda13
           workingDir: /workspace
           command:
           - /bin/bash
@@ -31,24 +28,28 @@ spec:
               --router-reset-states \
               --http-host 0.0.0.0 \
               --http-port 8000
-    VllmDecodeWorker:
-      componentType: worker
-      subComponentType: decode
-      replicas: 1
-      volumeMounts:
-      - name: model-cache
-        mountPoint: /model-cache
-      resources:
-        requests:
-          gpu: "8"
-        limits:
-          gpu: "8"
-      extraPodSpec:
+          name: main
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+        imagePullSecrets:
+        - name: nvcr-pull
+        schedulerName: default-scheduler
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
+  - name: VllmDecodeWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
-        mainContainer:
-          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
-          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+        containers:
+        - image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc.4-cuda13
           workingDir: /workspace
           securityContext:
             runAsUser: 0
@@ -116,3 +117,26 @@ spec:
                   "method": "mtp",
                   "num_speculative_tokens": 2
                 }'
+          name: main
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+          resources:
+            requests:
+              nvidia.com/gpu: "8"
+            limits:
+              nvidia.com/gpu: "8"
+        imagePullSecrets:
+        - name: nvcr-pull
+        schedulerName: default-scheduler
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
+        runtimeClassName: nvidia
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule

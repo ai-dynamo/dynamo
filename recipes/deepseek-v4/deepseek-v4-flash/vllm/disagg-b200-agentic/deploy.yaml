@@ -1,20 +1,17 @@
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: dsv4-flash-disagg-b200-agentic
 spec:
   backendFramework: vllm
-  pvcs:
-  - name: model-cache
-    create: false
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
-          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc.4-cuda13
           workingDir: /workspace
           command:
           - /bin/bash
@@ -28,33 +25,38 @@ spec:
               --router-reset-states \
               --http-host 0.0.0.0 \
               --http-port 8000
-    VllmPrefillWorker:
-      componentType: worker
-      subComponentType: prefill
-      envFromSecret: hf-token-secret
-      replicas: 1
-      volumeMounts:
-      - name: model-cache
-        mountPoint: /model-cache
-      resources:
-        requests:
-          gpu: "4"
-          rdma/ib: "4"
-        limits:
-          gpu: "4"
-          rdma/ib: "4"
-      extraPodSpec:
+          name: main
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+        imagePullSecrets:
+        - name: nvcr-pull
+        schedulerName: default-scheduler
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
+  - name: VllmPrefillWorker
+    type: prefill
+    replicas: 1
+    podTemplate:
+      spec:
         volumes:
         - name: shared-memory
           emptyDir:
             medium: Memory
             sizeLimit: 200Gi
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
         runtimeClassName: nvidia
-        mainContainer:
-          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
-          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+        containers:
+        - image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc.4-cuda13
           workingDir: /workspace
           securityContext:
             runAsUser: 0
@@ -66,6 +68,9 @@ spec:
           volumeMounts:
           - name: shared-memory
             mountPath: /dev/shm
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
           env:
           - name: HF_HOME
             value: /model-cache
@@ -81,17 +86,12 @@ spec:
             value: "1"
           - name: NCCL_IB_DISABLE
             value: "0"
-          # Per-rank GPU->NIC PCIe map (vLLM #42083), REQUIRED for GDR. Cluster-specific:
-          # value below is the nscale B200 map we benchmarked (regenerate per node:
-          # lspci for GPU BDF; readlink /sys/class/infiniband/<mlx5_X>/device for NIC BDF).
           - name: VLLM_GPU_NIC_PCIE_MAPPING
             value: "00000000:18:00.0=0000:19:00.0,00000000:29:00.0=0000:2a:00.0,00000000:3A:00.0=0000:3b:00.0,00000000:4B:00.0=0000:4c:00.0,00000000:9A:00.0=0000:9b:00.0,00000000:AA:00.0=0000:ab:00.0,00000000:BA:00.0=0000:bc:00.0,00000000:CA:00.0=0000:cb:00.0"
           - name: VLLM_NIC_SELECTION_VARS
             value: "UCX_NET_DEVICES:1"
           - name: UCX_TLS
             value: rc_x,rc,cuda_copy,cuda_ipc
-          # UCX_IB_ADDR_TYPE is fabric-specific. eth = RoCE. For InfiniBand use ib_global (or auto);
-          # NOTE: "ib" is NOT a valid UCX value (valid: ib_local|ib_site_local|ib_global|eth|auto).
           - name: UCX_IB_ADDR_TYPE
             value: eth
           - name: UCX_IB_REG_METHODS
@@ -143,33 +143,43 @@ spec:
                   "endpoint": "tcp://*:5571",
                   "enable_kv_cache_events": true
                 }'
-    VllmDecodeWorker:
-      componentType: worker
-      subComponentType: decode
-      envFromSecret: hf-token-secret
-      replicas: 1
-      volumeMounts:
-      - name: model-cache
-        mountPoint: /model-cache
-      resources:
-        requests:
-          gpu: "4"
-          rdma/ib: "4"
-        limits:
-          gpu: "4"
-          rdma/ib: "4"
-      extraPodSpec:
+          name: main
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            requests:
+              nvidia.com/gpu: "4"
+              rdma/ib: "4"
+            limits:
+              nvidia.com/gpu: "4"
+              rdma/ib: "4"
+        imagePullSecrets:
+        - name: nvcr-pull
+        schedulerName: default-scheduler
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+  - name: VllmDecodeWorker
+    type: decode
+    replicas: 1
+    podTemplate:
+      spec:
         volumes:
         - name: shared-memory
           emptyDir:
             medium: Memory
             sizeLimit: 200Gi
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
         runtimeClassName: nvidia
-        mainContainer:
-          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
-          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+        containers:
+        - image: nvcr.io/nvstaging/ai-dynamo/vllm-runtime:1.3.0-rc.4-cuda13
           workingDir: /workspace
           securityContext:
             runAsUser: 0
@@ -181,6 +191,9 @@ spec:
           volumeMounts:
           - name: shared-memory
             mountPath: /dev/shm
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
           env:
           - name: HF_HOME
             value: /model-cache
@@ -196,17 +209,12 @@ spec:
             value: "1"
           - name: NCCL_IB_DISABLE
             value: "0"
-          # Per-rank GPU->NIC PCIe map (vLLM #42083), REQUIRED for GDR. Cluster-specific:
-          # value below is the nscale B200 map we benchmarked (regenerate per node:
-          # lspci for GPU BDF; readlink /sys/class/infiniband/<mlx5_X>/device for NIC BDF).
           - name: VLLM_GPU_NIC_PCIE_MAPPING
             value: "00000000:18:00.0=0000:19:00.0,00000000:29:00.0=0000:2a:00.0,00000000:3A:00.0=0000:3b:00.0,00000000:4B:00.0=0000:4c:00.0,00000000:9A:00.0=0000:9b:00.0,00000000:AA:00.0=0000:ab:00.0,00000000:BA:00.0=0000:bc:00.0,00000000:CA:00.0=0000:cb:00.0"
           - name: VLLM_NIC_SELECTION_VARS
             value: "UCX_NET_DEVICES:1"
           - name: UCX_TLS
             value: rc_x,rc,cuda_copy,cuda_ipc
-          # UCX_IB_ADDR_TYPE is fabric-specific. eth = RoCE. For InfiniBand use ib_global (or auto);
-          # NOTE: "ib" is NOT a valid UCX value (valid: ib_local|ib_site_local|ib_global|eth|auto).
           - name: UCX_IB_ADDR_TYPE
             value: eth
           - name: UCX_IB_REG_METHODS
@@ -248,25 +256,7 @@ spec:
                   "cudagraph_mode": "FULL_AND_PIECEWISE",
                   "custom_ops": [
                     "all"
-                  ],
-                  "cudagraph_capture_sizes": [
-                    1,
-                    2,
-                    4,
-                    8,
-                    16,
-                    32,
-                    48,
-                    50,
-                    52,
-                    56,
-                    60,
-                    64,
-                    80,
-                    96,
-                    128
-                  ],
-                  "max_cudagraph_capture_size": 128
+                  ]
                 }' \
               --kv-transfer-config '{
                   "kv_connector": "NixlConnector",
@@ -277,3 +267,21 @@ spec:
                   }
                 }' \
               --disaggregation-mode decode
+          name: main
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            requests:
+              nvidia.com/gpu: "4"
+              rdma/ib: "4"
+            limits:
+              nvidia.com/gpu: "4"
+              rdma/ib: "4"
+        imagePullSecrets:
+        - name: nvcr-pull
+        schedulerName: default-scheduler
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
