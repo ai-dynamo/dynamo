@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::queue_admission::{
-    PolicyClassAdmissionController, QueueAdmissionConfig, WorkerPlacement,
-};
+use super::queue_admission::WorkerPlacement;
 use crate::protocols::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,9 +140,7 @@ struct DispatchCandidate {
 
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
-    admission: PolicyClassAdmissionController,
     pending: BinaryHeap<PolicyQueueEntry<T>>,
-    held: FxHashMap<u64, PolicyQueueEntry<T>>,
     ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
     stats: PolicyQueueStats,
     deficit: usize,
@@ -152,13 +148,12 @@ struct PolicyClassQueue<T> {
 
 impl<T> PolicyClassQueue<T> {
     fn is_empty(&self) -> bool {
-        self.pending.is_empty() && self.held.is_empty() && self.ready_by_worker.is_empty()
+        self.pending.is_empty() && self.ready_by_worker.is_empty()
     }
 
     fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
         self.pending
             .iter()
-            .chain(self.held.values())
             .chain(self.ready_by_worker.values().flat_map(|ready| ready.iter()))
     }
 
@@ -238,22 +233,12 @@ impl<T> PolicyQueue<T> {
                 .classes()
                 .iter()
                 .cloned()
-                .map(|config| {
-                    let admission = match config.queue_admission.as_ref() {
-                        None => PolicyClassAdmissionController::None,
-                        Some(QueueAdmissionConfig::SessionAware {}) => {
-                            PolicyClassAdmissionController::SessionAware
-                        }
-                    };
-                    PolicyClassQueue {
-                        config,
-                        admission,
-                        pending: BinaryHeap::new(),
-                        held: FxHashMap::default(),
-                        ready_by_worker: FxHashMap::default(),
-                        stats: PolicyQueueStats::default(),
-                        deficit: 0,
-                    }
+                .map(|config| PolicyClassQueue {
+                    config,
+                    pending: BinaryHeap::new(),
+                    ready_by_worker: FxHashMap::default(),
+                    stats: PolicyQueueStats::default(),
+                    deficit: 0,
                 })
                 .collect(),
             next_class: 0,
@@ -293,7 +278,6 @@ impl<T> PolicyQueue<T> {
         self.pending_count = 0;
         for class in &mut self.classes {
             retain_heap(&mut class.pending, &mut keep);
-            class.held.retain(|_, entry| keep(entry.payload()));
             class.ready_by_worker.retain(|_, ready| {
                 retain_heap(ready, &mut keep);
                 !ready.is_empty()
@@ -369,75 +353,6 @@ impl<T> PolicyQueue<T> {
         class.push_ready(intent, entry);
         self.pending_count += 1;
         Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn enqueue_held(
-        &mut self,
-        class_index: usize,
-        worker_count: usize,
-        snapshot: QueueSnapshot,
-        arrival_offset_secs: f64,
-        priority_jump: f64,
-        strict_priority: u32,
-        payload: T,
-    ) -> Result<u64, (QueueRejection, T)> {
-        let class = &mut self.classes[class_index];
-        if let Some(rejection) = queue_rejection(class, worker_count) {
-            return Err((rejection, payload));
-        }
-        assert!(
-            matches!(
-                class.admission,
-                PolicyClassAdmissionController::SessionAware
-            ),
-            "held request requires a queue_admission class"
-        );
-        let entry_id = self.next_enqueue_seq;
-        let entry = make_entry(
-            class_index,
-            snapshot,
-            arrival_offset_secs,
-            priority_jump,
-            strict_priority,
-            class.config.queue_policy,
-            entry_id,
-            payload,
-        );
-        self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
-        assert!(
-            class.held.insert(entry_id, entry).is_none(),
-            "queue entry ID reused"
-        );
-        add_stats(&mut class.stats, snapshot);
-        self.pending_count += 1;
-        Ok(entry_id)
-    }
-
-    pub fn ready_held(
-        &mut self,
-        class_index: usize,
-        entry_id: u64,
-        snapshot: QueueSnapshot,
-        priority_boost: f64,
-        intent: WorkerPlacement,
-        prepare: impl FnOnce(&mut T, WorkerPlacement),
-    ) -> bool {
-        let class = &mut self.classes[class_index];
-        if matches!(class.admission, PolicyClassAdmissionController::None) {
-            return false;
-        }
-        let Some(mut entry) = class.held.remove(&entry_id) else {
-            return false;
-        };
-        subtract_stats(&mut class.stats, entry.snapshot);
-        entry.snapshot = snapshot;
-        entry.priority.policy_score =
-            OrderedFloat(entry.priority.policy_score.0 + priority_boost.max(0.0));
-        prepare(&mut entry.payload, intent);
-        add_stats(&mut class.stats, snapshot);
-        class.push_ready(intent, entry);
-        true
     }
 
     /// Runs one DRR ring pass over dispatchable class heads. If no head has
@@ -522,7 +437,6 @@ impl<T> PolicyQueue<T> {
             class
                 .pending
                 .into_iter()
-                .chain(class.held.into_values())
                 .chain(class.ready_by_worker.into_values().flatten())
         })
     }
@@ -733,33 +647,6 @@ policy_classes:
         assert_eq!(
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "keep"
-        );
-    }
-
-    #[test]
-    fn held_requests_are_counted_and_move_to_worker_lanes() {
-        let mut queue = PolicyQueue::new(admission_profile());
-        let entry_id = queue
-            .enqueue_held(0, 2, QueueSnapshot::new(10, 0), 2.0, 0.0, 0, "held")
-            .unwrap();
-
-        assert_eq!(queue.pending_count(), 1);
-        assert_eq!(queue.class_stats(0).requests, 1);
-        assert!(queue.pop_next(|_, _, _| true).is_none());
-
-        let worker = WorkerWithDpRank::new(7, 1);
-        assert!(queue.ready_held(
-            0,
-            entry_id,
-            QueueSnapshot::new(10, 5),
-            1.0,
-            WorkerPlacement::Exact(worker),
-            |_, _| {},
-        ));
-        assert_eq!(queue.class_stats(0).cached_tokens, 5);
-        assert_eq!(
-            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
-            "held"
         );
     }
 
