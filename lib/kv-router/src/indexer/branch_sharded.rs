@@ -801,6 +801,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
         is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
         let sequence = compute_block_hash_for_seq(
@@ -808,6 +809,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
             self.kv_block_size,
             BlockHashOptions {
                 lora_name,
+                cache_namespace,
                 is_eagle,
                 block_mm_infos: None,
             },
@@ -961,16 +963,21 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
 
             let timing = {
                 let calls = self.metrics.timing.calls.load(Ordering::Relaxed);
-                let avg_routing_ns = if calls > 0 {
-                    self.metrics.timing.routing_ns.load(Ordering::Relaxed) / calls
-                } else {
-                    0
-                };
-                let avg_shard_us = if calls > 0 {
-                    self.metrics.timing.shard_ns.load(Ordering::Relaxed) / calls / 1000
-                } else {
-                    0
-                };
+                let avg_routing_ns = self
+                    .metrics
+                    .timing
+                    .routing_ns
+                    .load(Ordering::Relaxed)
+                    .checked_div(calls)
+                    .unwrap_or(0);
+                let avg_shard_us = self
+                    .metrics
+                    .timing
+                    .shard_ns
+                    .load(Ordering::Relaxed)
+                    .checked_div(calls)
+                    .unwrap_or(0)
+                    / 1000;
                 format!("\n  avg routing = {avg_routing_ns}ns\n  avg shard = {avg_shard_us}µs")
             };
 

@@ -34,6 +34,7 @@ from dynamo.planner.connectors.mdc import (
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
+    DynamoGraphDeploymentNotReadyError,
     EmptyTargetReplicasError,
     ModelNameNotFoundError,
     PlannerError,
@@ -65,6 +66,7 @@ class KubernetesConnector(PlannerConnector):
         model_name: Optional[str] = None,
         k8s_namespace: Optional[str] = None,
         parent_dgd_name: Optional[str] = None,
+        raise_not_ready: bool = False,
     ):
         self.kube_api = KubernetesAPI(k8s_namespace)
 
@@ -87,6 +89,7 @@ class KubernetesConnector(PlannerConnector):
 
         # For backwards compatibility
         self.graph_deployment_name = self.parent_dgd_name
+        self.raise_not_ready = raise_not_ready
 
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
         """Return the Dynamo namespace used by the current worker generation.
@@ -567,8 +570,18 @@ class KubernetesConnector(PlannerConnector):
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         if not self.kube_api.is_deployment_ready(deployment):
+            if self.raise_not_ready:
+                logger.warning(
+                    "Deployment %s is not ready, rejecting this scaling",
+                    self.graph_deployment_name,
+                )
+                raise DynamoGraphDeploymentNotReadyError(
+                    deployment_name=self.graph_deployment_name,
+                    namespace=getattr(self.kube_api, "current_namespace", None),
+                )
             logger.warning(
-                f"Deployment {self.graph_deployment_name} is not ready, ignoring this scaling"
+                "Deployment %s is not ready, ignoring this scaling",
+                self.graph_deployment_name,
             )
             return
 

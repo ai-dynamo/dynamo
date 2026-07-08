@@ -440,7 +440,10 @@ async def init_llm_worker(
 
     if config.modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
-        model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
+        model_config = AutoConfig.from_pretrained(
+            config.model,
+            trust_remote_code=engine_args.get("trust_remote_code", False),
+        )
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
             model_dir=config.model,

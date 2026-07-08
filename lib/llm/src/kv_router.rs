@@ -307,8 +307,15 @@ where
         if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
-            indexer::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
-                .await?;
+            indexer::start_subscriber(
+                component.clone(),
+                &kv_router_config,
+                indexer.clone(),
+                workers_with_configs.clone(),
+                model_name.clone().unwrap_or_else(|| "unknown".to_string()),
+                worker_type,
+            )
+            .await?;
         } else {
             tracing::info!(
                 "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",
@@ -471,6 +478,7 @@ where
         update_states: bool,
         return_routing_hashes: bool,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         expected_output_tokens: Option<u32>,
@@ -486,6 +494,7 @@ where
             update_states,
             return_routing_hashes,
             lora_name,
+            cache_namespace,
             priority_jump,
             strict_priority,
             None,
@@ -508,6 +517,7 @@ where
         update_states: bool,
         return_routing_hashes: bool,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         policy_class: Option<String>,
@@ -536,6 +546,7 @@ where
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name: lora_name.as_deref(),
+            cache_namespace: cache_namespace.as_deref(),
             is_eagle: Some(self.is_eagle),
         };
 
@@ -570,6 +581,7 @@ where
             tokens,
             self.block_size,
             block_hashes,
+            cache_namespace.as_deref(),
             retain_block_hashes,
         )
         .await?;
@@ -691,6 +703,7 @@ where
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         expected_output_tokens: Option<u32>,
@@ -706,6 +719,7 @@ where
                 update_states,
                 false,
                 lora_name,
+                cache_namespace,
                 priority_jump,
                 strict_priority,
                 expected_output_tokens,
@@ -739,12 +753,14 @@ where
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         router_config_override: Option<&RouterConfigOverride>,
     ) {
         let isl_tokens = tokens.len();
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name: lora_name.as_deref(),
+            cache_namespace: cache_namespace.as_deref(),
             is_eagle: Some(self.is_eagle),
         };
 
@@ -866,9 +882,10 @@ where
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
     ) -> Result<u32, KvRouterError> {
         Ok(self
-            .get_cache_hit_estimate(tokens, block_mm_infos, worker, lora_name)
+            .get_cache_hit_estimate(tokens, block_mm_infos, worker, lora_name, cache_namespace)
             .await?
             .rounded_overlap_blocks())
     }
@@ -879,10 +896,18 @@ where
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
     ) -> Result<WorkerCacheHitEstimate, KvRouterError> {
-        self.get_cache_hit_estimate_with_hashes(tokens, block_mm_infos, worker, lora_name, false)
-            .await
-            .map(|(estimate, _)| estimate)
+        self.get_cache_hit_estimate_with_hashes(
+            tokens,
+            block_mm_infos,
+            worker,
+            lora_name,
+            cache_namespace,
+            false,
+        )
+        .await
+        .map(|(estimate, _)| estimate)
     }
 
     pub(crate) async fn get_cache_hit_estimate_with_hashes(
@@ -891,6 +916,7 @@ where
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         worker: WorkerWithDpRank,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
         return_routing_hashes: bool,
     ) -> Result<(WorkerCacheHitEstimate, Option<RoutingDecisionHashes>), KvRouterError> {
         let block_hashes = compute_block_hash_for_seq(
@@ -899,6 +925,7 @@ where
             BlockHashOptions {
                 block_mm_infos,
                 lora_name,
+                cache_namespace,
                 is_eagle: Some(self.is_eagle),
             },
         );
@@ -925,11 +952,13 @@ where
         router_config_override: Option<&RouterConfigOverride>,
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
     ) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name,
+            cache_namespace,
             is_eagle: Some(self.is_eagle),
         };
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
@@ -966,11 +995,13 @@ where
         router_config_override: Option<&RouterConfigOverride>,
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
         include_shared: bool,
     ) -> Result<OverlapScoresResponse, KvRouterError> {
         let hash_options = BlockHashOptions {
             block_mm_infos,
             lora_name,
+            cache_namespace,
             is_eagle: Some(self.is_eagle),
         };
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
@@ -980,7 +1011,10 @@ where
 
         let (shared_hits, shared_error) = if include_shared {
             if let Some(shared_cache) = self.shared_cache.as_ref() {
-                match shared_cache.check_blocks(tokens, self.block_size).await {
+                match shared_cache
+                    .check_blocks(tokens, self.block_size, cache_namespace)
+                    .await
+                {
                     Ok(hits) => (Some(hits), None),
                     Err(err) => {
                         tracing::warn!(error = %err, "Shared cache overlap query failed");
@@ -1049,6 +1083,7 @@ where
                 priority_jump,
                 strict_priority,
                 lora_name,
+                cache_namespace,
             } => {
                 let request_context = ctx.context();
                 let mut schedule = Box::pin(self.find_best_match_details_with_policy_class(
@@ -1059,6 +1094,7 @@ where
                     true,
                     false,
                     lora_name,
+                    cache_namespace,
                     priority_jump,
                     strict_priority,
                     policy_class,
@@ -1106,6 +1142,7 @@ where
                 tokens,
                 block_mm_infos,
                 lora_name,
+                cache_namespace,
             } => RouterResponse::PotentialLoads {
                 loads: self
                     .get_potential_loads(
@@ -1113,6 +1150,7 @@ where
                         None,
                         block_mm_infos.as_deref(),
                         lora_name.as_deref(),
+                        cache_namespace.as_deref(),
                     )
                     .await?,
                 pending_count: self.pending_count(),
@@ -1222,6 +1260,7 @@ mod tests {
             &self,
             _tokens: &[u32],
             _block_size: u32,
+            _cache_namespace: Option<&str>,
         ) -> Result<dynamo_kv_router::protocols::SharedCacheHits, KvRouterError> {
             if self.should_error {
                 Err(KvRouterError::IndexerOffline)
@@ -1355,6 +1394,7 @@ mod tests {
                 None,
                 false,
                 None,
+                None,
                 0.0,
                 0,
                 None,
@@ -1390,6 +1430,7 @@ mod tests {
                 None,
                 false,
                 None,
+                None,
                 0.0,
                 0,
                 None,
@@ -1414,6 +1455,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
                 None,
                 0.0,
                 0,
@@ -1456,6 +1498,7 @@ mod tests {
                 false,
                 true,
                 None,
+                None,
                 0.0,
                 0,
                 None,
@@ -1479,6 +1522,7 @@ mod tests {
             BlockHashOptions {
                 block_mm_infos: None,
                 lora_name: None,
+                cache_namespace: None,
                 is_eagle: Some(false),
             },
         );
@@ -1507,6 +1551,7 @@ mod tests {
                 None,
                 false,
                 false,
+                None,
                 None,
                 0.0,
                 0,
@@ -1542,7 +1587,7 @@ mod tests {
         .await;
 
         let scores = router
-            .get_overlap_scores(&[11, 12, 21, 22], None, None, None, true)
+            .get_overlap_scores(&[11, 12, 21, 22], None, None, None, None, true)
             .await
             .unwrap();
 

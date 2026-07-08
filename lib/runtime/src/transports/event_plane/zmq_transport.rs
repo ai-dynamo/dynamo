@@ -19,13 +19,22 @@ use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tmq::{
     AsZmqSocket, Context, Multipart, SocketBuilder,
     publish::{Publish, publish},
     subscribe::{Subscribe, subscribe},
 };
 use tokio::sync::{Mutex, broadcast};
+
+/// Returns the process-wide shared ZMQ context.
+///
+/// libzmq spawns background I/O threads per `Context`, so all PUB/SUB sockets
+/// share one. `zmq::Context` is reference-counted; clones drive the same context.
+fn shared_zmq_context() -> Context {
+    static CONTEXT: OnceLock<Context> = OnceLock::new();
+    CONTEXT.get_or_init(Context::new).clone()
+}
 
 /// High Water Mark (HWM) for ZMQ sockets.
 /// This controls the maximum number of messages that can be queued.
@@ -87,7 +96,7 @@ impl ZmqPubTransport {
             endpoint.to_string()
         };
 
-        let ctx = Context::new();
+        let ctx = shared_zmq_context();
         let socket = configure_publish_builder(publish(&ctx)).bind(&actual_endpoint)?;
 
         tracing::info!(
@@ -112,7 +121,7 @@ impl ZmqPubTransport {
 
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
-        let ctx = Context::new();
+        let ctx = shared_zmq_context();
         let socket = configure_publish_builder(publish(&ctx)).connect(xsub_endpoint)?;
 
         tracing::info!(
@@ -135,7 +144,7 @@ impl ZmqPubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = Context::new();
+        let ctx = shared_zmq_context();
         let socket = configure_publish_builder(publish(&ctx)).connect(first_endpoint)?;
 
         for endpoint in endpoints {
@@ -196,7 +205,7 @@ pub struct ZmqSubTransport {
 impl ZmqSubTransport {
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
     pub async fn connect(endpoint: &str, topic: &str) -> Result<Self> {
-        let ctx = Context::new();
+        let ctx = shared_zmq_context();
         let socket = configure_subscribe_builder(subscribe(&ctx))
             .connect(endpoint)?
             .subscribe(topic.as_bytes())?;
@@ -234,7 +243,7 @@ impl ZmqSubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = Context::new();
+        let ctx = shared_zmq_context();
         let socket = configure_subscribe_builder(subscribe(&ctx))
             .connect(first_endpoint)?
             .subscribe(topic.as_bytes())?;

@@ -15,7 +15,7 @@
 #     --build-context dynamo=../../.. \
 #     -t dynamo/dynamo-rust-epp:dev .
 
-ARG RUST_IMAGE=rust:1.93.1
+ARG RUST_IMAGE=rust:1.96.1
 ARG BASE_IMAGE=ubuntu:24.04
 
 # =============================================================================
