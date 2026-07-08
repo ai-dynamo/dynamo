@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::Display;
+use std::{fmt::Display, sync::LazyLock};
+
+use dynamo_runtime::config::{
+    env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+};
 
 //
 // Hyperparameter Contraints
@@ -106,18 +110,33 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "bad_words_token_ids",
 ];
 
+static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS));
+
 /// Validates that no unsupported fields are present in the request.
 ///
 /// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
+/// Other fields may be ignored and dropped when
+/// `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy.
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), anyhow::Error> {
+    validate_no_unsupported_fields_with_ignore(
+        unsupported_fields,
+        *IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+    )
+}
+
+fn validate_no_unsupported_fields_with_ignore(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+    ignore_unsupported_fields: bool,
 ) -> Result<(), anyhow::Error> {
     let unknown: Vec<_> = unsupported_fields
         .keys()
         .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
         .map(|s| format!("`{}`", s))
         .collect();
-    if !unknown.is_empty() {
+    if !unknown.is_empty() && !ignore_unsupported_fields {
         anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
     }
     if let Some(value) = unsupported_fields.get("cache_salt")
@@ -443,6 +462,35 @@ pub fn validate_messages(
     if messages.is_empty() {
         anyhow::bail!("Messages array cannot be empty");
     }
+    // Prior assistant tool-call messages in the request must carry arguments
+    // as a JSON object string; reject bad non-empty shapes before chat-template rendering.
+    // This was caught in MiniMax-M3 multi-turn tool-call tests
+    for (message_index, message) in messages.iter().enumerate() {
+        if let dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(assistant) = message
+            && let Some(tool_calls) = &assistant.tool_calls
+        {
+            for (tool_call_index, tool_call) in tool_calls.iter().enumerate() {
+                validate_json_object_string(
+                    &tool_call.function.arguments,
+                    format!(
+                        "`messages[{message_index}].tool_calls[{tool_call_index}].function.arguments`"
+                    ),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_json_object_string(value: &str, field: String) -> Result<(), anyhow::Error> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
+    let parsed: serde_json::Value = serde_json::from_str(value)
+        .map_err(|error| anyhow::anyhow!("{field} must be a valid JSON object string: {error}"))?;
+    if !parsed.is_object() {
+        anyhow::bail!("{field} must be a valid JSON object string");
+    }
     Ok(())
 }
 
@@ -489,7 +537,48 @@ pub fn validate_tools(
         if tool.function.name.trim().is_empty() {
             anyhow::bail!("Function name at index {} cannot be empty", i);
         }
+        if !tool
+            .function
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            anyhow::bail!(
+                "Function at index {} has an invalid name: \"{}\". \
+                 Only a-z, A-Z, 0-9, underscores, and dashes are allowed.",
+                i,
+                tool.function.name,
+            );
+        }
     }
+    Ok(())
+}
+
+/// Validates that forced tool_choice requests refer to available tools.
+pub fn validate_tool_choice(
+    tool_choice: &Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
+    tools: Option<&[dynamo_protocols::types::ChatCompletionTool]>,
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ChatCompletionToolChoiceOption;
+
+    let tools_empty = tools.is_none_or(|tools| tools.is_empty());
+
+    match tool_choice {
+        Some(ChatCompletionToolChoiceOption::Required) if tools_empty => {
+            anyhow::bail!("tool_choice is \"required\" but tools is empty");
+        }
+        Some(ChatCompletionToolChoiceOption::Named(named)) => {
+            let tools = tools.unwrap_or(&[]);
+            if !tools.iter().any(|t| t.function.name == named.function.name) {
+                anyhow::bail!(
+                    "tool named \"{}\" in tool_choice is not present in tools",
+                    named.function.name
+                );
+            }
+        }
+        _ => {}
+    }
+
     Ok(())
 }
 
@@ -713,4 +802,40 @@ where
         anyhow::bail!("Value {} is out of range [{}, {}]", value, range.0, range.1);
     }
     Ok(Some(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn unknown_fields() -> HashMap<String, serde_json::Value> {
+        HashMap::from([("experimental_field".to_string(), json!("value"))])
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
+        let err = validate_no_unsupported_fields_with_ignore(&unknown_fields(), false).unwrap_err();
+        assert!(err.to_string().contains("Unsupported parameter(s)"));
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_ignores_unknown_fields_when_configured() {
+        validate_no_unsupported_fields_with_ignore(&unknown_fields(), true).unwrap();
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_still_validates_passthrough_fields_when_ignoring_unknowns() {
+        let unsupported_fields = HashMap::from([
+            ("experimental_field".to_string(), json!("value")),
+            ("stop_token_ids".to_string(), json!("bad")),
+        ]);
+
+        let err =
+            validate_no_unsupported_fields_with_ignore(&unsupported_fields, true).unwrap_err();
+        assert!(err.to_string().contains("stop_token_ids"));
+    }
 }

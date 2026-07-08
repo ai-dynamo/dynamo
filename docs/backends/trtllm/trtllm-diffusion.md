@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Video Diffusion Support (Experimental)
+subtitle: Experimental text-to-video and text-to-image diffusion in TensorRT-LLM using the visual_gen module and Diffusers pipelines.
 ---
 
 For general TensorRT-LLM features and configuration, see the [Reference Guide](trtllm-reference-guide.md).
@@ -15,10 +16,12 @@ image generation through `--modality image_diffusion` flag.
 
 - **TensorRT-LLM with visual_gen**: The `visual_gen` module is part of TensorRT-LLM (`tensorrt_llm._torch.visual_gen`). Install TensorRT-LLM following the [official instructions](https://github.com/NVIDIA/TensorRT-LLM#installation).
 - **dynamo-runtime with multimodal API**: The Dynamo runtime must include `ModelType.Videos` or `ModelType.Images` support. Ensure you're using a compatible version.
-- **VIDEO diffusion: imageio with ffmpeg**: Required for encoding generated frames to MP4 video:
+- **VIDEO diffusion: imageio with ffmpeg**: Required for encoding generated frames to MP4 video. The Dynamo TRT-LLM runtime container ships an LGPL-only ffmpeg CLI built with the NVIDIA NVENC H.264 encoder (`h264_nvenc`) and `libvpx_vp9` for WebM, and points `imageio` at it via `IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg` — the GPL-encumbered ffmpeg binary normally shipped inside the `imageio-ffmpeg` PyPI wheel is **not** installed. If you're running outside the container, install the Python wrapper without the bundled binary and point it at your own ffmpeg:
   ```bash
-  pip install imageio[ffmpeg]
+  pip install --no-binary imageio-ffmpeg "imageio[ffmpeg]"
+  export IMAGEIO_FFMPEG_EXE=/path/to/your/ffmpeg
   ```
+  MP4 output requires an NVIDIA GPU at runtime (NVENC is a hardware encoder).
 
 ## Supported Models
 

@@ -102,12 +102,13 @@ async def _check_start_populates_registration_metadata(started_engine):
     and populate ``max_num_seqs`` from ``max-running-requests`` — without
     these values the Rust registration path has no routing signals."""
     _engine, cfg = started_engine
-    assert cfg.kv_cache_block_size and cfg.kv_cache_block_size > 0
+    assert cfg.llm is not None
+    assert cfg.llm.kv_cache_block_size and cfg.llm.kv_cache_block_size > 0
     # total_kv_blocks is derived as ceil(max_total_tokens / page_size).
     # When the engine surfaces max_total_num_tokens, the result must be > 0.
-    if cfg.total_kv_blocks is not None:
-        assert cfg.total_kv_blocks > 0
-    assert cfg.max_num_seqs == 4
+    if cfg.llm.total_kv_blocks is not None:
+        assert cfg.llm.total_kv_blocks > 0
+    assert cfg.llm.max_num_seqs == 4
 
 
 async def _check_runtime_data_includes_worker_group(monkeypatch):

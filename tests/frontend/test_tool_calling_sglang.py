@@ -44,6 +44,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 pytestmark = [
     pytest.mark.sglang,
+    pytest.mark.core,
     pytest.mark.e2e,
     pytest.mark.gpu_1,
     pytest.mark.integration,
@@ -146,11 +147,14 @@ TOPOLOGIES = ("chat_processor_frontend", "rust_parsers")
 class WorkerProcess(ManagedProcess):
     """backend worker for the tool-calling tests."""
 
-    def __init__(self, request, *, system_port: int, topology: str):
+    def __init__(self, request, *, system_port: int, fpm_port: int, topology: str):
         env = os.environ.copy()
         env["DYN_LOG"] = "info"
         env["DYN_SYSTEM_PORT"] = str(system_port)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+        # SGLang publishes FPM over a per-worker ipc:// path; the env var only
+        # enables the feature (the port value is never bound).
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(fpm_port)
 
         command = [
             "python3",
@@ -273,10 +277,12 @@ def tool_calling_services(
     Yields the frontend HTTP port.
     """
     topology: str = request.param
-    frontend_port, system_port = allocate_ports(count=2, start_port=10000)
+    frontend_port, system_port, fpm_port = allocate_ports(count=3, start_port=10000)
 
     try:
-        with WorkerProcess(request, system_port=system_port, topology=topology):
+        with WorkerProcess(
+            request, system_port=system_port, fpm_port=fpm_port, topology=topology
+        ):
             # Allow worker to register with discovery.
             time.sleep(2)
             with ToolCallingFrontendProcess(

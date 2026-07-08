@@ -1,0 +1,211 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# AIPerf raw trace-replay benchmark for Nemotron Ultra DGDs.
+#
+# One Job covers the Ultra DGD variants. To target a specific DGD, edit the
+# env values below and, when running multiple jobs in one namespace, also edit
+# metadata.name and labels.app.
+#
+# Trace policy: raw_direct_no_filter. Do not drop over-context rows, clip OSL,
+# synthesize output lengths, or export HTTP traces. HTTP400/no-content rows are
+# benchmark failure evidence.
+#
+# Results: /opt/models/perf/<epoch>_<job-name>/
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ultra-bench
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: ultra-bench
+    spec:
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: nvidia.com/dynamo-component-type
+                operator: In
+                values:
+                - frontend
+              - key: nvidia.com/dynamo-graph-deployment-name
+                operator: In
+                values:
+                - ultra-agg-b200-chat-mtp
+                - ultra-agg-b200-agentic-mtp
+                - ultra-agg-b200-chat-nomtp
+                - ultra-agg-b200-agentic-nomtp
+                - ultra-agg-h200-chat-mtp
+                - ultra-agg-h200-agentic-mtp
+                - ultra-agg-h200-chat-nomtp
+                - ultra-agg-h200-agentic-nomtp
+                - ultra-disagg-b200-1p1d-agentic-nomtp
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: perf
+        image: python:3.12-slim
+        imagePullPolicy: IfNotPresent
+        workingDir: /workspace
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          ulimit -n 600000
+          apt-get update && apt-get install -y curl jq procps git coreutils && apt-get clean
+          pip install "aiperf==${AIPERF_VERSION}" protobuf "transformers==4.57.3" "tiktoken==0.13.0"
+          sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
+          export COLUMNS=200
+          EPOCH=$(date +%s)
+
+          wait_for_model_ready() {
+            local max_attempts=${WAIT_FOR_MODEL_MAX_ATTEMPTS:-720}
+            local attempt=0
+            echo "Waiting for model '${TARGET_MODEL}' at ${ENDPOINT}/v1/models (max ${max_attempts} attempts) ..."
+            while ! curl -sf "http://${ENDPOINT}/v1/models" | jq -e --arg m "${TARGET_MODEL}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+              attempt=$((attempt + 1))
+              if [ "${attempt}" -ge "${max_attempts}" ]; then
+                echo "ERROR: model '${TARGET_MODEL}' did not become ready after ${max_attempts} attempts."
+                exit 1
+              fi
+              echo "[$(date '+%H:%M:%S')] not ready (attempt ${attempt}/${max_attempts}), sleeping 5s"
+              sleep 5
+            done
+            curl -s "http://${ENDPOINT}/v1/models" | jq .
+          }
+
+          if [ ! -f "${TRACE_FILE}" ]; then
+            echo "ERROR: trace file not found at ${TRACE_FILE}"
+            exit 1
+          fi
+          if [ ! -f "${TOKENIZER_PATH}/tokenizer.json" ]; then
+            echo "ERROR: tokenizer not found at ${TOKENIZER_PATH}/tokenizer.json"
+            exit 1
+          fi
+
+          REQUEST_COUNT=$(wc -l < "${TRACE_FILE}" | tr -d ' ')
+          if [ "${REQUEST_COUNT}" -le 0 ]; then
+            echo "ERROR: trace file is empty: ${TRACE_FILE}"
+            exit 1
+          fi
+
+          wait_for_model_ready
+          ROOT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
+          mkdir -p "${ROOT_DIR}"
+          jq -n \
+            --arg trace_file "${TRACE_FILE}" \
+            --arg request_count "${REQUEST_COUNT}" \
+            --arg concurrency "${CONCURRENCY}" \
+            --arg target_model "${TARGET_MODEL}" \
+            --arg endpoint "http://${ENDPOINT}" \
+            '{
+              trace_file: $trace_file,
+              request_count: ($request_count | tonumber),
+              concurrency: ($concurrency | tonumber),
+              target_model: $target_model,
+              endpoint: $endpoint,
+              context_filtering: false,
+              osl_clipping: false,
+              output_length_substitution: false,
+              export_http_trace: false
+            }' | tee "${ROOT_DIR}/trace_replay_manifest.json"
+
+          echo "=============================================="
+          echo "Trace Replay Benchmark (AIPerf)"
+          echo "=============================================="
+          echo "Endpoint:      http://${ENDPOINT}"
+          echo "Model:         ${TARGET_MODEL}"
+          echo "Trace file:    ${TRACE_FILE}"
+          echo "Request count: ${REQUEST_COUNT}"
+          echo "Concurrency:   ${CONCURRENCY}"
+          echo "Artifact root: ${ROOT_DIR}"
+          echo "=============================================="
+
+          WARMUP_DIR="${ROOT_DIR}/warmup"
+          mkdir -p "${WARMUP_DIR}"
+          aiperf profile \
+            -m "${TARGET_MODEL}" \
+            --tokenizer "${TOKENIZER_PATH}" \
+            --tokenizer-trust-remote-code \
+            --url "http://${ENDPOINT}" \
+            --streaming \
+            --ui simple \
+            --isl 8000 \
+            --osl 1000 \
+            --concurrency 1 \
+            --request-count 5 \
+            --artifact-dir "${WARMUP_DIR}"
+          echo "Warmup complete"
+
+          MODEL_BASE="${TARGET_MODEL##*/}"
+          TS=$(date +'%Y%m%d_%H%M%S')
+          RUN_DIR="${ROOT_DIR}/${MODEL_BASE}_trace_c${CONCURRENCY}_${TS}"
+          mkdir -p "${RUN_DIR}"
+          aiperf profile \
+            -m "${TARGET_MODEL}" \
+            --tokenizer "${TOKENIZER_PATH}" \
+            --tokenizer-trust-remote-code \
+            --input-file "${TRACE_FILE}" \
+            --custom-dataset-type mooncake_trace \
+            --num-requests $(wc -l < "${TRACE_FILE}") \
+            --prompt-input-tokens-block-size 512 \
+            --url "http://${ENDPOINT}" \
+            --streaming \
+            --use-server-token-count \
+            --extra-inputs ignore_eos:true \
+            --concurrency "${CONCURRENCY}" \
+            --random-seed 42 \
+            --ui simple \
+            --artifact-dir "${RUN_DIR}" \
+            --request-timeout-seconds 1200 \
+            --workers-max "${CONCURRENCY}"
+          echo "Concurrency ${CONCURRENCY} complete; artifacts in ${RUN_DIR}"
+          ls -la "${RUN_DIR}" || true
+          echo "Done. Root: ${ROOT_DIR}"
+        env:
+        - name: ENDPOINT
+          value: ultra-agg-b200-chat-mtp-frontend:8000
+        - name: TRACE_FILE
+          value: /opt/models/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
+        - name: CONCURRENCY
+          value: "18"
+        - name: TARGET_MODEL
+          value: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+        - name: TOKENIZER_PATH
+          value: /opt/models/patched/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: "200"
+        - name: AIPERF_VERSION
+          value: "0.10.0"
+        - name: AIPERF_HTTP_SO_RCVTIMEO
+          value: "120"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "3600"
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "3600"
+        - name: JOB_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.labels['job-name']
+        - name: ROOT_ARTIFACT_DIR
+          value: /opt/models/perf
+        - name: HF_HOME
+          value: /opt/models
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /opt/models
+      restartPolicy: Never
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: shared-model-cache

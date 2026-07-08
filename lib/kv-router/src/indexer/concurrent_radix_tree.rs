@@ -12,9 +12,7 @@
 //!
 //! # Limitations vs RadixTree
 //!
-//! - Does NOT support `expiration_duration` / frequency tracking
-//! - `new_with_frequency()` is not provided
-//! - `find_matches` does not populate `OverlapScores.frequencies`
+//! - Does not populate the legacy `OverlapScores.frequencies` field
 //!
 //! # Concurrency Model
 //!
@@ -52,8 +50,6 @@ struct Block {
     workers: FxHashSet<WorkerWithDpRank>,
     /// The external sequence block hash for this block (None for root).
     block_hash: Option<ExternalSequenceBlockHash>,
-    // NOTE: No recent_uses field.
-    // Frequency tracking is not supported - keeps find_matches fully read-only.
 }
 
 impl Block {
@@ -109,9 +105,7 @@ impl CleanableNode for Block {
 ///
 /// # Limitations vs RadixTree
 ///
-/// - Does NOT support `expiration_duration` / frequency tracking
-/// - `new_with_frequency()` is not provided
-/// - `find_matches` does not populate `OverlapScores.frequencies`
+/// - Does not populate the legacy `OverlapScores.frequencies` field
 ///
 /// # Concurrency Model
 ///
@@ -179,7 +173,7 @@ impl ConcurrentRadixTree {
     /// ### Returns
     ///
     /// An `OverlapScores` representing the match scores.
-    /// Note: `frequencies` field will be empty since frequency tracking is not supported.
+    /// The legacy `frequencies` field is empty.
     pub fn find_matches_impl(
         &self,
         sequence: &[LocalBlockHash],
@@ -610,10 +604,12 @@ impl SyncIndexer for ConcurrentRadixTree {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker(worker_id) => {
+                WorkerTask::RemoveWorker { worker_id, .. } => {
                     self.remove_or_clear_worker_blocks(&mut lookup, worker_id, false);
                 }
-                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                WorkerTask::RemoveWorkerDpRank {
+                    worker_id, dp_rank, ..
+                } => {
                     self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
                 }
                 WorkerTask::CleanupStaleChildren => {

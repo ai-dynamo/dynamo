@@ -7,7 +7,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -24,23 +24,32 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
-kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
+kv-indexer = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-indexer"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
+slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
+select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
+aic-forward-pass = ["dynamo-mocker/aic-forward-pass", "dep:aiconfigurator-core"]
 nvtx = ["dynamo-runtime/nvtx"]
-# Enable in-process MM-aware KV routing via the lightseek crate
+# Enable in-process MM-aware KV routing
 # (per-image token-count + placeholder expansion + block-level mm_hash).
-# Opt-in at the wheel build (`maturin build --features lightseek-mm`)
+# Opt-in at the wheel build (`maturin build --features mm-routing`)
 # to keep the default wheel lean. Production containers and the MM
 # recipes pass this flag explicitly; the dev container's
 # `.devcontainer/post-create.sh` also enables it for local workflows.
-lightseek-mm = ["dynamo-llm/lightseek-mm"]
+mm-routing = ["dynamo-llm/mm-routing"]
 
 [dependencies]
+# AIC perf model: pure-Rust hot-path latency engine. Pinned to aiconfigurator
+# main ToT (PRs #1200 Rust core + #1201 KV-cache API). `extension-module` is
+# NOT enabled on aiconfigurator-core (its `default = []`), so this extension's
+# own interpreter is used; build_aic_engine() crosses into Python once at
+# startup while AicEngine::{prefill,decode}_latency_ms() are pure Rust (no GIL)
+# on the predict hot path.
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { path = "../../parsers" }
-dynamo-protocols = { path = "../../protocols" }
+dynamo-parsers = { version = "3.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }
@@ -66,8 +75,8 @@ tracing-opentelemetry = { version = "0.32.0" }
 opentelemetry = { version = "0.31.0", features = ["trace"] }
 uuid = { version = "1.18.1" }
 
-# kv-indexer / shared kv-router types
-dynamo-kv-router = { path = "../../kv-router", features = ["standalone-indexer"] }
+# kv-indexer / slot-tracker / shared kv-router types
+dynamo-kv-router = { path = "../../kv-router" }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
@@ -104,10 +113,3 @@ dynamo-llm = { path = "../../llm", default-features = false }
 inherits = "release"
 debug = true
 strip = false
-
-# Mirror of root Cargo.toml's patch: sub-workspaces don't inherit
-# [patch.crates-io] from the root, so re-declare here. Remove once
-# llm-multimodal >=1.6.0 is published on crates.io.
-[patch.crates-io]
-llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
-llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }

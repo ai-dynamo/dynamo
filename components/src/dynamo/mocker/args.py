@@ -18,6 +18,16 @@ DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 logger = logging.getLogger(__name__)
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be positive, got {parsed}")
+    return parsed
+
+
 def non_negative_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -208,7 +218,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--block-size",
         type=int,
         default=None,
-        help="Token block size for KV cache blocks (default: 64)",
+        help="Token block size for KV cache blocks. When unset, the default "
+        "depends on engine: vLLM 64, SGLang 1, TRTLLM 32.",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=positive_int,
+        default=None,
+        help="Maximum vLLM sequence length, including prompt and generated tokens. "
+        "When omitted, no model-length limit is enforced.",
     )
     parser.add_argument(
         "--max-num-seqs",
@@ -315,6 +333,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "(default: 0.88).",
     )
     parser.add_argument(
+        "--free-gpu-memory-fraction",
+        type=float,
+        default=None,
+        help="Fraction of free GPU memory (after model load) for the KV cache, "
+        "for AIC KV capacity estimation with TRT-LLM (default: 0.9).",
+    )
+    parser.add_argument(
         "--aic-system",
         type=str,
         default=None,
@@ -334,8 +359,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-backend-version",
         type=str,
         default=None,
-        help="AIC backend engine version (e.g., '0.14.0' for vLLM, '0.5.6.post2' for SGLang). "
-        "If not set, uses the default version for the backend.",
+        help="AIC backend engine version (e.g., '0.19.0' for vLLM, '0.5.10' for SGLang, "
+        "'1.3.0rc10' for TRT-LLM). If not set, uses the default version for the backend.",
     )
     parser.add_argument(
         "--aic-tp-size",
@@ -366,6 +391,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Corresponds to the 'dp' dimension in AIC CLI output.",
     )
     parser.add_argument(
+        "--aic-nextn",
+        type=int,
+        default=None,
+        help="[EXPERIMENTAL] Number of MTP draft tokens to sample (1-5).",
+    )
+    parser.add_argument(
+        "--aic-nextn-accept-rates",
+        type=str,
+        default=None,
+        help=(
+            "[EXPERIMENTAL] Comma-separated conditional MTP acceptance rates. "
+            "Entry i is P(draft i accepted | all earlier drafts were accepted)."
+        ),
+    )
+    parser.add_argument(
+        "--aic-mtp-seed",
+        type=int,
+        default=42,
+        help="[EXPERIMENTAL] Base RNG seed for mocker MTP burst sampling.",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=1,
@@ -382,14 +428,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "start_thinking_token_id (u32), end_thinking_token_id (u32), thinking_ratio (0.0-1.0). "
         'Example: \'{"start_thinking_token_id": 123, "end_thinking_token_id": 456, "thinking_ratio": 0.6}\'',
     )
+    parser.add_argument(
+        "--response-replay-trace-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional Mooncake JSONL trace containing output_token_ids for "
+            "output_replay_id annotation lookup."
+        ),
+    )
 
     # Engine type selection
     parser.add_argument(
         "--engine-type",
         type=str,
         default="vllm",
-        choices=["vllm", "sglang"],
-        help="Engine simulation type: 'vllm' (default) or 'sglang'.",
+        choices=["vllm", "sglang", "trtllm"],
+        help="Engine simulation type: 'vllm' (default), 'sglang', or 'trtllm'.",
     )
 
     # SGLang-specific configuration
@@ -429,6 +484,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=None,
         help="SGLang schedule conservativeness factor 0.0-1.0 (default: 1.0).",
+    )
+
+    # TensorRT-LLM-specific configuration
+    parser.add_argument(
+        "--trtllm-capacity-scheduler-policy",
+        type=str,
+        default=None,
+        choices=["guaranteed_no_evict"],
+        help="TRT-LLM capacity scheduler policy. v1 supports only "
+        "'guaranteed_no_evict' (default).",
     )
 
     # Legacy support - allow direct JSON file specification
@@ -506,6 +571,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "For intra-node NVLink, typical value is ~450.",
     )
     parser.add_argument(
+        "--kv-transfer-timing-mode",
+        choices=("full_prompt", "destination_missing"),
+        default="full_prompt",
+        help="Physical KV footprint used for coordinated disaggregated transfer timing.",
+    )
+    parser.add_argument(
         "--kv-cache-dtype",
         type=str,
         default="auto",
@@ -543,6 +614,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Set to 0 to disable.",
     )
     parser.add_argument(
+        "--enable-g4-storage",
+        action="store_true",
+        default=False,
+        help="Enable shared KVBM mock G4 object-storage simulation.",
+    )
+    parser.add_argument(
         "--offload-batch-size",
         type=non_negative_int,
         default=None,
@@ -571,6 +648,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=non_negative_float,
         default=None,
         help="Mock shared G3->G2 staging bandwidth in GB/s.",
+    )
+    parser.add_argument(
+        "--bandwidth-g2-to-g4-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock shared G2->G4 object offload bandwidth in GB/s.",
+    )
+    parser.add_argument(
+        "--bandwidth-g4-to-g2-gbps",
+        type=non_negative_float,
+        default=None,
+        help="Mock shared G4->G2 object staging bandwidth in GB/s.",
     )
 
     parser.add_argument(

@@ -25,9 +25,6 @@ from dynamo.planner.monitoring.worker_info import (
 
 logger = logging.getLogger(__name__)
 
-# ModelType::Prefill bit in ModelDeploymentCard::model_type (bitflags: 1 << 4).
-_MODEL_TYPE_PREFILL_BIT = 0x10
-
 
 @dataclass
 class MdcEntry:
@@ -64,19 +61,13 @@ def is_model_card(wrapper: dict) -> bool:
 def is_prefill_card(card_json: dict) -> bool:
     """Whether a card_json belongs to a prefill worker.
 
-    ``model_type`` can be serialized three ways depending on the producer:
-    an integer bitflag, a serde-bitflags dict with a ``bits`` key, or a
-    human-readable string (e.g. ``"Prefill"`` / ``"Chat|Completions"``).
+    The prefill role is carried on the card's ``worker_type`` field
+    (serialized as the lowercase string ``"prefill"``).
     """
-    model_type: Any = card_json.get("model_type", 0)
-    if isinstance(model_type, str):
-        return "prefill" in model_type.lower()
-    if isinstance(model_type, dict):
-        model_type = model_type.get("bits", 0)
-    try:
-        return bool(int(model_type) & _MODEL_TYPE_PREFILL_BIT)
-    except (TypeError, ValueError):
-        return False
+    worker_type: Any = card_json.get("worker_type")
+    if isinstance(worker_type, str):
+        return worker_type.lower() == "prefill"
+    return False
 
 
 def select_entry(
@@ -100,6 +91,22 @@ def select_entry(
             continue
         return entry
     return None
+
+
+def _parse_speculative_nextn(runtime_cfg: dict) -> Optional[int]:
+    runtime_data = runtime_cfg.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return None
+
+    spec_decode = runtime_data.get("spec_decode")
+    if not isinstance(spec_decode, dict):
+        return None
+
+    try:
+        nextn = int(spec_decode.get("nextn", 0))
+    except (TypeError, ValueError):
+        return None
+    return nextn if nextn > 0 else None
 
 
 def worker_info_from_mdc(
@@ -134,6 +141,9 @@ def worker_info_from_mdc(
             model_name = None
 
     k8s_name = k8s_name_override if k8s_name_override is not None else defaults.k8s_name
+    context_length = runtime_cfg.get("context_length")
+    if context_length is None:
+        context_length = card.get("architectural_max_context_length")
 
     return WorkerInfo(
         k8s_name=k8s_name,
@@ -144,5 +154,6 @@ def worker_info_from_mdc(
         kv_cache_block_size=card.get("kv_cache_block_size"),
         max_num_seqs=runtime_cfg.get("max_num_seqs"),
         max_num_batched_tokens=runtime_cfg.get("max_num_batched_tokens"),
-        context_length=card.get("context_length"),
+        context_length=context_length,
+        speculative_nextn=_parse_speculative_nextn(runtime_cfg),
     )

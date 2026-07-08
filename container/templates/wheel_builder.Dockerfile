@@ -33,6 +33,11 @@ ARG CARGO_BUILD_JOBS
 ARG DEVICE
 
 WORKDIR /workspace
+
+# Compliance: always create the rust license-harvest dir so the licenses stage's
+# `COPY --from=wheel_builder /opt/dynamo/rust-licenses` never fails, even for
+# targets that build no wheels. runtime_wheel_builder populates it post-build.
+RUN mkdir -p /opt/dynamo/rust-licenses
 {% if device == "xpu" or device == "cpu" %}
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
@@ -116,10 +121,13 @@ RUN apt-get update -y \
 {% if device == "cuda" %}
 # Install system dependencies
 # Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
+# --setopt=tsflags=nocontexts: skip SELinux file-context labeling. The manylinux
+# image lacks the SELinux policy store that some compute nodes expect; without
+# this flag, dnf fails with "ValueError: SELinux policy is not managed".
 RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
-    dnf install -y almalinux-release-synergy && \
+    dnf install -y --setopt=tsflags=nocontexts almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
-    dnf install -y \
+    dnf install -y --setopt=tsflags=nocontexts \
         # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
         autoconf \
         automake \
@@ -212,10 +220,12 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 # Cache uv downloads; uv handles its own locking for this cache.
+# pyyaml: needed by the compliance NOTICES-bundling steps below (overrides.py
+# imports yaml at module scope); the system python3 doesn't ship it.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
 
@@ -247,14 +257,48 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
         /tmp/use-sccache.sh install; \
     fi
 
+# Compliance: native source archives drop here. RUN git clone / wget …tar lines
+# in the wheel_builder pipeline preserve their resulting archive at
+# /tmp/native-sources/<name>-<version>.tar.gz so the per-image `sources_collect`
+# stage can COPY them out for OSRB submission. Created here unconditionally
+# (cheap) so the COPY always succeeds even when no native source builds run
+# for this framework.
+RUN mkdir -p /tmp/native-sources
+
+# Compliance source-archival pattern (do NOT add ARG ENABLE_SOURCE_ARCHIVAL
+# at this scope — it would invalidate every downstream layer when the flag
+# flips between PR builds and post-merge builds).
+#
+# When future work adds cargo-vendor / go-mod-vendor / native source-tree
+# preservation, declare the ARG INLINE in the smallest possible scope,
+# immediately before the gated RUN, e.g.:
+#
+#     ARG ENABLE_SOURCE_ARCHIVAL=false
+#     RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+#           cargo vendor --locked --manifest-path /opt/dynamo/Cargo.toml \
+#               /tmp/native-sources/rust-vendor; \
+#         fi
+#
+# This way the cache invalidation is contained to one RUN layer (the gated
+# one), not the rest of wheel_builder_base. shared-build-image.yml passes
+# ENABLE_SOURCE_ARCHIVAL=true via extra_build_args on push / release /
+# workflow_dispatch events; PR builds get the default "false" and skip.
+
 # Set SCCACHE environment variables (RUSTC_WRAPPER is set dynamically by
 # setup-env only when the sccache server starts successfully)
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Always build FFmpeg so libs are available for Rust checks in CI
-# Do not delete the source tarball for legal reasons
+# Always build FFmpeg so libs are available for Rust checks in CI.
+# We also build the ffmpeg CLI with h264_nvenc + libvpx_vp9 encoders so Python
+# code can encode video without the GPL-licensed binary shipped by imageio-ffmpeg.
+# Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
+# NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
+# GPU images) and VP9 from libvpx (BSD).
+# Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
+ARG NV_CODEC_HEADERS_REF
+ARG LIBVPX_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
@@ -263,11 +307,26 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     if [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
-    apt-get update -y && apt-get install -y build-essential pkg-config xz-utils; \
+    apt-get update -y && apt-get install -y build-essential pkg-config xz-utils git yasm; \
     apt-get clean && rm -rf /var/lib/apt/lists/*; \
     elif [ "$DEVICE" = "cuda" ]; then \
-    dnf install -y pkg-config xz; \
+    dnf install -y --setopt=tsflags=nocontexts pkg-config xz git yasm; \
     fi && \
+    # nv-codec-headers: provides the NVENC/NVDEC API headers ffmpeg compiles against.
+    # Header-only, no runtime dep here; libcuda/libnvidia-encode are loaded at runtime
+    # in the consuming container.
+    cd /tmp && \
+    git clone --depth 1 --branch ${NV_CODEC_HEADERS_REF} https://github.com/FFmpeg/nv-codec-headers.git && \
+    make -C nv-codec-headers PREFIX=/usr/local install && \
+    # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
+    # source so we don't need to track distro package names (libvpx-dev on Debian
+    # vs libvpx-devel via EPEL on RHEL/manylinux).
+    git clone --depth 1 --branch ${LIBVPX_REF} https://chromium.googlesource.com/webm/libvpx.git && \
+    cd libvpx && \
+    ./configure --prefix=/usr/local --enable-shared --disable-static --disable-examples --disable-unit-tests --disable-tools --disable-docs && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
     cd /tmp && \
     curl --retry 5 --retry-delay 3 -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
@@ -276,17 +335,21 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --prefix=/usr/local \
         --disable-gpl \
         --disable-nonfree \
-        --disable-programs \
         --disable-doc \
         --disable-static \
         --disable-x86asm \
         --disable-network \
-        --disable-encoders \
-        --disable-muxers \
         --disable-bsfs \
         --disable-devices \
         --disable-libdrm \
-        --enable-shared && \
+        --enable-shared \
+        --enable-nvenc \
+        --enable-libvpx \
+        --disable-encoders \
+        --enable-encoder=h264_nvenc,libvpx_vp9 \
+        --disable-muxers \
+        --enable-muxer=mov,mp4,matroska,webm \
+        --enable-protocol=file,pipe && \
     make -j$(nproc) && \
     make install && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
@@ -362,6 +425,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
      ldconfig
 
 {% if device == "cuda" %}
+ARG NIXL_LIBFABRIC_REPO
 ARG NIXL_LIBFABRIC_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -371,7 +435,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone https://github.com/ofiwg/libfabric.git && \
+    git clone "${NIXL_LIBFABRIC_REPO}" && \
     cd libfabric && \
     git checkout $NIXL_LIBFABRIC_REF && \
     ./autogen.sh && \
@@ -391,11 +455,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
     echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
     ldconfig
+
+ENV PKG_CONFIG_PATH="/usr/local/libfabric/lib/pkgconfig:${PKG_CONFIG_PATH}"
 {% endif %}
 
 {% if framework == "vllm" and device == "cuda" %}
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
-ARG AWS_SDK_CPP_VERSION=1.11.760
+ARG AWS_SDK_CPP_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
@@ -456,11 +522,69 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     else \
-        maturin build --release --features "kv-indexer,lightseek-mm" --out /opt/dynamo/dist; \
+        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+
+# Compliance: harvest each crate's real LICENSE files from the cargo registry
+# source cache so the rust NOTICES generator can inline upstream license text
+# (the runtime image keeps only the compiled wheel). Keyed "<name>-<version>"
+# to match generators/rust.py. Best-effort: unreadable/absent files are skipped
+# and the generator falls back to canonical SPDX text. cargo's registry lives
+# under CARGO_HOME and/or the cache-mounted /root/.cargo — scan both.
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
+        [ -d "$src" ] || continue; \
+        find "$src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do \
+            dest="/opt/dynamo/rust-licenses/$(basename "$crate")"; \
+            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
+                [ -e "$lf" ] || continue; \
+                mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+            done; \
+        done; \
+    done; \
+    echo "rust license harvest: $(find /opt/dynamo/rust-licenses -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l) crates with license files"; \
+    true
+
+# Compliance: bundle the human-readable third-party Rust NOTICES into the
+# maturin wheels themselves (PEP 639 <dist-info>/licenses/), using the harvested
+# crate license texts. The wheel already carries maturin's CycloneDX SBOM (the
+# machine-readable inventory); this adds the texts the redistributed wheel's
+# MIT/BSD/Apache attribution clauses require. Best-effort + non-fatal: a failure
+# leaves the wheel with its SBOM intact rather than breaking the build.
+# Must run with the build venv's python: bundle_wheel_notices imports
+# compliance.overrides, which needs pyyaml (installed in the venv above);
+# the bare system python3 lacks it and the step would no-op with a warning.
+COPY container/compliance /opt/compliance
+RUN set -u; injected=0; \
+    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl; do \
+        [ -e "$whl" ] || continue; \
+        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
+            --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
+            && injected=$((injected+1)) || echo "::warning::wheel NOTICES bundling failed for $whl (SBOM retained)"; \
+    done; \
+    echo "wheel NOTICES bundled into $injected wheel(s)"
+
+# Compliance source archival: vendor the workspace lockfile for the OSRB
+# bundle. Gated on ENABLE_SOURCE_ARCHIVAL so PR builds skip the ~200-400 MB
+# vendor pull. The vendor tree is consumed downstream by each runtime
+# template's sources_collect stage, which filters against the installed
+# wheels' embedded SBOMs to keep only the third-party crates we actually
+# ship. Stay scoped to one RUN layer (cache invalidation contained).
+ARG ENABLE_SOURCE_ARCHIVAL=false
+# Mount cargo registry + git caches so re-runs don't re-download the
+# ~750 crates from crates.io every build. `sharing=shared` lets parallel
+# builds (e.g. multiple frameworks in CI) read the same cache concurrently.
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        mkdir -p /tmp/dynamo-vendor-full && \
+        cd /opt/dynamo && \
+        cargo vendor --locked /tmp/dynamo-vendor-full > /dev/null && \
+        cp Cargo.toml Cargo.lock /tmp/dynamo-vendor-full/ ; \
+    fi
 
 {% else %}
 # Dev/local-dev targets do not have pre-built wheels or /workspace source code.
@@ -494,10 +618,12 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
 ##################################
 ##### wheel_builder ##############
 ##################################
-{% if "nixl_ref" in context[framework] %}
+{% if "nixl_ref" in context[framework] or device == "xpu" %}
 # Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
 # consolidates all wheels.
 # Runtime templates COPY from this stage.
+# Note: XPU triggers this path even when the framework section lacks nixl_ref,
+# because no upstream XPU runtime image ships pre-built NIXL.
 
 FROM wheel_builder_base AS wheel_builder
 
@@ -567,6 +693,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
+{% if not (framework == "sglang" and device == "cuda" and target in ("runtime", "dev", "local-dev")) %}
 # Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -580,6 +707,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     cd /workspace/nixl && \
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 # Copy source code (order matters for layer caching)
@@ -628,10 +756,36 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 # Consolidate all wheels from the runtime wheel builder stage
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
 
+# Compliance: bundle third-party Rust NOTICES into the kvbm wheel built in this
+# stage (the ai-dynamo-runtime wheel was already bundled in runtime_wheel_builder
+# and arrives consolidated above). Harvest kvbm's crate licenses from the cargo
+# registry, then inject into its auditwheel-repaired wheel. Best-effort/non-fatal.
+# Venv python required: compliance.overrides needs pyyaml, absent from the
+# system python3 (see the runtime_wheel_builder bundling step).
+COPY container/compliance /opt/compliance
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    set -u; \
+    for src in "${CARGO_HOME}/registry/src" /root/.cargo/registry/src; do \
+        [ -d "$src" ] || continue; \
+        find "$src" -mindepth 2 -maxdepth 2 -type d | while IFS= read -r crate; do \
+            dest="/opt/dynamo/rust-licenses/$(basename "$crate")"; \
+            for lf in "$crate"/LICENSE* "$crate"/LICENCE* "$crate"/COPYING* "$crate"/NOTICE* "$crate"/UNLICENSE*; do \
+                [ -e "$lf" ] || continue; mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+            done; \
+        done; \
+    done; \
+    for whl in /opt/dynamo/dist/kvbm*.whl; do \
+        [ -e "$whl" ] || continue; \
+        PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
+            --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \
+            || echo "::warning::kvbm wheel NOTICES bundling failed (SBOM retained)"; \
+    done; \
+    echo "kvbm wheel NOTICES step done"
+
 {% else %}
-# SGLang uses NIXL from the upstream lmsysorg/sglang runtime image and does not
-# build Dynamo KVBM. Keep this alias so downstream stages can still COPY Dynamo
-# wheels and build tools from a common wheel_builder stage name.
+# SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and
+# does not build Dynamo KVBM. Keep this alias so downstream stages can still
+# COPY Dynamo wheels and build tools from a common wheel_builder stage name.
 # SGLang dev/source builds may link nixl-sys against stubs when native NIXL is
 # absent; block-manager/KVBM runtime work should use vllm/trtllm/none images.
 FROM runtime_wheel_builder AS wheel_builder

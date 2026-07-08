@@ -13,8 +13,10 @@ from tests.utils.payloads import (
     ChatPayloadWithLogprobs,
     CompletionPayload,
     CompletionPayloadWithLogprobs,
+    ElasticEPScalePayload,
     EmbeddingPayload,
     GuidedDecodingChatPayload,
+    ImagesPayload,
     KvEventMetricsPayload,
     LMCacheMetricsPayload,
     MetricsPayload,
@@ -543,6 +545,49 @@ def make_completions_health_check(port: int, model: str):
     return _check_completions_endpoint
 
 
+def images_payload_default(
+    repeat_count: int = 1,
+    timeout: int = 60,
+) -> ImagesPayload:
+    """Default image-generation request for the raw-media (DiffusionEngine)
+    path. The sample diffusion engine returns a fixed 1x1 PNG whose base64
+    begins with the PNG signature ``iVBOR`` — the validation anchor."""
+    return ImagesPayload(
+        body={
+            "prompt": "a red balloon over green hills",
+            "n": 1,
+            "response_format": "b64_json",
+        },
+        expected_response=["iVBOR"],
+        expected_log=[],
+        repeat_count=repeat_count,
+        timeout=timeout,
+    )
+
+
+def make_images_health_check(port: int, model: str):
+    def _check_images_endpoint(remaining_timeout: float = 30.0) -> bool:
+        payload = images_payload_default(repeat_count=1).with_model(model)
+        payload.expected_response = []
+        payload.port = port
+        try:
+            resp = send_request(
+                payload.url(),
+                payload.body,
+                timeout=min(max(1.0, remaining_timeout), 5.0),
+                method=payload.method,
+                log_level=10,
+            )
+            out = payload.response_handler(resp)
+            if not out:
+                raise ValueError("")
+            return True
+        except Exception:
+            return False
+
+    return _check_images_endpoint
+
+
 def chat_payload_with_logprobs(
     content: Union[str, List[Dict[str, Any]]] = TEXT_PROMPT,
     repeat_count: int = 1,
@@ -722,4 +767,28 @@ def anthropic_messages_stream_payload_default(
         expected_log=expected_log or [],
         expected_response=expected_response
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def elastic_ep_scale_payload(
+    new_data_parallel_size: int,
+    content: str = TEXT_PROMPT,
+    max_tokens: int = 64,
+    expected_response: Optional[List[str]] = None,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    timeout: int = 300,
+) -> ElasticEPScalePayload:
+    """Scale the live data-parallel size, then verify a chat still completes."""
+    return ElasticEPScalePayload(
+        body={
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        new_data_parallel_size=new_data_parallel_size,
+        system_port=system_port,
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+        timeout=timeout,
     )

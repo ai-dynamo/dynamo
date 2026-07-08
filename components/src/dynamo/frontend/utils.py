@@ -3,11 +3,57 @@
 
 """Shared utilities for frontend chat processors (vLLM, SGLang)."""
 
+import json
 import logging
+import os
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 _MASK_64_BITS = (1 << 64) - 1
+
+
+ChatProcessorBackend = Literal["vllm", "sglang"]
+
+
+def read_jinja_chat_template(
+    template_path: str,
+    *,
+    backend: ChatProcessorBackend,
+) -> str:
+    """Read a Jinja chat template using backend-specific file semantics."""
+    with open(template_path, encoding="utf-8") as f:
+        chat_template = f.read()
+    if backend == "sglang":
+        # Match SGLang TemplateManager._load_jinja_template() for SGLang
+        # frontend preprocessing while leaving vLLM's plain file read intact.
+        return chat_template.strip("\n").replace("\\n", "\n")
+    return chat_template
+
+
+def resolve_chat_template(
+    source_path: str,
+    *,
+    backend: ChatProcessorBackend = "vllm",
+) -> str | None:
+    """Return a chat template stored beside the model, or None.
+
+    Covers models (e.g. Qwen3-Omni) whose template lives in chat_template.json
+    or chat_template.jinja rather than tokenizer_config.json, which the HF
+    tokenizer does not merge. The backend selects native .jinja file semantics.
+    """
+    jinja_path = os.path.join(source_path, "chat_template.jinja")
+    if os.path.exists(jinja_path):
+        return read_jinja_chat_template(jinja_path, backend=backend)
+
+    json_path = os.path.join(source_path, "chat_template.json")
+    if os.path.exists(json_path):
+        with open(json_path, encoding="utf-8") as f:
+            try:
+                return json.load(f).get("chat_template")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Malformed JSON in {json_path}: {e}") from e
+
+    return None
 
 
 def random_uuid() -> str:

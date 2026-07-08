@@ -49,11 +49,32 @@ from dynamo.profiler.utils.profile_common import (
     get_profiling_job_tolerations,
     inject_tolerations_into_dgd,
     pick_decode_component,
+    resolve_model_path,
 )
 from dynamo.profiler.utils.profile_decode import get_num_request_range
 from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_candidate_model_identity(
+    candidates,
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    model_cache: ModelCacheSpec,
+    config_modifier,
+) -> None:
+    """Keep the DGDR model name separate from its PVC runtime path."""
+    if not model_cache.pvcName or not model_cache.pvcModelPath:
+        return
+
+    for candidate in candidates:
+        candidate.dgd_config = config_modifier.update_model_from_pvc(
+            candidate.dgd_config,
+            model_name=dgdr.model,
+            pvc_name=model_cache.pvcName,
+            pvc_mount_path=model_cache.pvcMountPath,
+            pvc_path=model_cache.pvcModelPath,
+        )
 
 
 async def _benchmark_prefill_candidates(
@@ -371,8 +392,9 @@ async def run_thorough(
 
     # --- Stage 1: Enumeration ---
     model_cache = dgdr.modelCache or ModelCacheSpec()
+    local_or_hf_model = resolve_model_path(dgdr)
     enumerated = enumerate_profiling_configs(
-        model_path=model,
+        model_path=local_or_hf_model,
         system=system,
         backend=backend,
         image=derive_backend_image(dgdr.image, backend),
@@ -407,6 +429,30 @@ async def run_thorough(
             len(decode_candidates),
         )
 
+    config_modifier = CONFIG_MODIFIERS[backend]
+    _normalize_candidate_model_identity(
+        prefill_candidates, dgdr, model_cache, config_modifier
+    )
+    _normalize_candidate_model_identity(
+        decode_candidates, dgdr, model_cache, config_modifier
+    )
+    if backend == "vllm" and hasattr(
+        config_modifier, "apply_model_runtime_constraints"
+    ):
+        for candidate in prefill_candidates:
+            candidate.dgd_config = config_modifier.apply_model_runtime_constraints(
+                candidate.dgd_config, local_or_hf_model
+            )
+        for candidate in decode_candidates:
+            candidate.dgd_config = config_modifier.apply_model_runtime_constraints(
+                candidate.dgd_config, local_or_hf_model
+            )
+        logger.info(
+            "Applied vLLM model runtime constraints to %d prefill + %d decode candidates.",
+            len(prefill_candidates),
+            len(decode_candidates),
+        )
+
     # Propagate profiling-job tolerations to candidate DGDs
     job_tolerations = get_profiling_job_tolerations(dgdr)
     if job_tolerations:
@@ -424,8 +470,6 @@ async def run_thorough(
             len(prefill_candidates),
             len(decode_candidates),
         )
-
-    config_modifier = CONFIG_MODIFIERS[backend]
 
     # --- Stage 2: Benchmarking ---
     ops.current_phase = ProfilingPhase.SweepingPrefill
@@ -499,7 +543,7 @@ async def run_thorough(
     # --- Stage 4: DGD generation ---
     task = TaskConfig(
         serving_mode="disagg",
-        model_path=model,
+        model_path=local_or_hf_model,
         system_name=system,
         backend_name=backend,
         total_gpus=total_gpus,
@@ -510,7 +554,7 @@ async def run_thorough(
         request_latency=request_latency,
     )
     dgd_config = _generate_dgd_from_pick(
-        dgdr, best_config_df, "disagg", {"disagg": task}
+        dgdr, best_config_df, "disagg", {"disagg": task}, picking_mode
     )
 
     return {

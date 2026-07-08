@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 
 use super::{
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
-    WorkerLookupStats, WorkerTask,
+    WorkerLookupStats, WorkerTask, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -47,9 +47,17 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
     /// Shared backend - thread-safe via internal locking.
     backend: Arc<T>,
 
-    /// Maps WorkerId to worker thread index for sticky routing.
+    /// Maps WorkerId to worker thread index for indexer-lifetime sticky routing.
+    ///
+    /// This is not a live-worker registry: entries intentionally remain for the
+    /// indexer's lifetime. Producers read this assignment before enqueueing, so
+    /// removing an entry without a generation-aware handoff could let later work
+    /// overtake tasks already queued on the old thread.
     worker_assignments: Arc<DashMap<WorkerId, usize, FxBuildHasher>>,
-    /// Counter for round-robin assignment of new WorkerIds.
+    /// Monotonic round-robin reservation sequence for new WorkerIds.
+    ///
+    /// This is not an active-worker count: cold removals also reserve a slot so
+    /// the removal sweep and any subsequent restore share one FIFO.
     worker_assignment_count: Arc<AtomicUsize>,
 
     /// Channels to send tasks to worker threads (one per thread).
@@ -149,7 +157,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let worker_assignments = Arc::new(DashMap::with_hasher(FxBuildHasher));
         let worker_assignment_count = Arc::new(AtomicUsize::new(0));
         let synthetic_event_id = Arc::new(AtomicU64::new(0));
-        for _ in 0..num_workers {
+        for worker_idx in 0..num_workers {
             let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
             worker_event_senders.push(event_sender);
 
@@ -157,7 +165,28 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             let metrics = metrics.clone();
 
             let handle = std::thread::spawn(move || {
-                backend.worker(event_receiver, metrics).unwrap();
+                // This is observability, not recovery: if the worker panics, log
+                // through tracing and then preserve the panic for join().
+                let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Err(error) = backend.worker(event_receiver, metrics) {
+                        tracing::error!(
+                            worker_thread_index = worker_idx,
+                            ?error,
+                            "Thread pool worker exited with an error; worker thread is now dead"
+                        );
+                    }
+                }));
+
+                if let Err(panic_payload) = panic_result {
+                    let panic_msg = panic_payload_message(&*panic_payload);
+                    tracing::error!(
+                        target: "dynamo_kv_router::thread_pool_worker_panic",
+                        worker_thread_index = worker_idx,
+                        panic_message = %panic_msg,
+                        "Thread pool worker panicked; worker thread is now dead"
+                    );
+                    std::panic::resume_unwind(panic_payload);
+                }
             });
             thread_handles.push(handle);
         }
@@ -285,6 +314,29 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             let idx = worker_assignment_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             idx % num_workers
         })
+    }
+
+    fn enqueue_worker_removal(&self, worker_id: WorkerId, task: WorkerTask) {
+        // All mutations for one WorkerId use this indexer-lifetime assignment,
+        // so the removal and any subsequent restore share one FIFO.
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker_id,
+            self.num_workers,
+        );
+
+        if let Err(error) = self.worker_event_channels[thread_idx].send(task) {
+            tracing::error!(
+                worker_id,
+                worker_thread_index = thread_idx,
+                ?error,
+                "Failed to send worker removal task"
+            );
+            return;
+        }
+
+        self.maybe_enqueue_cleanup(thread_idx);
     }
 
     fn next_synthetic_event_id(synthetic_event_id: &AtomicU64) -> u64 {
@@ -441,6 +493,15 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         local_hashes: &[LocalBlockHash],
         sequence_hashes: &[SequenceHash],
     ) -> Result<(), KvRouterError> {
+        if local_hashes.len() != sequence_hashes.len() {
+            tracing::warn!(
+                local_len = local_hashes.len(),
+                sequence_len = sequence_hashes.len(),
+                "Mismatched routing-decision hash lengths"
+            );
+            return Err(KvRouterError::IndexerDroppedRequest);
+        }
+
         let Some(prune_manager) = &self.prune_manager else {
             // Approximate routing decisions are only recorded when explicitly enabled.
             return Ok(());
@@ -481,6 +542,16 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
         self.record_routing_decision_hashes(worker, &local_hashes, &sequence_hashes)
+            .await
+    }
+
+    pub async fn process_routing_decision_hash_slices(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: &[LocalBlockHash],
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<(), KvRouterError> {
+        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
             .await
     }
 }
@@ -571,32 +642,13 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             prune_manager.remove_worker(worker_id);
         }
 
-        // Route to the worker's assigned thread (if any), otherwise broadcast
-        // to all threads since dp_ranks may be spread across threads.
-        let thread_idx = self.worker_assignments.get(&worker_id).map(|v| *v);
-        match thread_idx {
-            Some(idx) => {
-                if let Err(e) =
-                    self.worker_event_channels[idx].send(WorkerTask::RemoveWorker(worker_id))
-                {
-                    tracing::error!(
-                        "Failed to send RemoveWorker to worker thread {}: {:?}",
-                        idx,
-                        e
-                    );
-                    return;
-                }
-
-                self.maybe_enqueue_cleanup(idx);
-            }
-            None => {
-                // Worker was never assigned a thread - broadcast to all
-                for channel in &self.worker_event_channels {
-                    let _ = channel.send(WorkerTask::RemoveWorker(worker_id));
-                }
-                self.maybe_enqueue_cleanup(0);
-            }
-        }
+        self.enqueue_worker_removal(
+            worker_id,
+            WorkerTask::RemoveWorker {
+                worker_id,
+                sweep_tree: true,
+            },
+        );
     }
 
     async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
@@ -604,12 +656,14 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }
 
-        // Broadcast to all threads — the dp_rank may be on any thread.
-        // Don't remove from worker_assignments since other dp_ranks may still exist.
-        for channel in &self.worker_event_channels {
-            let _ = channel.send(WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank));
-        }
-        self.maybe_enqueue_cleanup(0);
+        self.enqueue_worker_removal(
+            worker_id,
+            WorkerTask::RemoveWorkerDpRank {
+                worker_id,
+                dp_rank,
+                sweep_tree: true,
+            },
+        );
     }
 
     fn shutdown(&self) {
@@ -748,5 +802,56 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
 
     fn node_edge_lengths(&self) -> Vec<usize> {
         self.backend.node_edge_lengths()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ConcurrentRadixTreeCompressed,
+        test_utils::{assert_score, make_store_event},
+    };
+
+    fn assigned_thread(
+        indexer: &ThreadPoolIndexer<ConcurrentRadixTreeCompressed>,
+        worker_id: WorkerId,
+    ) -> Option<usize> {
+        indexer
+            .worker_assignments
+            .get(&worker_id)
+            .map(|entry| *entry)
+    }
+
+    enum ColdRemoval {
+        Worker,
+        DpRank,
+    }
+
+    async fn assert_cold_remove_reserves_sticky_queue(removal: ColdRemoval) {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        indexer.apply_event(make_store_event(1, &[1])).await;
+        assert_eq!(assigned_thread(&indexer, 1), Some(0));
+
+        match removal {
+            ColdRemoval::Worker => indexer.remove_worker(2).await,
+            ColdRemoval::DpRank => indexer.remove_worker_dp_rank(2, 0).await,
+        }
+
+        assert_eq!(assigned_thread(&indexer, 2), Some(1));
+        indexer.apply_event(make_store_event(2, &[2])).await;
+        indexer.flush().await;
+        assert_eq!(assigned_thread(&indexer, 2), Some(1));
+        assert_score(&indexer, &[2], WorkerWithDpRank::new(2, 0), 1).await;
+    }
+
+    #[tokio::test]
+    async fn cold_worker_remove_reserves_sticky_queue() {
+        assert_cold_remove_reserves_sticky_queue(ColdRemoval::Worker).await;
+    }
+
+    #[tokio::test]
+    async fn cold_rank_remove_reserves_sticky_queue() {
+        assert_cold_remove_reserves_sticky_queue(ColdRemoval::DpRank).await;
     }
 }

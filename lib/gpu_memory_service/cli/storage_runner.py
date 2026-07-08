@@ -25,10 +25,7 @@ import logging
 import sys
 
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
-from gpu_memory_service.snapshot.transfer import (
-    DEFAULT_TRANSFER_BACKEND,
-    TRANSFER_BACKEND_CHOICES,
-)
+from gpu_memory_service.snapshot.transfer import TransferBackendKind
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,10 +51,6 @@ def _resolve_socket(device: int, socket_path) -> str:
     from gpu_memory_service.common.utils import get_socket_path
 
     return get_socket_path(device)
-
-
-def _parse_sharded_ssd_roots(value) -> list[str]:
-    return parse_sharded_ssd_roots(value or "")
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +81,7 @@ def _run_save(args) -> None:
         device=args.device,
         timeout_ms=args.timeout_ms,
         shard_size_bytes=args.shard_size_bytes,
-        sharded_ssd_roots=_parse_sharded_ssd_roots(args.sharded_ssd_roots),
+        sharded_ssd_roots=parse_sharded_ssd_roots(args.sharded_ssd_roots or ""),
     )
 
     manifest = client.save(max_workers=args.save_workers)
@@ -125,7 +118,8 @@ def _run_load(args) -> None:
         device=args.device,
         timeout_ms=args.timeout_ms,
         transfer_backend=args.transfer_backend,
-        sharded_ssd_roots=_parse_sharded_ssd_roots(args.sharded_ssd_roots),
+        sharded_ssd_roots=parse_sharded_ssd_roots(args.sharded_ssd_roots or ""),
+        sharded_ssd_queues_per_root=args.sharded_ssd_queues_per_root,
     )
 
     id_map = client.load_to_gms(
@@ -143,14 +137,12 @@ def _run_load(args) -> None:
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-_SHARD_SIZE_DEFAULT = 4 * 1024**3  # 4 GiB
-
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="gms-storage-client",
         description="Save and load GPU Memory Service state to/from disk.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="subcommand")
 
@@ -158,6 +150,7 @@ def _build_parser() -> argparse.ArgumentParser:
     save_p = subparsers.add_parser(
         "save",
         help="Save GMS state to a sharded binary directory.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Connect to a running GMS server in RO mode and export every "
             "allocation plus all metadata to a compact sharded binary format."
@@ -172,7 +165,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--device",
         type=int,
         default=0,
-        help="CUDA device index (default: 0).",
+        help="CUDA device index.",
     )
     save_p.add_argument(
         "--socket-path",
@@ -189,10 +182,9 @@ def _build_parser() -> argparse.ArgumentParser:
     save_p.add_argument(
         "--shard-size-bytes",
         type=int,
-        default=_SHARD_SIZE_DEFAULT,
+        default=4 * 1024**3,
         help=(
-            f"Soft upper bound per shard file in bytes "
-            f"(default: {_SHARD_SIZE_DEFAULT // 1024**3} GiB).  "
+            "Soft upper bound per shard file in bytes. "
             "Decrease to increase parallelism on save/load; increase to "
             "reduce file count."
         ),
@@ -209,7 +201,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--save-workers",
         type=int,
         default=8,
-        help="Thread pool size for parallel shard writes (default: 8).",
+        help="Thread pool size for parallel shard writes.",
     )
     save_p.add_argument(
         "--verbose",
@@ -222,6 +214,7 @@ def _build_parser() -> argparse.ArgumentParser:
     load_p = subparsers.add_parser(
         "load",
         help="Load a saved GMS state back into a running GMS server.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Connect to a running GMS server in RW mode, restore tensor data "
             "from a saved directory through the selected transfer backend, "
@@ -237,7 +230,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--device",
         type=int,
         default=0,
-        help="CUDA device index (default: 0).",
+        help="CUDA device index.",
     )
     load_p.add_argument(
         "--socket-path",
@@ -254,13 +247,13 @@ def _build_parser() -> argparse.ArgumentParser:
     load_p.add_argument(
         "--workers",
         type=int,
-        default=8,
-        help="Thread pool size for parallel shard reads (default: 8).",
+        default=16,
+        help="Thread pool size for parallel shard reads.",
     )
     load_p.add_argument(
         "--transfer-backend",
-        choices=TRANSFER_BACKEND_CHOICES,
-        default=DEFAULT_TRANSFER_BACKEND,
+        choices=[backend.value for backend in TransferBackendKind],
+        default=TransferBackendKind.NIXL.value,
         help=(
             "Byte transfer backend for restore. "
             "'nixl' uses NIXL POSIX with host staging; "
@@ -273,6 +266,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--sharded-ssd-roots",
         default=None,
         help="Comma-separated SSD roots for the sharded-ssd transfer backend.",
+    )
+    load_p.add_argument(
+        "--sharded-ssd-queues-per-root",
+        type=int,
+        default=2,
+        help=(
+            "Number of independent sharded-ssd restore queues per SSD root. "
+            "Increase this "
+            "to use multiple NIXL/POSIX workers per local SSD root."
+        ),
     )
     load_p.add_argument(
         "--no-clear",
@@ -306,6 +309,8 @@ def main() -> None:
     if args.subcommand is None:
         parser.print_help()
         sys.exit(1)
+    if args.subcommand == "load" and args.sharded_ssd_queues_per_root <= 0:
+        parser.error("--sharded-ssd-queues-per-root must be a positive integer")
 
     if args.subcommand == "save":
         _run_save(args)

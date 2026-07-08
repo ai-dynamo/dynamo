@@ -283,6 +283,23 @@ pub struct IndexerRecordRoutingDecisionRequest {
     pub sequence_hashes: Vec<SequenceHash>,
 }
 
+/// Precomputed hashes for recording a route-time indexer update.
+#[derive(Debug, Clone)]
+pub struct RoutingDecisionHashes {
+    pub local_hashes: Vec<LocalBlockHash>,
+    pub sequence_hashes: Vec<SequenceHash>,
+}
+
+impl RoutingDecisionHashes {
+    pub fn from_local_hashes(local_hashes: Vec<LocalBlockHash>) -> Self {
+        let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+        Self {
+            local_hashes,
+            sequence_hashes,
+        }
+    }
+}
+
 /// Response from a served approximate-mode routing-decision endpoint.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum IndexerRecordRoutingDecisionResponse {
@@ -452,10 +469,19 @@ pub enum WorkerTask {
         worker: WorkerWithDpRank,
         anchor: AnchorTask,
     },
-    /// Permanently remove a worker from tracking (keep_worker: false).
-    RemoveWorker(WorkerId),
+    /// Permanently remove a worker from tracking.
+    RemoveWorker {
+        worker_id: WorkerId,
+        /// True for the one shared-state backend task that owns structural cleanup.
+        sweep_tree: bool,
+    },
     /// Remove a single dp_rank for a worker.
-    RemoveWorkerDpRank(WorkerId, DpRank),
+    RemoveWorkerDpRank {
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        /// True for the one shared-state backend task that owns structural cleanup.
+        sweep_tree: bool,
+    },
     /// Best-effort maintenance task for shared-state backends.
     CleanupStaleChildren,
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),

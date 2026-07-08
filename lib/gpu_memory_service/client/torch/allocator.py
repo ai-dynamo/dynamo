@@ -172,14 +172,15 @@ def get_or_create_scratch_manager(
     device: int,
     *,
     tag: str = "kv_cache",
+    scratch_size: int = 512 * 1024 * 1024,
 ) -> "GMSClientMemoryManager":
     """Register an unconnected manager for client-local scratch allocation.
 
     The manager is constructed but .connect() is NOT called. _gms_malloc routes
     via create_scratch_mapping while is_scratch is True. Caller must invoke
     .connect(...) before any server-backed operation, then call
-    ensure_scratch_disabled(manager) to flip routing to the standard
-    create_mapping path.
+    manager.prepare_scratch_for_reallocation() to move preserved-VA bookkeeping
+    and flip routing to the standard create_mapping path.
     """
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
@@ -196,9 +197,19 @@ def get_or_create_scratch_manager(
                 f"GMS allocator tag={tag} already registered as non-scratch; "
                 "use get_or_create_gms_client_memory_manager instead"
             )
+        if state.manager.scratch_size != scratch_size:
+            raise RuntimeError(
+                f"GMS scratch allocator tag={tag} was initialized with "
+                f"scratch_size={state.manager.scratch_size}, not {scratch_size}"
+            )
         return state.manager
 
-    manager = GMSClientMemoryManager(socket_path, device=device, tag=tag)
+    manager = GMSClientMemoryManager(
+        socket_path,
+        device=device,
+        tag=tag,
+        scratch_size=scratch_size,
+    )
     _ensure_callbacks_initialized()
     mem_pool = _create_mem_pool()
 
@@ -229,30 +240,6 @@ def is_scratch(manager: "GMSClientMemoryManager") -> bool:
     return state.is_scratch
 
 
-def ensure_scratch_disabled(manager: "GMSClientMemoryManager") -> None:
-    """Flip the manager's tag out of scratch routing.
-
-    After this, _gms_malloc routes via create_mapping (server-backed) on the
-    tag's mempool. Idempotent. Raises if the manager is not registered or
-    not currently RW-connected — server-backed allocations require RW.
-
-    Call after migrating scratch entries into _mappings via
-    prepare_scratch_for_reallocation, before reallocate_all_handles.
-    """
-    if manager.tag is None:
-        raise RuntimeError("manager has no tag; not registered in allocator")
-    state = _tag_states.get(manager.tag)
-    if state is None:
-        raise RuntimeError(f"tag {manager.tag!r} not in _tag_states")
-    if manager.granted_lock_type != GrantedLockType.RW:
-        raise RuntimeError(
-            f"ensure_scratch_disabled requires RW grant on tag={manager.tag!r}; "
-            f"got granted_lock_type={manager.granted_lock_type}. "
-            "Did you forget to .connect(RequestedLockType.RW) first?"
-        )
-    state.is_scratch = False
-
-
 def get_gms_client_memory_manager(
     tag: str = "weights",
 ) -> "GMSClientMemoryManager | None":
@@ -264,6 +251,64 @@ def get_gms_client_memory_manager(
 
 def get_gms_client_memory_managers() -> tuple["GMSClientMemoryManager", ...]:
     return tuple(state.manager for state in _tag_states.values())
+
+
+def prune_allocations(
+    manager: "GMSClientMemoryManager",
+    *,
+    referenced_allocation_ids: set[str],
+    synchronize: bool = True,
+) -> None:
+    """Free GMS allocations that are not in an explicit torch keep-set.
+
+    Callers provide the allocation IDs that remain valid; this helper does not
+    infer liveness from Python GC.  Weight loaders call it after registering
+    module tensors, treating other allocations as load-time scratch/cache that
+    PyTorch's caching allocator may leave behind because ``empty_cache()`` is a
+    no-op while live GMS mempool mappings exist.
+
+    Args:
+        manager: GMS manager whose local mappings should be pruned.
+        referenced_allocation_ids: Allocation IDs that must remain mapped and
+            committed.
+        synchronize: Synchronize CUDA before freeing unreferenced mappings.  The
+            default avoids freeing a block while prior GPU work may still be
+            using it.  Callers that have already synchronized can pass
+            ``False``.
+
+    """
+    if manager.granted_lock_type != GrantedLockType.RW or manager.is_unmapped:
+        return
+
+    if not any(mapping.handle != 0 for mapping in manager.mappings.values()):
+        return
+
+    if synchronize:
+        import torch
+
+        torch.cuda.synchronize(manager.device)
+
+    keep = {str(allocation_id) for allocation_id in referenced_allocation_ids}
+
+    pruned_allocations = 0
+    pruned_bytes = 0
+    for va, mapping in list(manager.mappings.items()):
+        if str(mapping.allocation_id) in keep:
+            continue
+        if mapping.handle == 0:
+            continue
+        pruned_allocations += 1
+        pruned_bytes += int(mapping.aligned_size)
+        manager.destroy_mapping(va)
+
+    if pruned_allocations:
+        logger.info(
+            "[GMS] Pruned %d unreferenced allocations (%.2f GiB); "
+            "kept %d registered allocations",
+            pruned_allocations,
+            pruned_bytes / (1 << 30),
+            len(keep),
+        )
 
 
 def evict_gms_client_memory_manager(manager: "GMSClientMemoryManager") -> None:

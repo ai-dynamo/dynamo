@@ -431,9 +431,11 @@ class TestVllmRendererApi:
             "routed_experts",
             "num_nans_in_logits",
         )
-        # vllm-omni extends EngineCoreOutput with streaming segment metadata
-        # (only installed on amd64, not arm64).
+        # vllm-omni extends EngineCoreOutput with a multimodal output channel
+        # and streaming segment metadata (only installed on amd64, not arm64).
+        # Declaration order in OmniEngineCoreOutput determines wire position.
         omni_output_extra_fields = (
+            "multimodal_output",
             "is_segment_finished",
             "new_prompt_len_snapshot",
         )
@@ -570,10 +572,11 @@ class TestVllmRendererApi:
         )
 
     def test_reasoning_parser_method_signatures(self):
-        """Verify ReasoningParser has extract_reasoning_streaming and
-        is_reasoning_end_streaming.
+        """Verify ReasoningParser has extract_reasoning_streaming,
+        is_reasoning_end_streaming, and extract_reasoning.
 
-        prepost.py calls both during streaming post-processing to separate
+        prepost.py calls the streaming pair during streaming post-processing
+        and extract_reasoning on the non-streaming finalize path to separate
         reasoning tokens from content tokens.
         """
         assert hasattr(ReasoningParser, "extract_reasoning_streaming"), (
@@ -607,4 +610,16 @@ class TestVllmRendererApi:
         assert end_params == ["self", "input_ids", "delta_ids"], (
             "ReasoningParser.is_reasoning_end_streaming signature changed; "
             f"expected ['self', 'input_ids', 'delta_ids'], got {end_params}"
+        )
+
+        assert hasattr(ReasoningParser, "extract_reasoning"), (
+            "ReasoningParser no longer has 'extract_reasoning'; "
+            "update StreamingPostProcessor in "
+            "components/src/dynamo/frontend/prepost.py"
+        )
+        batch_sig = inspect.signature(ReasoningParser.extract_reasoning)
+        batch_params = list(batch_sig.parameters)
+        assert batch_params == ["self", "model_output", "request"], (
+            "ReasoningParser.extract_reasoning signature changed; "
+            f"expected ['self', 'model_output', 'request'], got {batch_params}"
         )

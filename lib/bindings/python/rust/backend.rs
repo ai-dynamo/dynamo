@@ -3,11 +3,12 @@
 
 //! PyO3 bridge for `dynamo_backend_common::Worker`.
 //!
-//! Lets a Python `LLMEngine` ABC subclass plug into the Rust `Worker`
-//! through a thin `PyLLMEngine` adapter. All lifecycle work — signal
-//! handling, discovery unregister, grace period, drain, cleanup, and
-//! 3-phase runtime shutdown — lives in Rust; Python only owns engine
-//! semantics.
+//! Lets a Python `BaseEngine` ABC subclass plug into the Rust `Worker`
+//! through a thin adapter: `PyLLMEngine` for token engines, `PyRawEngine`
+//! for raw-media engines, both composing the shared `PyEngineCore`. All
+//! lifecycle work — signal handling, discovery unregister, grace period,
+//! drain, cleanup, and 3-phase runtime shutdown — lives in Rust; Python
+//! only owns engine semantics.
 //!
 //! Exposed under `dynamo._core.backend` as `Worker`, `WorkerConfig`,
 //! `EngineConfig`, and `RuntimeConfig`.
@@ -21,9 +22,14 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, ComponentSnapshot,
     DisaggregationMode as RsDisaggregationMode, DynamoError, EngineConfig as RsEngineConfig,
-    ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput, MetricsBindings,
-    MetricsCtx, OnPublisherReady, PreprocessedRequest, RuntimeConfig as RsRuntimeConfig,
+    ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput,
+    LlmRegistration as RsLlmRegistration, MetricsBindings, MetricsCtx, OnPublisherReady,
+    PreprocessedRequest, RawEngine, RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
+};
+use dynamo_llm::local_model::runtime_config::{
+    StructuralTagMode as RsStructuralTagMode, StructuralTagSchemaMode as RsStructuralTagSchemaMode,
+    StructuralTagScope as RsStructuralTagScope,
 };
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
@@ -36,7 +42,7 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
-use crate::errors::py_exception_to_backend_error;
+use crate::errors::{extract_http_like_error, py_exception_to_backend_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::to_pyerr;
 
@@ -46,6 +52,7 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = PyModule::new(py, "backend")?;
     m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
+    m.add_class::<LlmRegistration>()?;
     m.add_class::<RuntimeConfig>()?;
     m.add_class::<WorkerConfig>()?;
     m.add_class::<Worker>()?;
@@ -79,6 +86,7 @@ pub enum DisaggregationMode {
     Aggregated = 1,
     Prefill = 2,
     Decode = 3,
+    Encode = 4,
 }
 
 impl From<DisaggregationMode> for RsDisaggregationMode {
@@ -87,6 +95,7 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
             DisaggregationMode::Aggregated => RsDisaggregationMode::Aggregated,
             DisaggregationMode::Prefill => RsDisaggregationMode::Prefill,
             DisaggregationMode::Decode => RsDisaggregationMode::Decode,
+            DisaggregationMode::Encode => RsDisaggregationMode::Encode,
         }
     }
 }
@@ -94,24 +103,25 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
 // ---------------------------------------------------------------------------
 // EngineConfig — mirror of `dynamo_backend_common::EngineConfig`.
 //
-// Engines are free to return either a `dynamo._core.backend.EngineConfig`
-// or any plain Python dataclass with the canonical attribute names; the
-// bridge accepts both. We expose this pyclass mainly so engines that want
-// strong typing can opt in.
+// Engines may return either this pyclass or any object with the canonical
+// attributes `model` / `served_model_name` / `runtime_data` / `llm`; the
+// bridge's `start()` extraction accepts both. Note `llm` is a nested record
+// (LlmRegistration), NOT flat fields — an object exposing flat `context_length`
+// etc. (the pre-split shape) registers with `llm=None`, i.e. no KV/DP/bootstrap
+// hints. We expose this pyclass mainly so engines that want strong typing can
+// opt in.
 // ---------------------------------------------------------------------------
 
-#[pyclass(module = "dynamo._core.backend", name = "EngineConfig")]
+#[pyclass(module = "dynamo._core.backend", name = "LlmRegistration")]
 #[derive(Clone, Default)]
-pub struct EngineConfig {
-    inner: RsEngineConfig,
+pub struct LlmRegistration {
+    inner: RsLlmRegistration,
 }
 
 #[pymethods]
-impl EngineConfig {
+impl LlmRegistration {
     #[new]
     #[pyo3(signature = (
-        model,
-        served_model_name = None,
         context_length = None,
         kv_cache_block_size = None,
         total_kv_blocks = None,
@@ -121,12 +131,9 @@ impl EngineConfig {
         data_parallel_start_rank = None,
         bootstrap_host = None,
         bootstrap_port = None,
-        runtime_data = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        model: String,
-        served_model_name: Option<String>,
         context_length: Option<u32>,
         kv_cache_block_size: Option<u32>,
         total_kv_blocks: Option<u64>,
@@ -136,18 +143,9 @@ impl EngineConfig {
         data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
-        runtime_data: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Self> {
-        let runtime_data = runtime_data
-            .map(|dict| depythonize::<HashMap<String, serde_json::Value>>(dict))
-            .transpose()
-            .map_err(to_pyerr)?
-            .unwrap_or_default();
-
-        Ok(Self {
-            inner: RsEngineConfig {
-                model,
-                served_model_name,
+    ) -> Self {
+        Self {
+            inner: RsLlmRegistration {
                 context_length,
                 kv_cache_block_size,
                 total_kv_blocks,
@@ -157,19 +155,10 @@ impl EngineConfig {
                 data_parallel_start_rank,
                 bootstrap_host,
                 bootstrap_port,
-                runtime_data,
             },
-        })
+        }
     }
 
-    #[getter]
-    fn model(&self) -> &str {
-        &self.inner.model
-    }
-    #[getter]
-    fn served_model_name(&self) -> Option<&str> {
-        self.inner.served_model_name.as_deref()
-    }
     #[getter]
     fn context_length(&self) -> Option<u32> {
         self.inner.context_length
@@ -205,6 +194,55 @@ impl EngineConfig {
     #[getter]
     fn bootstrap_port(&self) -> Option<u16> {
         self.inner.bootstrap_port
+    }
+}
+
+#[pyclass(module = "dynamo._core.backend", name = "EngineConfig")]
+#[derive(Clone, Default)]
+pub struct EngineConfig {
+    inner: RsEngineConfig,
+}
+
+#[pymethods]
+impl EngineConfig {
+    #[new]
+    #[pyo3(signature = (model, served_model_name = None, runtime_data = None, llm = None))]
+    fn new(
+        model: String,
+        served_model_name: Option<String>,
+        runtime_data: Option<&Bound<'_, PyDict>>,
+        llm: Option<LlmRegistration>,
+    ) -> PyResult<Self> {
+        let runtime_data = runtime_data
+            .map(|dict| depythonize::<HashMap<String, serde_json::Value>>(dict))
+            .transpose()
+            .map_err(to_pyerr)?
+            .unwrap_or_default();
+
+        Ok(Self {
+            inner: RsEngineConfig {
+                model,
+                served_model_name,
+                runtime_data,
+                llm: llm.map(|l| l.inner),
+            },
+        })
+    }
+
+    #[getter]
+    fn model(&self) -> &str {
+        &self.inner.model
+    }
+    #[getter]
+    fn served_model_name(&self) -> Option<&str> {
+        self.inner.served_model_name.as_deref()
+    }
+    #[getter]
+    fn llm(&self) -> Option<LlmRegistration> {
+        self.inner
+            .llm
+            .clone()
+            .map(|inner| LlmRegistration { inner })
     }
     #[getter]
     fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -274,6 +312,10 @@ impl WorkerConfig {
         runtime = None,
         disaggregation_mode = DisaggregationMode::Aggregated,
         health_check_payload = None,
+        structural_tag_mode = "off".to_string(),
+        structural_tag_scope = "auto".to_string(),
+        structural_tag_schema = "auto".to_string(),
+        route_to_encoder = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -295,6 +337,10 @@ impl WorkerConfig {
         runtime: Option<RuntimeConfig>,
         disaggregation_mode: DisaggregationMode,
         health_check_payload: Option<PyObject>,
+        structural_tag_mode: String,
+        structural_tag_scope: String,
+        structural_tag_schema: String,
+        route_to_encoder: bool,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -322,6 +368,33 @@ impl WorkerConfig {
             }
             _ => None,
         };
+        let st_mode = match structural_tag_mode.as_str() {
+            "off" => RsStructuralTagMode::Off,
+            "on" => RsStructuralTagMode::On,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid structural_tag_mode: {other}. Expected 'off' or 'on'."
+                )));
+            }
+        };
+        let st_scope = match structural_tag_scope.as_str() {
+            "auto" => RsStructuralTagScope::Auto,
+            "always" => RsStructuralTagScope::Always,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid structural_tag_scope: {other}. Expected 'auto' or 'always'."
+                )));
+            }
+        };
+        let st_schema = match structural_tag_schema.as_str() {
+            "auto" => RsStructuralTagSchemaMode::Auto,
+            "strict" => RsStructuralTagSchemaMode::Strict,
+            other => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid structural_tag_schema: {other}. Expected 'auto' or 'strict'."
+                )));
+            }
+        };
         Ok(Self {
             inner: RsWorkerConfig {
                 namespace,
@@ -340,7 +413,11 @@ impl WorkerConfig {
                 metrics_labels,
                 disaggregation_mode: disaggregation_mode.into(),
                 health_check_payload,
+                structural_tag_mode: st_mode,
+                structural_tag_scope: st_scope,
+                structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
+                route_to_encoder,
             },
         })
     }
@@ -366,12 +443,23 @@ pub struct Worker {
     /// `engine.start()` again, which most engines (vLLM, sglang, trtllm)
     /// don't tolerate. We surface a clear `RuntimeError` instead.
     consumed: AtomicBool,
+    /// `true` when `engine` is a `DiffusionEngine` (raw media pipeline).
+    /// Set by the Python `Worker` shim via `isinstance`. Selects the raw
+    /// JSON request adapter (`RsWorker::new_raw`) instead of the token
+    /// adapter (`RsWorker::new`).
+    raw: bool,
 }
 
 #[pymethods]
 impl Worker {
     #[new]
-    fn new(engine: PyObject, config: WorkerConfig, event_loop: PyObject) -> PyResult<Self> {
+    #[pyo3(signature = (engine, config, event_loop, raw = false))]
+    fn new(
+        engine: PyObject,
+        config: WorkerConfig,
+        event_loop: PyObject,
+        raw: bool,
+    ) -> PyResult<Self> {
         // True existing-only check — `runtime_from_existing()` would
         // synthesize a fresh runtime here and falsely mark us as shared.
         let owns_runtime = !rs::Worker::has_existing_runtime();
@@ -410,6 +498,7 @@ impl Worker {
             config: config.inner,
             owns_runtime,
             consumed: AtomicBool::new(false),
+            raw,
         })
     }
 
@@ -435,6 +524,7 @@ impl Worker {
         let event_loop = self.event_loop.clone();
         let config = self.config.clone();
         let owns_runtime = self.owns_runtime;
+        let raw = self.raw;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let runtime = rs::Worker::runtime_from_existing()
@@ -471,8 +561,17 @@ impl Worker {
                 }
             }
 
-            let py_engine = PyLLMEngine::new(engine, event_loop);
-            let worker = RsWorker::new(Arc::new(py_engine), config);
+            // Select the engine modality. A `DiffusionEngine` (raw media
+            // pipeline) routes through `PyRawEngine` + `RsWorker::new_raw`
+            // (JSON adapter); everything else is a token-pipeline
+            // `LLMEngine`.
+            let worker = if raw {
+                let py_engine = PyRawEngine::new(engine, event_loop);
+                RsWorker::new_raw(Arc::new(py_engine), config)
+            } else {
+                let py_engine = PyLLMEngine::new(engine, event_loop);
+                RsWorker::new(Arc::new(py_engine), config)
+            };
 
             let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
 
@@ -495,10 +594,13 @@ impl Worker {
 }
 
 // ---------------------------------------------------------------------------
-// PyLLMEngine — the actual bridge. Not a `#[pyclass]`; lives only in Rust.
+// PyEngineCore — the Python-bridge state and lifecycle shared by both wrappers
+// (`PyLLMEngine`, `PyRawEngine`): everything that doesn't depend on the request
+// modality. The modality-specific `generate` shaping and `kv_event_sources`
+// live on the wrappers. Not a `#[pyclass]`; Rust-only.
 // ---------------------------------------------------------------------------
 
-struct PyLLMEngine {
+struct PyEngineCore {
     // Wrapped in `Arc` so we can clone refcount-style without acquiring
     // the GIL — `PyObject::clone` would otherwise need to bump Python's
     // own refcount, which requires the GIL. Same pattern as
@@ -509,7 +611,7 @@ struct PyLLMEngine {
     request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
 }
 
-impl PyLLMEngine {
+impl PyEngineCore {
     fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
         Self {
             engine,
@@ -543,88 +645,22 @@ impl PyLLMEngine {
 
         py_future.await
     }
-}
 
-struct RequestStateGuard {
-    request_id: String,
-    trace_contexts: Arc<StdMutex<HashMap<String, DistributedTraceContext>>>,
-    request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
-}
-
-impl Drop for RequestStateGuard {
-    fn drop(&mut self) {
-        self.trace_contexts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.request_id);
-        self.request_metadata
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.request_id);
-    }
-}
-
-#[async_trait]
-impl LLMEngine for PyLLMEngine {
-    async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
-        let engine = self.engine.clone();
-        let event_loop = self.event_loop.clone();
-
-        // Forward worker_id to Python `start(worker_id)`. spawn_blocking
-        // around the GIL section matches `call_method0_async`.
-        let py_future = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<_> {
-                let bound = engine.bind(py);
-                let coroutine = bound.call_method1("start", (worker_id,))?;
-                let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
-            })
-        })
-        .await
-        .map_err(|e| {
-            DynamoError::builder()
-                .error_type(ErrorType::Backend(BackendError::Unknown))
-                .message(format!("start offload error: {e}"))
-                .build()
-        })?
-        .map_err(py_err_to_dynamo)?;
-
-        let result = py_future.await.map_err(py_err_to_dynamo)?;
-
-        Python::with_gil(|py| -> PyResult<RsEngineConfig> {
-            let bound = result.bind(py);
-            // Accept either the Rust EngineConfig pyclass or any Python
-            // object exposing the canonical attribute names (e.g. the
-            // `dynamo.common.backend.EngineConfig` dataclass).
-            if let Ok(cfg) = bound.extract::<EngineConfig>() {
-                return Ok(cfg.inner);
-            }
-            Ok(RsEngineConfig {
-                model: bound.getattr("model")?.extract()?,
-                served_model_name: opt_attr::<String>(bound, "served_model_name")?,
-                context_length: opt_attr::<u32>(bound, "context_length")?,
-                kv_cache_block_size: opt_attr::<u32>(bound, "kv_cache_block_size")?,
-                total_kv_blocks: opt_attr::<u64>(bound, "total_kv_blocks")?,
-                max_num_seqs: opt_attr::<u64>(bound, "max_num_seqs")?,
-                max_num_batched_tokens: opt_attr::<u64>(bound, "max_num_batched_tokens")?,
-                data_parallel_size: opt_attr::<u32>(bound, "data_parallel_size")?,
-                data_parallel_start_rank: opt_attr::<u32>(bound, "data_parallel_start_rank")?,
-                bootstrap_host: opt_attr::<String>(bound, "bootstrap_host")?,
-                bootstrap_port: opt_attr::<u16>(bound, "bootstrap_port")?,
-                runtime_data: match bound.getattr("runtime_data") {
-                    Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
-                    _ => HashMap::new(),
-                },
-            })
-        })
-        .map_err(py_err_to_dynamo)
-    }
-
-    async fn generate(
+    /// Shared dispatch for the token and raw `generate` paths: records
+    /// per-request trace/metadata state, pythonizes the request (any
+    /// `Serialize` — `PreprocessedRequest` or `serde_json::Value`), calls
+    /// Python `generate(request, context=ctx)`, and returns the resulting
+    /// stream of Python chunk objects + the state guard. The caller maps each
+    /// `PyObject` to its output type.
+    ///
+    /// Invariant: must be awaited within the `engine.generate` span (both
+    /// adapters `.instrument()` it) so the span capture below sees the right
+    /// parent.
+    async fn dispatch_generate<T: serde::Serialize + Send + 'static>(
         &self,
-        request: PreprocessedRequest,
+        request: T,
         ctx: dynamo_backend_common::GenerateContext,
-    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+    ) -> Result<(BoxStream<'static, PyResult<PyObject>>, RequestStateGuard), DynamoError> {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
         let trace_context = get_distributed_tracing_context();
@@ -648,14 +684,13 @@ impl LLMEngine for PyLLMEngine {
         let first_token = ctx.first_token_sender().cloned();
         let inner_ctx = ctx.inner_arc();
         // **Invariant**: `tracing::Span::current()` here MUST be the
-        // `engine.generate` span opened by `EngineAdapter::generate`. The
-        // capture must happen BEFORE `spawn_blocking` because inside the
-        // blocking closure, `Span::current()` is the worker-thread root,
-        // not the auto-span.
+        // `engine.generate` span opened by the adapter. The capture must
+        // happen BEFORE `spawn_blocking` because inside the blocking closure,
+        // `Span::current()` is the worker-thread root, not the auto-span.
         //
         // If anyone refactors this dispatch (extra task hop, different
-        // scheduler), they must re-verify the captured span. `Context`
-        // stores this span and routes engine telemetry calls to it via
+        // scheduler), they must re-verify the captured span. `Context` stores
+        // this span and routes engine telemetry calls to it via
         // `current_span` / `start_span` — wrong span = wrong attributes
         // silently. See the `auto_span_records_*` tests in
         // `lib/backend-common/src/adapter.rs` for the assertions that depend
@@ -663,7 +698,7 @@ impl LLMEngine for PyLLMEngine {
         debug_assert_eq!(
             tracing::Span::current().metadata().map(|m| m.name()),
             Some("engine.generate"),
-            "Span::current() must be engine.generate at PyLLMEngine boundary; \
+            "Span::current() must be engine.generate at PyEngineCore boundary; \
              a dispatch refactor likely broke the capture point"
         );
         let engine_span = tracing::Span::current();
@@ -702,6 +737,507 @@ impl LLMEngine for PyLLMEngine {
                 .build()
         })?
         .map_err(py_err_to_dynamo)?;
+
+        Ok((stream.boxed(), request_state_guard))
+    }
+}
+
+struct RequestStateGuard {
+    request_id: String,
+    trace_contexts: Arc<StdMutex<HashMap<String, DistributedTraceContext>>>,
+    request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
+}
+
+impl Drop for RequestStateGuard {
+    fn drop(&mut self) {
+        self.trace_contexts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.request_id);
+        self.request_metadata
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.request_id);
+    }
+}
+
+impl PyEngineCore {
+    async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+
+        // Forward worker_id to Python `start(worker_id)`. spawn_blocking
+        // around the GIL section matches `call_method0_async`.
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<_> {
+                let bound = engine.bind(py);
+                let coroutine = bound.call_method1("start", (worker_id,))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("start offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        let result = py_future.await.map_err(py_err_to_dynamo)?;
+
+        Python::with_gil(|py| -> PyResult<RsEngineConfig> {
+            let bound = result.bind(py);
+            // Accept either the Rust EngineConfig pyclass or any Python
+            // object exposing the canonical attribute names (e.g. the
+            // `dynamo.common.backend.EngineConfig` dataclass).
+            if let Ok(cfg) = bound.extract::<EngineConfig>() {
+                return Ok(cfg.inner);
+            }
+            // Token-pipeline metadata lives in the optional `.llm` sub-record
+            // (LlmRegistration). LLMEngines set it; RawEngines leave it None.
+            // Missing attr = the duck-typed default (pre-split / raw engines);
+            // any other getattr error is a real bug → propagate, don't swallow.
+            let llm = match bound.getattr("llm") {
+                Ok(v) if !v.is_none() => Some(RsLlmRegistration {
+                    context_length: opt_attr::<u32>(&v, "context_length")?,
+                    kv_cache_block_size: opt_attr::<u32>(&v, "kv_cache_block_size")?,
+                    total_kv_blocks: opt_attr::<u64>(&v, "total_kv_blocks")?,
+                    max_num_seqs: opt_attr::<u64>(&v, "max_num_seqs")?,
+                    max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
+                    data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
+                    data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
+                    bootstrap_host: opt_attr::<String>(&v, "bootstrap_host")?,
+                    bootstrap_port: opt_attr::<u16>(&v, "bootstrap_port")?,
+                }),
+                Ok(_) => None,
+                Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => None,
+                Err(e) => return Err(e),
+            };
+            Ok(RsEngineConfig {
+                model: bound.getattr("model")?.extract()?,
+                served_model_name: opt_attr::<String>(bound, "served_model_name")?,
+                runtime_data: match bound.getattr("runtime_data") {
+                    Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
+                    Ok(_) => HashMap::new(),
+                    Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
+                        HashMap::new()
+                    }
+                    Err(e) => return Err(e),
+                },
+                llm,
+            })
+        })
+        .map_err(py_err_to_dynamo)
+    }
+
+    async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+        let trace_context = self
+            .trace_contexts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(ctx.id())
+            .cloned()
+            .or_else(get_distributed_tracing_context);
+        let metadata = self
+            .request_metadata
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(ctx.id())
+            .unwrap_or_default();
+
+        let res: Result<(), PyErr> = async move {
+            let py_future = tokio::task::spawn_blocking(move || {
+                Python::with_gil(|py| -> PyResult<_> {
+                    let bound = engine.bind(py);
+                    let py_ctx = Py::new(py, PyContext::new(ctx, trace_context, None, metadata))?;
+                    let coroutine = bound.call_method1("abort", (py_ctx,))?;
+                    let locals = TaskLocals::new(event_loop.bind(py).clone());
+                    pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+                })
+            })
+            .await
+            .map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("offload error: {e}"))
+            })??;
+            py_future.await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = res {
+            // Aborts are best-effort — log and swallow so cancellation
+            // bookkeeping isn't blocked by a misbehaving engine.
+            tracing::debug!(error = %e, "engine.abort raised; ignoring");
+        }
+    }
+
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        let py_obj = self
+            .call_method0_async("is_quiescent")
+            .await
+            .map_err(py_err_to_dynamo)?;
+        Python::with_gil(|py| -> PyResult<Option<bool>> {
+            let bound = py_obj.bind(py);
+            // Python `None` maps to `Ok(None)`; a bool to `Some(bool)`.
+            if bound.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(bound.extract::<bool>()?))
+        })
+        .map_err(py_err_to_dynamo)
+    }
+
+    async fn cleanup(&self) -> Result<(), DynamoError> {
+        self.call_method0_async("cleanup")
+            .await
+            .map_err(py_err_to_dynamo)?;
+        Ok(())
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        let py_obj = self
+            .call_method0_async("health_check_payload")
+            .await
+            .map_err(py_err_to_dynamo)?;
+        Python::with_gil(|py| -> PyResult<Option<serde_json::Value>> {
+            let bound = py_obj.bind(py);
+            if bound.is_none() {
+                return Ok(None);
+            }
+            let value: serde_json::Value = depythonize(bound).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "health_check_payload must return a JSON-serializable dict or None: {e}"
+                ))
+            })?;
+            if !value.is_object() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "health_check_payload must return a JSON object (dict) or None",
+                ));
+            }
+            Ok(Some(value))
+        })
+        .map_err(py_err_to_dynamo)
+    }
+
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        // Step 1: call Python's `register_prometheus` for vendor-registry
+        // bridging (side effect on ctx.metrics; nothing flows back). Engines
+        // that don't override the ABC default no-op return immediately.
+        self.call_python_register_prometheus(_ctx.metrics).await?;
+
+        // Step 2: read the engine's declared dp_ranks. Empty = opt out.
+        let dp_ranks = self.read_dp_ranks().await?;
+        if dp_ranks.is_empty() {
+            return Ok(MetricsBindings {
+                dp_ranks,
+                on_publisher_ready: None,
+            });
+        }
+
+        // Step 3: build the on_publisher_ready closure. Framework calls
+        // it with the constructed `Arc<SnapshotPublisher>`; we hand it
+        // back to Python via `attach_snapshot_publisher`. Engine stashes
+        // and calls `publisher.publish(rank, snap)` from its stat-logger
+        // thereafter.
+        let engine = self.engine.clone();
+        let on_publisher_ready: dynamo_backend_common::OnSnapshotPublisherReady =
+            Box::new(move |publisher: Arc<RsSnapshotPublisher>| {
+                Python::with_gil(|py| -> PyResult<()> {
+                    let py_pub = Py::new(py, PySnapshotPublisher { inner: publisher })?;
+                    engine
+                        .bind(py)
+                        .call_method1("attach_snapshot_publisher", (py_pub,))?;
+                    Ok(())
+                })
+                .map_err(py_err_to_dynamo)
+            });
+
+        Ok(MetricsBindings {
+            dp_ranks,
+            on_publisher_ready: Some(on_publisher_ready),
+        })
+    }
+
+    async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
+        let engine = self.engine.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<Vec<String>> {
+                let result = engine.bind(py).call_method0("supported_controls")?;
+                let mut controls = Vec::new();
+                for item in result.try_iter()? {
+                    controls.push(item?.extract()?);
+                }
+                Ok(controls)
+            })
+        })
+        .await;
+
+        match join {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(py_err_to_dynamo(e)),
+            Err(join_err) => Err(DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!(
+                    "supported_controls spawn_blocking join failed: {join_err}"
+                ))
+                .build()),
+        }
+    }
+
+    async fn engine_control(
+        &self,
+        control: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                let py_body = pythonize(py, &body).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to convert engine control request body to Python: {e}"
+                    ))
+                })?;
+                let coroutine = engine
+                    .bind(py)
+                    .call_method1("engine_control", (control, py_body))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("engine_control offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        let py_result = py_future.await.map_err(py_err_to_dynamo)?;
+
+        tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                depythonize::<serde_json::Value>(py_result.bind(py)).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to serialize engine control response: {e}"
+                    ))
+                })
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("engine_control response offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)
+    }
+
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        let engine = self.engine.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<Vec<String>> {
+                let result = engine.bind(py).call_method0("supported_updates")?;
+                let mut updates = Vec::new();
+                for item in result.try_iter()? {
+                    updates.push(item?.extract()?);
+                }
+                Ok(updates)
+            })
+        })
+        .await;
+
+        match join {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(py_err_to_dynamo(e)),
+            Err(join_err) => Err(DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!(
+                    "supported_updates spawn_blocking join failed: {join_err}"
+                ))
+                .build()),
+        }
+    }
+
+    async fn engine_update(
+        &self,
+        update: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                let py_body = pythonize(py, &body).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to convert engine update request body to Python: {e}"
+                    ))
+                })?;
+                let coroutine = engine
+                    .bind(py)
+                    .call_method1("engine_update", (update, py_body))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("engine_update offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        let py_result = py_future.await.map_err(py_err_to_dynamo)?;
+
+        tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                depythonize::<serde_json::Value>(py_result.bind(py)).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                        "Failed to serialize engine update response: {e}"
+                    ))
+                })
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("engine_update response offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)
+    }
+
+    async fn on_endpoint_ready(
+        &self,
+        endpoint: rs::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<_> {
+                let py_endpoint = Py::new(
+                    py,
+                    crate::Endpoint {
+                        inner: endpoint,
+                        event_loop: event_loop.bind(py).clone().unbind(),
+                    },
+                )?;
+                let coroutine = engine
+                    .bind(py)
+                    .call_method1("on_endpoint_ready", (py_endpoint,))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("on_endpoint_ready offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        py_future.await.map_err(py_err_to_dynamo)?;
+        Ok(())
+    }
+}
+
+impl PyEngineCore {
+    async fn call_python_register_prometheus(
+        &self,
+        metrics: &dynamo_backend_common::EngineMetrics,
+    ) -> Result<(), DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+        let py_metrics_state = crate::prometheus_metrics::EngineMetrics::from_rust(metrics);
+
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<_> {
+                let bound = engine.bind(py);
+                let py_metrics = Py::new(py, py_metrics_state)?;
+                let coroutine = bound.call_method1("register_prometheus", (py_metrics,))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("register_prometheus offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        py_future.await.map_err(py_err_to_dynamo)?;
+        Ok(())
+    }
+
+    /// Call Python `component_metrics_dp_ranks()` → `Vec<u32>`. Empty list
+    /// is the default (engine opts out of per-rank metrics).
+    async fn read_dp_ranks(&self) -> Result<Vec<u32>, DynamoError> {
+        let engine = self.engine.clone();
+        let join = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<Vec<u32>> {
+                let result = engine.bind(py).call_method0("component_metrics_dp_ranks")?;
+                let list = result.downcast::<pyo3::types::PyList>()?;
+                list.iter().map(|item| item.extract::<u32>()).collect()
+            })
+        })
+        .await;
+        match join {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(py_err_to_dynamo(e)),
+            Err(join_err) => Err(DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!(
+                    "component_metrics_dp_ranks spawn_blocking join failed: {join_err}"
+                ))
+                .build()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PyLLMEngine — token-pipeline bridge: `PyEngineCore` plus the token `generate`
+// (chunks → `LLMEngineOutput`) and `kv_event_sources`.
+// ---------------------------------------------------------------------------
+
+struct PyLLMEngine {
+    core: PyEngineCore,
+}
+
+impl PyLLMEngine {
+    fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
+        Self {
+            core: PyEngineCore::new(engine, event_loop),
+        }
+    }
+}
+
+#[async_trait]
+impl LLMEngine for PyLLMEngine {
+    async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
+        self.core.start(worker_id).await
+    }
+
+    async fn generate(
+        &self,
+        request: PreprocessedRequest,
+        ctx: dynamo_backend_common::GenerateContext,
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        let (stream, request_state_guard) = self.core.dispatch_generate(request, ctx).await?;
 
         let mapped = async_stream::stream! {
             let _request_state_guard = request_state_guard;
@@ -759,89 +1295,24 @@ impl LLMEngine for PyLLMEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let engine = self.engine.clone();
-        let event_loop = self.event_loop.clone();
-        let trace_context = self
-            .trace_contexts
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(ctx.id())
-            .cloned()
-            .or_else(get_distributed_tracing_context);
-        let metadata = self
-            .request_metadata
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(ctx.id())
-            .unwrap_or_default();
-
-        let res: Result<(), PyErr> = async move {
-            let py_future = tokio::task::spawn_blocking(move || {
-                Python::with_gil(|py| -> PyResult<_> {
-                    let bound = engine.bind(py);
-                    let py_ctx = Py::new(py, PyContext::new(ctx, trace_context, None, metadata))?;
-                    let coroutine = bound.call_method1("abort", (py_ctx,))?;
-                    let locals = TaskLocals::new(event_loop.bind(py).clone());
-                    pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
-                })
-            })
-            .await
-            .map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("offload error: {e}"))
-            })??;
-            py_future.await?;
-            Ok(())
-        }
-        .await;
-
-        if let Err(e) = res {
-            // Aborts are best-effort — log and swallow so cancellation
-            // bookkeeping isn't blocked by a misbehaving engine.
-            tracing::debug!(error = %e, "engine.abort raised; ignoring");
-        }
+        self.core.abort(ctx).await
     }
 
-    async fn drain(&self) -> Result<(), DynamoError> {
-        self.call_method0_async("drain")
-            .await
-            .map_err(py_err_to_dynamo)?;
-        Ok(())
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        self.core.is_quiescent().await
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
-        self.call_method0_async("cleanup")
-            .await
-            .map_err(py_err_to_dynamo)?;
-        Ok(())
+        self.core.cleanup().await
     }
 
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
-        let py_obj = self
-            .call_method0_async("health_check_payload")
-            .await
-            .map_err(py_err_to_dynamo)?;
-        Python::with_gil(|py| -> PyResult<Option<serde_json::Value>> {
-            let bound = py_obj.bind(py);
-            if bound.is_none() {
-                return Ok(None);
-            }
-            let value: serde_json::Value = depythonize(bound).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "health_check_payload must return a JSON-serializable dict or None: {e}"
-                ))
-            })?;
-            if !value.is_object() {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "health_check_payload must return a JSON object (dict) or None",
-                ));
-            }
-            Ok(Some(value))
-        })
-        .map_err(py_err_to_dynamo)
+        self.core.health_check_payload().await
     }
 
     async fn kv_event_sources(&self) -> Result<Vec<RsKvEventSource>, DynamoError> {
         let py_list = self
+            .core
             .call_method0_async("kv_event_sources")
             .await
             .map_err(py_err_to_dynamo)?;
@@ -857,99 +1328,141 @@ impl LLMEngine for PyLLMEngine {
         .map_err(py_err_to_dynamo)
     }
 
-    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
-        // Step 1: call Python's `register_prometheus` for vendor-registry
-        // bridging (side effect on ctx.metrics; nothing flows back). Engines
-        // that don't override the ABC default no-op return immediately.
-        self.call_python_register_prometheus(_ctx.metrics).await?;
+    async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        self.core.setup_metrics(ctx).await
+    }
 
-        // Step 2: read the engine's declared dp_ranks. Empty = opt out.
-        let dp_ranks = self.read_dp_ranks().await?;
-        if dp_ranks.is_empty() {
-            return Ok(MetricsBindings {
-                dp_ranks,
-                on_publisher_ready: None,
-            });
-        }
+    async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
+        self.core.supported_controls().await
+    }
 
-        // Step 3: build the on_publisher_ready closure. Framework calls
-        // it with the constructed `Arc<SnapshotPublisher>`; we hand it
-        // back to Python via `attach_snapshot_publisher`. Engine stashes
-        // and calls `publisher.publish(rank, snap)` from its stat-logger
-        // thereafter.
-        let engine = self.engine.clone();
-        let on_publisher_ready: dynamo_backend_common::OnSnapshotPublisherReady =
-            Box::new(move |publisher: Arc<RsSnapshotPublisher>| {
-                Python::with_gil(|py| -> PyResult<()> {
-                    let py_pub = Py::new(py, PySnapshotPublisher { inner: publisher })?;
-                    engine
-                        .bind(py)
-                        .call_method1("attach_snapshot_publisher", (py_pub,))?;
-                    Ok(())
-                })
-                .map_err(py_err_to_dynamo)
-            });
+    async fn engine_control(
+        &self,
+        control: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        self.core.engine_control(control, body).await
+    }
 
-        Ok(MetricsBindings {
-            dp_ranks,
-            on_publisher_ready: Some(on_publisher_ready),
-        })
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        self.core.supported_updates().await
+    }
+
+    async fn engine_update(
+        &self,
+        update: String,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        self.core.engine_update(update, body).await
+    }
+
+    async fn on_endpoint_ready(
+        &self,
+        endpoint: rs::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        self.core.on_endpoint_ready(endpoint).await
     }
 }
 
-impl PyLLMEngine {
-    async fn call_python_register_prometheus(
-        &self,
-        metrics: &dynamo_backend_common::EngineMetrics,
-    ) -> Result<(), DynamoError> {
-        let engine = self.engine.clone();
-        let event_loop = self.event_loop.clone();
-        let py_metrics_state = crate::prometheus_metrics::EngineMetrics::from_rust(metrics);
+// ---------------------------------------------------------------------------
+// PyRawEngine — raw-media bridge for Python `DiffusionEngine`: `PyEngineCore`
+// plus a `generate` that passes the request/response through as
+// `serde_json::Value` (no token/`LLMEngineOutput` shaping).
+// ---------------------------------------------------------------------------
 
-        let py_future = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<_> {
-                let bound = engine.bind(py);
-                let py_metrics = Py::new(py, py_metrics_state)?;
-                let coroutine = bound.call_method1("register_prometheus", (py_metrics,))?;
-                let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
-            })
-        })
-        .await
-        .map_err(|e| {
-            DynamoError::builder()
-                .error_type(ErrorType::Backend(BackendError::Unknown))
-                .message(format!("register_prometheus offload error: {e}"))
-                .build()
-        })?
-        .map_err(py_err_to_dynamo)?;
+struct PyRawEngine {
+    core: PyEngineCore,
+}
 
-        py_future.await.map_err(py_err_to_dynamo)?;
-        Ok(())
+impl PyRawEngine {
+    fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
+        Self {
+            core: PyEngineCore::new(engine, event_loop),
+        }
+    }
+}
+
+#[async_trait]
+impl RawEngine for PyRawEngine {
+    async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
+        self.core.start(worker_id).await
     }
 
-    /// Call Python `component_metrics_dp_ranks()` → `Vec<u32>`. Empty list
-    /// is the default (engine opts out of per-rank metrics).
-    async fn read_dp_ranks(&self) -> Result<Vec<u32>, DynamoError> {
-        let engine = self.engine.clone();
-        let join = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<Vec<u32>> {
-                let result = engine.bind(py).call_method0("component_metrics_dp_ranks")?;
-                let list = result.downcast::<pyo3::types::PyList>()?;
-                list.iter().map(|item| item.extract::<u32>()).collect()
-            })
-        })
-        .await;
-        match join {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => Err(py_err_to_dynamo(e)),
-            Err(join_err) => Err(DynamoError::builder()
-                .error_type(ErrorType::Backend(BackendError::Unknown))
-                .message(format!(
-                    "component_metrics_dp_ranks spawn_blocking join failed: {join_err}"
-                ))
-                .build()),
-        }
+    async fn generate(
+        &self,
+        request: serde_json::Value,
+        ctx: dynamo_backend_common::GenerateContext,
+    ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError> {
+        let (stream, request_state_guard) = self.core.dispatch_generate(request, ctx).await?;
+
+        let mapped = async_stream::stream! {
+            let _request_state_guard = request_state_guard;
+            let mut inner = std::pin::pin!(stream);
+            while let Some(item) = inner.next().await {
+                let py_obj = match item {
+                    Ok(obj) => obj,
+                    Err(e) => {
+                        yield Err(py_err_to_dynamo(e));
+                        return;
+                    }
+                };
+
+                // Depythonize the response object to JSON on a blocking
+                // thread — same GIL-contention rationale as the LLM path.
+                // No `LLMEngineOutput` shaping: the media response body
+                // flows through verbatim.
+                let parsed = tokio::task::spawn_blocking(move || {
+                    Python::with_gil(|py| -> PyResult<serde_json::Value> {
+                        let bound = py_obj.into_bound(py);
+                        depythonize(&bound).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "raw engine chunk must be a JSON-serializable object: {e}"
+                            ))
+                        })
+                    })
+                })
+                .await;
+
+                match parsed {
+                    Ok(Ok(value)) => yield Ok(value),
+                    Ok(Err(e)) => {
+                        tracing::error!(error = %e, "failed to parse chunk from python raw engine");
+                        yield Err(py_err_to_dynamo(e));
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "raw chunk parse offload error");
+                        yield Err(DynamoError::builder()
+                            .error_type(ErrorType::Backend(BackendError::Unknown))
+                            .message(format!("raw chunk parse offload error: {e}"))
+                            .build());
+                        return;
+                    }
+                }
+            }
+        };
+
+        Ok(Box::pin(mapped))
+    }
+
+    async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
+        self.core.abort(ctx).await
+    }
+
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        self.core.is_quiescent().await
+    }
+
+    async fn cleanup(&self) -> Result<(), DynamoError> {
+        self.core.cleanup().await
+    }
+
+    async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        self.core.setup_metrics(ctx).await
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        self.core.health_check_payload().await
     }
 }
 
@@ -1075,6 +1588,17 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
     let (backend, message) = Python::with_gil(|py| {
         if let Some(mapped) = py_exception_to_backend_error(py, &err) {
             return mapped;
+        }
+        // See engine.rs::process_item — emit JSON-shaped message so the OpenAI
+        // frontend can read the status code instead of defaulting to 500.
+        if let Some((code, message)) = extract_http_like_error(py, &err) {
+            let backend = if (400..500).contains(&code) {
+                BackendError::InvalidArgument
+            } else {
+                BackendError::Unknown
+            };
+            let json_msg = serde_json::json!({ "message": message, "code": code }).to_string();
+            return (backend, json_msg);
         }
         let backend = if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
             || err.is_instance_of::<pyo3::exceptions::PyTypeError>(py)

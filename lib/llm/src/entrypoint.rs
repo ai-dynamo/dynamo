@@ -47,7 +47,11 @@ pub struct RouterConfig {
     pub kv_router_config: KvRouterConfig,
     /// Load threshold configuration for overload detection
     pub load_threshold_config: LoadThresholdConfig,
+    /// Deprecated compatibility field. Routing and readiness ignore this value.
+    #[serde(default)]
     pub enforce_disagg: bool,
+    #[serde(default)]
+    pub session_affinity_ttl_secs: Option<u64>,
 }
 
 impl RouterConfig {
@@ -57,6 +61,7 @@ impl RouterConfig {
             kv_router_config,
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
+            session_affinity_ttl_secs: None,
         }
     }
 
@@ -65,8 +70,16 @@ impl RouterConfig {
         self
     }
 
+    #[deprecated(
+        note = "enforce_disagg is ignored; topology and readiness come from registered worker types"
+    )]
     pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
         self.enforce_disagg = enforce_disagg;
+        self
+    }
+
+    pub fn with_session_affinity_ttl_secs(mut self, ttl_secs: u64) -> Self {
+        self.session_affinity_ttl_secs = Some(ttl_secs);
         self
     }
 }
@@ -91,6 +104,7 @@ pub enum EngineConfig {
         engine: ExecutionContext,
         model: Box<LocalModel>,
         is_prefill: bool,
+        is_decode: bool,
     },
 }
 

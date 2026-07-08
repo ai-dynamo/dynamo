@@ -4,7 +4,7 @@
 """Video generation request handler for TensorRT-LLM backend.
 
 This handler processes video generation requests using diffusion models.
-It handles MediaOutput from TensorRT-LLM's visual_gen pipelines, which
+It handles VisualGenOutput from TensorRT-LLM's visual_gen pipelines, which
 can contain video, image, and/or audio tensors depending on the model.
 """
 
@@ -38,7 +38,7 @@ class VideoGenerationHandler(BaseGenerativeHandler):
     via DiffusionEngine, encodes the output to the appropriate media format,
     and returns the media URL or base64-encoded data.
 
-    Supports MediaOutput with:
+    Supports VisualGenOutput with:
     - video: torch.Tensor (num_frames, H, W, 3) uint8 → encoded as MP4
     - image: logged as unsupported (use an image handler instead)
     - audio: logged (future: mux into MP4)
@@ -170,7 +170,7 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
         This is the main entry point called by Dynamo's endpoint.serve_endpoint().
 
-        Handles MediaOutput from the pipeline:
+        Handles VisualGenOutput from the pipeline:
         - video tensor → MP4
         - image tensor → unsupported (raises error)
         - audio tensor → unsupported (raises error)
@@ -231,7 +231,9 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 )
 
             if output is None:
-                raise RuntimeError("Pipeline returned no output (MediaOutput is None)")
+                raise RuntimeError(
+                    "VisualGen returned no output (VisualGenOutput is None)"
+                )
 
             # Determine output format
             response_format = req.response_format or "url"
@@ -246,9 +248,9 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 )
             fps = nvext.fps or self.config.default_fps
 
-            # Encode media based on what the pipeline returned
+            # Encode media based on what the VisualGen returned
             if output.video is not None:
-                # MediaOutput.video is (B, T, H, W, C) uint8 since TRT-LLM rc9;
+                # VisualGenOutput.video is (B, T, H, W, C) uint8 since TRT-LLM rc9;
                 # squeeze the batch dim to get (T, H, W, C) for MP4 encoding.
                 video = output.video
                 assert (
@@ -268,21 +270,21 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
             elif output.image is not None:
                 raise RuntimeError(
-                    "Pipeline returned image-only output, but this handler "
+                    "VisualGen returned image-only output, but this handler "
                     "only supports video. Use an image generation handler instead."
                 )
 
             # Log audio if present (unsupported)
             elif output.audio is not None:
                 raise RuntimeError(
-                    "Pipeline returned audio-only output, but this handler "
+                    "VisualGen returned audio-only output, but this handler "
                     "only supports video. Use an audio generation handler instead."
                 )
 
             else:
                 raise RuntimeError(
-                    "Pipeline returned MediaOutput with no video or image or audio data. "
-                    f"MediaOutput fields: video={output.video is not None}, "
+                    "VisualGen returned VisualGenOutput with no video or image or audio data. "
+                    f"VisualGenOutput fields: video={output.video is not None}, "
                     f"image={output.image is not None}, audio={output.audio is not None}"
                 )
 

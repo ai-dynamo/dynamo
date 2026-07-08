@@ -33,6 +33,7 @@ from dynamo.planner.config.parallelization import (
     picked_to_aic_model_config_kwargs,
 )
 from dynamo.planner.config.planner_config import (
+    AICPerfModelSpec,
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
 )
@@ -76,6 +77,7 @@ def assemble_final_config(
     best_prefill_config=None,
     best_decode_config=None,
     aic_spec: Optional[AICInterpolationSpec] = None,
+    aic_perf_model: Optional[AICPerfModelSpec] = None,
     resolved_backend: Optional[str] = None,
 ) -> Any:
     """Apply Dynamo features to the picked DGD config via composable layers.
@@ -86,9 +88,10 @@ def assemble_final_config(
        endpoint is populated at runtime. The planner consumes this as
        priority 1 of its bootstrap chain, superseding AIC and files.
     3. **Planner** — inject the Planner service + planner-config ConfigMap.
-       When ``aic_spec`` is given (rapid mode), it is embedded in the
-       planner config so the planner runs AIC interpolation at bootstrap
-       if the endpoint is unavailable.
+       When ``aic_perf_model`` is given, it is embedded so the planner can
+       initialize the Rust perf shim with native AIC identity. When
+       ``aic_spec`` is given (rapid mode), it is embedded so the planner can
+       run AIC interpolation at bootstrap if the endpoint is unavailable.
     4. **Profile data** — attach interpolation-data ConfigMap when mocker
        or planner-thorough is enabled. The ConfigMap is only emitted when
        the picked config is disaggregated AND the interpolation NPZ files
@@ -137,6 +140,7 @@ def assemble_final_config(
             best_prefill_mapping=best_prefill_config,
             best_decode_mapping=best_decode_config,
             aic_spec=aic_spec,
+            aic_perf_model=aic_perf_model,
         )
         config_maps.append(planner_cm)
 
@@ -385,6 +389,7 @@ def add_planner_to_config(
     best_prefill_mapping=None,
     best_decode_mapping=None,
     aic_spec: Optional[AICInterpolationSpec] = None,
+    aic_perf_model: Optional[AICPerfModelSpec] = None,
 ) -> dict:
     """Add a Planner service and its planner-config ConfigMap to *config_dict*.
 
@@ -399,12 +404,18 @@ def add_planner_to_config(
         best_decode_mapping: Picked decode parallel config.
         aic_spec: AIC interpolation spec (rapid mode). When set, the planner
             runs AIC in-process at bootstrap instead of reading NPZ files.
+        aic_perf_model: Native AIC forward-pass perf model identity for
+            real-time Rust shim queries.
 
     Returns:
         The ``planner_config_cm`` ConfigMap dict.
     """
     planner_cfg = _build_planner_config(
-        dgdr, best_prefill_mapping, best_decode_mapping, aic_spec
+        dgdr,
+        best_prefill_mapping,
+        best_decode_mapping,
+        aic_spec,
+        aic_perf_model,
     )
     planner_cfg.profile_results_dir = PROFILE_DATA_MOUNT
 
@@ -572,6 +583,7 @@ def _build_planner_config(
     best_prefill_mapping,
     best_decode_mapping,
     aic_spec: Optional[AICInterpolationSpec] = None,
+    aic_perf_model: Optional[AICPerfModelSpec] = None,
 ) -> PlannerConfig:
     """Build a PlannerConfig from the DGDR spec and picked parallel configs."""
     if dgdr.features and dgdr.features.planner:
@@ -587,6 +599,8 @@ def _build_planner_config(
 
     if aic_spec is not None:
         planner_cfg.aic_interpolation = aic_spec
+    if aic_perf_model is not None:
+        planner_cfg.aic_perf_model = aic_perf_model
 
     # Propagate SLA targets from spec.sla so the post-deployment planner enforces
     # the same SLA used at sweep time. Without this, the planner silently uses
@@ -616,6 +630,49 @@ def _build_planner_config(
             planner_cfg.itl_ms = float(sla.itl)
 
     return planner_cfg
+
+
+def build_aic_perf_model_spec(
+    dgdr,
+    best_prefill_pick: Optional[PickedParallelConfig],
+    best_decode_pick: Optional[PickedParallelConfig],
+    resolved_backend: str,
+    system: str,
+) -> Optional[AICPerfModelSpec]:
+    """Build native AIC identity for the planner's Rust perf shim.
+
+    This is intentionally independent from AIC interpolation. It does not
+    request a sweep; it only gives the shim enough identity and parallelism
+    data to try native forward-pass estimation before falling back to
+    observed-FPM regression.
+    """
+    planner = (
+        dgdr.features.planner  # type: ignore[union-attr]
+        if dgdr.features is not None and dgdr.features.planner is not None
+        else None
+    )
+    if (
+        not is_planner_enabled(dgdr)
+        or planner is None
+        or planner.optimization_target != "sla"
+    ):
+        return None
+    if resolved_backend not in ("trtllm", "vllm", "sglang"):
+        return None
+
+    mode = planner.mode
+    if mode in ("prefill", "disagg") and best_prefill_pick is None:
+        return None
+    if mode in ("decode", "agg", "disagg") and best_decode_pick is None:
+        return None
+
+    return AICPerfModelSpec(
+        hf_id=dgdr.model,
+        system=system,
+        backend=resolved_backend,
+        prefill_pick=best_prefill_pick,
+        decode_pick=best_decode_pick,
+    )
 
 
 def build_aic_interpolation_spec(

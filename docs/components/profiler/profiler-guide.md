@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler Guide
+subtitle: Runs the AI Configurator-driven profiling pipeline that turns a model, SLA targets, and backend into a ready-to-deploy DGD.
 ---
 
 ## Overview
 
 The Dynamo Profiler analyzes model inference performance and generates optimized deployment configurations (DynamoGraphDeployments). Given a model, hardware, and SLA targets, it determines the best parallelization strategy, selects optimal prefill and decode engine configurations, and produces a ready-to-deploy DGD YAML.
 
-The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AI Configurator (AIC)](https://github.com/ai-dynamo/aiconfigurator) for performance simulation, candidate enumeration, and configuration picking. When the planner is enabled, the profiler additionally generates engine interpolation curves used for runtime autoscaling.
+The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AI Configurator (AIC)](https://github.com/ai-dynamo/aiconfigurator) for performance simulation, candidate enumeration, and configuration picking. When the planner is enabled, the profiler also emits native AIC perf-model identity for the Rust engine perf shim and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
 
 ## Workflow
 
@@ -64,7 +65,7 @@ flowchart TD
 
 4. **DGD Generation**: The picked configuration is rendered into a complete DGD YAML via AIC's generator pipeline, including correct parallelization, replica counts, container image, and PVC mounts.
 
-5. **Interpolation** (throughput planner/mocker): When the planner or mocker needs throughput data, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. In thorough sweeping, these are stored as NPZ files and later packaged into a ConfigMap during final assembly. In rapid sweeping, consumers use AIC performance-model flags or in-process interpolation instead, so no profile-data ConfigMap is generated.
+5. **Interpolation** (planner bootstrap/mocker): When mocker or planner bootstrap data is requested, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. In thorough sweeping, these are stored as NPZ files and later packaged into a ConfigMap during final assembly. In rapid sweeping, consumers use AIC performance-model flags, planner `aic_perf_model`, or in-process interpolation instead, so no profile-data ConfigMap is generated.
 
 6. **Final Assembly** (3 composable layers):
    1. **Mocker base**: If mocker is enabled, the base DGD is swapped for the mocker DGD template (`generate_mocker_config`). Otherwise the AIC-picked DGD is kept.
@@ -77,14 +78,18 @@ flowchart TD
 
 ### Rapid
 
-Uses AIC's performance simulation to estimate optimal configurations without deploying real engines. Completes in ~30 seconds.
+Uses AIC's performance simulation to estimate optimal configurations without
+deploying real engines. Completes in ~30 seconds; see the
+[AIC support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/).
 
 ```yaml
 searchStrategy: rapid
 ```
 
 - Supports all backends: vLLM, SGLang, TensorRT-LLM
-- If the model/hardware/backend combination is not supported by AIC, falls back to a naive config (memory-fit TP calculation)
+- Falls back to a naive config (memory-fit TP calculation) only after DGDR
+  accepts the GPU SKU. Fallback sizing depends on AIC system metadata and does
+  not add support for additional GPU SKUs.
 - No GPU resources consumed during profiling
 
 ### Thorough
@@ -123,7 +128,7 @@ Triggered when there is **no planner and no target load**. Maximizes throughput 
 
 ## Planner Integration
 
-When the planner is enabled, the profiler generates engine interpolation data needed for throughput-based autoscaling. The `pre_deployment_sweeping_mode` field controls how this data is produced:
+When the planner is enabled, the profiler emits `aic_perf_model` identity for the Rust engine perf shim whenever picked configs are available. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
 
 ```yaml
 features:
@@ -135,12 +140,12 @@ features:
 
 `optimization_target` must be set to `sla` for `enable_throughput_scaling` and the planner's `ttft_ms`/`itl_ms` SLA targets to take effect. The `PlannerConfig` default is `throughput`, which uses static queue/utilization thresholds: it silently flips `enable_throughput_scaling` to `false` (so pre-deployment profiling is skipped and `planner-profile-data-XXXX` is not emitted) and ignores any `features.planner.ttft_ms`/`itl_ms` values. `enable_load_scaling` is unaffected (easy-mode keeps load scaling enabled). See the [Planner Guide](../planner/planner-guide.md#optimization-target) for the full explanation of each `optimization_target` value.
 
-- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs). Consumers use AIC performance-model flags or in-process interpolation, so `planner-profile-data-XXXX` is not emitted.
+- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs). Consumers use AIC performance-model flags, planner `aic_perf_model`, or in-process interpolation, so `planner-profile-data-XXXX` is not emitted.
 - **thorough**: Deploys the selected engine config on real GPUs and sweeps across ISL/concurrency ranges (2-4h). When profile data is needed, the profiler packages it into `planner-profile-data-XXXX`.
-- **none**: Skips interpolation. Only valid when using load-based scaling without throughput-based scaling.
+- **none**: Skips interpolation. Planner throughput scaling can still start from native AIC or live FPM regression warmup. Mocker still requires pre-deployment sweeping.
 
 The generated DGD can include these ConfigMaps:
-- **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `profile_results_dir` pointing to the profiling data mount)
+- **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `aic_perf_model` when available and `profile_results_dir` pointing to the profiling data mount)
 - **planner-profile-data-XXXX**: Prefill and decode interpolation data (JSON). Only emitted when `pre_deployment_sweeping_mode: thorough` and either `optimization_target: sla` is set alongside `enable_throughput_scaling: true`, or mocker is enabled. Rapid mode does not emit this ConfigMap.
 
 See the [Planner Guide](../planner/planner-guide.md) for the full `PlannerConfig` reference.
@@ -159,8 +164,8 @@ The profiler enforces these rules at startup:
 |-----------|----------|
 | `searchStrategy: thorough` + `backend: auto` | Rejected. Specify a concrete backend. |
 | `enable_throughput_scaling: true` without `optimization_target: sla` | Silently coerced. `PlannerConfig` defaults `optimization_target` to `throughput`, which flips `enable_throughput_scaling` to `false` at validation time. Set `optimization_target: sla` explicitly to keep throughput-based scaling enabled. |
-| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Rejected. Throughput-based scaling requires pre-deployment sweeping. |
-| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Rejected. AIC does not support this model/hardware/backend combination; switch `pre_deployment_sweeping_mode` to `thorough`. |
+| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Allowed for planner. The perf model starts from native AIC when available or waits for enough live FPM observations. |
+| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Allowed for planner. The Rust shim falls back to observed-FPM regression when native AIC estimates are unavailable. |
 | `e2eLatency` provided together with an explicitly-set `ttft` or `itl` | Rejected by SLA validator. Provide only `e2eLatency`; `ttft` and `itl` do not need to be explicitly nulled. |
 | SLA unachievable | Warning logged, SLA updated to best achievable value. |
 | Load-match needs more GPUs than available | Warning logged. |
@@ -198,7 +203,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -215,7 +220,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 **Step 2: Apply the DGDR**
@@ -372,7 +377,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   searchStrategy: rapid  # or thorough
   autoApply: true
@@ -436,13 +441,14 @@ Pass arguments to the SLA planner via the features section:
 ```yaml
 features:
   planner:
-    planner_min_endpoint: 2                    # Minimum endpoints to maintain
-    planner_adjustment_interval: 60            # Adjustment interval (seconds)
-    planner_load_predictor: linear             # Load prediction method
+    min_endpoint: 2                            # Minimum endpoints to maintain
+    load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
+    throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
+    load_predictor: linear                     # Load prediction method
 ```
 
 > [!NOTE]
-> Planner arguments use `planner_` prefix. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
+> Planner arguments use the `PlannerConfig` field names consumed by the planner service. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
 
 ### Model Cache PVC (Advanced)
 
@@ -640,14 +646,14 @@ SGLang workers expose profiling endpoints for runtime performance analysis:
 
 ```bash
 # Start profiling
-curl -X POST http://localhost:9090/engine/start_profile \
+curl -X POST http://localhost:9090/engine/control/start_profile \
   -H "Content-Type: application/json" \
   -d '{"output_dir": "/tmp/profiler_output"}'
 
 # Run inference requests...
 
 # Stop profiling
-curl -X POST http://localhost:9090/engine/stop_profile
+curl -X POST http://localhost:9090/engine/control/stop_profile
 ```
 
 View traces using Chrome's `chrome://tracing`, [Perfetto UI](https://ui.perfetto.dev/), or TensorBoard.

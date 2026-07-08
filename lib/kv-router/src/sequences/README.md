@@ -64,3 +64,32 @@ So a stale or torn read can lead to a suboptimal routing choice, but it should n
 - The system accepts this lag because the read side is advisory.
 
 This is the core design: a strict local write DAG with an eventually consistent read projection.
+
+## Modeled remaining prefill time
+
+The slot tracker also exposes an internal derived read for modeled remaining prefill time per worker.
+This value is computed from admission-time prefill duration hints already stored in `ActiveSequences`,
+then projected through `PromptRegistry` with the same advisory read semantics as token load.
+
+This read is not a routing input, protocol payload, metric, or authoritative engine timing signal.
+It returns non-negative milliseconds. Elapsed time from the oldest active prefill is applied to the
+aggregate modeled backlog, so spillover can reduce later modeled prefills before the final worker
+backlog clips at zero. That behavior is intentional because engines may batch or overlap multiple
+prefills faster than the per-request model represents.
+
+The active-token load view uses the same aggregate spillover only when all active prefills have
+modeled durations. If any active prefill lacks an expected duration, token load falls back to
+anchor-only decay so unmodeled no-AIC/default requests do not decay. A zero-duration anchor is treated
+as completing its own tokens immediately without inventing token spillover into later requests.
+This token-load approximation assumes active modeled prefills have roughly uniform tokens/sec.
+
+If a modeled non-anchor prefill is removed before the anchor, the tracker credits that completed work
+by shifting the effective anchor forward by the removed request's modeled duration, capped at the
+removal time. This keeps completed non-anchor work from also counting as elapsed progress against the
+remaining modeled backlog. `Free` keeps its existing implicit prefill-completion cleanup behavior and
+applies the same credit when the prefill is still tracked. Replica-synced state remains advisory and
+receive-time anchored.
+
+When any active prefill for a worker lacks an expected duration, the modeled-time read returns
+`Err(MissingExpectedDuration)`. That is the normal default/no-AIC or prediction-failed state, and the
+tracker fast-returns from the derived snapshot without summing active prefills in that case.

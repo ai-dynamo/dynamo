@@ -27,6 +27,7 @@ from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation
 from dynamo.profiler.rapid import run_rapid
 from dynamo.profiler.thorough import run_thorough
+from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
@@ -35,6 +36,7 @@ from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import (
     assemble_final_config,
     build_aic_interpolation_spec,
+    build_aic_perf_model_spec,
 )
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     BackendType,
@@ -74,6 +76,29 @@ def _apply_tolerations_to_final_config(final_config: Any, tolerations: list) -> 
     return inject_tolerations_into_dgd(final_config, tolerations)
 
 
+def _apply_model_runtime_constraints_to_final_config(
+    final_config: Any,
+    backend: str,
+    model_name_or_path: str,
+) -> Any:
+    if backend != "vllm" or not final_config:
+        return final_config
+
+    config_modifier = CONFIG_MODIFIERS[backend]
+    if not hasattr(config_modifier, "apply_model_runtime_constraints"):
+        return final_config
+
+    if isinstance(final_config, list):
+        final_config[-1] = config_modifier.apply_model_runtime_constraints(
+            final_config[-1], model_name_or_path
+        )
+    elif isinstance(final_config, dict):
+        final_config = config_modifier.apply_model_runtime_constraints(
+            final_config, model_name_or_path
+        )
+    return final_config
+
+
 def _check_auto_backend_support(model: str, system: str) -> bool:
     """
     Return True if *any* concrete backend is AIC-supported for this model/system.
@@ -82,6 +107,16 @@ def _check_auto_backend_support(model: str, system: str) -> bool:
     return any(
         check_model_hardware_support(model, system, b) for b in _CONCRETE_BACKENDS
     )
+
+
+def _check_dgdr_aic_support(
+    dgdr: DynamoGraphDeploymentRequestSpec, backend: str, system: str
+) -> bool:
+    """Check AIC support using a mounted model config when one is available."""
+    model_path = resolve_model_path(dgdr)
+    if backend == "auto":
+        return _check_auto_backend_support(model_path, system)
+    return check_model_hardware_support(model_path, system, backend)
 
 
 def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
@@ -370,10 +405,7 @@ async def run_profile(
             search_strategy,
             picking_mode,
         ) = _extract_profiler_params(dgdr)
-        if backend == "auto":
-            aic_supported = _check_auto_backend_support(model, system)
-        else:
-            aic_supported = check_model_hardware_support(model, system, backend)
+        aic_supported = _check_dgdr_aic_support(dgdr, backend, system)
         # then validate DGDR features based on AIC support
         validate_dgdr_dynamo_features(dgdr, aic_supported)
 
@@ -504,6 +536,17 @@ async def run_profile(
             if is_disagg_config and not ops.dry_run
             else None
         )
+        aic_perf_model = (
+            build_aic_perf_model_spec(
+                dgdr,
+                best_prefill_pick=best_prefill_config,
+                best_decode_pick=best_decode_config,
+                resolved_backend=resolved_backend,
+                system=system,
+            )
+            if not ops.dry_run
+            else None
+        )
         final_config = assemble_final_config(
             dgdr,
             ops,
@@ -511,6 +554,7 @@ async def run_profile(
             best_prefill_config,
             best_decode_config,
             aic_spec=aic_spec,
+            aic_perf_model=aic_perf_model,
             resolved_backend=resolved_backend,
         )
 
@@ -523,6 +567,12 @@ async def run_profile(
             elif isinstance(final_config, dict):
                 final_config = apply_dgd_overrides(final_config, dgdr.overrides.dgd)
             logger.info("Applied DGD overrides to the final config.")
+
+        final_config = _apply_model_runtime_constraints_to_final_config(
+            final_config,
+            resolved_backend,
+            resolve_model_path(dgdr),
+        )
 
         # Propagate profiling-job tolerations to the final DGD (covers any
         # services added by assemble_final_config, e.g. Planner).

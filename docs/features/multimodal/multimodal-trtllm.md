@@ -30,7 +30,7 @@ You can provide multimodal inputs in the following ways:
 
 ## Deployment Patterns
 
-TRT-LLM supports aggregated and traditional disaggregated patterns. See [Architecture Patterns](README.md#architecture-patterns) for detailed explanations.
+TRT-LLM supports aggregated and traditional disaggregated patterns. See [Multimodal Model Serving](README.md) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
@@ -374,7 +374,7 @@ TRT-LLM workers register with Dynamo using:
 # TRT-LLM Worker - Register with Tokens
 await register_model(
     ModelInput.Tokens,      # Rust does minimal preprocessing
-    model_type,             # ModelType.Chat or ModelType.Prefill
+    model_type,             # ModelType.Chat or ModelType.Empty
     generate_endpoint,
     model_name,
     ...

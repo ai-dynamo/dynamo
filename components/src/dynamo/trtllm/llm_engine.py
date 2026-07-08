@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -32,14 +33,21 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 from torch.cuda import device_count
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
+    LogitsProcessorSpec,
+    is_generation_stage,
+    logits_processors_for_request,
+    resolve_test_logits_processor_spec,
 )
 from dynamo.common.backend.health_check import (
     bos_token_id_or,
@@ -49,10 +57,13 @@ from dynamo.common.backend.metrics import register_global_registry
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, PushSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import KvEventPublisher, ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
+from dynamo.trtllm.logits_processing.adapter import attach_logits_processors
+from dynamo.trtllm.request_handlers.handler_base import TRTLLMEnginePauseController
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -67,10 +78,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Match legacy `trtllm/main.py` so prefill drain behaves the same.
-_DRAIN_TIMEOUT_S = 30.0
-_DRAIN_POLL_INTERVAL_S = 0.5
-
 # 1021 is the largest 10-bit prime — spreads machine_ids more evenly
 # under modulo than 1024 would. Matches legacy
 # `workers/llm_worker.py: connection_id() % 1021`.
@@ -83,7 +90,7 @@ _IDLE_SLEEP_S = 0.01
 
 # Mirror the legacy `dynamo.trtllm` worker — required for TRT-LLM to actually
 # publish KV cache events. Without this, `get_kv_cache_events` returns empty.
-_DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+_DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 
 # Note: `metrics_dict` is set per-instance on `GenerationResult` (only
 # when TRT-LLM's perf-stats collection is enabled and the request
@@ -140,6 +147,17 @@ class TrtllmLLMEngine(LLMEngine):
         self.publish_events_and_metrics = publish_events_and_metrics
         self._component = component
         self._additional_metrics: Optional["AdditionalMetricsCollector"] = None
+        kv_cache_config = self.engine_args.get("kv_cache_config", {})
+        if isinstance(kv_cache_config, dict):
+            event_buffer_max_size = kv_cache_config.get("event_buffer_max_size", 0)
+        elif isinstance(kv_cache_config, KvCacheConfig):
+            event_buffer_max_size = kv_cache_config.event_buffer_max_size
+        else:
+            raise TypeError(
+                "kv_cache_config must be a dict or KvCacheConfig, "
+                f"got {type(kv_cache_config).__name__}"
+            )
+        self._kv_event_buffer_max_size = int(event_buffer_max_size or 0)
         self._trtllm_metrics_collector: Optional["MetricsCollector"] = None
         # Resolved once at construction so the hot poll loop doesn't run
         # `hasattr` per iteration; same for the per-request log method
@@ -148,6 +166,8 @@ class TrtllmLLMEngine(LLMEngine):
         self._log_request_metrics: Optional[Callable[[dict], None]] = None
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
+        # Resolved once in `start()`; None when the smoke hook is off.
+        self._logits_processor_spec: LogitsProcessorSpec | None = None
         # Per-request GenerationResult handles for `abort()` lookup. TRT-LLM's
         # abort API is `GenerationResult.abort()` (not by request-id), so we
         # need the handle. Other engines (vllm, sglang) abort by id and
@@ -178,6 +198,14 @@ class TrtllmLLMEngine(LLMEngine):
         # One-shot guards so a misbehaving engine doesn't flood logs.
         self._warned_dispatch_failed = False
         self._warned_unknown_dp_rank = False
+        self._pause_controller: TRTLLMEnginePauseController | None = None
+        self._pause_lock = asyncio.Lock()
+        self._inflight_lock = asyncio.Lock()
+        self._inflight_requests = 0
+        self._no_inflight_requests = asyncio.Event()
+        self._no_inflight_requests.set()
+        self._reject_new_requests = False
+        self._resume_recovery_required = False
 
     @classmethod
     async def from_args(
@@ -256,6 +284,15 @@ class TrtllmLLMEngine(LLMEngine):
                 kv_cfg["event_buffer_max_size"] = _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
             engine_args["kv_cache_config"] = kv_cfg
 
+        # Force tokenizer init for the smoke hook, after all overrides so an
+        # explicit user `skip_tokenizer_init=True` can't starve the processor.
+        # Gated to generation roles for the same reason as the spec resolution
+        # below. The flag is TRT-LLM-shaped; each backend sets its own.
+        if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1" and is_generation_stage(
+            _TRTLLM_TO_COMMON_DISAGG[config.disaggregation_mode]
+        ):
+            engine_args["skip_tokenizer_init"] = False
+
         # Use post-override engine_args so EngineConfig matches what the
         # actual TRT-LLM engine got.
         engine = cls(
@@ -292,6 +329,14 @@ class TrtllmLLMEngine(LLMEngine):
 
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
         await self._engine.initialize()
+        self._pause_controller = TRTLLMEnginePauseController(self._engine)
+
+        # Resolve the engine-declared spec now the engine (and its tokenizer)
+        # is initialized; see `logits_processor_spec()`.
+        self._logits_processor_spec = await self.logits_processor_spec()
+        # TODO: Thread runtime and shutdown_event through unified LLMEngine
+        # startup so the TRT-LLM monitor can match the legacy shutdown path.
+        self._engine.start_health_monitor()
 
         from tensorrt_llm.metrics import MetricsCollector
 
@@ -304,6 +349,9 @@ class TrtllmLLMEngine(LLMEngine):
                 "disaggregation_mode": self.disaggregation_mode.value,
                 "engine_type": "trtllm",
             },
+        )
+        self._additional_metrics.set_kv_event_buffer_capacity(
+            self._kv_event_buffer_max_size
         )
         self._trtllm_metrics_collector = MetricsCollector(
             {"model_name": gauge_model_name, "engine_type": "trtllm"}
@@ -331,11 +379,13 @@ class TrtllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.served_model_name,
-            context_length=self.max_seq_len,
-            kv_cache_block_size=self.kv_block_size,
-            max_num_seqs=self.max_batch_size,
-            max_num_batched_tokens=self.max_num_tokens,
-            data_parallel_size=self._attention_dp_size,
+            llm=LlmRegistration(
+                context_length=self.max_seq_len,
+                kv_cache_block_size=self.kv_block_size,
+                max_num_seqs=self.max_batch_size,
+                max_num_batched_tokens=self.max_num_tokens,
+                data_parallel_size=self._attention_dp_size,
+            ),
         )
 
     # TRT-LLM's `get_kv_cache_events` / `get_stats` block the calling
@@ -357,6 +407,18 @@ class TrtllmLLMEngine(LLMEngine):
             )
             for rank in range(self._attention_dp_size)
         ]
+
+    async def logits_processor_spec(self) -> LogitsProcessorSpec | None:
+        # Only generation roles ever attach (PREFILL/ENCODE gate out per
+        # request), so skip spec resolution — and the tokenizer it needs —
+        # entirely for the other roles.
+        if not is_generation_stage(_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode]):
+            return None
+        # Bind the env-gated smoke hook to TRT-LLM's tokenizer; the lambda is
+        # dereferenced lazily, only when the hook is on (see the resolver).
+        assert self._engine is not None
+        engine = self._engine  # narrow for the closure
+        return resolve_test_logits_processor_spec(lambda: engine.llm.tokenizer)
 
     def component_metrics_dp_ranks(self) -> list[int]:
         return list(range(self._attention_dp_size))
@@ -416,9 +478,9 @@ class TrtllmLLMEngine(LLMEngine):
                             kv_used_blocks=int(kv_used),
                             kv_total_blocks=kv_total,
                             gpu_cache_usage=(kv_used / kv_total) if kv_total else 0.0,
-                            kv_cache_hit_rate=float(hit_rate)
-                            if hit_rate is not None
-                            else None,
+                            kv_cache_hit_rate=(
+                                float(hit_rate) if hit_rate is not None else None
+                            ),
                             dp_rank=rank,
                         ),
                     )
@@ -444,6 +506,8 @@ class TrtllmLLMEngine(LLMEngine):
             if not events:
                 time.sleep(_IDLE_SLEEP_S)
                 continue
+            if self._additional_metrics is not None:
+                self._additional_metrics.record_kv_event_drain_batch(len(events))
             for event in events:
                 try:
                     self._dispatch_kv_event(event)
@@ -470,6 +534,10 @@ class TrtllmLLMEngine(LLMEngine):
                     last + 1,
                     event_id,
                 )
+                if self._additional_metrics is not None:
+                    self._additional_metrics.record_kv_event_id_gap(
+                        max(0, event_id - (last + 1))
+                    )
             self._last_event_id_by_rank[rank] = event_id
         publisher = self._kv_publishers.get(rank)
         if publisher is None:
@@ -534,7 +602,145 @@ class TrtllmLLMEngine(LLMEngine):
             if removed:
                 publisher.publish_removed(removed)
 
+    def supported_controls(self) -> set[str]:
+        return {"release_memory_occupation", "resume_memory_occupation"}
+
+    async def engine_control(self, control: str, body: dict) -> dict:
+        handlers = {
+            "release_memory_occupation": self.release_memory_occupation,
+            "resume_memory_occupation": self.resume_memory_occupation,
+        }
+        handler = handlers.get(control)
+        if handler is None:
+            return {
+                "status": "error",
+                "message": f"unsupported engine control: {control}",
+            }
+        return await handler(body or {})
+
+    async def _set_reject_new_requests(self, reject: bool) -> None:
+        async with self._inflight_lock:
+            self._reject_new_requests = reject
+
+    async def _mark_request_started(self) -> bool:
+        async with self._inflight_lock:
+            if self._reject_new_requests:
+                return False
+            self._inflight_requests += 1
+            self._no_inflight_requests.clear()
+            return True
+
+    async def _mark_request_finished(self) -> None:
+        async with self._inflight_lock:
+            if self._inflight_requests == 0:
+                return
+            self._inflight_requests -= 1
+            if self._inflight_requests == 0:
+                self._no_inflight_requests.set()
+
+    async def _wait_for_inflight_requests(self, timeout_s: float) -> None:
+        try:
+            await asyncio.wait_for(self._no_inflight_requests.wait(), timeout_s)
+        except asyncio.TimeoutError as exc:
+            async with self._inflight_lock:
+                inflight = self._inflight_requests
+            raise RuntimeError(
+                f"Timed out waiting for {inflight} in-flight request(s) to finish"
+            ) from exc
+
+    @staticmethod
+    def _controller_needs_resume_recovery(
+        controller: TRTLLMEnginePauseController,
+    ) -> bool:
+        needs_recovery = getattr(controller, "needs_resume_recovery", False)
+        return needs_recovery if isinstance(needs_recovery, bool) else False
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        controller = self._pause_controller
+        if controller is None:
+            return {"status": "error", "message": "engine is not initialized"}
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._pause_lock:
+            if controller.is_paused:
+                return {"status": "ok", "message": "Memory already released"}
+            if (
+                self._resume_recovery_required
+                or self._controller_needs_resume_recovery(controller)
+            ):
+                return {
+                    "status": "error",
+                    "message": "resume_memory_occupation required before retrying release",
+                }
+            try:
+                await self._set_reject_new_requests(True)
+                timeout_s = float(body.get("timeout_s", 30.0))
+                await self._wait_for_inflight_requests(timeout_s)
+            except Exception as exc:
+                logger.error("release_memory_occupation failed before pause: %s", exc)
+                await self._set_reject_new_requests(False)
+                return {"status": "error", "message": str(exc)}
+
+            try:
+                await controller.pause(tags)
+                self._resume_recovery_required = False
+                return {"status": "ok", "message": "Memory released"}
+            except Exception as exc:
+                logger.error("release_memory_occupation pause failed: %s", exc)
+                self._resume_recovery_required = True
+                return {"status": "error", "message": str(exc)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        controller = self._pause_controller
+        if controller is None:
+            return {"status": "error", "message": "engine is not initialized"}
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._pause_lock:
+            needs_recovery = (
+                self._resume_recovery_required
+                or self._controller_needs_resume_recovery(controller)
+            )
+            if not controller.is_paused and not needs_recovery:
+                return {"status": "ok", "message": "Memory already resumed"}
+            try:
+                if controller.is_paused or self._controller_needs_resume_recovery(
+                    controller
+                ):
+                    await controller.resume(tags)
+                await self._set_reject_new_requests(False)
+                controller.mark_resumed()
+                self._resume_recovery_required = False
+                return {"status": "ok", "message": "Memory resumed"}
+            except Exception as exc:
+                logger.error("resume_memory_occupation failed: %s", exc)
+                self._resume_recovery_required = True
+                return {"status": "error", "message": str(exc)}
+
     async def generate(
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
+        if not await self._mark_request_started():
+            yield {
+                "finish_reason": "error",
+                "token_ids": [],
+                "index": 0,
+                "completion_usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+            }
+            return
+        try:
+            async for chunk in self._generate_started(request, context):
+                yield chunk
+        finally:
+            await self._mark_request_finished()
+
+    async def _generate_started(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
         assert self._engine is not None, "Engine not initialized"
@@ -566,6 +772,24 @@ class TrtllmLLMEngine(LLMEngine):
             self._default_sampling_params, request
         )
 
+        # TRT-LLM's `logprobs=0` disables computation entirely. Floor at 1
+        # so a `logprobs=0` request still gets the chosen-token logprob;
+        # the raw requested count gates top_logprobs emission below.
+        (
+            requested_logprobs_count,
+            prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
+        if requested_logprobs_count is not None and hasattr(
+            sampling_params, "logprobs"
+        ):
+            sampling_params.logprobs = max(1, requested_logprobs_count)
+        if prompt_logprobs_count is not None and hasattr(
+            sampling_params, "prompt_logprobs"
+        ):
+            sampling_params.prompt_logprobs = prompt_logprobs_count
+
         # Prefill: context_only handle → packed into the response.
         # Decode: read prefill peer's handle, flip to generation_only.
         disaggregated_params: LlmDisaggregatedParams | None = None
@@ -594,6 +818,8 @@ class TrtllmLLMEngine(LLMEngine):
             elif self.max_seq_len is not None:
                 sampling_params.max_tokens = max(1, self.max_seq_len - len(token_ids))
 
+        # TODO: mirror visible/hidden stop-token handling from the disagg
+        # path (handler_base.py) into a shared helper. See PR #9778.
         ignore_eos = stop_conditions.get("ignore_eos")
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
@@ -609,7 +835,13 @@ class TrtllmLLMEngine(LLMEngine):
             else None
         )
 
-        # Prefill returns one non-streaming chunk carrying the handoff —
+        entries = logits_processors_for_request(
+            self._logits_processor_spec,
+            disaggregation_mode=_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode],
+        )
+        attach_logits_processors(sampling_params, entries)
+
+        # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
         generation_result = self._engine.llm.generate_async(
@@ -643,12 +875,39 @@ class TrtllmLLMEngine(LLMEngine):
                         "index": output_idx,
                     }
 
+                    # output.logprobs is cumulative in lockstep with
+                    # output.token_ids — reuse the same slice offset.
+                    (
+                        log_probs,
+                        top_logprobs,
+                    ) = _shared_logprobs.extract_from_completion_output(
+                        output,
+                        tokens_so_far,
+                        fallback_to_first_on_missing=True,
+                        include_bytes=False,
+                    )
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if (
+                        top_logprobs is not None
+                        and requested_logprobs_count is not None
+                        and requested_logprobs_count > 0
+                    ):
+                        out["top_logprobs"] = top_logprobs
+
                     if output.finish_reason:
                         out["finish_reason"] = str(output.finish_reason)
 
                     if out.get("finish_reason") or res.finished:
                         if not out.get("finish_reason"):
                             out["finish_reason"] = "unknown"
+                        # TRT-LLM shares vLLM's prompt_logprobs shape.
+                        if prompt_logprobs_count is not None:
+                            prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                                res
+                            )
+                            if prompt_payload is not None:
+                                out["engine_data"] = {"prompt_logprobs": prompt_payload}
                         prompt_tokens = len(token_ids)
                         total_completion_tokens = sum(
                             len(o.token_ids) for o in res.outputs
@@ -795,51 +1054,11 @@ class TrtllmLLMEngine(LLMEngine):
             extras={"priority": 1.0},
         )
 
-    async def drain(self) -> None:
-        """Prefill-only: poll until in-flight requests finish so a
-        decode peer's NIXL pull doesn't see freed GPU memory (#7319).
-        Mirrors legacy `_make_drain_callback`."""
-        if (
-            self._engine is None
-            or self.disaggregation_mode != DisaggregationMode.PREFILL
-        ):
-            return
-
-        deadline = asyncio.get_running_loop().time() + _DRAIN_TIMEOUT_S
-        logger.info(
-            "Draining in-flight requests on prefill worker (timeout=%.1fs)",
-            _DRAIN_TIMEOUT_S,
-        )
-        # The stats stream can raise asyncio.TimeoutError when the engine
-        # has nothing fresh to report, or StopAsyncIteration when the
-        # underlying iterator is exhausted — both are benign and just mean
-        # "no signal this tick, try again". A wider `Exception` would
-        # swallow code bugs introduced later; the test stub raises
-        # RuntimeError to exercise the retry path.
-        _BENIGN_POLL = (asyncio.TimeoutError, StopAsyncIteration, RuntimeError)
-        while asyncio.get_running_loop().time() < deadline:
-            try:
-                stats_iter = self._engine.llm.get_stats_async(timeout=2)
-                stat = await anext(stats_iter)
-                active = stat.get("numActiveRequests", 0)
-                queued = stat.get("numQueuedRequests", 0)
-                if active + queued == 0:
-                    logger.info("All in-flight requests drained")
-                    return
-                logger.info(
-                    "Waiting for %d in-flight request(s) (active=%d, queued=%d)",
-                    active + queued,
-                    active,
-                    queued,
-                )
-            except _BENIGN_POLL as e:
-                logger.debug("Stats poll failed during drain: %s", e)
-            await asyncio.sleep(_DRAIN_POLL_INTERVAL_S)
-        logger.warning(
-            "Drain timeout (%.1fs) reached; proceeding with shutdown — "
-            "some NIXL transfers may still be in flight",
-            _DRAIN_TIMEOUT_S,
-        )
+    # TRT-LLM deliberately does not override is_quiescent (inherits None: wait
+    # the full drain budget). It has no signal for "pending KV transfers done":
+    # iteration stats stop arriving once the worker is idle, so active == 0 is
+    # never observed; and _active_requests is popped at handoff, before decode
+    # pulls the KV. The budget alone gives decode time to drain.
 
     async def cleanup(self) -> None:
         # Stop the publisher threads BEFORE engine shutdown so they don't
@@ -852,6 +1071,16 @@ class TrtllmLLMEngine(LLMEngine):
         self._kv_events_thread = None
         self._metrics_thread = None
         self._kv_publishers.clear()
+        self._pause_controller = None
+        # Abort any still-tracked requests so llm.shutdown() runs on an idle
+        # engine. Mostly a no-op for prefill (popped at handoff); matters for
+        # decode/aggregated workers mid-generation.
+        for result in list(self._active_requests.values()):
+            try:
+                result.abort()
+            except Exception:
+                logger.debug("abort during cleanup failed", exc_info=True)
+        self._active_requests.clear()
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")
@@ -879,7 +1108,9 @@ class TrtllmLLMEngine(LLMEngine):
                 regex=regex,
                 grammar=guided_decoding.get("grammar"),
                 json_object=guided_decoding.get("json_object", False),
-                structural_tag=guided_decoding.get("structural_tag"),
+                structural_tag=serialize_structural_tag(
+                    guided_decoding.get("structural_tag")
+                ),
             )
 
         n = overrides.get("n")

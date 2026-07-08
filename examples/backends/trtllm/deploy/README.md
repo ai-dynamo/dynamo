@@ -55,7 +55,18 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 - `prefill`: Specialized prefill-only worker
 
 > [!NOTE]
-> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for detailed instructions.
+> This deployment can use native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
+
+### 7. **Snapshot Restore Example** (`v1beta1/snapshot-restore.yaml`)
+Experimental Dynamo Snapshot restore example for Qwen3-0.6B with a single
+TensorRT-LLM worker. This example uses the conservative engine configuration in
+[`../engine_configs/qwen3/snapshot.yaml`](../engine_configs/qwen3/snapshot.yaml).
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server
+- `TRTLLMWorker`: Single GPU TensorRT-LLM worker restored with
+  `experimental.checkpoint.enabled: true` and
+  `startupPolicy: WaitForCheckpoint`
 
 ## CRD Structure
 
@@ -120,16 +131,9 @@ docker build -f container/rendered.Dockerfile .
 # Update the image references in the YAML files
 ```
 
-**Note:** TensorRT-LLM uses git-lfs, which needs to be installed in advance:
-```bash
-apt-get update && apt-get -y install git git-lfs
-```
+The Dynamo TensorRT-LLM image is based on the upstream `nvcr.io/nvidia/tensorrt-llm/release` container, which publishes both `amd64` and `arm64` variants. To build for arm64, pass `--platform=linux/arm64` to `render.py` and `docker buildx build`.
 
-For ARM machines, use:
-```bash
-python container/render.py --framework=vllm --platform arm64 --output-short-filename
-docker build -f container/rendered.Dockerfile .
-```
+For more customization (pinning a different upstream TRT-LLM tag or using a TRT-LLM image you built from source), see the [Building a Custom Container](../../../../docs/backends/trtllm/trtllm-building-custom-container.md) guide.
 
 ## Usage
 
@@ -258,12 +262,6 @@ args:
   - "3"
 ```
 
-## Benchmarking
-
-To benchmark your deployment with AIPerf, see this utility script: [perf.sh](../../../../benchmarks/llm/perf.sh)
-
-Configure the `model` name and `host` based on your deployment.
-
 ## Further Reading
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
@@ -284,7 +282,5 @@ Common issues and solutions:
 3. **Health check failures**: Review model loading logs and increase `initialDelaySeconds`
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
-6. **Git LFS issues**: Ensure git-lfs is installed before building containers
-7. **ARM deployment**: Use `--platform linux/arm64` when building on ARM machines
 
 For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).
