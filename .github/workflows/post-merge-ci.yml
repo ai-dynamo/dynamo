@@ -1272,6 +1272,6 @@ jobs:
     needs: [ deploy-status-check ]
     uses: ./.github/workflows/notify-slack.yml
     with:
-      pipeline_name: Post-merge
+      pipeline_name: Post-Merge
       runs_on: ubuntu-slim
     secrets: inherit

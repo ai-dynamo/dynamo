@@ -82,7 +82,7 @@ jobs:
               - type: "section"
                 text:
                   type: mrkdwn
-                  text: ":alert: *Github ${{ inputs.pipeline_name }} Pipeline Failure*"
+                  text: ":alert: *GitHub ${{ inputs.pipeline_name }} Pipeline Failure*"
               - type: "section"
                 text:
                   type: mrkdwn
