@@ -2364,7 +2364,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 			},
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
-				Reason:  "Updating",
+				Reason:  "updating",
 				Message: Message("Resources not ready: test-dgd: decode: desired=2, updated=1"),
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
@@ -2511,7 +2511,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 			},
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
-				Reason:  "PodsNotReady",
+				Reason:  "pods_not_ready",
 				Message: Message("Resources not ready: test-dgd: aggregated: scheduled but available=1/2"),
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {

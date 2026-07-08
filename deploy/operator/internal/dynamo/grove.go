@@ -228,9 +228,18 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		return true, "", serviceStatus, ""
 	}
 
-	// Not ready: diagnose the cause, classify capacity/scheduling blockers
-	// before runtime readiness so a component stuck on scheduling is not
-	// misreported as merely "pods not ready".
+	// Not ready: classify capacity signals, in order of reliability:
+	//   1. scheduleGatedReplicas > 0            (explicit gated count)
+	//   2. PodCliqueScheduled condition = False  (explicit scheduling signal)
+	//   3. 0 < scheduledReplicas < desired       (genuine partial scheduling)
+	// Grove defaults scheduledReplicas to 0 (non-pointer field), so a 0 is
+	// ambiguous between "genuinely nothing scheduled" and "field not populated",
+	// and is additionally 0 transiently during early rollout. Comparing a 0
+	// would misclassify ordinary rollout/readiness churn as InsufficientCapacity.
+	// The trade-off: a *total* scheduling failure (scheduled == 0 of N) cannot be
+	// distinguished from the default and is not caught here — it will instead be
+	// reported via case 1 or case 2, if Grove sets them, or fall through
+	// to Updating/PodsNotReady otherwise.
 	if scheduleGatedReplicas > 0 {
 		logger.V(1).Info("PodClique has schedule-gated replicas", "resourceName", resourceName, "scheduleGated", scheduleGatedReplicas)
 		return false, fmt.Sprintf("schedule-gated replicas: %d", scheduleGatedReplicas), serviceStatus, v1beta1.DGDReadyReasonInsufficientCapacity
@@ -240,6 +249,10 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		cond.Reason == groveconstants.ConditionReasonInsufficientScheduledPods {
 		logger.V(1).Info("PodClique scheduling condition reports insufficient capacity", "resourceName", resourceName, "reason", cond.Reason, "message", cond.Message)
 		return false, fmt.Sprintf("scheduling condition %s: %s", cond.Reason, cond.Message), serviceStatus, v1beta1.DGDReadyReasonInsufficientCapacity
+	}
+	if scheduledReplicas > 0 && scheduledReplicas < desiredReplicas {
+		logger.V(1).Info("PodClique partially scheduled", "resourceName", resourceName, "desired", desiredReplicas, "scheduled", scheduledReplicas)
+		return false, fmt.Sprintf("insufficient scheduled replicas: scheduled=%d/%d", scheduledReplicas, desiredReplicas), serviceStatus, v1beta1.DGDReadyReasonInsufficientCapacity
 	}
 
 	if desiredReplicas != updatedReplicas {
@@ -326,13 +339,22 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 		return true, "", serviceStatus, ""
 	}
 
-	// Not ready: diagnose the cause, classify capacity/scheduling blockers
-	// before runtime readiness. MinAvailableBreached is used.
+	// Not ready: the explicit MinAvailableBreached scheduling condition,
+	// and a genuine partial scheduled count (0 < scheduled < desired).
+	//
+	// Grove alpha.8 polarity note: on the MinAvailableBreached condition, the
+	// *scheduling* shortfall reason (InsufficientScheduledPodCliqueScalingGroupReplicas)
+	// is emitted with Status=False, while Status=True is paired with the
+	// *availability* reason (InsufficientAvailablePodCliqueScalingGroupReplicas).
 	if cond := meta.FindStatusCondition(pcsg.Status.Conditions, groveconstants.ConditionTypeMinAvailableBreached); cond != nil &&
-		cond.Status == metav1.ConditionTrue &&
+		cond.Status == metav1.ConditionFalse &&
 		cond.Reason == groveconstants.ConditionReasonInsufficientScheduledPCSGReplicas {
 		logger.V(1).Info("PodCliqueScalingGroup MinAvailableBreached reports insufficient capacity", "resourceName", resourceName, "reason", cond.Reason, "message", cond.Message)
 		return false, fmt.Sprintf("min-available breached (%s): %s", cond.Reason, cond.Message), serviceStatus, v1beta1.DGDReadyReasonInsufficientCapacity
+	}
+	if scheduledReplicas > 0 && scheduledReplicas < desiredReplicas {
+		logger.V(1).Info("PodCliqueScalingGroup partially scheduled", "resourceName", resourceName, "desired", desiredReplicas, "scheduled", scheduledReplicas)
+		return false, fmt.Sprintf("insufficient scheduled replicas: scheduled=%d/%d", scheduledReplicas, desiredReplicas), serviceStatus, v1beta1.DGDReadyReasonInsufficientCapacity
 	}
 
 	if desiredReplicas != updatedReplicas {

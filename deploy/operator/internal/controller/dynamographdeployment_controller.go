@@ -1164,23 +1164,27 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
-	// replace the generic not-ready reason with a Grove-specific
-	// classification (InsufficientCapacity / PodsNotReady / Updating /
-	// MixedNotReadyReasons / SomeResourcesNotReady) computed from Grove
-	// PodClique / PodCliqueScalingGroup status. Only override when not ready;
-	// the ready path keeps checkResourcesReadiness's success result.
-	//
-	// This is a separate call from checkResourcesReadiness (which produces
-	// the detailed human-readable Message via the Resource closure) because
-	// Condition.Reason must be a bare CamelCase token and cannot be threaded
-	// through the generic Resource.IsReady() -> "<name>: <reason>" wrapping.
-	// Both reads are served from the controller-runtime informer cache, not
-	// the API server, so the cost is negligible and they observe the same
-	// PodClique/PCSG generation within a single reconcile.
+
+	// Grove-specific Ready reason classification
 	r.applyGroveReadyClassification(ctx, dynamoDeployment, &result)
+
 	return result, nil
 }
 
+// applyGroveReadyClassification replaces the generic not-ready reason on result
+// with a Grove-specific classification (InsufficientCapacity / PodsNotReady /
+// Updating / MixedNotReadyReasons / SomeResourcesNotReady) computed from Grove
+// PodClique / PodCliqueScalingGroup status (REQ 1). It only overrides when the
+// result is not successful; the ready path keeps checkResourcesReadiness's
+// success result.
+//
+// This is a separate read from checkResourcesReadiness (which produces the
+// detailed human-readable Message via the Resource closure) because
+// Condition.Reason must be a bare CamelCase token and cannot be threaded
+// through the generic Resource.IsReady() -> "<name>: <reason>" wrapping. Both
+// reads are served from the controller-runtime informer cache, not the API
+// server, so the cost is negligible and they observe the same PodClique/PCSG
+// generation within a single reconcile.
 func (r *DynamoGraphDeploymentReconciler) applyGroveReadyClassification(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, result *ReconcileResult) {
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
 		return
@@ -2712,11 +2716,20 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 						// UpdatedReplicas, and ReadyReplicas. Without the
 						// non-ReadyReplicas signals, the DGD can stay stale at the
 						// tail of a rolling update when ReadyReplicas is flat.
+						//
+						// ScheduleGatedReplicas and the PodCliqueScheduled condition
+						// are also tracked because the Ready-reason classification
+						// (REQ 1) reads them: a component whose only change is
+						// scheduling (gated pods clearing, or the scheduling
+						// condition flipping) must re-wake the DGD so its Ready
+						// reason is reclassified.
 						return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
 							oldPC.Status.UpdatedReplicas != newPC.Status.UpdatedReplicas ||
 							oldPC.Status.Replicas != newPC.Status.Replicas ||
+							oldPC.Status.ScheduleGatedReplicas != newPC.Status.ScheduleGatedReplicas ||
 							oldPC.Spec.Replicas != newPC.Spec.Replicas ||
-							!ptrInt64Equal(oldPC.Status.ObservedGeneration, newPC.Status.ObservedGeneration)
+							!ptrInt64Equal(oldPC.Status.ObservedGeneration, newPC.Status.ObservedGeneration) ||
+							groveScheduledConditionChanged(oldPC.Status.Conditions, newPC.Status.Conditions)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
@@ -2739,16 +2752,19 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 						if !okOld || !okNew {
 							return false
 						}
-						// ObservedGeneration is tracked because CheckPCSGReady uses it as
-						// a readiness gate ("spec not yet processed" while
+						// CheckPCSGReady tracks ObservedGeneration for "spec not yet processed" while
 						// ObservedGeneration < Generation). A PCSG spec edit that does
 						// not change Spec.Replicas (e.g. template/topology edits) would
 						// otherwise not wake the DGD when Grove catches up.
+						// The MinAvailableBreached condition is tracked in case of a
+						// PCSG-level scheduling shortfall; a change to only that
+						// condition must re-wake the DGD for reclassification.
 						return oldPCSG.Status.AvailableReplicas != newPCSG.Status.AvailableReplicas ||
 							oldPCSG.Status.UpdatedReplicas != newPCSG.Status.UpdatedReplicas ||
 							oldPCSG.Status.Replicas != newPCSG.Status.Replicas ||
 							oldPCSG.Spec.Replicas != newPCSG.Spec.Replicas ||
-							!ptrInt64Equal(oldPCSG.Status.ObservedGeneration, newPCSG.Status.ObservedGeneration)
+							!ptrInt64Equal(oldPCSG.Status.ObservedGeneration, newPCSG.Status.ObservedGeneration) ||
+							groveScheduledConditionChanged(oldPCSG.Status.Conditions, newPCSG.Status.Conditions)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
@@ -2872,4 +2888,30 @@ func ptrInt64Equal(a, b *int64) bool {
 		return false
 	}
 	return *a == *b
+}
+
+// groveScheduledConditionChanged reports whether either of the Grove scheduling
+// conditions consumed by the Ready-reason classification (dynamo/grove.go)
+// changed between two condition slices. It watches PodCliqueScheduled (set on
+// PodCliques) and MinAvailableBreached (set on PodCliqueScalingGroups); a single
+// helper serves both since each object only carries the condition relevant to
+// it. A change in Status or Reason on either condition is treated as a change,
+// so a scheduling shortfall clearing (or appearing) re-wakes the DGD even when
+// the replica counters are otherwise flat.
+func groveScheduledConditionChanged(oldConds, newConds []metav1.Condition) bool {
+	for _, condType := range []string{
+		groveconstants.ConditionTypePodCliqueScheduled,
+		groveconstants.ConditionTypeMinAvailableBreached,
+	} {
+		oldCond := meta.FindStatusCondition(oldConds, condType)
+		newCond := meta.FindStatusCondition(newConds, condType)
+		if (oldCond == nil) != (newCond == nil) {
+			return true
+		}
+		if oldCond != nil && newCond != nil &&
+			(oldCond.Status != newCond.Status || oldCond.Reason != newCond.Reason) {
+			return true
+		}
+	}
+	return false
 }
