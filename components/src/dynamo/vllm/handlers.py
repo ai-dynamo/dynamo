@@ -468,13 +468,25 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
+# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+_DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
+
+
 def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
+    """Pass an internally tagged cache salt to vLLM.
+
+    vLLM publishes cache salts as otherwise-untyped strings in ``extra_keys``
+    alongside LoRA and multimodal metadata. The tag lets Dynamo recover the
+    namespace without guessing from the user-controlled value. It is removed
+    again by the Rust KV-event decoder, so Dynamo's public namespace is
+    unchanged.
+    """
     if not isinstance(prompt, dict):
         return
     for source in _iter_nvext_sources(request):
         cache_salt = source.get("cache_salt")
-        if cache_salt is not None:
-            prompt["cache_salt"] = cache_salt
+        if cache_salt:
+            prompt["cache_salt"] = f"{_DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"
             return
 
 
@@ -1001,6 +1013,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             enable_multimodal=enable_multimodal,
             enable_frontend_decoding=enable_frontend_decoding,
             embedding_loader=embedding_loader,
+            trust_remote_code=config.engine_args.trust_remote_code,
         )
 
         # Serialise concurrent scale_elastic_ep calls.  vLLM's elastic-EP
@@ -3394,7 +3407,8 @@ class EmbeddingWorkerHandler:
         ``"base64"``); when ``"base64"`` is requested, each per-input vector is
         serialized as a base64-encoded string of little-endian ``f32`` bytes
         per the OpenAI spec, so the byte count matches the (possibly reduced)
-        dimensionality.
+        dimensionality. Optional ``truncate_prompt_tokens`` is forwarded to
+        vLLM's tokenizer path for raw-text inputs.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
         input_field = request.get("input")
@@ -3427,6 +3441,25 @@ class EmbeddingWorkerHandler:
                 f"Invalid 'encoding_format' value {encoding_format!r}; "
                 "expected 'float' or 'base64'"
             )
+
+        truncate_prompt_tokens = request.get("truncate_prompt_tokens")
+        tokenization_kwargs: dict[str, Any] | None = None
+        if truncate_prompt_tokens is not None:
+            if not isinstance(truncate_prompt_tokens, int) or isinstance(
+                truncate_prompt_tokens, bool
+            ):
+                raise TypeError(
+                    "Invalid 'truncate_prompt_tokens' type "
+                    f"{type(truncate_prompt_tokens).__name__}; expected int"
+                )
+            if truncate_prompt_tokens < -1:
+                raise ValueError(
+                    "truncate_prompt_tokens must be >= -1, "
+                    f"got {truncate_prompt_tokens}"
+                )
+            tokenization_kwargs = {
+                "truncate_prompt_tokens": truncate_prompt_tokens,
+            }
 
         # Request the pooled sentence embedding. With no task, vLLM's
         # encode() resolves to per-token output (the full ``n_tokens x
@@ -3468,11 +3501,15 @@ class EmbeddingWorkerHandler:
             )
             final_output = None
             async with self._abort_monitor(context, request_id):
-                async for out in self.engine_client.encode(
-                    prompt=encode_arg,
-                    pooling_params=pooling_params,
-                    request_id=request_id,
-                ):
+                encode_kwargs: dict[str, Any] = {
+                    "prompt": encode_arg,
+                    "pooling_params": pooling_params,
+                    "request_id": request_id,
+                }
+                if tokenization_kwargs is not None and isinstance(encode_arg, str):
+                    encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
+
+                async for out in self.engine_client.encode(**encode_kwargs):
                     final_output = out
             if final_output is None:
                 raise RuntimeError(

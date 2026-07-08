@@ -62,6 +62,10 @@ impl PrefillRouter {
             .routing
             .as_ref()
             .and_then(|routing| routing.lora_name.clone());
+        let cache_namespace = req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.cache_namespace.clone());
         let priority_jump = req
             .routing
             .as_ref()
@@ -102,6 +106,7 @@ impl PrefillRouter {
                 false,
                 false,
                 lora_name,
+                cache_namespace,
                 priority_jump,
                 strict_priority,
                 expected_output_tokens,
@@ -202,6 +207,10 @@ impl PrefillRouter {
             .routing
             .as_ref()
             .and_then(|routing| routing.lora_name.clone());
+        let cache_namespace = req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.cache_namespace.clone());
         let priority_jump = req
             .routing
             .as_ref()
@@ -233,6 +242,7 @@ impl PrefillRouter {
                 false,
                 false,
                 lora_name,
+                cache_namespace,
                 priority_jump,
                 strict_priority,
                 None,

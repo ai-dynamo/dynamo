@@ -163,6 +163,7 @@ jobs:
           MINIO_CONSOLE_ADDRESS: ':9001'
     steps:
       - name: Checkout repository
+        id: checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
@@ -231,8 +232,11 @@ jobs:
           gpu_tests: 'true'
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-        # !cancelled() so a parallel-stage failure doesn't hide sequential results.
-        if: ${{ !cancelled() && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        # !cancelled() so a parallel-stage failure doesn't hide sequential results,
+        # but require checkout to have succeeded so an infra/prereq failure (e.g. the
+        # container/pod never coming online) skips this step cleanly instead of trying
+        # to run the local pytest-local action against an un-checked-out workspace.
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
         uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}

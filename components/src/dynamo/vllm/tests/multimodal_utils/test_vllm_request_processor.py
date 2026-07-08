@@ -772,7 +772,9 @@ def test_qwen_handoff_applies_per_request_pixel_overrides(monkeypatch):
 
 def test_qwen_prefill_handoff_fails_fast_without_grid_metadata(monkeypatch):
     processor = _processor()
-    monkeypatch.setattr(mod, "load_qwen_grid_params", lambda model: None)
+    monkeypatch.setattr(
+        mod, "load_qwen_grid_params", lambda model, trust_remote_code=False: None
+    )
 
     with pytest.raises(RuntimeError, match="cannot initialize decode mRoPE"):
         processor.initialize_prefill_handoff()

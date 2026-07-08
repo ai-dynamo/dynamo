@@ -53,6 +53,7 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
+from dynamo.trtllm.utils.request_utils import request_cache_salt
 
 if TYPE_CHECKING:
     # tensorrt_llm may use a different version that doesn't have MetricsCollector,
@@ -1129,6 +1130,7 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+        cache_salt = request_cache_salt(request)
 
         try:
             # NEW: Updated engine call to include multimodal data
@@ -1140,6 +1142,7 @@ class HandlerBase(BaseGenerativeHandler):
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
                 priority=priority,
+                cache_salt=cache_salt,
             )
 
             # In disagg decode mode with remote prefill, wrap abort() to defer
