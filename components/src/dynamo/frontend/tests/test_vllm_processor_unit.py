@@ -13,9 +13,14 @@ from types import SimpleNamespace
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
-from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
 from dynamo.frontend.prepost import _prepare_request
+
+# The qwen3 tool parser lives in newer vLLM; skip the whole module on bases that predate it
+# (e.g. the Rubin vLLM 0.22.1 image) instead of erroring at collection.
+Qwen3EngineToolParser = pytest.importorskip(
+    "vllm.tool_parsers.qwen3_engine_tool_parser"
+).Qwen3EngineToolParser
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
 # need it (and via the vllm_processor_module fixture). Importing it at module

@@ -12,7 +12,14 @@ import pytest
 
 from .common import check_module_available
 
-HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
+# The qwen3 tool/reasoning parsers imported below live in newer vLLM; older bases (e.g. the
+# Rubin vLLM 0.22.1 image) ship the base vllm modules but not these, so gate on all of them —
+# otherwise the `if HAS_VLLM` imports raise at collection instead of the module skipping cleanly.
+HAS_VLLM = (
+    check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
+    and check_module_available("vllm.reasoning.qwen3_engine_reasoning_parser")
+    and check_module_available("vllm.tool_parsers.qwen3_engine_tool_parser")
+)
 if HAS_VLLM:
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
