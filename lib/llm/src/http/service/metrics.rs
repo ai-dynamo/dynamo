@@ -23,6 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::frontend_config::ChatCompletionsReasoningField;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use crate::protocols::{
@@ -56,7 +57,7 @@ pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
 
 pub use prometheus::Registry;
 
-use super::RouteDoc;
+use super::{RouteDoc, chat_completions_wire::NvCreateChatCompletionStreamResponseWire};
 
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
@@ -1936,13 +1937,14 @@ fn observe_annotation_metrics<T>(
     }
 }
 
-fn annotated_to_sse_event<T: Serialize>(
+fn annotated_to_sse_event_with<T>(
     annotated: crate::types::Annotated<T>,
+    serialize_data: impl FnOnce(Event, &T) -> Result<Event, axum::Error>,
 ) -> Result<Option<Event>, axum::Error> {
     let mut event = Event::default();
 
     if let Some(ref data) = annotated.data {
-        event = sse_json_data(event, data)?;
+        event = serialize_data(event, data)?;
     }
 
     if let Some(ref msg) = annotated.event {
@@ -1979,6 +1981,12 @@ fn annotated_to_sse_event<T: Serialize>(
     } else {
         Ok(Some(event))
     }
+}
+
+fn annotated_to_sse_event<T: Serialize>(
+    annotated: crate::types::Annotated<T>,
+) -> Result<Option<Event>, axum::Error> {
+    annotated_to_sse_event_with(annotated, sse_json_data)
 }
 
 /// Process streaming response with event conversion for SSE
@@ -2022,6 +2030,7 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
     annotated: EventConverter<NvCreateChatCompletionStreamResponse>,
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
+    reasoning_field: ChatCompletionsReasoningField,
 ) -> Result<Option<Event>, axum::Error> {
     let mut annotated = annotated.0;
 
@@ -2049,7 +2058,12 @@ pub fn process_chat_response_using_event_converter_and_observe_metrics(
         annotated.data = None;
     }
 
-    annotated_to_sse_event(annotated)
+    annotated_to_sse_event_with(annotated, |event, data| {
+        sse_json_data(
+            event,
+            &NvCreateChatCompletionStreamResponseWire::new(data, reasoning_field),
+        )
+    })
 }
 
 /// Create a new router with optional DRT metrics integration.
@@ -2875,6 +2889,7 @@ mod tests {
             EventConverter::from(annotated),
             &mut collector,
             &mut http_queue_guard,
+            ChatCompletionsReasoningField::ReasoningContent,
         );
 
         assert!(
@@ -3420,6 +3435,18 @@ mod tests {
             crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
         >,
     ) -> Result<Option<Event>, axum::Error> {
+        run_chat_stream_event_converter_with_field(
+            annotated,
+            ChatCompletionsReasoningField::ReasoningContent,
+        )
+    }
+
+    fn run_chat_stream_event_converter_with_field(
+        annotated: crate::types::Annotated<
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+        >,
+        reasoning_field: ChatCompletionsReasoningField,
+    ) -> Result<Option<Event>, axum::Error> {
         let metrics = Arc::new(Metrics::new());
         let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
         let mut http_queue_guard: Option<HttpQueueGuard> = None;
@@ -3427,6 +3454,7 @@ mod tests {
             EventConverter::from(annotated),
             &mut collector,
             &mut http_queue_guard,
+            reasoning_field,
         )
     }
 
@@ -3562,6 +3590,32 @@ mod tests {
         assert_eq!(json["id"], "test-id");
         assert_eq!(json["object"], "chat.completion.chunk");
         assert_eq!(json["choices"][0]["delta"]["content"], "hello");
+    }
+
+    #[test]
+    fn test_event_converter_uses_configured_reasoning_field() {
+        let mut annotated = make_chat_stream_annotated("answer");
+        let response = annotated.data.as_mut().unwrap();
+        response.inner.choices[0].delta.reasoning_content = Some("think".to_string());
+        response.nvext = Some(serde_json::json!({
+            "reasoning_content": "extension-value"
+        }));
+
+        let event = run_chat_stream_event_converter_with_field(
+            annotated,
+            ChatCompletionsReasoningField::Reasoning,
+        )
+        .unwrap()
+        .expect("chat stream response should produce an SSE event");
+
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["choices"][0]["delta"]["reasoning"], "think");
+        assert!(
+            json["choices"][0]["delta"]
+                .get("reasoning_content")
+                .is_none()
+        );
+        assert_eq!(json["nvext"]["reasoning_content"], "extension-value");
     }
 
     #[test]

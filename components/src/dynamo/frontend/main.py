@@ -256,6 +256,7 @@ async def async_main():
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
+        "chat_completions_reasoning_field": config.chat_completions_reasoning_field,
         "tokenizer_backend": config.tokenizer_backend,
     }
     if config.migration_max_seq_len is not None:

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use dynamo_llm::frontend_config::ChatCompletionsReasoningField;
 use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::codec::create_message_stream;
@@ -43,27 +44,48 @@ pub struct HarnessService {
 impl HarnessService {
     pub async fn start(scripts: impl IntoIterator<Item = Script>) -> Self {
         let engine = Arc::new(ScriptedChatEngine::new(scripts));
-        Self::start_with_engine(engine).await
+        Self::start_with_engine(engine, None, false).await
+    }
+
+    pub async fn start_with_reasoning_field(
+        scripts: impl IntoIterator<Item = Script>,
+        reasoning_field: ChatCompletionsReasoningField,
+        reasoning_dispatch: bool,
+    ) -> Self {
+        let engine = Arc::new(ScriptedChatEngine::new(scripts));
+        Self::start_with_engine(engine, Some(reasoning_field), reasoning_dispatch).await
     }
 
     pub async fn start_with_gated_tail(script: Script, split_at: usize) -> (Self, ScriptGate) {
         let (engine, gate) = ScriptedChatEngine::with_gated_tail(script, split_at);
-        (Self::start_with_engine(Arc::new(engine)).await, gate)
+        (
+            Self::start_with_engine(Arc::new(engine), None, false).await,
+            gate,
+        )
     }
 
-    async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+    async fn start_with_engine(
+        engine: Arc<ScriptedChatEngine>,
+        reasoning_field: Option<ChatCompletionsReasoningField>,
+        reasoning_dispatch: bool,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
             .expect("failed to build harness HTTP client");
         let (listener, port) = bind_random_port().await;
-        let service = HttpService::builder()
+        let mut service_builder = HttpService::builder()
             .port(port)
             .host("127.0.0.1")
             .enable_chat_endpoints(true)
             .enable_cmpl_endpoints(false)
             .enable_responses_endpoints(true)
             .enable_anthropic_endpoints(true)
+            .enable_streaming_reasoning_dispatch(reasoning_dispatch);
+        if let Some(reasoning_field) = reasoning_field {
+            service_builder = service_builder.chat_completions_reasoning_field(reasoning_field);
+        }
+        let service = service_builder
             .build()
             .expect("failed to build harness HTTP service");
 

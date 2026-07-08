@@ -45,7 +45,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::frontend_config::{ChatCompletionsReasoningField, FrontendApiConfig, MetricsConfig};
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -101,6 +101,7 @@ pub struct State {
     cancel_token: CancellationToken,
     // Frontend API behavior read by request handlers after the service is built.
     frontend_api_config: FrontendApiConfig,
+    chat_completions_reasoning_field: ChatCompletionsReasoningField,
     nvext_enabled: bool,
 }
 
@@ -111,6 +112,7 @@ pub struct State {
 struct StateConfig {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
+    chat_completions_reasoning_field: ChatCompletionsReasoningField,
     nvext_enabled: bool,
 }
 
@@ -372,6 +374,7 @@ impl State {
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
+            chat_completions_reasoning_field: config.chat_completions_reasoning_field,
         }
     }
 
@@ -478,6 +481,11 @@ impl State {
         self.frontend_api_config
             .streaming_dispatch()
             .reasoning_dispatch()
+    }
+
+    /// Response field selected for Chat Completions reasoning output.
+    pub fn chat_completions_reasoning_field(&self) -> ChatCompletionsReasoningField {
+        self.chat_completions_reasoning_field
     }
 }
 
@@ -884,7 +892,14 @@ impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
         let metrics_config = config.metrics_config.clone();
-        let frontend_api_config = config.frontend_api_config.clone();
+        let mut frontend_api_config = config.frontend_api_config.clone();
+        let chat_completions_reasoning_field = frontend_api_config
+            .resolve_chat_completions_reasoning_field()
+            .map_err(anyhow::Error::msg)?;
+        tracing::info!(
+            field = %chat_completions_reasoning_field,
+            "Chat Completions reasoning response field configured"
+        );
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
         let generate_endpoints_enabled = config.enable_generate_endpoints;
 
@@ -913,6 +928,7 @@ impl HttpServiceConfigBuilder {
             StateConfig {
                 metrics_config,
                 frontend_api_config,
+                chat_completions_reasoning_field,
                 nvext_enabled,
             },
         ));
@@ -1144,6 +1160,16 @@ impl HttpServiceConfigBuilder {
             .get_or_insert_with(FrontendApiConfig::default)
             .streaming_dispatch_mut()
             .set_reasoning_dispatch(enabled);
+        self
+    }
+
+    pub fn chat_completions_reasoning_field(
+        mut self,
+        field: ChatCompletionsReasoningField,
+    ) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_chat_completions_reasoning_field(field);
         self
     }
 
@@ -1490,5 +1516,61 @@ mod tests {
                 "builder=false wins even if disable is unset"
             );
         });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_chat_completions_reasoning_field_direct_rust_resolution() {
+        use dynamo_runtime::config::environment_names::llm::DYN_CHAT_COMPLETIONS_REASONING_FIELD;
+
+        temp_env::with_var_unset(DYN_CHAT_COMPLETIONS_REASONING_FIELD, || {
+            let service = HttpService::builder().build().unwrap();
+            assert_eq!(
+                service.state().chat_completions_reasoning_field(),
+                ChatCompletionsReasoningField::ReasoningContent
+            );
+        });
+
+        temp_env::with_var(
+            DYN_CHAT_COMPLETIONS_REASONING_FIELD,
+            Some("reasoning"),
+            || {
+                let service = HttpService::builder().build().unwrap();
+                assert_eq!(
+                    service.state().chat_completions_reasoning_field(),
+                    ChatCompletionsReasoningField::Reasoning
+                );
+            },
+        );
+
+        for invalid in ["", "Reasoning", "reasoning_content "] {
+            temp_env::with_var(DYN_CHAT_COMPLETIONS_REASONING_FIELD, Some(invalid), || {
+                let error = match HttpService::builder().build() {
+                    Ok(_) => panic!("unexpectedly accepted {invalid:?}"),
+                    Err(error) => error,
+                };
+                assert!(
+                    error
+                        .to_string()
+                        .contains("invalid Chat Completions reasoning field"),
+                    "unexpected error for {invalid:?}: {error:#}"
+                );
+            });
+        }
+
+        temp_env::with_var(
+            DYN_CHAT_COMPLETIONS_REASONING_FIELD,
+            Some("invalid"),
+            || {
+                let service = HttpService::builder()
+                    .chat_completions_reasoning_field(ChatCompletionsReasoningField::Reasoning)
+                    .build()
+                    .unwrap();
+                assert_eq!(
+                    service.state().chat_completions_reasoning_field(),
+                    ChatCompletionsReasoningField::Reasoning
+                );
+            },
+        );
     }
 }

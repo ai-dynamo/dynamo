@@ -340,6 +340,9 @@ pub mod llm {
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
 
+    /// Chat Completions response field used for reasoning output.
+    pub const DYN_CHAT_COMPLETIONS_REASONING_FIELD: &str = "DYN_CHAT_COMPLETIONS_REASONING_FIELD";
+
     /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
     /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
     /// streaming path, bypassing the v1 tool-call jail. Off by default; when set, the
@@ -784,6 +787,7 @@ mod tests {
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_CHAT_COMPLETIONS_REASONING_FIELD,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,

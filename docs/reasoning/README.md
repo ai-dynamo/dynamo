@@ -117,3 +117,21 @@ Dynamo splits the model output so the chain-of-thought lands in
   ]
 }
 ```
+
+### Customize the Chat Completions Response Field
+
+To emit parsed reasoning as `reasoning` instead of `reasoning_content`, configure the frontend:
+
+```bash
+DYN_CHAT_COMPLETIONS_REASONING_FIELD=reasoning python -m dynamo.frontend
+```
+
+The equivalent CLI option is:
+
+```bash
+python -m dynamo.frontend --chat-completions-reasoning-field reasoning
+```
+
+The setting accepts `reasoning_content` and `reasoning`. It applies to streaming and non-streaming
+`/v1/chat/completions` responses and to `reasoning_dispatch` event payloads. Dynamo emits only the
+selected field. It does not change Responses API reasoning items or Anthropic thinking blocks.

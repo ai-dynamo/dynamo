@@ -82,12 +82,14 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
     enable_streaming_reasoning_dispatch: bool
+    chat_completions_reasoning_field: str
     exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
     trust_remote_code: bool
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
+    _VALID_CHAT_COMPLETIONS_REASONING_FIELDS = {"reasoning_content", "reasoning"}
 
     def validate(self) -> None:
         if self.load_aware:
@@ -121,6 +123,15 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
+            )
+        if (
+            self.chat_completions_reasoning_field
+            not in self._VALID_CHAT_COMPLETIONS_REASONING_FIELDS
+        ):
+            raise ValueError(
+                "--chat-completions-reasoning-field: invalid value "
+                f"'{self.chat_completions_reasoning_field}' "
+                "(choose from ['reasoning_content', 'reasoning'])"
             )
         if self.router_prefill_load_model == "aic":
             if self.router_mode != "kv":
@@ -420,6 +431,17 @@ class FrontendArgGroup(ArgGroup):
                 "with the complete reasoning block once thinking ends. "
                 "Can be combined with --enable-streaming-tool-dispatch."
             ),
+        )
+        add_argument(
+            g,
+            flag_name="--chat-completions-reasoning-field",
+            env_var="DYN_CHAT_COMPLETIONS_REASONING_FIELD",
+            default="reasoning_content",
+            help=(
+                "Response field for reasoning output on /v1/chat/completions. "
+                "Accepted values are 'reasoning_content' and 'reasoning'."
+            ),
+            choices=["reasoning_content", "reasoning"],
         )
         # NOTE: This flag also exists in DynamoRuntimeArgGroup (runtime_args.py).
         # Both definitions are needed: runtime_args controls the Rust-native

@@ -119,6 +119,19 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats and integ
 |-------------|---------|---------|-------------|
 | `--tokenizer` | `DYN_TOKENIZER` | `default` | Tokenizer: `default` (HuggingFace) or `fastokens` (high-performance Rust tokenizer). See [Tokenizer](Tokenizer.md) |
 
+## Chat Completions Reasoning Field
+
+| CLI Argument | Env Var | Default | Description |
+|-------------|---------|---------|-------------|
+| `--chat-completions-reasoning-field` | `DYN_CHAT_COMPLETIONS_REASONING_FIELD` | `reasoning_content` | Response field for parsed reasoning on `/v1/chat/completions`: `reasoning_content` or `reasoning` |
+
+The selected field applies to streaming and non-streaming Chat Completions responses. It also
+applies to the payload of `reasoning_dispatch` events when streaming reasoning dispatch is enabled.
+Dynamo emits only the selected field. Non-streaming messages include the field with a `null` value
+when no reasoning is present; streaming deltas omit it. Invalid or empty values prevent the frontend
+from starting. The setting does not change Responses API reasoning items or Anthropic thinking
+blocks.
+
 ## Experimental
 
 | CLI Argument | Env Var | Default | Description |

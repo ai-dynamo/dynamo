@@ -29,10 +29,11 @@ use dynamo_runtime::{
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{StreamExt, stream};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned, ser::SerializeStruct};
 
 use super::{
     RouteDoc,
+    chat_completions_wire::NvCreateChatCompletionResponseWire,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
     error::HttpError,
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -1590,6 +1591,30 @@ struct ReasoningDispatchPayload<'a> {
     reasoning_content: &'a str,
 }
 
+struct ReasoningDispatchPayloadWire<'a> {
+    payload: &'a ReasoningDispatchPayload<'a>,
+    reasoning_field: crate::frontend_config::ChatCompletionsReasoningField,
+}
+
+impl Serialize for ReasoningDispatchPayloadWire<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.reasoning_field {
+            crate::frontend_config::ChatCompletionsReasoningField::ReasoningContent => {
+                self.payload.serialize(serializer)
+            }
+            crate::frontend_config::ChatCompletionsReasoningField::Reasoning => {
+                let mut state = serializer.serialize_struct("ReasoningDispatchPayload", 2)?;
+                state.serialize_field("index", &self.payload.index)?;
+                state.serialize_field("reasoning", self.payload.reasoning_content)?;
+                state.end()
+            }
+        }
+    }
+}
+
 /// Serialize `payload` and append it as an SSE event with the given name.
 fn push_dispatch_event(
     event_name: &str,
@@ -1707,6 +1732,7 @@ fn accumulate_reasoning_dispatch(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
     buffers: &mut HashMap<u32, String>,
     out: &mut Vec<Result<Event, axum::Error>>,
+    reasoning_field: crate::frontend_config::ChatCompletionsReasoningField,
 ) {
     let Some(data) = &response.data else {
         return;
@@ -1730,7 +1756,14 @@ fn accumulate_reasoning_dispatch(
                 index: choice.index,
                 reasoning_content: buffer.as_str(),
             };
-            push_dispatch_event("reasoning_dispatch", &payload, out);
+            push_dispatch_event(
+                "reasoning_dispatch",
+                &ReasoningDispatchPayloadWire {
+                    payload: &payload,
+                    reasoning_field,
+                },
+                out,
+            );
             buffer.clear();
         }
     }
@@ -1884,6 +1917,7 @@ async fn chat_completions(
 
     // apply any annotations to the front of the stream
     let stream = stream::iter(annotations).chain(stream);
+    let reasoning_field = state.chat_completions_reasoning_field();
 
     // todo - tap the stream and propagate request level metrics
     // note - we might do this as part of the post processing set to make it more generic
@@ -1927,6 +1961,7 @@ async fn chat_completions(
                         &response,
                         &mut reasoning_buffer,
                         &mut events,
+                        reasoning_field,
                     );
                 }
 
@@ -1936,6 +1971,7 @@ async fn chat_completions(
                     EventConverter::from(response),
                     &mut response_collector,
                     &mut http_queue_guard,
+                    reasoning_field,
                 );
 
                 // Side-channel events come first, then the regular data event.
@@ -2003,7 +2039,11 @@ async fn chat_completions(
         if ctx.is_killed() {
             inflight_guard.mark_error(ErrorType::Cancelled);
         }
-        Ok(Json(response).into_response())
+        Ok(Json(NvCreateChatCompletionResponseWire::new(
+            &response,
+            reasoning_field,
+        ))
+        .into_response())
     }
 }
 
@@ -5184,8 +5224,20 @@ mod tests {
         response: &Annotated<NvCreateChatCompletionStreamResponse>,
         buffers: &mut HashMap<u32, String>,
     ) -> Vec<Result<Event, axum::Error>> {
+        collect_reasoning_dispatch_events_with_field(
+            response,
+            buffers,
+            crate::frontend_config::ChatCompletionsReasoningField::ReasoningContent,
+        )
+    }
+
+    fn collect_reasoning_dispatch_events_with_field(
+        response: &Annotated<NvCreateChatCompletionStreamResponse>,
+        buffers: &mut HashMap<u32, String>,
+        reasoning_field: crate::frontend_config::ChatCompletionsReasoningField,
+    ) -> Vec<Result<Event, axum::Error>> {
         let mut events = Vec::new();
-        accumulate_reasoning_dispatch(response, buffers, &mut events);
+        accumulate_reasoning_dispatch(response, buffers, &mut events, reasoning_field);
         events
     }
 
@@ -5565,6 +5617,33 @@ mod tests {
             buffers.get(&0).is_none_or(|s| s.is_empty()),
             "buffer should be cleared after emit"
         );
+    }
+
+    #[test]
+    fn test_reasoning_dispatch_uses_configured_field() {
+        let mut buffers = HashMap::new();
+        let reasoning_field = crate::frontend_config::ChatCompletionsReasoningField::Reasoning;
+
+        let reasoning = make_stream_response(vec![make_choice_with_reasoning(
+            3,
+            Some("Let me think"),
+            None,
+        )]);
+        let events =
+            collect_reasoning_dispatch_events_with_field(&reasoning, &mut buffers, reasoning_field);
+        assert!(events.is_empty());
+
+        let content = make_stream_response(vec![make_choice_with_reasoning(3, None, None)]);
+        let events =
+            collect_reasoning_dispatch_events_with_field(&content, &mut buffers, reasoning_field);
+        assert_eq!(events.len(), 1);
+
+        let event = events[0].as_ref().unwrap();
+        assert_event_type(event, "reasoning_dispatch");
+        let json = extract_sse_data_json(event);
+        assert_eq!(json["index"], 3);
+        assert_eq!(json["reasoning"], "Let me think");
+        assert!(json.get("reasoning_content").is_none());
     }
 
     #[test]

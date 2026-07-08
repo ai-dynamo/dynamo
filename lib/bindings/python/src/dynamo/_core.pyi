@@ -3018,6 +3018,7 @@ class EntrypointArgs:
         strip_anthropic_preamble: Optional[bool] = None,
         enable_streaming_tool_dispatch: Optional[bool] = None,
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
+        chat_completions_reasoning_field: Optional[str] = None,
         tokenizer_backend: Optional[str] = None,
     ) -> None:
         """
@@ -3052,6 +3053,7 @@ class EntrypointArgs:
             strip_anthropic_preamble: Optional Anthropic preamble stripping override
             enable_streaming_tool_dispatch: Optional streaming tool dispatch override
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
+            chat_completions_reasoning_field: Optional Chat Completions reasoning response field override ("reasoning_content" or "reasoning")
             tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
         """
         ...
