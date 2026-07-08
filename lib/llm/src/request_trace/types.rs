@@ -1,9 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::protocols::common::extensions::AgentContext;
+use crate::protocols::openai::chat_completions::{
+    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestTraceRecord {
@@ -18,6 +23,8 @@ pub struct RequestTraceRecord {
     pub request: Option<RequestTraceMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<RequestTraceToolEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<RequestTracePayload>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,12 +43,28 @@ pub enum RequestTraceEventType {
     ToolEnd,
     #[serde(rename = "tool_error")]
     ToolError,
+    #[serde(rename = "request_payload")]
+    RequestPayload,
 }
 
 impl RequestTraceEventType {
     pub fn is_tool_event(self) -> bool {
         matches!(self, Self::ToolStart | Self::ToolEnd | Self::ToolError)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestTracePayload {
+    pub request_id: String,
+    pub endpoint: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<Arc<NvCreateChatCompletionRequest>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<Arc<NvCreateChatCompletionResponse>>,
+    pub payload_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_drop_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -259,6 +282,7 @@ impl From<RequestTraceToolEventIngress> for RequestTraceRecord {
             }),
             request: None,
             tool: Some(ingress.tool),
+            payload: None,
         }
     }
 }
@@ -312,6 +336,7 @@ mod tests {
                 finish_reason_metadata: None,
             }),
             tool: None,
+            payload: None,
         };
 
         let value = serde_json::to_value(record).unwrap();
@@ -320,9 +345,64 @@ mod tests {
         assert!(value.get("event_source").is_none());
         assert!(value.get("agent_context").is_none());
         assert!(value.get("tool").is_none());
+        assert!(value.get("payload").is_none());
         assert!(value["request"].get("model").is_none());
         assert!(value["request"].get("finish_reason_metadata").is_none());
-        assert!(value["request"].get("payload").is_none());
+    }
+
+    #[test]
+    fn request_payload_record_serializes_unified_schema() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "store": true
+        }))
+        .unwrap();
+        let response: NvCreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }]
+        }))
+        .unwrap();
+        let record = RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type: RequestTraceEventType::RequestPayload,
+            event_time_unix_ms: 1_100,
+            event_source: Some(RequestTraceEventSource::Dynamo),
+            agent_context: None,
+            request: None,
+            tool: None,
+            payload: Some(RequestTracePayload {
+                request_id: "req-1".to_string(),
+                endpoint: "openai.chat_completion".to_string(),
+                model: "test-model".to_string(),
+                request: Some(Arc::new(request)),
+                response: Some(Arc::new(response)),
+                payload_complete: true,
+                payload_drop_reason: None,
+            }),
+        };
+
+        let value = serde_json::to_value(record).unwrap();
+        assert_eq!(value["schema"], "dynamo.request.trace.v1");
+        assert_eq!(value["event_type"], "request_payload");
+        assert_eq!(value["payload"]["request_id"], "req-1");
+        assert_eq!(value["payload"]["endpoint"], "openai.chat_completion");
+        assert!(value["payload"].get("requested_streaming").is_none());
+        assert_eq!(value["payload"]["payload_complete"], true);
+        assert_eq!(value["payload"]["request"]["model"], "test-model");
+        assert_eq!(
+            value["payload"]["response"]["choices"][0]["message"]["content"],
+            "hi"
+        );
+        assert!(value.get("schema_version").is_none());
+        assert!(value.get("audit_complete").is_none());
     }
 
     #[test]

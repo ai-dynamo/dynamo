@@ -2381,6 +2381,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "bytes",
  "clap",
  "dashmap",
  "dynamo-backend-common",
@@ -2398,6 +2399,7 @@ dependencies = [
  "pythonize",
  "rmp",
  "serde",
+ "serde-transcode",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -2510,9 +2512,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.3.2"
+version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "801685a07cfbc87d5e3f3ed55b920707b67f31dd660c62d1b3532a651fc9d013"
+checksum = "eda65fd29fa8fc5395fc9430155d68d67a7eef216415a152cbf85e9916aa0bbf"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -7249,6 +7251,15 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde-transcode"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "590c0e25c2a5bb6e85bf5c1bce768ceb86b316e7a01bdf07d2cb4ec2271990e2"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
