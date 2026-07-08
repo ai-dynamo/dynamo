@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use super::convert_backend_top_logprobs;
+use super::{convert_backend_top_logprobs, token_to_utf8_bytes};
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
 
@@ -449,17 +449,12 @@ fn completion_logprobs_from_output(
                 })
                 .collect::<Vec<_>>();
             let logprob = clamp_vllm_logprob(*logprob as f32);
-            let mut top_logprobs =
+            let top_logprobs =
                 convert_backend_top_logprobs(&top_logprobs, &token, *token_id, logprob, true);
-            // The token-native API exposes opaque `token_id:<id>` placeholders,
-            // not decoded text, so their UTF-8 bytes are unknown.
-            for entry in &mut top_logprobs {
-                entry.bytes = None;
-            }
             dynamo_protocols::types::ChatCompletionTokenLogprob {
+                bytes: token_to_utf8_bytes(&token),
                 token,
                 logprob,
-                bytes: None,
                 top_logprobs,
             }
         })
@@ -931,14 +926,21 @@ mod tests {
         assert_eq!(logprobs["content"][0]["token"], "token_id:100");
         assert_eq!(logprobs["content"][1]["token"], "token_id:101");
         assert!(logprobs.get("refusal").is_none());
-        assert_eq!(logprobs["content"][0]["bytes"], Value::Null);
+        assert_eq!(
+            logprobs["content"][0]["bytes"],
+            serde_json::json!(b"token_id:100")
+        );
         assert_eq!(
             logprobs["content"][0]["top_logprobs"][0]["bytes"],
-            Value::Null
+            serde_json::json!(b"token_id:100")
         );
         assert_eq!(
             logprobs["content"][0]["top_logprobs"][1]["token"],
             "token_id:7"
+        );
+        assert_eq!(
+            logprobs["content"][0]["top_logprobs"][1]["bytes"],
+            serde_json::json!(b"token_id:7")
         );
         assert_eq!(
             response.prompt_logprobs.as_ref().expect("prompt logprobs")[1]["22"]["decoded_token"],
