@@ -85,17 +85,29 @@ Dynamo automatically selects the best available orchestrator for multinode deplo
 - The installed orchestrator (Grove or LWS) is automatically selected
 
 #### Scheduler Integration:
-- **With Grove**: Automatically integrates with [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) when available, providing:
-  - Advanced queue management via `nvidia.com/kai-scheduler-queue` annotation
-  - AI-optimized scheduling policies
-  - Resource-aware workload placement
+- **With Grove**: Dynamo uses Grove for multinode orchestration when the Grove API is available, unless you set `nvidia.com/enable-grove: "false"` on the DGD resource. Scheduler integration is configured separately:
+  - KAI-Scheduler: set `global.kai-scheduler.install=true` to install the bundled KAI-Scheduler chart and enable integration, or set `global.kai-scheduler.enabled=true` when KAI-Scheduler is already installed externally and its API is available. Select queues with `nvidia.com/kai-scheduler-queue`.
+  - **EXPERIMENTAL:** Volcano: Dynamo does not install Volcano. Set `global.volcano-scheduler.enabled=true` only when Volcano is already installed and the Volcano API is available. Select queues with `nvidia.com/volcano-queue`.
+  - KAI-Scheduler and Volcano scheduler integration are mutually exclusive for a single Dynamo operator configuration because both set pod `schedulerName`. Helm rejects configurations that enable both integrations.
 - **With LWS**: Uses Volcano scheduler for gang scheduling and resource coordination
+
+> **EXPERIMENTAL:** The Dynamo/Grove Volcano scheduler integration is newly introduced and opt-in. Volcano itself is a mature CNCF scheduler, but this integration is intended for clusters where Volcano is already installed and understood by the platform operator.
+>
+> Changing `global.volcano-scheduler.enabled` affects how the Dynamo operator reconciles Grove-backed DGD resources. When enabled, Dynamo generates Grove resources that use `schedulerName: volcano` and propagates the Volcano queue annotation. Treat this Helm value as a scheduling-mode change for existing Grove-backed DGDs, not as a metadata-only toggle.
 
 #### Configuration Examples:
 
-**Default (Grove with KAI-Scheduler):**
+**Grove with KAI-Scheduler:**
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+global:
+  grove:
+    enabled: true
+  kai-scheduler:
+    enabled: true
+```
+
+```yaml
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: my-multinode-deployment
@@ -107,9 +119,31 @@ spec:
 
 > **Note:** The `nvidia.com/kai-scheduler-queue` annotation defaults to `"dynamo"`. If you specify a custom queue name, ensure the queue exists in your cluster before deploying. You can verify available queues with `kubectl get queues`.
 
+**Grove with Volcano:**
+```yaml
+global:
+  grove:
+    enabled: true
+  volcano-scheduler:
+    enabled: true
+```
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-multinode-deployment
+  annotations:
+    nvidia.com/volcano-queue: "gpu-training"
+spec:
+  # ... your deployment spec
+```
+
+> **Note:** The `nvidia.com/volcano-queue` annotation is propagated to Grove as `scheduling.grove.io/volcano-queue`. If you specify a custom queue name, ensure the Volcano queue exists and is open before deploying. You can verify available queues with `kubectl get queues`.
+
 **Force LWS usage:**
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: my-multinode-deployment
