@@ -140,6 +140,8 @@ pub const METRIC_STATUS_OK: &str = "ok";
 pub const METRIC_STATUS_PARENT_NOT_FOUND: &str = "parent_block_not_found";
 pub const METRIC_STATUS_BLOCK_NOT_FOUND: &str = "block_not_found";
 pub const METRIC_STATUS_INVALID_BLOCK: &str = "invalid_block";
+pub const METRIC_STATUS_CAPACITY_EXHAUSTED: &str = "capacity_exhausted";
+pub const METRIC_STATUS_INDEXER_INVARIANT_VIOLATION: &str = "indexer_invariant_violation";
 
 /// Metric event labels.
 pub const METRIC_EVENT_STORED: &str = "stored";
@@ -275,6 +277,10 @@ impl KvIndexerMetrics {
                         KvCacheEventError::ParentBlockNotFound => METRIC_STATUS_PARENT_NOT_FOUND,
                         KvCacheEventError::BlockNotFound => METRIC_STATUS_BLOCK_NOT_FOUND,
                         KvCacheEventError::InvalidBlockSequence => METRIC_STATUS_INVALID_BLOCK,
+                        KvCacheEventError::CapacityExhausted => METRIC_STATUS_CAPACITY_EXHAUSTED,
+                        KvCacheEventError::IndexerInvariantViolation => {
+                            METRIC_STATUS_INDEXER_INVARIANT_VIOLATION
+                        }
                     };
                     self.kv_cache_events_applied
                         .with_label_values(&[event_type, error_label])
@@ -330,6 +336,8 @@ struct ResultCounters {
     parent_not_found: IntCounter,
     block_not_found: IntCounter,
     invalid_block: IntCounter,
+    capacity_exhausted: IntCounter,
+    indexer_invariant_violation: IntCounter,
 }
 
 #[cfg(feature = "metrics")]
@@ -342,6 +350,10 @@ impl ResultCounters {
             block_not_found: counters
                 .with_label_values(&[event_type, METRIC_STATUS_BLOCK_NOT_FOUND]),
             invalid_block: counters.with_label_values(&[event_type, METRIC_STATUS_INVALID_BLOCK]),
+            capacity_exhausted: counters
+                .with_label_values(&[event_type, METRIC_STATUS_CAPACITY_EXHAUSTED]),
+            indexer_invariant_violation: counters
+                .with_label_values(&[event_type, METRIC_STATUS_INDEXER_INVARIANT_VIOLATION]),
         }
     }
 
@@ -351,6 +363,8 @@ impl ResultCounters {
             Err(KvCacheEventError::ParentBlockNotFound) => &self.parent_not_found,
             Err(KvCacheEventError::BlockNotFound) => &self.block_not_found,
             Err(KvCacheEventError::InvalidBlockSequence) => &self.invalid_block,
+            Err(KvCacheEventError::CapacityExhausted) => &self.capacity_exhausted,
+            Err(KvCacheEventError::IndexerInvariantViolation) => &self.indexer_invariant_violation,
         }
     }
 }

@@ -883,6 +883,12 @@ pub enum KvCacheEventError {
 
     #[error("Invalid block sequence")]
     InvalidBlockSequence,
+
+    #[error("Indexer capacity exhausted")]
+    CapacityExhausted,
+
+    #[error("Indexer invariant violated")]
+    IndexerInvariantViolation,
 }
 
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].

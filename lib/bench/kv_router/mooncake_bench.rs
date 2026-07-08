@@ -11,6 +11,8 @@ use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::replay::{generate_replay_artifacts, process_mooncake_trace};
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_router::indexer::KvIndexerMetrics;
+use dynamo_kv_router::indexer::cuckoo::{CkfConfig, EventTransposedCkfIndexer};
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::{
     ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
 };
@@ -60,6 +62,17 @@ enum IndexerArgs {
         num_event_workers: usize,
     },
 
+    /// Fixed-D=16 bucket-major transposed Cuckoo-filter indexer.
+    TransposedCkf {
+        /// Number of OS threads that consume and apply KV cache events.
+        #[clap(long, default_value = "8")]
+        num_event_workers: usize,
+
+        /// Logical block capacity provisioned for each DC lane.
+        #[clap(long, default_value = "16384")]
+        expected_blocks_per_dc: usize,
+    },
+
     /// Branch-sharded CRTC: N independent CRTC shards routed by a bounded
     /// prefix trie with structural anchors for depth-boundary suffixes.
     /// find_matches touches at most one shard (no scatter-gather).
@@ -94,6 +107,10 @@ impl IndexerArgs {
             IndexerArgs::ConcurrentRadixTreeCompressed { num_event_workers } => {
                 MooncakeIndexerConfig::concurrent_radix_tree_compressed(*num_event_workers)
             }
+            IndexerArgs::TransposedCkf {
+                num_event_workers,
+                expected_blocks_per_dc,
+            } => MooncakeIndexerConfig::transposed_ckf(*num_event_workers, *expected_blocks_per_dc),
             IndexerArgs::BranchShardedCrtc {
                 num_shards,
                 num_event_workers_per_shard,
@@ -149,7 +166,7 @@ struct Args {
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
     /// radix-tree, nested-map, concurrent-radix-tree,
-    /// concurrent-radix-tree-compressed, branch-sharded-crtc.
+    /// concurrent-radix-tree-compressed, transposed-ckf, branch-sharded-crtc.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
@@ -241,10 +258,23 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
             MooncakeIndexerKind::NestedMap
                 | MooncakeIndexerKind::ConcurrentRadixTree
                 | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
+                | MooncakeIndexerKind::TransposedCkf
         ) {
             anyhow::bail!(
-                "corrected Mooncake replay supports only nested-map, concurrent-radix-tree, and concurrent-radix-tree-compressed; got {name}"
+                "corrected Mooncake replay supports only nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, and transposed-ckf; got {name}"
             );
+        }
+        if config.kind == MooncakeIndexerKind::TransposedCkf {
+            let total_workers = args
+                .common
+                .num_unique_inference_workers
+                .checked_mul(args.common.inference_worker_duplication_factor)
+                .ok_or_else(|| anyhow::anyhow!("simulated worker count overflow"))?;
+            if total_workers != 16 {
+                anyhow::bail!(
+                    "transposed-ckf requires exactly 16 simulated workers; got {total_workers}"
+                );
+            }
         }
     }
     Ok(())
@@ -262,7 +292,11 @@ fn indexer_config(args: &Args, name: &str) -> anyhow::Result<MooncakeIndexerConf
     if args.compare.is_empty() {
         Ok(args.get_indexer().to_config())
     } else {
-        MooncakeIndexerConfig::from_short_name(name, args.num_event_workers)
+        let mut config = MooncakeIndexerConfig::from_short_name(name, args.num_event_workers)?;
+        if config.kind == MooncakeIndexerKind::TransposedCkf {
+            config.expected_blocks_per_dc = args.common.num_gpu_blocks;
+        }
+        Ok(config)
     }
 }
 
@@ -345,6 +379,20 @@ async fn run_open_loop_for_config(
         MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
             let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
                 ConcurrentRadixTreeCompressed::new(),
+                config.num_event_workers,
+                args.common.block_size,
+                metrics(),
+            ));
+            run_backend(config.short_name(), indexer, trial, open_config).await
+        }
+        MooncakeIndexerKind::TransposedCkf => {
+            let workers = std::array::from_fn(|lane| WorkerWithDpRank::new(lane as u64, 0));
+            let backend = EventTransposedCkfIndexer::new(
+                workers,
+                CkfConfig::new(config.expected_blocks_per_dc),
+            )?;
+            let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
+                backend,
                 config.num_event_workers,
                 args.common.block_size,
                 metrics(),

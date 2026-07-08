@@ -192,6 +192,16 @@ pub trait SyncIndexer: Send + Sync + 'static {
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
 
+    /// Whether this backend can reconstruct its complete state as router events.
+    fn supports_event_dump(&self) -> bool {
+        true
+    }
+
+    /// Whether Boolean event acknowledgements are sufficient for pruning bookkeeping.
+    fn supports_routing_decision_pruning(&self) -> bool {
+        true
+    }
+
     /// Install a shared structural anchor for branch-sharded suffix routing.
     ///
     /// Backends that do not support anchored routing keep the default
