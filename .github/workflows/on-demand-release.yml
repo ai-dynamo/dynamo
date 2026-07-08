@@ -34,10 +34,10 @@ on:
         type: string
         default: ''
       rc_round:
-        description: 'Internal staging RC round (the rc suffix on the NGC/helm/crate staging versions + wheel subpath, so re-stages do not collide on the immutable registries). NO GitHub tag is created. Default 3.'
+        description: 'Internal staging RC round (the rc suffix on the NGC/helm/crate staging versions + wheel subpath, so re-stages do not collide on the immutable registries). NO GitHub tag is created. Default 4.'
         required: false
         type: string
-        default: '3'
+        default: '4'
       rc_sub:
         description: 'Sub-increment within the RC round (0 = none). >0 appends a second dotted level, e.g. round 2 + sub 1 -> rc.2.1 (a numerically-ordered SemVer pre-release). Default 0.'
         required: false
@@ -349,7 +349,7 @@ jobs:
         # A dry run sets up the branch/bump only — don't consume an rc.
         if: ${{ !inputs.dry_run }}
         env:
-          RC_ROUND: ${{ inputs.rc_round || '3' }}
+          RC_ROUND: ${{ inputs.rc_round || '4' }}
           RC_SUB: ${{ inputs.rc_sub || '0' }}
         run: |
           set -euo pipefail
