@@ -188,9 +188,12 @@ vllm_configs = {
         marks=[
             pytest.mark.kvbm,
             pytest.mark.gpu_1,
-            # TODO: profile real VRAM peak in a KVBM-enabled image and add
-            # profiled_vram_gib. Not guessed here: runs in the sequential GPU
-            # stage until profiled (KVBM footprint ~= agg Qwen3-0.6B).
+            # No profiled_vram_gib: profiled in a KVBM-enabled image and it peaks
+            # ~44.9 GiB on a 48 GiB GPU (KVBM's 20 GiB CPU-cache onboard fills the
+            # device during inference), NOT ~agg's ~3.8 GiB. That exceeds the
+            # 24 GiB gpu_1 CI runner, so agg_kvbm.sh needs a GPU-memory bound (or
+            # a larger lane) before a portable profiled_vram_gib makes sense.
+            # Runs in the sequential GPU stage meanwhile.
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
             pytest.mark.timeout(410),
             pytest.mark.pre_merge,
