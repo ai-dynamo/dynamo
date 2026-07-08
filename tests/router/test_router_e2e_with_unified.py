@@ -25,7 +25,11 @@ from typing import Any
 
 import pytest
 
-from tests.router.e2e_harness import run_basic_router_test, run_router_decisions_test
+from tests.router.e2e_harness import (
+    run_basic_router_test,
+    run_cache_salt_isolation_test,
+    run_router_decisions_test,
+)
 from tests.router.test_router_e2e_with_sglang import MODEL_NAME as SGLANG_MODEL_NAME
 from tests.router.test_router_e2e_with_sglang import SGLANG_ARGS, SGLangProcess
 from tests.router.test_router_e2e_with_trtllm import MODEL_NAME as TRTLLM_MODEL_NAME
@@ -206,6 +210,38 @@ def test_unified_vllm_router_decisions_multiple_workers(
         num_workers=2,
         single_gpu=True,
         test_dp_rank=False,
+    )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.vllm
+@pytest.mark.model(VLLM_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(6.9)
+@pytest.mark.requested_vllm_kv_cache_bytes(331_801_000)
+@pytest.mark.timeout(360)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_unified_vllm_cache_salt_isolation(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+) -> None:
+    """Cache-salted vLLM events remain isolated in the router index.
+
+    This crosses the real unified vLLM engine and its KV-event publisher, then
+    queries the router index independently for each tenant namespace.
+    """
+    run_cache_salt_isolation_test(
+        engine_process_cls=UnifiedVLLMProcess,
+        engine_args_name="vllm_args",
+        engine_args=VLLM_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=VLLM_MODEL_NAME,
+        block_size=VLLM_BLOCK_SIZE,
+        component_name="backend",
     )
 
 
@@ -418,6 +454,37 @@ def test_unified_trtllm_router_decisions_multiple_workers(
         num_workers=2,
         single_gpu=True,
         test_dp_rank=False,
+    )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.trtllm
+@pytest.mark.model(TRTLLM_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_unified_trtllm_cache_salt_isolation(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    request_plane,
+) -> None:
+    """Cache-salted TRT-LLM events remain isolated in the router index.
+
+    This crosses the real unified TRT-LLM engine and its KV-event publisher,
+    then queries the router index independently for each tenant namespace.
+    """
+    run_cache_salt_isolation_test(
+        engine_process_cls=UnifiedTRTLLMProcess,
+        engine_args_name="trtllm_args",
+        engine_args=TRTLLM_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=TRTLLM_MODEL_NAME,
+        block_size=TRTLLM_BLOCK_SIZE,
+        component_name="backend",
     )
 
 
