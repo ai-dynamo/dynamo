@@ -107,6 +107,72 @@ async def test_generate_submits_prepared_multimodal_prompt(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_prefill_terminal_adds_embedding_handoff(monkeypatch):
+    from dynamo.vllm import llm_engine as mod
+
+    output = SimpleNamespace(
+        index=0,
+        token_ids=[42],
+        finish_reason="length",
+        stop_reason=None,
+        logprobs=None,
+    )
+    response = SimpleNamespace(
+        outputs=[output],
+        prompt_token_ids=[1, 99, 2],
+        prompt_logprobs=None,
+        kv_transfer_params={"remote_block_ids": [7]},
+    )
+    engine = _engine(DisaggregationMode.PREFILL, [response])
+    image = object()
+    handoff = {
+        "image_grid_thw": [[1, 2, 2]],
+        "embeddings_shape": [1, 16],
+    }
+    processor = SimpleNamespace(
+        prepare_prompt=AsyncMock(
+            return_value=PreparedMultimodalPrompt(
+                prompt={"prompt_token_ids": [1, 2]},
+                request={"token_ids": [1, 2]},
+                multi_modal_data={"image": image},
+                mm_processor_kwargs={"max_pixels": 1003520},
+            )
+        ),
+        build_prefill_handoff=MagicMock(return_value=handoff),
+    )
+    engine._multimodal_request_processor = processor
+    monkeypatch.setattr(
+        mod, "build_sampling_params", lambda *args, **kwargs: _sampling_params()
+    )
+
+    chunks = [
+        chunk
+        async for chunk in engine.generate(
+            {
+                "token_ids": [1, 2],
+                "sampling_options": {},
+                "stop_conditions": {},
+                "output_options": {},
+            },
+            _Context(),
+        )
+    ]
+
+    assert chunks[0]["disaggregated_params"] == {
+        "kv_transfer_params": {"remote_block_ids": [7]},
+        "embedding_params": {
+            "image_grid_thw": [[1, 2, 2]],
+            "embeddings_shape": [1, 16],
+        },
+    }
+    processor.build_prefill_handoff.assert_called_once_with(
+        multi_modal_data={"image": image},
+        prompt_token_ids=[1, 99, 2],
+        mm_processor_kwargs={"max_pixels": 1003520},
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "route_to_encoder", "message"),
     [
@@ -131,29 +197,6 @@ async def test_from_args_rejects_unsupported_multimodal_topologies(
     )
 
     with pytest.raises(NotImplementedError, match=message):
-        await mod.VllmLLMEngine.from_args([])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "mode", [DisaggregationMode.PREFILL, DisaggregationMode.DECODE]
-)
-async def test_from_args_rejects_multimodal_pd_until_followup(monkeypatch, mode):
-    from dynamo.vllm import llm_engine as mod
-
-    config = SimpleNamespace(
-        disaggregation_mode=mode,
-        route_to_encoder=False,
-        headless=False,
-        enable_multimodal=True,
-    )
-    monkeypatch.setattr(
-        mod,
-        "parse_args",
-        lambda argv, fpm_trace_relay_supported=False: config,
-    )
-
-    with pytest.raises(NotImplementedError, match="multimodal P/D"):
         await mod.VllmLLMEngine.from_args([])
 
 
@@ -202,4 +245,3 @@ async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
     worker_overrides = from_runtime_config.call_args.kwargs
     assert worker_overrides["media_decoder"] is not None
     assert worker_overrides["media_fetcher"] is not None
-    assert from_runtime_config.call_args.kwargs["model_input"] is mod.ModelInput.Tokens

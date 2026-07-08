@@ -72,6 +72,7 @@ from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import (
     VllmEnginePauseController,
+    _apply_nvext_cache_salt,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -272,16 +273,6 @@ class VllmLLMEngine(LLMEngine):
                 "unified encode worker is available"
             )
 
-        if config.enable_multimodal and config.disaggregation_mode in (
-            DisaggregationMode.PREFILL,
-            DisaggregationMode.DECODE,
-        ):
-            raise NotImplementedError(
-                "multimodal P/D is not supported by the unified vLLM entry "
-                "point yet; use aggregated unified serving or `python -m "
-                "dynamo.vllm`"
-            )
-
         if not config.served_model_name:
             config.served_model_name = (
                 config.engine_args.served_model_name
@@ -372,6 +363,8 @@ class VllmLLMEngine(LLMEngine):
             enable_multimodal=self.enable_multimodal,
             enable_frontend_decoding=self.frontend_decoding,
         )
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            self._multimodal_request_processor.initialize_prefill_handoff()
         # Resolve once the tokenizer is available (see logits_processor_spec()).
         self._logits_processor_spec = await self.logits_processor_spec()
         self._pause_controller = VllmEnginePauseController(self.engine_client)
@@ -429,6 +422,7 @@ class VllmLLMEngine(LLMEngine):
             self.disaggregation_mode,
         )
         prompt = prepared_prompt.prompt
+        _apply_nvext_cache_salt(prepared_prompt.request, prompt)
 
         # Multimodal decode may replace token_ids with the expanded prefill
         # sequence. Sampling limits must use that same effective request.
@@ -598,10 +592,18 @@ class VllmLLMEngine(LLMEngine):
                     # prefill terminal so PrefillRouter can forward it.
                     if is_prefill:
                         kv_transfer_params = getattr(res, "kv_transfer_params", None)
+                        handoff_params: dict[str, Any] = {}
                         if kv_transfer_params is not None:
-                            out["disaggregated_params"] = {
-                                "kv_transfer_params": kv_transfer_params,
-                            }
+                            handoff_params["kv_transfer_params"] = kv_transfer_params
+                        embedding_params = multimodal_processor.build_prefill_handoff(
+                            multi_modal_data=prepared_prompt.multi_modal_data,
+                            prompt_token_ids=list(res.prompt_token_ids or []),
+                            mm_processor_kwargs=prepared_prompt.mm_processor_kwargs,
+                        )
+                        if embedding_params is not None:
+                            handoff_params["embedding_params"] = embedding_params
+                        if handoff_params:
+                            out["disaggregated_params"] = handoff_params
 
                 yield out
 

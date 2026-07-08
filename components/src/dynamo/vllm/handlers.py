@@ -463,13 +463,25 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
+# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+_DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
+
+
 def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
+    """Pass an internally tagged cache salt to vLLM.
+
+    vLLM publishes cache salts as otherwise-untyped strings in ``extra_keys``
+    alongside LoRA and multimodal metadata. The tag lets Dynamo recover the
+    namespace without guessing from the user-controlled value. It is removed
+    again by the Rust KV-event decoder, so Dynamo's public namespace is
+    unchanged.
+    """
     if not isinstance(prompt, dict):
         return
     for source in _iter_nvext_sources(request):
         cache_salt = source.get("cache_salt")
-        if cache_salt is not None:
-            prompt["cache_salt"] = cache_salt
+        if cache_salt:
+            prompt["cache_salt"] = f"{_DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"
             return
 
 
