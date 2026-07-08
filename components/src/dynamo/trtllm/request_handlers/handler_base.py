@@ -70,6 +70,25 @@ configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# PD disaggregation diagnostics (gated by DYN_PD_DIAG=1).
+#
+# Per-request lifecycle logging on the WORKER side (prefill + decode), meant to
+# answer "why did the decode worker stop receiving/finishing requests?". It
+# complements the frontend's DYN_PREFILL_TRACE (which only covers the prefill
+# stage) by making the decode side observable:
+#   - request START/END + live in-flight count per worker (are slots filling up
+#     with stuck requests and never draining?)
+#   - engine submission (generate_async) with the request_type actually sent
+#   - FIRST engine result — on a decode worker this is the moment the KV
+#     transfer from prefill completes; if it never prints, KV transfer is stuck
+#   - finish reason
+#
+# Logs are per-request (bounded), NOT per-token, so they are safe at moderate
+# QPS. ON by default; disable with DYN_PD_DIAG=0. Grep worker logs for "PD-DIAG".
+# ---------------------------------------------------------------------------
+_PD_DIAG_ENABLED = os.environ.get("DYN_PD_DIAG", "1") not in ("0", "false")
+
 
 # exp-H (gap #4): one-shot runtime-verification flag (perf-safe — logs once at INFO so the
 # conversation_id plumbing can be confirmed without enabling debug at benchmark time).
@@ -941,6 +960,12 @@ class HandlerBase(BaseGenerativeHandler):
         """Track in-flight count, reject during sleep, then delegate to implementation."""
         started = await self._mark_request_started()
         if not started:
+            if _PD_DIAG_ENABLED:
+                logger.info(
+                    "PD-DIAG [%s] REJECTED id=%s (worker rejecting new requests, paused/draining)",
+                    self.disaggregation_mode.value,
+                    context.id(),
+                )
             yield {
                 "finish_reason": {
                     "error": "Worker is temporarily rejecting new requests"
@@ -948,6 +973,13 @@ class HandlerBase(BaseGenerativeHandler):
                 "token_ids": [],
             }
             return
+        if _PD_DIAG_ENABLED:
+            logger.info(
+                "PD-DIAG [%s] START id=%s inflight=%d",
+                self.disaggregation_mode.value,
+                context.id(),
+                self._inflight_requests,
+            )
         try:
             async for chunk in self._generate_locally_impl(
                 request, context, embeddings, ep_disaggregated_params
@@ -955,6 +987,13 @@ class HandlerBase(BaseGenerativeHandler):
                 yield chunk
         finally:
             await self._mark_request_finished()
+            if _PD_DIAG_ENABLED:
+                logger.info(
+                    "PD-DIAG [%s] END id=%s inflight=%d",
+                    self.disaggregation_mode.value,
+                    context.id(),
+                    self._inflight_requests,
+                )
 
     async def _generate_locally_impl(
         self,
@@ -1185,6 +1224,69 @@ class HandlerBase(BaseGenerativeHandler):
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
 
+        if _PD_DIAG_ENABLED:
+            _req_type = getattr(disaggregated_params, "request_type", None)
+            _disagg_req_id = getattr(disaggregated_params, "disagg_request_id", None)
+            logger.info(
+                "PD-DIAG [%s] SUBMIT id=%s request_type=%s disagg_request_id=%s "
+                "streaming=%s dp_rank=%s has_prefill_result=%s",
+                self.disaggregation_mode.value,
+                request_id,
+                _req_type,
+                _disagg_req_id,
+                streaming,
+                dp_rank,
+                request.get("prefill_result") is not None,
+            )
+
+        # Diagnostic: track whether the first engine result has arrived. On a
+        # decode worker, the first result == KV transfer from prefill completed.
+        _diag_first_result_seen = False
+        # Diagnostic: count engine results. A prefill worker runs with
+        # max_tokens=1 / streaming=False and must yield exactly one result;
+        # more than one is anomalous and worth surfacing.
+        _diag_result_count = 0
+        # Diagnostic stall watchdog state (zero-cost when DYN_PD_DIAG is off).
+        # `_diag_last_output` is the monotonic timestamp of the last engine
+        # result (initialized at submission below); the watchdog task warns when
+        # the gap since then exceeds the threshold. `_diag_stall_task` stays
+        # defined unconditionally so the `finally` below can always cancel it.
+        _diag_stall_task: Optional[asyncio.Task] = None
+        if _PD_DIAG_ENABLED:
+            _diag_loop = asyncio.get_running_loop()
+            _diag_last_output = _diag_loop.time()
+            _diag_stall_threshold_s = float(
+                os.environ.get("DYN_PD_DIAG_STALL_SECS", "60")
+            )
+
+            async def _diag_stall_watchdog() -> None:
+                """Warn when the engine yields no new output for longer than the
+                threshold after submission. Catches decode requests stuck waiting
+                for the KV transfer (no first result yet) and mid-generation
+                hangs. Re-warns every threshold while the stall persists."""
+                while True:
+                    idle = _diag_loop.time() - _diag_last_output
+                    if idle < _diag_stall_threshold_s:
+                        # Sleep exactly until the threshold would be crossed.
+                        await asyncio.sleep(_diag_stall_threshold_s - idle)
+                        continue
+                    if not _diag_first_result_seen:
+                        detail = "no first result yet"
+                        if self.disaggregation_mode == DisaggregationMode.DECODE:
+                            detail += " (decode KV transfer from prefill not complete)"
+                    else:
+                        detail = "stalled mid-generation"
+                    logger.warning(
+                        "PD-DIAG [%s] STALL id=%s no_output_for=%.0fs results_so_far=%d (%s)",
+                        self.disaggregation_mode.value,
+                        request_id,
+                        idle,
+                        _diag_result_count,
+                        detail,
+                    )
+                    # Wait a full threshold before warning again for this stall.
+                    await asyncio.sleep(_diag_stall_threshold_s)
+
         try:
             # NEW: Updated engine call to include multimodal data
             generate_kwargs = {
@@ -1202,6 +1304,12 @@ class HandlerBase(BaseGenerativeHandler):
                 generate_kwargs["conversation_params"] = conversation_params
             generation_result = self.engine.llm.generate_async(**generate_kwargs)
 
+            # Start the stall watchdog now that the request has been submitted
+            # to the engine (anchor the timer at submission).
+            if _PD_DIAG_ENABLED:
+                _diag_last_output = _diag_loop.time()
+                _diag_stall_task = asyncio.create_task(_diag_stall_watchdog())
+
             # In disagg decode mode, wrap abort() to defer until first token
             # (KV transfer complete).
             abort_guard = (
@@ -1218,6 +1326,34 @@ class HandlerBase(BaseGenerativeHandler):
                     # Signal first token to deferred abort guard
                     if abort_guard is not None:
                         abort_guard.signal_first_token()
+
+                    if _PD_DIAG_ENABLED:
+                        # Reset the stall watchdog: the engine produced output.
+                        _diag_last_output = _diag_loop.time()
+                        _diag_result_count += 1
+                        if not _diag_first_result_seen:
+                            _diag_first_result_seen = True
+                            logger.info(
+                                "PD-DIAG [%s] FIRST_RESULT id=%s%s",
+                                self.disaggregation_mode.value,
+                                request_id,
+                                " (KV transfer from prefill complete)"
+                                if self.disaggregation_mode == DisaggregationMode.DECODE
+                                else "",
+                            )
+                        elif (
+                            self.disaggregation_mode == DisaggregationMode.PREFILL
+                            and _diag_result_count == 2
+                        ):
+                            # Prefill must produce exactly one result; a second
+                            # (or later) result means the engine kept generating
+                            # past max_tokens=1. Log once, at the first extra.
+                            logger.warning(
+                                "PD-DIAG [prefill] EXTRA_RESULT id=%s result_count=%d "
+                                "(prefill expected exactly 1 result)",
+                                request_id,
+                                _diag_result_count,
+                            )
 
                     # TRTLLM engine needs to start generating tokens first before stats
                     # can be retrieved.
@@ -1410,6 +1546,16 @@ class HandlerBase(BaseGenerativeHandler):
 
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
+
+        finally:
+            # Stop the stall watchdog on every exit path (normal completion,
+            # cancellation, per-request error, or engine shutdown).
+            if _diag_stall_task is not None:
+                _diag_stall_task.cancel()
+                try:
+                    await _diag_stall_task
+                except asyncio.CancelledError:
+                    pass
 
     @staticmethod
     def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
