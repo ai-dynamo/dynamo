@@ -414,7 +414,6 @@ vllm_configs = {
             pytest.mark.gpu_2,
             # Per-GPU peak: prefill and decode run on separate GPUs (GPU1/GPU0),
             # so each worker peaks like the single-GPU LMCache config (agg_lmcache).
-            pytest.mark.profiled_vram_gib(3.8),
             # 2 workers + a 20s inter-worker startup sleep in disagg_lmcache.sh;
             # generous ceiling over the ~200s single-worker LMCache runtime.
             pytest.mark.timeout(700),
