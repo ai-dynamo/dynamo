@@ -661,11 +661,12 @@ def test_decode_grid_sizes_max_batch_from_padded_allocation():
         ctx_len = point.context_length
         bs = point.batch_size
         blocks_per_req = -(-(ctx_len + 1) // block_size)  # ceil
-        max_feasible = num_gpu_blocks // blocks_per_req
+        # vLLM permanently reserves one physical block as its null sentinel.
+        max_feasible = (num_gpu_blocks - 1) // blocks_per_req
         assert bs <= max_feasible, (
             f"point ctx_len={ctx_len} batch_size={bs} would exceed KV "
             f"capacity: needs {bs * blocks_per_req} blocks, only "
-            f"{num_gpu_blocks} available "
+            f"{num_gpu_blocks - 1} usable "
             f"(blocks_per_req={blocks_per_req}, max_feasible={max_feasible})."
         )
 
@@ -685,12 +686,118 @@ def test_decode_grid_first_ctx_yields_block_aligned_capacity():
     assert (
         len(boundary_points) > 0
     ), f"grid missing ctx_len={block_size} entries: {stub._bench_grid}"
-    # 100 blocks // 2 blocks-per-req == 50 max batch.
-    assert max(p.batch_size for p in boundary_points) <= 50, (
+    # One of the 100 blocks is the null sentinel, leaving 99 // 2 == 49.
+    assert max(p.batch_size for p in boundary_points) <= 49, (
         f"boundary ctx_len={block_size}: max batch must not exceed "
-        f"num_gpu_blocks // 2 = 50; got "
+        f"(num_gpu_blocks - 1) // 2 = 49; got "
         f"{[p.batch_size for p in boundary_points]}"
     )
+
+
+def test_decode_grid_accounts_for_all_hybrid_kv_cache_groups():
+    """Every KV-cache group allocates from the same physical block pool."""
+    block_size = 16
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=100, block_size=block_size)
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(
+            single_type_managers=[
+                SimpleNamespace(block_size=16),
+                SimpleNamespace(block_size=32),
+            ]
+        )
+    )
+
+    InstrumentedScheduler._bench_generate_decode_grid(stub)
+
+    boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
+    # A 17-token allocation uses 2 + 1 blocks across the two groups.
+    assert max(p.batch_size for p in boundary_points) <= 33
+
+
+def test_decode_block_footprint_excludes_cross_attention_groups():
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=100, block_size=16)
+    cross_attention_manager = object.__new__(
+        instrumented_scheduler_module.CrossAttentionManager
+    )
+    cross_attention_manager.block_size = 16
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(
+            single_type_managers=[
+                SimpleNamespace(block_size=16),
+                cross_attention_manager,
+            ]
+        )
+    )
+
+    # The 17 decoder tokens consume two self-attention blocks and zero
+    # cross-attention blocks because the synthetic request has no encoder input.
+    assert InstrumentedScheduler._bench_blocks_per_req(stub, 17) == 2
+
+
+def test_decode_grid_leaves_kv_cache_watermark_free():
+    block_size = 16
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=100, block_size=block_size)
+    stub.kv_cache_manager = SimpleNamespace(watermark_blocks=3)
+
+    InstrumentedScheduler._bench_generate_decode_grid(stub)
+
+    boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
+    # 100 total - 1 null - 3 watermark leaves 96 blocks, or 48 requests.
+    assert max(p.batch_size for p in boundary_points) <= 48
+
+
+def test_decode_grid_uses_live_free_block_count_after_manager_reservations():
+    block_size = 16
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=100, block_size=block_size)
+    stub.kv_cache_manager = SimpleNamespace(
+        watermark_blocks=3,
+        block_pool=SimpleNamespace(get_num_free_blocks=lambda: 90),
+    )
+
+    InstrumentedScheduler._bench_generate_decode_grid(stub)
+
+    boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
+    # The pool has already removed null/sink reservations: (90 - 3) // 2.
+    assert max(p.batch_size for p in boundary_points) <= 43
+
+
+@pytest.mark.parametrize(
+    ("mode", "prefill_points", "decode_points", "expected_missing_phases"),
+    [
+        ("prefill", 0, 0, ["prefill"]),
+        ("decode", 0, 0, ["decode"]),
+        ("agg", 0, 0, ["prefill", "decode"]),
+        ("agg", 1, 0, ["decode"]),
+        ("agg", 0, 1, ["prefill"]),
+        ("agg", 1, 1, []),
+    ],
+)
+def test_benchmark_grid_tracks_each_requested_empty_phase(
+    mode, prefill_points, decode_points, expected_missing_phases
+):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = SimpleNamespace(mode=mode)
+    stub._bench_grid = deque()
+    stub._bench_grid_built = False
+    stub._bench_missing_phases = []
+
+    def generate_prefill_grid():
+        stub._bench_grid.extend(
+            BenchmarkPoint(point_type="prefill") for _ in range(prefill_points)
+        )
+
+    def generate_decode_grid():
+        stub._bench_grid.extend(
+            BenchmarkPoint(point_type="decode") for _ in range(decode_points)
+        )
+
+    stub._bench_generate_prefill_grid = generate_prefill_grid
+    stub._bench_generate_decode_grid = generate_decode_grid
+
+    InstrumentedScheduler._bench_build_grid(stub)
+
+    assert stub._bench_expected_points == prefill_points + decode_points
+    assert stub._bench_missing_phases == expected_missing_phases
 
 
 # ---------------------------------------------------------------------------
@@ -1138,6 +1245,7 @@ def test_benchmark_output_marks_skipped_kv_point_invalid(tmp_path):
     stub._bench_skipped_points = [
         SkippedBenchmarkPoint(point=point, reason="seed_cache_validation_failed")
     ]
+    stub._bench_missing_phases = []
     stub.max_num_scheduled_tokens = 40
     stub.max_num_running_reqs = 8
     stub.max_model_len = 128
@@ -1156,6 +1264,33 @@ def test_benchmark_output_marks_skipped_kv_point_invalid(tmp_path):
     assert output["skipped_points"] == [
         {"point": point.__dict__, "reason": "seed_cache_validation_failed"}
     ]
+    assert output["missing_phases"] == []
+
+
+def test_benchmark_output_marks_requested_empty_phase_invalid(tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig(mode="decode", output_path=str(output_path))
+    stub._bench_expected_points = 0
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+    stub._bench_missing_phases = ["decode"]
+    stub.max_num_scheduled_tokens = 40
+    stub.max_num_running_reqs = 8
+    stub.max_model_len = 8
+    stub.block_size = 16
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=64)
+
+    InstrumentedScheduler._bench_write_results(stub)
+
+    output = json.loads(output_path.read_text())
+    assert output["coverage"] == {
+        "expected_points": 0,
+        "completed_points": 0,
+        "skipped_points": 0,
+    }
+    assert output["missing_phases"] == ["decode"]
+    assert output["valid"] is False
 
 
 def test_prefill_point_with_measured_kv_mismatch_is_skipped():
@@ -1239,4 +1374,96 @@ def test_prefill_point_with_measured_batch_size_mismatch_is_skipped():
     assert stub._bench_results == []
     assert stub._bench_skipped_points == [
         SkippedBenchmarkPoint(point=point, reason="measured_batch_size_mismatch")
+    ]
+
+
+def test_decode_point_with_exact_shape_is_saved():
+    point = BenchmarkPoint(point_type="decode", context_length=16, batch_size=3)
+    fpms = [
+        {
+            "scheduled_requests": {
+                "num_decode_requests": 3,
+                "sum_decode_kv_tokens": 48,
+            }
+        }
+    ]
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_current_point = point
+    stub._bench_current_fpms = fpms
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == [
+        instrumented_scheduler_module.BenchmarkPointResult(point=point, fpms=fpms)
+    ]
+    assert stub._bench_skipped_points == []
+
+
+def test_decode_point_with_measured_batch_size_mismatch_is_skipped():
+    point = BenchmarkPoint(point_type="decode", context_length=16, batch_size=3)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_current_point = point
+    stub._bench_current_fpms = [
+        {
+            "scheduled_requests": {
+                "num_decode_requests": 2,
+                "sum_decode_kv_tokens": 32,
+            }
+        }
+    ]
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == [
+        SkippedBenchmarkPoint(point=point, reason="measured_batch_size_mismatch")
+    ]
+
+
+def test_decode_point_with_measured_context_mismatch_is_skipped():
+    point = BenchmarkPoint(point_type="decode", context_length=16, batch_size=3)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_current_point = point
+    stub._bench_current_fpms = [
+        {
+            "scheduled_requests": {
+                "num_decode_requests": 3,
+                "sum_decode_kv_tokens": 47,
+            }
+        }
+    ]
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == [
+        SkippedBenchmarkPoint(point=point, reason="measured_decode_context_mismatch")
+    ]
+
+
+def test_zero_request_decode_injection_is_skipped_immediately():
+    point = BenchmarkPoint(point_type="decode", context_length=16, batch_size=3)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_drain_if_pending = MagicMock(return_value=False)
+    stub._bench_active_req_ids = set()
+    stub._bench_grid = deque([point])
+    stub._bench_current_point = None
+    stub._bench_current_fpms = []
+    stub._bench_skipped_points = []
+    stub._bench_inject_fake_decode = MagicMock(
+        return_value=SimpleNamespace(total_num_scheduled_tokens=0)
+    )
+
+    output = InstrumentedScheduler._bench_step_decode(stub)
+
+    assert output is None
+    assert stub._bench_current_point is None
+    assert stub._bench_skipped_points == [
+        SkippedBenchmarkPoint(point=point, reason="decode_injection_failed")
     ]

@@ -109,7 +109,8 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
     )
     assert data.get("valid") is True, (
         f"benchmark reported incomplete coverage: coverage={data.get('coverage')} "
-        f"skipped_points={data.get('skipped_points')}"
+        f"skipped_points={data.get('skipped_points')} "
+        f"missing_phases={data.get('missing_phases')}"
     )
 
     results = data.get("results") or []
@@ -150,6 +151,25 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
                         batch_size * kv_reads_per_request
                     ), (
                         f"point {point} measured the wrong initial KV reads: "
+                        f"scheduled_requests={scheduled}"
+                    )
+            else:
+                scheduled = fpm.get("scheduled_requests") or {}
+                assert scheduled.get("num_decode_requests", 0) > 0, (
+                    f"decode point {point} captured a non-decode FPM: "
+                    f"scheduled_requests={scheduled}"
+                )
+                if fpm_index == 0:
+                    batch_size = point.get("batch_size", 1)
+                    context_length = point["context_length"]
+                    assert scheduled.get("num_decode_requests") == batch_size, (
+                        f"point {point} measured the wrong decode batch size: "
+                        f"scheduled_requests={scheduled}"
+                    )
+                    assert scheduled.get("sum_decode_kv_tokens") == (
+                        batch_size * context_length
+                    ), (
+                        f"point {point} measured the wrong decode context: "
                         f"scheduled_requests={scheduled}"
                     )
     return data

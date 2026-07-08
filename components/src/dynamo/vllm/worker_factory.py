@@ -101,7 +101,8 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
             raise RuntimeError(
                 f"Self-benchmark produced incomplete results at {p}: "
                 f"coverage={data.get('coverage')} "
-                f"skipped_points={data.get('skipped_points')}"
+                f"skipped_points={data.get('skipped_points')} "
+                f"missing_phases={data.get('missing_phases')}"
             )
         if i == 0:
             merged = data

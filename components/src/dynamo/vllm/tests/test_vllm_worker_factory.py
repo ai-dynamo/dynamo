@@ -59,6 +59,7 @@ async def test_wait_and_load_benchmark_rejects_invalid_results(monkeypatch, tmp_
                     "skipped_points": 1,
                 },
                 "skipped_points": [{"reason": "seed_cache_validation_failed"}],
+                "missing_phases": ["decode"],
             }
         )
     )
@@ -66,10 +67,11 @@ async def test_wait_and_load_benchmark_rejects_invalid_results(monkeypatch, tmp_
         "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
     )
 
-    with pytest.raises(RuntimeError, match="incomplete results"):
+    with pytest.raises(RuntimeError, match="incomplete results") as exc_info:
         await _wait_and_load_benchmark(
             {"output_path": str(output_path), "timeout": 1}, Mock()
         )
+    assert "missing_phases=['decode']" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
