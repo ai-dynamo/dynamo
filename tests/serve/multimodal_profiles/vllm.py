@@ -55,6 +55,7 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
+    "p_d_unified": "disagg_multimodal_p_d.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -112,6 +113,41 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         suffix="image",
                         payload=make_image_payload(["green"]),
                         extra_script_args=["--unified"],
+                    ),
+                    MmCase(
+                        suffix="embedding_cache",
+                        payload=make_image_payload(
+                            ["green"],
+                            repeat_count=2,
+                            expected_log=[
+                                r"DynamoMultimodalEmbeddingCacheConnector "
+                                r"initialized: capacity_gb=1\.00"
+                            ],
+                        ),
+                        extra_script_args=[
+                            "--unified",
+                            "--multimodal-embedding-cache-capacity-gb",
+                            "1",
+                        ],
+                    ),
+                    MmCase(
+                        suffix="shm_transfer",
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                        env={
+                            "DYN_CHAT_PROCESSOR": "vllm",
+                            "DYNAMO_MM_TRANSFER": "shm",
+                        },
+                    ),
+                    MmCase(
+                        suffix="nixl_transfer",
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                        marks=[pytest.mark.post_merge],
+                        env={
+                            "DYN_CHAT_PROCESSOR": "vllm",
+                            "DYNAMO_MM_TRANSFER": "nixl",
+                        },
                     ),
                 ],
             ),
@@ -214,6 +250,19 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=15.7,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+            "p_d_unified": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=300,
+                single_gpu=True,
+                profiled_vram_gib=15.7,
+                requested_vllm_kv_cache_bytes=1_714_881_000,
+                tests=[
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                    )
+                ],
             ),
         },
     ),

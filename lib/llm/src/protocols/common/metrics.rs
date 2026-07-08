@@ -5,6 +5,11 @@ use std::time::Duration;
 
 use dynamo_runtime::protocols::annotated::Annotated;
 
+/// Omit count fields from the serialized annotation when zero.
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
 pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
 
 /// Marks the payload-only usage chunk. It carries the same `LLMMetricAnnotation`
@@ -13,12 +18,21 @@ pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
 /// carry `usage` to the payload `DeltaAggregator` and is never sent to the client.
 pub const ANNOTATION_PAYLOAD_USAGE: &str = "payload_usage";
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct LLMMetricAnnotation {
     pub input_tokens: usize,
     pub output_tokens: usize,
     pub chunk_tokens: usize,
     pub cached_tokens: Option<usize>,
+    /// Number of `image_url` content parts in the request (0 for text-only).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub image_count: usize,
+    /// Number of `video_url` content parts in the request (0 for text-only).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub video_count: usize,
+    /// Number of `audio_url` content parts in the request (0 for text-only).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub audio_count: usize,
     /// Prefill worker ID (for TTFT attribution in disaggregated mode)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_worker_id: Option<u64>,

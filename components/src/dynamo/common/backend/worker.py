@@ -27,7 +27,7 @@ from typing import Optional
 
 from dynamo._core import backend as _backend
 from dynamo.common.constants import DisaggregationMode
-from dynamo.llm import ModelInput
+from dynamo.llm import MediaDecoder, MediaFetcher, ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine import BaseEngine, RawEngine
@@ -139,9 +139,11 @@ class WorkerConfig:
     # When True, this worker declares an upstream Encode peer in its
     # topology `needs`. Meaningful only on AGGREGATED/PREFILL roles;
     # the Rust validator rejects DECODE/ENCODE + True with InvalidArgument.
-    # Appended at the END of the dataclass to keep positional callers
-    # working -- inserting mid-class would silently shift downstream args.
+    # Keep this and future fields appended to preserve positional callers;
+    # inserting fields earlier would silently shift downstream arguments.
     route_to_encoder: bool = False
+    media_decoder: Optional[MediaDecoder] = None
+    media_fetcher: Optional[MediaFetcher] = None
 
     @classmethod
     def from_runtime_config(
@@ -275,6 +277,8 @@ class Worker:
             structural_tag_schema=self.config.structural_tag_schema,
             runtime=runtime_cfg,
             route_to_encoder=self.config.route_to_encoder,
+            media_decoder=self.config.media_decoder,
+            media_fetcher=self.config.media_fetcher,
         )
 
         loop = asyncio.get_running_loop()

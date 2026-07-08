@@ -73,7 +73,7 @@ class TensorRTLLMEngine:
                 # Prefill/decode workers initialize the standard TRT-LLM `LLM` from `engine_args`
                 # (model, backend settings, kv cache config, etc.). ENCODE workers instead use
                 # TRT-LLM's `MultimodalEncoder`, which has a different constructor surface.
-                # We intentionally pass only the supported parameters to avoid unexpected kwargs.
+                # Keep an explicit allowlist so LLM-only arguments are not forwarded.
                 model = self.engine_args.get("model")
 
                 # Skip MultimodalEncoder for architectures that handle vision
@@ -85,12 +85,21 @@ class TensorRTLLMEngine:
                 logging.info(
                     f"Initializing multimodal encoder with max_batch_size: {max_batch_size}"
                 )
+                encoder_kwargs: dict[str, Any] = {
+                    "model": model,
+                    "max_batch_size": max_batch_size,
+                }
+                for arg_name in (
+                    "trust_remote_code",
+                    "tensor_parallel_size",
+                    "model_kwargs",
+                ):
+                    if arg_name in self.engine_args:
+                        encoder_kwargs[arg_name] = self.engine_args[arg_name]
+
                 # MultimodalEncoder and LLM both inherit from BaseLLM in TRT-LLM,
                 # so storing either in self._llm is valid.
-                self._llm = MultimodalEncoder(
-                    model=model,
-                    max_batch_size=max_batch_size,
-                )
+                self._llm = MultimodalEncoder(**encoder_kwargs)
             else:
                 # Prefill/decode workers: initialize standard TRT-LLM `LLM` with full engine_args
                 # (model path, backend settings, KV cache config, disaggregation settings, etc.)

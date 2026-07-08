@@ -386,6 +386,11 @@ pub struct Metrics {
     /// `model`.
     embedding_latency: HistogramVec,
 
+    // Per-request multimodal content-part count histograms (labeled by `model`).
+    images_per_request: HistogramVec,
+    videos_per_request: HistogramVec,
+    audio_per_request: HistogramVec,
+
     // Runtime configuration metrics. Note: Some of these metrics represent counter-like values from
     // source systems, but are implemented as gauges because they are copied/synchronized from upstream
     // counter values rather than being directly incremented.
@@ -524,6 +529,15 @@ pub struct ResponseMetricCollector {
     inter_token_latency: prometheus::Histogram,
     input_sequence_length: prometheus::Histogram,
     cached_tokens: prometheus::Histogram,
+    // Per-model multimodal count histogram handles, resolved once at construction.
+    images_per_request: prometheus::Histogram,
+    videos_per_request: prometheus::Histogram,
+    audio_per_request: prometheus::Histogram,
+    // Latched per-request counts (for the tracing span fields recorded in `Drop`).
+    image_count_val: usize,
+    video_count_val: usize,
+    audio_count_val: usize,
+    multimodal_counts_observed: bool,
     start_time: Instant,
     // we use is_first_token to distinguish TTFT from ITL. It is true by default and
     // flipped to false when the first token is returned and TTFT is published.
@@ -790,6 +804,42 @@ impl Metrics {
         )
         .unwrap();
 
+        // Per-request media-count buckets: every integer through 10 (where most
+        // requests land), then coarse steps for the large-batch tail.
+        let multimodal_count_buckets = vec![
+            0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 20.0, 30.0, 40.0, 50.0, 100.0,
+        ];
+
+        let images_per_request = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::IMAGES_PER_REQUEST),
+                "Number of image_url content parts per request",
+            )
+            .buckets(multimodal_count_buckets.clone()),
+            &["model"],
+        )
+        .unwrap();
+
+        let videos_per_request = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::VIDEOS_PER_REQUEST),
+                "Number of video_url content parts per request",
+            )
+            .buckets(multimodal_count_buckets.clone()),
+            &["model"],
+        )
+        .unwrap();
+
+        let audio_per_request = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::AUDIO_PER_REQUEST),
+                "Number of audio_url content parts per request",
+            )
+            .buckets(multimodal_count_buckets),
+            &["model"],
+        )
+        .unwrap();
+
         let cached_tokens = HistogramVec::new(
             HistogramOpts::new(
                 frontend_metric_name(frontend_service::CACHED_TOKENS),
@@ -922,6 +972,9 @@ impl Metrics {
             time_to_first_token,
             inter_token_latency,
             embedding_latency,
+            images_per_request,
+            videos_per_request,
+            audio_per_request,
             model_total_kv_blocks,
             model_max_num_seqs,
             model_max_num_batched_tokens,
@@ -1076,6 +1129,9 @@ impl Metrics {
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
         registry.register(Box::new(self.embedding_latency.clone()))?;
+        registry.register(Box::new(self.images_per_request.clone()))?;
+        registry.register(Box::new(self.videos_per_request.clone()))?;
+        registry.register(Box::new(self.audio_per_request.clone()))?;
 
         // Register runtime configuration metrics
         registry.register(Box::new(self.model_total_kv_blocks.clone()))?;
@@ -1492,6 +1548,9 @@ impl ResponseMetricCollector {
         let inter_token_latency = metrics.inter_token_latency.with_label_values(&[&model]);
         let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
         let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
+        let images_per_request = metrics.images_per_request.with_label_values(&[&model]);
+        let videos_per_request = metrics.videos_per_request.with_label_values(&[&model]);
+        let audio_per_request = metrics.audio_per_request.with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
             model,
@@ -1500,6 +1559,13 @@ impl ResponseMetricCollector {
             inter_token_latency,
             input_sequence_length,
             cached_tokens,
+            images_per_request,
+            videos_per_request,
+            audio_per_request,
+            image_count_val: 0,
+            video_count_val: 0,
+            audio_count_val: 0,
+            multimodal_counts_observed: false,
             is_first_token: true,
             last_response_time: None,
             start_time: Instant::now(),
@@ -1572,6 +1638,28 @@ impl ResponseMetricCollector {
             self.cached_tokens_observed = true;
             self.cached_tokens.observe(tokens as f64);
         }
+    }
+
+    /// Observe per-request multimodal content-part counts, latched to run exactly
+    /// once per request (the counts are constant across a request's chunks).
+    pub fn observe_multimodal_counts(
+        &mut self,
+        image_count: usize,
+        video_count: usize,
+        audio_count: usize,
+    ) {
+        if self.multimodal_counts_observed {
+            return;
+        }
+        self.multimodal_counts_observed = true;
+
+        self.image_count_val = image_count;
+        self.video_count_val = video_count;
+        self.audio_count_val = audio_count;
+
+        self.images_per_request.observe(image_count as f64);
+        self.videos_per_request.observe(video_count as f64);
+        self.audio_per_request.observe(audio_count as f64);
     }
 
     /// Observe tokenize/detokenize latencies in milliseconds.
@@ -1725,6 +1813,13 @@ impl Drop for ResponseMetricCollector {
         let span = tracing::Span::current();
         span.record("input_tokens", self.isl as u32);
         span.record("output_tokens", self.osl as u32);
+        // Only record once observed, so requests that never carried a metrics
+        // annotation (e.g. errored before the first chunk) don't stamp a false zero.
+        if self.multimodal_counts_observed {
+            span.record("image_count", self.image_count_val as u32);
+            span.record("video_count", self.video_count_val as u32);
+            span.record("audio_count", self.audio_count_val as u32);
+        }
         if let Some(ttft_ms) = self.ttft_ms {
             span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
         }
@@ -1799,6 +1894,11 @@ fn observe_llm_metrics(
 ) {
     response_collector.observe_current_osl(metrics.output_tokens);
     response_collector.observe_cached_tokens(metrics.cached_tokens);
+    response_collector.observe_multimodal_counts(
+        metrics.image_count,
+        metrics.video_count,
+        metrics.audio_count,
+    );
     response_collector.observe_tokenize_latencies(
         metrics.tokenize_latency,
         metrics.detokenize_total_latency,
@@ -2269,6 +2369,56 @@ mod tests {
     }
 
     #[test]
+    fn test_multimodal_counts_observed_once() {
+        // Counts are request-level constants carried on every chunk's annotation.
+        // The collector must latch them on the first observation: each histogram
+        // records exactly one per-request sample, and later (differing) values are
+        // ignored. The histogram `_sum` doubles as the cumulative volume.
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "mm-counts-model";
+
+        let mut collector = metrics.clone().create_response_collector(model);
+        // Repeated calls simulate the same counts arriving on each streamed chunk.
+        collector.observe_multimodal_counts(2, 1, 0);
+        collector.observe_multimodal_counts(2, 1, 0);
+        // A later, differing value must not override the latched counts.
+        collector.observe_multimodal_counts(99, 99, 99);
+
+        let img = metrics.images_per_request.with_label_values(&[model]);
+        assert_eq!(img.get_sample_count(), 1, "image histogram observed once");
+        assert_eq!(img.get_sample_sum(), 2.0, "image _sum == cumulative volume");
+        let vid = metrics.videos_per_request.with_label_values(&[model]);
+        assert_eq!(vid.get_sample_count(), 1, "video histogram observed once");
+        assert_eq!(vid.get_sample_sum(), 1.0);
+        let aud = metrics.audio_per_request.with_label_values(&[model]);
+        assert_eq!(
+            aud.get_sample_count(),
+            1,
+            "audio histogram observes even a 0 (text-only distribution)"
+        );
+        assert_eq!(aud.get_sample_sum(), 0.0);
+    }
+
+    #[test]
+    fn test_multimodal_counts_text_only_zeros() {
+        // A text-only request carries zero counts; the histograms still get one
+        // sample each (at 0), so `_count` is 1 and `_sum` is 0.
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "text-only-model";
+
+        let mut collector = metrics.clone().create_response_collector(model);
+        collector.observe_multimodal_counts(0, 0, 0);
+
+        let img = metrics.images_per_request.with_label_values(&[model]);
+        assert_eq!(img.get_sample_count(), 1);
+        assert_eq!(img.get_sample_sum(), 0.0);
+    }
+
+    #[test]
     fn test_cached_decode_itl_gauge_records_for_worker() {
         // The per-worker ITL gauge handle is resolved once (worker labels are latched
         // at routing time via `set_worker_info`) and reused on every output token.
@@ -2513,6 +2663,7 @@ mod tests {
             tokenize_latency: Some(Duration::from_millis(8)),
             detokenize_total_latency: Some(Duration::from_micros(100)),
             detokenize_count: Some(2),
+            ..Default::default()
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();
@@ -2609,6 +2760,7 @@ mod tests {
             tokenize_latency: None,
             detokenize_total_latency: None,
             detokenize_count: None,
+            ..Default::default()
         };
         let metrics_comment = llm_metrics.to_annotation::<()>().unwrap().comment;
         let metrics_json = metrics_comment.as_ref().expect("metrics comment present")[0].clone();
@@ -2712,6 +2864,7 @@ mod tests {
             tokenize_latency: Some(Duration::from_millis(8)),
             detokenize_total_latency: Some(Duration::from_micros(100)),
             detokenize_count: Some(2),
+            ..Default::default()
         });
 
         assert!(annotated.event.is_none());
@@ -2787,6 +2940,7 @@ mod tests {
             tokenize_latency: None,
             detokenize_total_latency: None,
             detokenize_count: None,
+            ..Default::default()
         });
 
         let without_json = serde_json::to_value(&without_metrics).unwrap();
@@ -2835,6 +2989,7 @@ mod tests {
             tokenize_latency: Some(Duration::from_millis(8)),
             detokenize_total_latency: Some(Duration::from_micros(100)),
             detokenize_count: Some(2),
+            ..Default::default()
         };
 
         let annotation = llm_metrics.to_annotation::<()>().unwrap();
