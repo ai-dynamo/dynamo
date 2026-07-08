@@ -43,15 +43,27 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           IGNORED_JOBS: ${{ inputs.ignored_jobs }}
         run: |
+          # Fetch every page of the run's jobs — the API caps per_page at 100, so a
+          # run with >100 jobs would otherwise drop later failures. Accumulate the
+          # job objects and re-wrap as {"jobs":[...]} so the filter below is unchanged.
           JOBS_JSON=$(mktemp)
-          # --fail + --retry-all-errors: retry transient API errors (5xx / secondary
-          # rate limits) and fail loudly on a genuine non-200 instead of writing an
-          # error body that later trips up jq with "Cannot iterate over null".
-          curl -sS --fail --retry 3 --retry-all-errors --retry-delay 3 \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            >$JOBS_JSON
+          JOBS_ACC=$(mktemp)
+          page=1
+          while [ "$page" -le 20 ]; do  # 20 * 100 = 2000 jobs, a safe upper bound
+            PAGE_JSON=$(mktemp)
+            # --fail + --retry-all-errors: retry transient API errors (5xx / secondary
+            # rate limits) and fail loudly on a genuine non-200 instead of writing an
+            # error body that later trips up jq with "Cannot iterate over null".
+            curl -sS --fail --retry 3 --retry-all-errors --retry-delay 3 \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100&page=${page}" \
+              >"$PAGE_JSON"
+            jq -c '(.jobs // [])[]' "$PAGE_JSON" >>"$JOBS_ACC"
+            [ "$(jq '(.jobs // []) | length' "$PAGE_JSON")" -lt 100 ] && break
+            page=$((page + 1))
+          done
+          jq -s '{jobs: .}' "$JOBS_ACC" >"$JOBS_JSON"
 
           # Turn the newline-separated IGNORED_JOBS list into a trimmed, non-empty JSON array for jq.
           IGNORED_JSON=$(printf '%s\n' "$IGNORED_JOBS" | jq -R 'gsub("^\\s+|\\s+$";"")' | jq -s 'map(select(length > 0))')
