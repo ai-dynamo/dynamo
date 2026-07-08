@@ -9,24 +9,35 @@ subtitle: Field reference for the PlannerConfig JSON/YAML object consumed by the
 
 ## How the config is loaded
 
-The Planner process takes a single command-line flag:
+The Planner service loads `PlannerConfig` from a single required `--config` argument — a path to a `.json`, `.yaml`, or `.yml` file, or an inline JSON string. The service auto-detects which, loads it, and validates it against the `PlannerConfig` model. A value that is neither a readable file nor valid JSON fails at startup. How you supply it depends on where you run the Planner.
 
-```bash
-python -m dynamo.planner --config <value>
-```
+<Card>
+<Tabs>
+  <Tab title="Kubernetes">
+    Set the object under `spec.features.planner` in a [DynamoGraphDeploymentRequest](../../kubernetes/dgdr-reference.mdx) (DGDR). DGDR passes it through without field-level validation, mounts it as a `planner-config-*` ConfigMap, and launches the Planner with `--config` pointing at the mounted file. The Planner validates it at startup. Every field below can be set here.
 
-`--config` is **required**. `<value>` is either a path to a `.json`, `.yaml`, or `.yml` file, or an inline JSON string. The service auto-detects which, loads it, and validates it against the `PlannerConfig` model. A value that is neither a readable file nor valid JSON fails at startup.
+    ```yaml
+    spec:
+      features:
+        planner:
+          mode: disagg
+          backend: vllm
+          # optimization_target defaults to "throughput" — works with no further config
+    ```
+  </Tab>
+  <Tab title="Local">
+    Run the Planner module directly and pass `--config` yourself, as either a file path or an inline JSON string:
 
-On Kubernetes, set the object under `spec.features.planner` in a [DynamoGraphDeploymentRequest](../../kubernetes/dgdr-reference.mdx) (DGDR). DGDR passes it through without field-level validation and mounts it as a `planner-config-*` ConfigMap; the Planner validates it when it starts. Every field below can be set there.
+    ```bash
+    # From a YAML or JSON file
+    python -m dynamo.planner --config planner_config.yaml
 
-```yaml
-spec:
-  features:
-    planner:
-      mode: disagg
-      backend: vllm
-      # optimization_target defaults to "throughput" — works with no further config
-```
+    # Or inline JSON
+    python -m dynamo.planner --config '{"mode": "disagg", "backend": "vllm"}'
+    ```
+  </Tab>
+</Tabs>
+</Card>
 
 <Note>
   Several Prometheus fields default from environment variables and are excluded when the config is serialized back out. Set them either in the config object or through the environment variable noted on each field. See [Environment variables](#environment-variables).
