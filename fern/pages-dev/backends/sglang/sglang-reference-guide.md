@@ -61,6 +61,18 @@ Unlike vLLM, SGLang E/P/D needs `--dedicated-mm-encoder` on both decode and pref
 
 The current supported parser names for both flags are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/README.md#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/README.md#supported-reasoning-parsers).
 
+For reasoning models with required or named tool choice, configure both
+reasoning parsers on the worker:
+
+```bash
+python -m dynamo.sglang --model <model> \
+  --reasoning-parser <sglang-parser> \
+  --dyn-reasoning-parser <dynamo-parser>
+```
+
+The SGLang parser delays grammar enforcement until reasoning ends; the Dynamo
+parser populates `reasoning_content`. Parser names can differ between registries.
+
 ## Tokenizer Behavior
 
 By default, Dynamo handles tokenization and detokenization through its Rust-based frontend, passing `input_ids` to SGLang. This enables all frontend endpoints (`v1/chat/completions`, `v1/completions`, `v1/embeddings`).
