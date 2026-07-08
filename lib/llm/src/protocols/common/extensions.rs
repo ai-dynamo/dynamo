@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::protocols::TokenIdType;
-use crate::protocols::agents::{AgentContextHeaderValues, agent_context_header_values};
+use crate::protocols::agents::{
+    AgentContextHeaderValues, agent_context_header_values, session_affinity_header_value,
+};
 use crate::protocols::common::llm_backend::PromptLogprobs;
 use crate::protocols::common::timing::TimingInfo;
 
@@ -240,6 +242,7 @@ pub const HEADER_DP_RANK: &str = "x-dynamo-dp-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-dynamo-prefill-dp-rank";
 pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
 pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
+pub const HEADER_TENANT_ID: &str = "x-tenant-id";
 // Compatibility aliases for the original unprefixed names. Future agents may remove these after
 // the deprecation window.
 pub const HEADER_WORKER_INSTANCE_ID_ALIAS: &str = "x-worker-instance-id";
@@ -265,8 +268,27 @@ impl From<AgentContextHeaderValues> for AgentContext {
 
 pub const AGENT_CONTEXT_CONTEXT_KEY: &str = "dynamo.llm.agent_context";
 
+pub const SESSION_AFFINITY_CONTEXT_KEY: &str = "dynamo.llm.session_affinity";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionAffinityId(String);
+
+impl SessionAffinityId {
+    pub(crate) fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
     agent_context_header_values(headers).map(AgentContext::from)
+}
+
+pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffinityId> {
+    session_affinity_header_value(headers).map(SessionAffinityId::new)
 }
 
 /// Apply HTTP routing header overrides to nvext.
@@ -278,6 +300,7 @@ pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
 /// - `x-dynamo-prefill-dp-rank` -> `prefill_dp_rank`
 /// - `x-dynamo-request-priority` -> `agent_hints.priority`
 /// - `x-dynamo-request-strict-priority` -> `agent_hints.strict_priority`
+/// - `x-tenant-id` -> `cache_salt`
 ///
 /// Routing headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -317,6 +340,11 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .get(HEADER_REQUEST_STRICT_PRIORITY)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
+    let tenant_id = headers
+        .get(HEADER_TENANT_ID)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
 
     if worker_id.is_none()
         && prefill_id.is_none()
@@ -324,6 +352,7 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         && prefill_dp_rank.is_none()
         && priority.is_none()
         && strict_priority.is_none()
+        && tenant_id.is_none()
     {
         return nvext;
     }
@@ -351,6 +380,9 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
             hints.strict_priority = Some(strict_priority);
         }
     }
+    if let Some(salt) = tenant_id {
+        ext.cache_salt = Some(salt);
+    }
     Some(ext)
 }
 
@@ -360,6 +392,26 @@ pub trait NvExtProvider {
     fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
         None
     }
+}
+
+/// Return the request's non-empty cache salt using Dynamo's public precedence rules.
+///
+/// `nvext.cache_salt` is the canonical input. The top-level `cache_salt` field remains a
+/// compatibility fallback for request types that retain unsupported OpenAI fields. Empty strings
+/// are treated as absent so an empty canonical value can still fall back to a non-empty legacy
+/// value.
+pub fn request_cache_salt<R: NvExtProvider>(request: &R) -> Option<&str> {
+    request
+        .nvext()
+        .and_then(|nvext| nvext.cache_salt.as_deref())
+        .filter(|salt| !salt.is_empty())
+        .or_else(|| {
+            request
+                .unsupported_fields()
+                .and_then(|fields| fields.get("cache_salt"))
+                .and_then(|value| value.as_str())
+                .filter(|salt| !salt.is_empty())
+        })
 }
 
 pub fn routing_constraints_to_kv(
@@ -600,10 +652,56 @@ pub(crate) fn validate_completion_token_ids_single_choice(
 mod tests {
     use super::*;
     use crate::protocols::agents::{
-        HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID,
-        HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID,
-        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
+        HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID, HEADER_DYNAMO_PARENT_SESSION_ID,
+        HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID,
+        HEADER_OPENCODE_SESSION_ID,
     };
+
+    #[derive(Default)]
+    struct CacheSaltRequest {
+        nvext: Option<NvExt>,
+        unsupported_fields: HashMap<String, serde_json::Value>,
+    }
+
+    impl NvExtProvider for CacheSaltRequest {
+        fn nvext(&self) -> Option<&NvExt> {
+            self.nvext.as_ref()
+        }
+
+        fn raw_prompt(&self) -> Option<String> {
+            None
+        }
+
+        fn unsupported_fields(&self) -> Option<&HashMap<String, serde_json::Value>> {
+            Some(&self.unsupported_fields)
+        }
+    }
+
+    #[test]
+    fn request_cache_salt_uses_canonical_precedence_and_empty_fallbacks() {
+        let mut request = CacheSaltRequest::default();
+        assert_eq!(request_cache_salt(&request), None);
+
+        request
+            .unsupported_fields
+            .insert("cache_salt".to_string(), serde_json::json!("tenant-legacy"));
+        assert_eq!(request_cache_salt(&request), Some("tenant-legacy"));
+
+        request.nvext = Some(NvExt {
+            cache_salt: Some("tenant-nvext".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(request_cache_salt(&request), Some("tenant-nvext"));
+
+        request.nvext.as_mut().unwrap().cache_salt = Some(String::new());
+        assert_eq!(request_cache_salt(&request), Some("tenant-legacy"));
+
+        request
+            .unsupported_fields
+            .insert("cache_salt".to_string(), serde_json::json!(""));
+        assert_eq!(request_cache_salt(&request), None);
+    }
 
     #[test]
     fn shared_nvext_builder_default() {
@@ -785,6 +883,25 @@ mod tests {
     }
 
     #[test]
+    fn apply_header_routing_overrides_sets_cache_salt_from_tenant_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-a".parse().unwrap());
+
+        let nvext = apply_header_routing_overrides(None, &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-a"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-header".parse().unwrap());
+        let nvext = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let nvext = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+    }
+
+    #[test]
     fn apply_header_routing_overrides_supports_unprefixed_aliases() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_WORKER_INSTANCE_ID_ALIAS, "123".parse().unwrap());
@@ -854,7 +971,56 @@ mod tests {
     }
 
     #[test]
-    fn agent_context_from_headers_uses_claude_agent_id_as_child_session() {
+    fn session_affinity_requires_explicit_dynamo_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_CLAUDE_CODE_SESSION_ID,
+            "claude-session".parse().unwrap(),
+        );
+        headers.insert(HEADER_CODEX_SESSION_ID, "codex-session".parse().unwrap());
+        headers.insert(
+            HEADER_OPENCODE_SESSION_ID,
+            "opencode-session".parse().unwrap(),
+        );
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "canonical"
+        );
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn native_agent_session_does_not_enable_affinity() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_CLAUDE_CODE_SESSION_ID,
+            "claude-session".parse().unwrap(),
+        );
+        headers.insert(HEADER_CLAUDE_CODE_AGENT_ID, "claude-agent".parse().unwrap());
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "claude-agent");
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(
+            HEADER_DYNAMO_SESSION_ID,
+            "affinity-session".parse().unwrap(),
+        );
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "affinity-session");
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "affinity-session"
+        );
+    }
+
+    #[test]
+    fn agent_context_from_headers_uses_claude_agent_lineage() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -869,6 +1035,23 @@ mod tests {
             agent_context.parent_session_id.as_deref(),
             Some("claude-session")
         );
+
+        headers.insert(
+            HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
+            "claude-parent-agent".parse().unwrap(),
+        );
+        assert_eq!(
+            agent_context_from_headers(&headers)
+                .unwrap()
+                .parent_session_id
+                .as_deref(),
+            Some("claude-parent-agent")
+        );
+
+        headers.remove(HEADER_CLAUDE_CODE_AGENT_ID);
+        let root_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(root_context.session_id, "claude-session");
+        assert_eq!(root_context.parent_session_id, None);
     }
 
     #[test]

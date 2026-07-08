@@ -6,6 +6,7 @@
 use dynamo_backend_common::DynamoError;
 use serde::Deserialize;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::utility::PauseMode;
 
 const SUPPORTED_CONTROLS: [&str; 3] = ["sleep", "wake_up", "reset_prefix_cache"];
 
@@ -58,9 +59,17 @@ async fn sleep(
         }
     };
     let level = body.level.unwrap_or(1);
-    let mode = body.mode.unwrap_or_else(|| "abort".to_string());
+    let mode = match body.mode {
+        Some(mode) => match mode.parse::<PauseMode>() {
+            Ok(mode) => mode,
+            Err(error) => {
+                return Ok(error_response(format!("invalid sleep mode: {error}")));
+            }
+        },
+        None => PauseMode::Abort,
+    };
 
-    match client.sleep(level, &mode).await {
+    match client.sleep(level, mode).await {
         Ok(()) => Ok(serde_json::json!({
             "status": "ok",
             "message": format!("Engine slept (level={level})"),

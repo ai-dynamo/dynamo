@@ -4,6 +4,7 @@
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
 #   snapshot -> snapshot-agent build and test
+#   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
@@ -54,6 +55,11 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
+  # Standalone CRD apiVersion converter: classification-only so it satisfies
+  # the changed-files coverage check without triggering the operator deploy
+  # pipeline (it is excluded from the `deploy` filter below).
+  - 'deploy/utils/convert_api_version.py'
+  - 'deploy/utils/tests/**'
   - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
@@ -131,9 +137,18 @@ operator:
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 snapshot:
-  - *ci
   - 'deploy/snapshot/**'
   - 'deploy/snapshot/.*'
+  - 'components/src/dynamo/common/snapshot/**'
+  - 'deploy/operator/internal/checkpoint/**'
+  - 'tests/deploy/test_dynamocheckpoint.py'
+
+power_agent:
+  - *ci
+  - 'deploy/power-agent/**'
+  - 'deploy/helm/charts/power-agent/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 deploy:
   - *ci
@@ -142,6 +157,10 @@ deploy:
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   - 'tests/utils/managed_deployment.py'
+  # Standalone CRD apiVersion converter: not used by the deploy-test harness and
+  # has no CI test wiring, so it should not trigger the operator deploy pipeline.
+  - '!deploy/utils/convert_api_version.py'
+  - '!deploy/utils/tests/**'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -151,6 +170,9 @@ planner:
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
+  # Power-aware planner (PR #9369): per-node power agent component
+  - 'deploy/power-agent/**'
+  - 'deploy/helm/charts/power-agent/**'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'

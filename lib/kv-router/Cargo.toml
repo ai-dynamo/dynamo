@@ -26,16 +26,19 @@ standalone-selection = ["standalone-indexer"]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true, optional = true }
+dynamo-kv-hashing = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
+indexmap = { workspace = true }
 ordered-float = { workspace = true }
 derive_builder = { workspace = true }
 prometheus = { workspace = true, optional = true }
 rand = { workspace = true }
+seqlock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
 serde_yaml = "0.9.34"

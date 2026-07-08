@@ -48,6 +48,11 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
             aic_attention_dp_size=1,
             aic_nextn=None,
             aic_nextn_accept_rates=None,
+            aic_gemm_dtype=None,
+            aic_moe_dtype=None,
+            aic_fmha_dtype=None,
+            aic_kv_cache_dtype=None,
+            aic_comm_dtype=None,
         )
     )
 
@@ -63,6 +68,11 @@ def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
         "aic_attention_dp_size": 1,
         "aic_nextn": None,
         "aic_nextn_accept_rates": None,
+        "aic_gemm_dtype": None,
+        "aic_moe_dtype": None,
+        "aic_fmha_dtype": None,
+        "aic_kv_cache_dtype": None,
+        "aic_comm_dtype": None,
     }
 
 

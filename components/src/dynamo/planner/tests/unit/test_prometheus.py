@@ -23,6 +23,7 @@ from dynamo import prometheus_names
 from dynamo.planner.monitoring.traffic_metrics import (
     FrontendMetric,
     FrontendMetricContainer,
+    Metrics,
     PrometheusAPIClient,
 )
 
@@ -109,6 +110,60 @@ def test_frontend_metric_container_with_nan_value():
     test_data["value"][1] = 42.5  # type: ignore[index]
     container = FrontendMetricContainer.model_validate(test_data)
     assert container.value[1] == 42.5
+
+
+def test_metrics_normalize_nan_averages_for_idle_window():
+    metrics = Metrics(
+        ttft=math.nan,
+        itl=math.nan,
+        num_req=0,
+        isl=math.nan,
+        osl=math.nan,
+        request_duration=math.nan,
+    )
+
+    normalized = metrics.normalize_idle_nans()
+
+    assert normalized == ["ttft", "itl", "isl", "osl", "request_duration"]
+    assert metrics.is_valid()
+    assert metrics.ttft == 0
+    assert metrics.itl == 0
+    assert metrics.isl == 0
+    assert metrics.osl == 0
+    assert metrics.request_duration == 0
+
+
+def test_metrics_keep_nan_averages_invalid_with_traffic():
+    metrics = Metrics(
+        ttft=math.nan,
+        itl=math.nan,
+        num_req=1,
+        isl=math.nan,
+        osl=math.nan,
+        request_duration=math.nan,
+    )
+
+    assert metrics.normalize_idle_nans() == []
+    assert not metrics.is_valid()
+
+
+def test_metrics_keep_missing_idle_averages_invalid():
+    metrics = Metrics(
+        ttft=None,
+        itl=math.nan,
+        num_req=0,
+        isl=math.nan,
+        osl=math.nan,
+        request_duration=math.nan,
+    )
+
+    assert metrics.normalize_idle_nans() == [
+        "itl",
+        "isl",
+        "osl",
+        "request_duration",
+    ]
+    assert not metrics.is_valid()
 
 
 def test_frontend_metric_with_partial_data():
@@ -474,17 +529,20 @@ class TestPrometheusAPIClientRouterSource:
         expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}"
         assert expected_metric in call_args
 
-    def test_get_avg_kv_hit_rate_returns_none_for_frontend_source(self):
-        """Frontend source doesn't publish an aggregate kv_hit_rate, so the
-        client should short-circuit to None rather than issue a PromQL query."""
+    def test_get_avg_kv_hit_rate_frontend_source_queries_router_histogram(self):
+        """Frontend source can expose router component metrics, so kv_hit_rate
+        should still query dynamo_component_router_kv_hit_rate."""
         client = PrometheusAPIClient(
             "http://localhost:9090", "test-fe-namespace", metrics_source="frontend"
         )
         client.prom = MagicMock()
-        client.prom.custom_query.return_value = [{"value": [0, "42.0"]}]
+        client.prom.custom_query.return_value = [{"value": [0, "0.42"]}]
         result = client.get_avg_kv_hit_rate("60s", "mymodel")
-        assert result is None
-        client.prom.custom_query.assert_not_called()
+        assert result == 0.42
+
+        call_args = str(client.prom.custom_query.call_args)
+        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}"
+        assert expected_metric in call_args
 
     def test_get_avg_request_count_uses_router_requests_total(self, router_client):
         """get_avg_request_count with router source queries dynamo_component_router_requests_total."""

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import types
+
 import pytest
 
 from dynamo._internal.aic import (
@@ -8,7 +10,9 @@ from dynamo._internal.aic import (
     _NEXTN_ACCEPT_RATES_LEN,
     DEFAULT_FREE_GPU_MEMORY_FRACTION,
     DEFAULT_MEM_FRACTION_STATIC,
+    _normalize_aic_quant_mode,
     _pad_nextn_accept_rates,
+    _resolve_quant_mode,
     estimate_num_gpu_blocks,
     resolve_backend_version,
 )
@@ -207,3 +211,131 @@ def test_pad_nextn_accept_rates_pads_and_truncates():
 def test_pad_nextn_accept_rates_rejects_invalid(bad):
     with pytest.raises(ValueError):
         _pad_nextn_accept_rates(bad)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("auto", None),
+        ("None", None),
+        ("NULL", None),
+        ("  AUTO  ", None),
+        # `int4` is the user-facing alias; AIC's quant-mode name is `int4_wo`.
+        ("int4", "int4_wo"),
+        # Already-canonical names pass through (only stripped).
+        ("fp8", "fp8"),
+        ("fp8_block", "fp8_block"),
+        ("w4a16_mxfp4", "w4a16_mxfp4"),
+        ("  fp8  ", "fp8"),
+    ],
+)
+def test_normalize_aic_quant_mode(value, expected):
+    # Single source of truth for the AIC quant-mode vocabulary: shared by the
+    # KV-block estimator (`estimate_num_gpu_blocks`), the replay arg resolver,
+    # and the Rust latency-engine build path.
+    assert _normalize_aic_quant_mode(value) == expected
+
+
+def test_estimate_num_gpu_blocks_forwards_normalized_quant_modes(monkeypatch):
+    # The dynamo dtype overrides must reach AIC normalized: `int4` -> `int4_wo`
+    # and `auto` -> None (AIC's "use the model default" sentinel).
+    calls = _patch_memory(monkeypatch)
+
+    estimate_num_gpu_blocks(
+        backend_name="vllm",
+        system="h200_sxm",
+        model_path="some/model",
+        tp_size=1,
+        block_size=10,
+        max_num_batched_tokens=128,
+        gemm_dtype="int4",
+        moe_dtype="w4a16_mxfp4",
+        fmha_dtype="auto",
+        kv_cache_dtype="fp8",
+        comm_dtype="fp8",
+    )
+
+    kw = calls[0]
+    assert kw["gemm_quant_mode"] == "int4_wo"
+    assert kw["moe_quant_mode"] == "w4a16_mxfp4"
+    assert kw["fmha_quant_mode"] is None
+    assert kw["kvcache_quant_mode"] == "fp8"
+    assert kw["comm_quant_mode"] == "fp8"
+
+
+def test_resolve_quant_mode_per_field():
+    common = pytest.importorskip("aiconfigurator.sdk.common")
+
+    assert _resolve_quant_mode("gemm", "int4") == common.GEMMQuantMode.int4_wo
+    assert _resolve_quant_mode("gemm", "fp8") == common.GEMMQuantMode.fp8
+    assert _resolve_quant_mode("moe", "w4a16_mxfp4") == common.MoEQuantMode.w4a16_mxfp4
+    assert _resolve_quant_mode("fmha", "bfloat16") == common.FMHAQuantMode.bfloat16
+    assert _resolve_quant_mode("kvcache", "fp8") == common.KVCacheQuantMode.fp8
+    assert _resolve_quant_mode("comm", "fp8") == common.CommQuantMode.fp8
+    # "auto"/None mean "use the model default".
+    assert _resolve_quant_mode("gemm", "auto") is None
+    assert _resolve_quant_mode("kvcache", None) is None
+
+
+def test_resolve_quant_mode_rejects_unsupported_per_field():
+    pytest.importorskip("aiconfigurator.sdk.common")
+
+    # `int4` -> `int4_wo` is valid for GEMM/MoE but not for KV cache or FMHA,
+    # which have narrower vocabularies. The error must name the field and the
+    # allowed values rather than surfacing a bare KeyError from aiconfigurator.
+    with pytest.raises(ValueError, match="kvcache quant mode"):
+        _resolve_quant_mode("kvcache", "int4")
+    with pytest.raises(ValueError, match="fmha quant mode"):
+        _resolve_quant_mode("fmha", "int4")
+    with pytest.raises(ValueError, match="comm quant mode"):
+        _resolve_quant_mode("comm", "int4")
+    with pytest.raises(ValueError, match="supported values"):
+        _resolve_quant_mode("gemm", "not-a-dtype")
+
+
+def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
+    common = pytest.importorskip("aiconfigurator.sdk.common")
+    import dynamo._internal.aic as aic_mod
+
+    captured: dict = {}
+
+    class FakeModelConfig:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_model = types.SimpleNamespace(
+        model_name="m", context_ops=[], generation_ops=[], _nextn=0
+    )
+    fake = {
+        "config": types.SimpleNamespace(ModelConfig=FakeModelConfig),
+        "get_database": lambda system, backend, version: object(),
+        "get_supported_databases": lambda: {},
+        "get_model": lambda model_path, model_config, backend_name: fake_model,
+        "get_backend": lambda backend_name: object(),
+        "InferenceSession": lambda model, database, backend: object(),
+    }
+    monkeypatch.setattr(aic_mod, "_load_aiconfigurator", lambda: fake)
+    # Skip the optional compiled-engine build (it would import aiconfigurator's
+    # rust engine step); we only care about the ModelConfig wiring here.
+    monkeypatch.setenv("DYNAMO_AIC_DISABLE_COMPILED_ENGINE", "1")
+
+    aic_mod.AicSession(
+        backend_name="vllm",
+        system="h200_sxm",
+        model_path="m",
+        tp_size=1,
+        gemm_dtype="int4",
+        moe_dtype="w4a16_mxfp4",
+        fmha_dtype="fp8",
+        kv_cache_dtype="auto",  # -> omitted, ModelConfig keeps its default
+        comm_dtype="fp8",
+    )
+
+    assert captured["gemm_quant_mode"] == common.GEMMQuantMode.int4_wo
+    assert captured["moe_quant_mode"] == common.MoEQuantMode.w4a16_mxfp4
+    assert captured["fmha_quant_mode"] == common.FMHAQuantMode.fp8
+    assert "kvcache_quant_mode" not in captured
+    assert captured["comm_quant_mode"] == common.CommQuantMode.fp8

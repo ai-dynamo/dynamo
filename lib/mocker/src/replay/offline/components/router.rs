@@ -13,7 +13,9 @@ use dynamo_kv_router::protocols::{
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::scheduling::{PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot};
+use dynamo_kv_router::scheduling::{
+    OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
+};
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, SchedulingRequest,
@@ -132,6 +134,7 @@ struct PendingRequest {
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
+    session_id: Option<String>,
 }
 
 impl PendingRequest {
@@ -157,20 +160,24 @@ impl PendingRequest {
             .map(|(worker, overlap)| (*worker, *overlap as usize * block_size))
             .collect();
         SchedulingRequest {
-            maybe_request_id: Some(self.request_id()),
+            mode: ScheduleMode::Tracked {
+                request_id: self.request_id(),
+            },
             token_seq: self.token_seq.clone(),
             isl_tokens: self.isl_tokens,
-            tier_overlap_blocks: TierOverlapBlocks::default(),
-            effective_overlap_blocks,
-            effective_cached_tokens,
+            overlap: OverlapSignals {
+                tier_overlap_blocks: TierOverlapBlocks::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            },
             worker_loads,
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
-            update_states: true,
             lora_name: None,
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
             policy_class: self.policy_class.clone(),
+            session_id: self.session_id.clone(),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -229,13 +236,24 @@ impl OfflineReplayRouter {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn on_request_arrival(
         &mut self,
         request: &DirectRequest,
         replay_hashes: Option<ReplayRequestHashes>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let pending = self.build_pending_request(request, replay_hashes)?;
+        self.on_request_arrival_for_session(request, replay_hashes, None, now_ms)
+    }
+
+    pub(crate) fn on_request_arrival_for_session(
+        &mut self,
+        request: &DirectRequest,
+        replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
+        let pending = self.build_pending_request(request, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
         let (class_index, snapshot) = match self
             .profile
@@ -324,6 +342,13 @@ impl OfflineReplayRouter {
         })
     }
 
+    /// Cancel a request that has not yet been assigned to a worker.
+    pub(crate) fn cancel_pending(&mut self, uuid: Uuid) -> bool {
+        let before = self.pending.pending_count();
+        self.pending.retain(|request| request.uuid != uuid);
+        self.pending.pending_count() != before
+    }
+
     /// Drain queued requests that can now be admitted (e.g. after a new worker
     /// becomes available).
     pub(crate) fn try_drain_pending(&mut self, now_ms: f64) -> Result<RouterEffects> {
@@ -367,6 +392,17 @@ impl OfflineReplayRouter {
     pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
         self.workers_with_configs.remove(&wid);
+        Ok(())
+    }
+
+    /// Drop the retained topology/cache state after the engine confirms that
+    /// the draining worker no longer owns any request lifecycle state.
+    pub(crate) fn finalize_worker_removal(&mut self, worker_id: usize) -> Result<()> {
+        let wid = worker_id as WorkerId;
+        self.slots
+            .unregister_worker(wid)
+            .map_err(anyhow::Error::from)?;
+        self.indexer.tree.remove_worker(wid);
         Ok(())
     }
 
@@ -441,6 +477,7 @@ impl OfflineReplayRouter {
         &self,
         request: &DirectRequest,
         replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
     ) -> Result<PendingRequest> {
         let uuid = request
             .uuid
@@ -492,6 +529,7 @@ impl OfflineReplayRouter {
             priority_jump,
             strict_priority,
             policy_class: request.policy_class.clone(),
+            session_id,
         })
     }
 
@@ -652,6 +690,7 @@ mod tests {
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
     };
+    use rustc_hash::FxHashMap;
     use uuid::Uuid;
 
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
@@ -727,6 +766,7 @@ mod tests {
         DirectRequest {
             tokens: vec![token; input_tokens],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
@@ -759,6 +799,17 @@ mod tests {
             },
             storage_tier,
         )
+    }
+
+    #[test]
+    fn session_identity_reaches_scheduling_request() {
+        let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let pending = router
+            .build_pending_request(&request(1, 7), None, Some("session-a".to_string()))
+            .unwrap();
+        let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
+
+        assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
     }
 
     #[test]
@@ -829,6 +880,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Uuid::from_u128(2)]
         );
+    }
+
+    #[test]
+    fn canceled_pending_request_is_not_admitted_after_capacity_frees() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+
+        assert_eq!(
+            router
+                .on_request_arrival(&request(1, 7), None, 0.0)
+                .unwrap()
+                .admissions
+                .len(),
+            1
+        );
+        assert!(
+            router
+                .on_request_arrival(&request(2, 8), None, 0.0)
+                .unwrap()
+                .admissions
+                .is_empty()
+        );
+        assert!(router.cancel_pending(Uuid::from_u128(2)));
+        assert!(!router.cancel_pending(Uuid::from_u128(2)));
+        assert_eq!(router.pending_count(), 0);
+
+        let effects = router
+            .on_request_completed(Uuid::from_u128(1), 1.0)
+            .unwrap();
+        assert!(effects.admissions.is_empty());
     }
 
     #[test]
@@ -1183,6 +1265,31 @@ policy_classes:
                 isl_blocks: 1,
             }]
         );
+    }
+
+    #[test]
+    fn finalized_worker_removal_drops_retained_topology_and_cache_state() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+        let target = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event(
+                0,
+                1,
+                hashes.local_block_hashes[0].0,
+                StorageTier::Device,
+            )])
+            .unwrap();
+        assert_eq!(router.debug_snapshot(0.0).indexer.total_cached_blocks, 1);
+
+        router.remove_worker(0).unwrap();
+        router.finalize_worker_removal(0).unwrap();
+        let snapshot = router.debug_snapshot(0.0);
+        assert!(snapshot.active_blocks_by_worker.is_empty());
+        assert!(snapshot.indexer.cached_blocks_by_worker.is_empty());
+        router.add_worker(0).unwrap();
     }
 
     #[test]

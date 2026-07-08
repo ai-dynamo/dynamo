@@ -22,9 +22,6 @@ spec:
     spec:
       restartPolicy: Never
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -57,13 +54,6 @@ spec:
           value: "1"
         - name: COLUMNS
           value: "200"
-        # HOME defaults to "/" for uid 1000 with no /etc/passwd entry; pip --user
-        # then tries to write /.local (read-only). Point HOME at /tmp (1777 sticky)
-        # so ~/.local resolves under a writable path.
-        - name: HOME
-          value: /tmp
-        - name: PATH
-          value: /tmp/.local/bin:/usr/local/bin:/usr/bin:/bin
         envFrom:
         - secretRef:
             name: hf-token-secret
@@ -72,10 +62,10 @@ spec:
         - -c
         - |
           set -eu
-          # No apt-get: cluster runs us as non-root, and we don't actually need
-          # curl/jq — Python stdlib handles the readiness probe. Install aiperf
-          # into HOME=/tmp/.local via --user so it works under runAsNonRoot.
-          pip install --user -q aiperf==0.6.0 transformers==4.57.3 tokenizers==0.22.2
+          # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
+          # GB200 benchmark pods need build tools to compile it from source.
+          apt-get update && apt-get install -y --no-install-recommends build-essential && apt-get clean
+          pip install -q aiperf==0.10.0 transformers==4.57.3 tokenizers==0.22.2
 
           echo "Waiting for model at http://$ENDPOINT/v1/models..."
           python3 - <<'PY'

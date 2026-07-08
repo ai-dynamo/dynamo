@@ -10,19 +10,22 @@ mod catalog;
 mod core;
 mod error;
 mod input;
-mod scoring;
 mod server;
+mod service;
 mod types;
 
 #[cfg(test)]
 mod tests;
 
+pub use crate::services::common::replica_sync::ReplicaPeerError;
 pub use core::{SelectionCore, SelectionServiceConfig};
 pub use error::SelectionError;
 pub use server::{AppState, run_server};
+pub use service::{SelectionService, SelectionServiceBuilder};
 pub use types::{
     ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest, OverlapScoresResponse,
     PotentialLoadsRequest, ReadyResponse, ReservationRequest, ReservationResponse,
     SelectAndReserveRequest, SelectRequest, SelectResponse, SelectionKey, SelectionWorkerConfig,
-    WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore, WorkerPatchRequest, WorkerRequest,
+    SharedCacheOverlapScore, WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore,
+    WorkerPatchRequest, WorkerRequest,
 };

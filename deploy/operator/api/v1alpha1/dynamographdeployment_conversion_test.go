@@ -38,6 +38,25 @@ import (
 
 const backendFrameworkSGLang = "sglang"
 
+func TestIsDynamoGraphDeploymentConversionAnnotation(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{key: annDGDSpec, want: true},
+		{key: annDGDStatus, want: true},
+		{key: "nvidia.com/dgd-future", want: true},
+		{key: "nvidia.com/generated-dgd-spec", want: false},
+		{key: "example.com/dgd-spec", want: false},
+	}
+
+	for _, test := range tests {
+		if got := IsDynamoGraphDeploymentConversionAnnotation(test.key); got != test.want {
+			t.Errorf("IsDynamoGraphDeploymentConversionAnnotation(%q) = %t, want %t", test.key, got, test.want)
+		}
+	}
+}
+
 // roundTripFromV1beta1 converts a v1beta1 DGD to v1alpha1 and back, returning
 // the final v1beta1 object. For any valid v1beta1 input V the returned V'
 // must equal V (syntactic round-trip invariant).
@@ -111,6 +130,7 @@ func TestDGD_RoundTrip_Empty(t *testing.T) {
 
 func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	replicas := int32(2)
+	minAvailable := int32(1)
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "min", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -119,7 +139,9 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 				{
 					ComponentName: "worker",
 					ComponentType: v1beta1.ComponentTypeWorker,
-					Replicas:      &replicas},
+					Replicas:      &replicas,
+					MinAvailable:  &minAvailable,
+				},
 			},
 		},
 	}

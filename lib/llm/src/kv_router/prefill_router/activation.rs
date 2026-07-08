@@ -29,7 +29,7 @@ impl PrefillRouter {
     pub fn disabled(
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
-        enforce_disagg: bool,
+        session_affinity_ttl_secs: Option<u64>,
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
@@ -37,7 +37,7 @@ impl PrefillRouter {
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
-            enforce_disagg,
+            session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -54,7 +54,7 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        enforce_disagg: bool,
+        session_affinity_ttl_secs: Option<u64>,
         model_name: String,
         namespace: String,
         is_eagle: bool,
@@ -69,7 +69,7 @@ impl PrefillRouter {
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
-            enforce_disagg,
+            session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             prefill_load_estimator,
             model_name,
             namespace,
@@ -158,7 +158,11 @@ impl PrefillRouter {
             .await?;
 
             // Wrap it in KvPushRouter
-            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new(push_router, kv_chooser)))
+            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new(
+                push_router,
+                kv_chooser,
+                self.session_affinity_ttl,
+            )?))
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;
@@ -174,7 +178,13 @@ impl PrefillRouter {
             )
             .await?;
 
-            InnerPrefillRouter::SimpleRouter(Arc::new(push_router))
+            InnerPrefillRouter::SimpleRouter(Arc::new(
+                crate::session_affinity::SessionAffinityPushRouter::new(
+                    push_router,
+                    self.session_affinity_ttl,
+                    self.router_mode.is_direct_routing(),
+                )?,
+            ))
         };
 
         // Set the router (ignore error if already set).
@@ -225,7 +235,7 @@ impl PrefillRouter {
     // -- Prefill death handling --
 
     /// Deactivate the prefill router. Called when all prefill workers are removed.
-    /// After deactivation, requests fall back to aggregated mode (or fail if enforce_disagg).
+    /// After deactivation, requests fall back to aggregated mode.
     /// The inner router is preserved so that when workers rejoin (same endpoint/discovery),
     /// the Client's discovery subscription picks them up automatically.
     pub fn deactivate(&self) {
@@ -245,7 +255,6 @@ impl PrefillRouter {
         tracing::info!(
             model_name = %self.model_name,
             namespace = %self.namespace,
-            enforce_disagg = self.enforce_disagg,
             "Prefill router deactivated (all prefill workers removed)"
         );
     }
@@ -253,9 +262,8 @@ impl PrefillRouter {
     /// Reactivate a deactivated router. Called when prefill workers rejoin.
     /// The inner router's Client re-discovers workers via its discovery subscription.
     ///
-    /// Note: there is a brief race between entering `Active` (making
-    /// `can_serve_requests()` return true) and the Client actually rediscovering
-    /// workers. Requests arriving in this window may fail at prefill resolution.
+    /// Note: there is a brief race between entering `Active` and the Client
+    /// actually rediscovering workers. Requests arriving in this window may fail at prefill resolution.
     /// This is bounded by discovery propagation time (typically sub-second).
     ///
     /// Also note: reactivation reuses the existing inner router built from the
@@ -317,13 +325,6 @@ impl PrefillRouter {
 
     pub(super) fn lifecycle_state(&self) -> PrefillLifecycleState {
         PrefillLifecycleState::from_atomic(self.lifecycle.load(Ordering::Acquire))
-    }
-
-    /// Whether this router can serve requests in its current state.
-    /// Strict disaggregated routing requires active prefill workers; otherwise
-    /// pending and unavailable routers can use aggregated fallback.
-    pub fn can_serve_requests(&self) -> bool {
-        !self.enforce_disagg || self.lifecycle_state() == PrefillLifecycleState::Active
     }
 
     /// Mark this router as active for testing purposes.

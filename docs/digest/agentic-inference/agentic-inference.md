@@ -51,7 +51,7 @@ Agent harnesses are increasingly adopting `v1/responses` and `v1/messages` over 
 </tr>
 </table>
 
-We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues) or use the [tool-call-parser-generator](../../../.agents/skills/tool-parser-generator/SKILL.md) skill to generate it with your harness of choice.
+We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues) or use the tool-call-parser-generator skill in [ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates) to generate it with your harness of choice.
 
 ### Agent Hints: The Harness-Orchestrator Interface
 
@@ -170,7 +170,7 @@ Making blocks globally available solves the sharing problem, but does not solve 
 
 The general design pattern is to attach zero or more retention directives to a request or token range. Blocks without directives follow the default LRU path with zero overhead. The evictor becomes a two-structure system: an LRU free list for unprioritized blocks (O(1), unchanged) and a priority queue for annotated blocks. Dynamo's public agent surface exposes the priority part today through `nvext.agent_hints.priority`; TTL or per-token-range retention directives are future API work.
 
-Anthropic's prompt caching lets you mark prefixes as cacheable on their infrastructure. Dynamo does not currently expose the same semantics as a self-hosted `nvext.cache_control` TTL pinning API. The supported production path is priority-driven: `nvext.agent_hints.priority` can influence router queueing and, when the backend enables it, engine scheduling and priority-aware cache eviction. SGLang can additionally tag ordinary evictable radix KV by session.
+Anthropic's prompt caching lets you mark prefixes as cacheable on their infrastructure. Dynamo does not currently expose the same semantics as a self-hosted `nvext.cache_control` TTL pinning API. The supported production path is priority-driven: `nvext.agent_hints.priority` can influence router queueing and, when the backend enables it, engine scheduling and priority-aware cache eviction.
 
 The next step is connecting richer retention directives with the distributed cache. Today, priority and session metadata are local serving signals, not a cluster-wide per-block TTL lease. Extending retention semantics across HiCache/KVBM's shared storage tier would let the harness mark a block once and have its priority, lifetime, and placement intent travel with it through the write-through path. Combined with the prefetch hooks described above, this gives the harness end-to-end lifecycle control across the full memory hierarchy.
 

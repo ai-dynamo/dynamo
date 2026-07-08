@@ -41,6 +41,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -85,6 +86,7 @@ type DynamoGraphDeploymentReconciler struct {
 	client.Client
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
+	RestConfig            *rest.Config
 	Recorder              record.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
@@ -101,7 +103,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
-// +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=grove.io,resources=clustertopologybindings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
@@ -279,18 +281,17 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	reconcileResult, err := r.reconcileResources(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "failed to reconcile the resources")
+		reason = "failed_to_reconcile_the_resources"
+		return ctrl.Result{}, err
+	}
 
 	state = reconcileResult.State
 	reason = reconcileResult.Reason
 	message = reconcileResult.Message
 	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
 	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
-
-	if err != nil {
-		logger.Error(err, "failed to reconcile the resources")
-		reason = "failed_to_reconcile_the_resources"
-		return ctrl.Result{}, err
-	}
 
 	// Override state based on rolling update status if a rolling update is in progress
 	if dynamoDeployment.Status.RollingUpdate != nil {
@@ -455,15 +456,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 }
 
 func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
-	// Unset or not "false": Grove if available; else component mode
-	// "false": component mode (multinode -> LWS; single-node -> standard)
-	enableGrove := true
-	if dgd.Annotations != nil && strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) == consts.KubeLabelValueFalse {
-		enableGrove = false
-	}
-
-	return enableGrove && r.RuntimeConfig.GroveEnabled
+	return r.RuntimeConfig.GroveEnabled && (dgd.Annotations == nil ||
+		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
 func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
@@ -512,10 +506,16 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 		// single-node GMS components stall in the in-progress list because the
 		// corresponding PodClique never exists.
 		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+		var readinessErr error
 		if usesPCSG {
-			isReady, reason, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, readinessErr = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		} else {
-			isReady, reason, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, readinessErr = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+		}
+		if readinessErr != nil {
+			logger.Error(readinessErr, "failed to check component readiness", "componentName", componentName, "resourceName", resourceName)
+			updatedInProgress = append(updatedInProgress, componentName)
+			continue
 		}
 		if !isReady {
 			logger.V(1).Info("component not ready", "componentName", componentName, "resourceName", resourceName, "reason", reason)
@@ -667,11 +667,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 		logger.Error(err, "failed to sync the Grove GangSet")
 		return nil, fmt.Errorf("failed to sync the Grove GangSet: %w", err)
 	}
+	allComponentsReady, reason, componentStatuses, err := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Grove component readiness: %w", err)
+	}
 	syncedGrovePodCliqueSetAsResource, err := commoncontroller.NewResourceWithComponentStatuses(
 		syncedGrovePodCliqueSet,
 		func() (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
-			allComponentsReady, reason, componentStatuses := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
 			if !allComponentsReady {
 				return false, reason, componentStatuses
 			}
@@ -2583,8 +2586,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	// Only attempt DestinationRule reconciliation when the Istio CRDs are
 	// present on the cluster; otherwise the API call would fail on every
 	// reconcile for Istio-less clusters.
-	if r.RuntimeConfig.IstioAvailable {
-		meshEnabled := r.Config.ServiceMesh.IsEnabled()
+	// IsEnabled controls service mesh creation/update. When disabled, still
+	// best-effort clean up previously owned DestinationRules if the API exists.
+	meshEnabled := r.Config.ServiceMesh.IsEnabled()
+	istioAvailable := r.RuntimeConfig.IstioEnabled
+	if !meshEnabled && !istioAvailable {
+		istioAvailable = commoncontroller.DetectIstioDestinationRuleAvailabilityFromConfig(ctx, r.RestConfig)
+	}
+	if istioAvailable {
 		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.Config.ServiceMesh)
 		_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*networkingv1beta1.DestinationRule, bool, error) {
 			return destinationRule, !meshEnabled, nil
@@ -2595,6 +2604,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		}
 		if meshEnabled {
 			logger.Info("Synced EPP DestinationRule", "name", eppServiceName)
+		} else {
+			logger.Info("Cleaned up EPP DestinationRule", "name", eppServiceName)
 		}
 	} else if r.Config.ServiceMesh.IsEnabled() {
 		logger.Error(nil, "Service mesh is enabled but networking.istio.io CRDs are not installed; skipping DestinationRule reconciliation")
@@ -2662,7 +2673,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
-	if r.RuntimeConfig.IstioAvailable {
+	if r.RuntimeConfig.IstioEnabled {
 		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },

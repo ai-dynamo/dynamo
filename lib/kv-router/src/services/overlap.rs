@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::indexer::{LowerTierMatchDetails, TieredMatchDetails};
 use crate::protocols::{StorageTier, WorkerId, WorkerWithDpRank};
+use crate::scheduling::SelectedWorkerTierSnapshot;
 
 /// Per-instance match summary aligned with Mooncake RFC #1403.
 ///
@@ -20,6 +21,28 @@ pub struct MooncakeOverlapSummary {
     pub dp: HashMap<String, u32>,
     pub cpu: u32,
     pub disk: u32,
+}
+
+impl MooncakeOverlapSummary {
+    pub(crate) fn from_selected_worker_tiers(
+        snapshot: &SelectedWorkerTierSnapshot,
+        block_size: u32,
+    ) -> Self {
+        let gpu = snapshot.gpu_blocks.saturating_mul(block_size);
+        let cpu = snapshot.host_pinned_blocks.saturating_mul(block_size);
+        let disk = snapshot.disk_blocks.saturating_mul(block_size);
+        Self {
+            longest_matched: gpu.max(cpu).max(disk),
+            gpu,
+            dp: snapshot
+                .dp_device_blocks
+                .iter()
+                .map(|(rank, blocks)| (rank.to_string(), blocks.saturating_mul(block_size)))
+                .collect(),
+            cpu,
+            disk,
+        }
+    }
 }
 
 pub(crate) fn build_mooncake_overlap_summaries(
@@ -124,5 +147,26 @@ mod tests {
             summaries.get(&9).unwrap().dp,
             HashMap::from([("3".into(), 0)])
         );
+    }
+
+    #[test]
+    fn converts_selected_snapshot_to_token_counts() {
+        let snapshot = SelectedWorkerTierSnapshot {
+            dp_device_blocks: vec![(2, 2), (3, 0)],
+            gpu_blocks: 2,
+            host_pinned_blocks: 3,
+            disk_blocks: u32::MAX,
+        };
+
+        let summary = MooncakeOverlapSummary::from_selected_worker_tiers(&snapshot, 16);
+
+        assert_eq!(
+            summary.dp,
+            HashMap::from([("2".into(), 32), ("3".into(), 0)])
+        );
+        assert_eq!(summary.gpu, 32);
+        assert_eq!(summary.cpu, 48);
+        assert_eq!(summary.disk, u32::MAX);
+        assert_eq!(summary.longest_matched, u32::MAX);
     }
 }

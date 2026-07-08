@@ -513,7 +513,7 @@ class WorkerFactory:
         # Set up forward pass metrics relay (child ZMQ -> event plane).
         # In checkpoint mode the engine was created before the runtime, so
         # ForwardPassMetrics.worker_id will be empty (relay still works).
-        fpm_relays = self.setup_fpm_relay(generate_endpoint, vllm_config)
+        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
         if fpm_relays:
             handler.fpm_relays = fpm_relays
 
@@ -755,7 +755,7 @@ class WorkerFactory:
         # Set up forward pass metrics relay (child ZMQ -> event plane).
         # In checkpoint mode the engine was created before the runtime, so
         # ForwardPassMetrics.worker_id will be empty (relay still works).
-        fpm_relays = self.setup_fpm_relay(generate_endpoint, vllm_config)
+        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
         if fpm_relays:
             handler.fpm_relays = fpm_relays
 

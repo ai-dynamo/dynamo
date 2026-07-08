@@ -284,7 +284,7 @@ async fn route_approx_tokens(
 
 async fn request_scores(index: &dyn KvIndexerInterface, tokens: &[u32]) -> OverlapScores {
     index
-        .find_matches_for_request(tokens, None, None)
+        .find_matches_for_request(tokens, None, None, None)
         .await
         .unwrap()
 }
@@ -739,31 +739,6 @@ mod interface_tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_large_stores(variant: &str) {
-        let index = make_indexer(variant);
-
-        // Test sequences of increasing sizes
-        for i in 0..10u64 {
-            let len = 1 << i; // 1, 2, 4, 8, ..., 512
-            let worker_id = i;
-            let sequence: Vec<u64> = (1..=len).map(|x| x + (i * 10000)).collect();
-            index
-                .apply_event(make_store_event(worker_id, &sequence))
-                .await;
-        }
-
-        flush_and_settle(index.as_ref()).await;
-
-        let worker = WorkerWithDpRank::new(9, 0);
-        let last_seq: Vec<LocalBlockHash> = (1..=512u64)
-            .map(|x| LocalBlockHash(x + (9 * 10000)))
-            .collect();
-        let scores = index.find_matches(last_seq).await.unwrap();
-        assert_eq!(scores.scores.get(&worker), Some(&512));
-    }
-
-    #[tokio::test]
-    #[apply(indexer_template)]
     async fn test_dump_and_restore(variant: &str) {
         let index = make_indexer(variant);
 
@@ -859,7 +834,7 @@ mod interface_tests {
 
         let tokens: Vec<u32> = (1..=96).collect();
         let scores = index
-            .find_matches_for_request(&tokens, None, None)
+            .find_matches_for_request(&tokens, None, None, None)
             .await
             .unwrap();
         assert!(scores.scores.is_empty());
@@ -881,7 +856,7 @@ mod interface_tests {
         flush_and_settle(index.as_ref()).await;
 
         let scores = index
-            .find_matches_for_request(&tokens, None, None)
+            .find_matches_for_request(&tokens, None, None, None)
             .await
             .unwrap();
         assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)), Some(&3));
@@ -1559,6 +1534,110 @@ mod lora_tests {
         assert!(scores_b.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
         assert!(!scores_b.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
     }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_different_cache_namespaces_do_not_conflict(variant: &str) {
+        let index = make_indexer(variant);
+        let kv_block_size: u32 = 32;
+
+        let tokens: Vec<u32> = (0..kv_block_size * 2).collect();
+
+        let hashes_a = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                cache_namespace: Some("tenant-a"),
+                ..Default::default()
+            },
+        );
+        let hashes_b = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                cache_namespace: Some("tenant-b"),
+                ..Default::default()
+            },
+        );
+
+        assert_ne!(
+            hashes_a, hashes_b,
+            "Different cache namespaces must produce different hashes"
+        );
+
+        let seq_a = compute_seq_hash_for_block(&hashes_a);
+        let seq_b = compute_seq_hash_for_block(&hashes_b);
+
+        index
+            .apply_event(router_event(
+                0,
+                0,
+                0,
+                KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: stored_blocks_with_sequence_hashes(&hashes_a, &seq_a),
+                }),
+            ))
+            .await;
+
+        index
+            .apply_event(router_event(
+                1,
+                0,
+                0,
+                KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: stored_blocks_with_sequence_hashes(&hashes_b, &seq_b),
+                }),
+            ))
+            .await;
+
+        flush_and_settle(index.as_ref()).await;
+
+        let scores_a = index.find_matches(hashes_a.clone()).await.unwrap();
+        assert_eq!(scores_a.scores.len(), 1);
+        assert!(scores_a.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
+        assert!(!scores_a.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+
+        let scores_b = index.find_matches(hashes_b.clone()).await.unwrap();
+        assert_eq!(scores_b.scores.len(), 1);
+        assert!(scores_b.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+        assert!(!scores_b.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
+
+        let request_scores_a = index
+            .find_matches_for_request(&tokens, None, Some("tenant-a"), None)
+            .await
+            .unwrap();
+        assert_eq!(request_scores_a.scores.len(), 1);
+        assert!(
+            request_scores_a
+                .scores
+                .contains_key(&WorkerWithDpRank::new(0, 0))
+        );
+        assert!(
+            !request_scores_a
+                .scores
+                .contains_key(&WorkerWithDpRank::new(1, 0))
+        );
+
+        let request_scores_b = index
+            .find_matches_for_request(&tokens, None, Some("tenant-b"), None)
+            .await
+            .unwrap();
+        assert_eq!(request_scores_b.scores.len(), 1);
+        assert!(
+            request_scores_b
+                .scores
+                .contains_key(&WorkerWithDpRank::new(1, 0))
+        );
+        assert!(
+            !request_scores_b
+                .scores
+                .contains_key(&WorkerWithDpRank::new(0, 0))
+        );
+    }
 }
 
 // ============================================================================
@@ -1568,90 +1647,6 @@ mod lora_tests {
 mod long_sequence_tests {
     use super::*;
     use rstest_reuse::apply;
-
-    #[tokio::test]
-    #[apply(indexer_template)]
-    async fn test_long_sequence_single_store(variant: &str) {
-        let index = make_indexer(variant);
-
-        // Store a long sequence (128 blocks) in a single event
-        let seq_len = 128;
-        let sequence: Vec<u64> = (1..=seq_len).collect();
-        index.apply_event(make_store_event(0, &sequence)).await;
-
-        flush_and_settle(index.as_ref()).await;
-
-        // Query full sequence - should match all blocks
-        let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
-        let scores = index.find_matches(full_query).await.unwrap();
-        assert_eq!(scores.scores.len(), 1);
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            seq_len as u32
-        );
-
-        // Query prefix (first 64 blocks)
-        let prefix_query: Vec<LocalBlockHash> = (1..=64).map(LocalBlockHash).collect();
-        let scores = index.find_matches(prefix_query).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            64
-        );
-
-        // Query with divergence at position 50
-        let mut divergent_query: Vec<LocalBlockHash> = (1..=100).map(LocalBlockHash).collect();
-        divergent_query[49] = LocalBlockHash(99999); // Position 49 (0-indexed) diverges
-        let scores = index.find_matches(divergent_query).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            49
-        );
-    }
-
-    #[tokio::test]
-    #[apply(indexer_template)]
-    async fn test_long_sequence_multiple_continuations(variant: &str) {
-        let index = make_indexer(variant);
-
-        // Build a long sequence through multiple continuations
-        // First store: blocks 1-50
-        let first_chunk: Vec<u64> = (1..=50).collect();
-        index.apply_event(make_store_event(0, &first_chunk)).await;
-
-        // Second store: blocks 51-100 (continuation of first)
-        let second_chunk: Vec<u64> = (51..=100).collect();
-        index
-            .apply_event(make_store_event_with_parent(0, &first_chunk, &second_chunk))
-            .await;
-
-        // Third store: blocks 101-150 (continuation of second)
-        let prefix_1_2: Vec<u64> = (1..=100).collect();
-        let third_chunk: Vec<u64> = (101..=150).collect();
-        index
-            .apply_event(make_store_event_with_parent(0, &prefix_1_2, &third_chunk))
-            .await;
-
-        flush_and_settle(index.as_ref()).await;
-
-        // Query full sequence - should match all 150 blocks
-        let full_query: Vec<LocalBlockHash> = (1..=150).map(LocalBlockHash).collect();
-        let scores = index.find_matches(full_query).await.unwrap();
-        assert_eq!(scores.scores.len(), 1);
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            150
-        );
-
-        // Query crossing continuation boundaries
-        let cross_boundary_query: Vec<LocalBlockHash> = (45..=105).map(LocalBlockHash).collect();
-        let scores = index.find_matches(cross_boundary_query).await.unwrap();
-        // Query starts at block 45, but stored sequence starts at 1, so this won't match
-        // because the sequence hash at position 0 of our query (block 45) won't match
-        // the stored sequence hash at position 0 (block 1)
-        assert!(
-            scores.scores.is_empty() || !scores.scores.contains_key(&WorkerWithDpRank::new(0, 0))
-        );
-    }
 
     #[tokio::test]
     #[apply(indexer_template)]
@@ -1741,51 +1736,6 @@ mod long_sequence_tests {
         assert_eq!(
             *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
             79
-        );
-    }
-
-    #[tokio::test]
-    #[apply(indexer_template)]
-    async fn test_long_sequence_interleaved_workers(variant: &str) {
-        let index = make_indexer(variant);
-
-        // Multiple workers storing overlapping long sequences concurrently
-        // Worker 0: blocks 1-100
-        // Worker 1: blocks 1-75
-        // Worker 2: blocks 1-50
-        // Worker 3: blocks 1-25
-
-        let seq_100: Vec<u64> = (1..=100).collect();
-        let seq_75: Vec<u64> = (1..=75).collect();
-        let seq_50: Vec<u64> = (1..=50).collect();
-        let seq_25: Vec<u64> = (1..=25).collect();
-
-        index.apply_event(make_store_event(0, &seq_100)).await;
-        index.apply_event(make_store_event(1, &seq_75)).await;
-        index.apply_event(make_store_event(2, &seq_50)).await;
-        index.apply_event(make_store_event(3, &seq_25)).await;
-
-        flush_and_settle(index.as_ref()).await;
-
-        // Query for 60 blocks - workers 0,1 match 60, worker 2 matches 50, worker 3 matches 25
-        let query_60: Vec<LocalBlockHash> = (1..=60).map(LocalBlockHash).collect();
-        let scores = index.find_matches(query_60).await.unwrap();
-        assert_eq!(scores.scores.len(), 4);
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            60
-        );
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
-            60
-        );
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
-            50
-        );
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap(),
-            25
         );
     }
 

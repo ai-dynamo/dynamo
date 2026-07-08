@@ -15,7 +15,10 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _openai_stop_sampling_params,
     _user_stop_token_ids,
 )
-from dynamo.sglang.request_handlers.llm.mm_disagg_utils import extract_media_urls
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
+    extract_media_urls,
+    raise_if_unextracted_multimodal,
+)
 from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
 
 pytestmark = [
@@ -215,6 +218,28 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert "seed" not in sampling_params
 
 
+def test_build_sampling_params_maps_guided_decoding_to_json_schema():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "guided_decoding": {
+                    "json": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }
+                }
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["json_schema"] == (
+        '{"type": "object", "properties": {"city": {"type": "string"}}}'
+    )
+
+
 def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 
@@ -260,6 +285,38 @@ def test_build_sampling_params_forwards_repetition_controls_for_openai_requests(
     assert sampling_params["min_p"] == 0.01
     assert sampling_params["sampling_seed"] == 1234
     assert "seed" not in sampling_params
+
+
+class TestMultimodalGuard:
+    """Tests for multimodal guard when frontend extraction is missing."""
+
+    @staticmethod
+    def _image_message():
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/a.jpg"},
+                },
+                {"type": "text", "text": "describe image"},
+            ],
+        }
+
+    @pytest.mark.parametrize(
+        "request_factory",
+        [
+            lambda msg: {"token_ids": [1, 2, 3], "messages": [msg]},
+            lambda msg: {"token_ids": [1, 2, 3], "extra_args": {"messages": [msg]}},
+        ],
+        ids=["top_level_messages", "extra_args_messages"],
+    )
+    def test_raises_for_image_url(self, request_factory):
+        with pytest.raises(RuntimeError, match="multi_modal_data"):
+            raise_if_unextracted_multimodal(request_factory(self._image_message()))
+
+    def test_text_only_request_bypasses_guard(self):
+        raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
 
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
@@ -419,6 +476,53 @@ async def test_metadata_upload_normalizes_numpy_values(tmp_path):
     assert uploaded_array["dtype"] == "float32"
     assert uploaded_array["shape"] == [2, 2]
     assert uploaded_array["data"] == expected.tobytes()
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_treats_completion_usage_as_optional():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 2,
+                            "completion_tokens": 3,
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks == [
+        {"index": 0, "finish_reason": "stop", "token_ids": []},
+        {
+            "index": 1,
+            "finish_reason": "stop",
+            "token_ids": [],
+            "completion_usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5,
+            },
+        },
+    ]
 
 
 @pytest.mark.asyncio

@@ -30,7 +30,7 @@ You can provide multimodal inputs in the following ways:
 
 ## Deployment Patterns
 
-TRT-LLM supports aggregated and traditional disaggregated patterns. See [Architecture Patterns](README.md#architecture-patterns) for detailed explanations.
+TRT-LLM supports aggregated and traditional disaggregated patterns. See [Multimodal Model Serving](README.md) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|

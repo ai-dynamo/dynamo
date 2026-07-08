@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -70,11 +71,19 @@ func DetectDRAAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, resourcev1.SchemeGroupVersion.Group, &version)
 }
 
-// DetectIstioAvailability checks if Istio is available by checking if the
-// networking.istio.io API group is registered. Used to guard DestinationRule
-// reconciliation so the operator doesn't error on clusters without Istio CRDs.
-func DetectIstioAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIGroupAvailability(ctx, mgr, "networking.istio.io", nil)
+// DetectIstioDestinationRuleAvailability checks if Istio is available by checking if the
+// DestinationRule API is registered. Used to guard DestinationRule
+// reconciliation so the operator doesn't error on clusters without Istio CRDs
+// or with only a partially installed networking.istio.io API group.
+func DetectIstioDestinationRuleAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return DetectIstioDestinationRuleAvailabilityFromConfig(ctx, mgr.GetConfig())
+}
+
+// DetectIstioDestinationRuleAvailabilityFromConfig checks if the DestinationRule API is
+// registered using a rest.Config. This is used by reconcilers that need a
+// best-effort cleanup path without enabling startup-time Istio discovery.
+func DetectIstioDestinationRuleAvailabilityFromConfig(ctx context.Context, cfg *rest.Config) bool {
+	return detectAPIResourceAvailability(ctx, cfg, "networking.istio.io/v1beta1", "destinationrules")
 }
 
 // detectAPIGroupAvailability checks if a specific API group, and optionally a
@@ -120,6 +129,38 @@ func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName
 	} else {
 		logger.Info("API group version not available", logValues...)
 	}
+	return false
+}
+
+func detectAPIResourceAvailability(ctx context.Context, cfg *rest.Config, groupVersion, resourceName string) bool {
+	logger := log.FromContext(ctx)
+	logValues := []any{"groupVersion", groupVersion, "resource", resourceName}
+
+	if cfg == nil {
+		logger.Info("detection failed, no discovery client available", logValues...)
+		return false
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		logger.Error(err, "detection failed, could not create discovery client", logValues...)
+		return false
+	}
+
+	apiResourceList, err := discoveryClient.ServerResourcesForGroupVersion(groupVersion)
+	if err != nil {
+		logger.Info("API resource not available", append(logValues, "error", err.Error())...)
+		return false
+	}
+
+	for _, resource := range apiResourceList.APIResources {
+		if resource.Name == resourceName {
+			logger.Info("API resource is available", logValues...)
+			return true
+		}
+	}
+
+	logger.Info("API resource not available", logValues...)
 	return false
 }
 

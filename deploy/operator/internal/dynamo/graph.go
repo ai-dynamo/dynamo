@@ -1210,6 +1210,27 @@ func expandMultinodeGMSRoles(componentName string, numberOfNodes int32, totalEng
 	return roles
 }
 
+// LongestPodCliqueNameForDGDComponent returns the longest rendered PodClique
+// name for a DGD component using the same role expansion as Grove rendering.
+func LongestPodCliqueNameForDGDComponent(
+	componentName string,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) string {
+	lowerComponentName := strings.ToLower(componentName)
+	if component == nil || (component.GetNumberOfNodes() <= 1 && !component.IsInterPodGMSEnabled()) {
+		return lowerComponentName
+	}
+
+	longestName := lowerComponentName
+	for _, role := range expandRolesForComponent(componentName, component.Replicas, component.GetNumberOfNodes(), component) {
+		roleName := strings.ToLower(role.Name)
+		if len(roleName) > len(longestName) {
+			longestName = roleName
+		}
+	}
+	return longestName
+}
+
 // PCSNameForDGD computes the PodCliqueSet name for a DGD, auto-truncating if
 // the DGD name is too long to fit within Grove's combined resource name limit.
 //
@@ -1224,14 +1245,8 @@ func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymen
 		lowerName := strings.ToLower(componentName)
 		var budget int
 		if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
-			maxCliqueNameLen := 0
-			for _, role := range expandRolesForComponent(componentName, component.Replicas, component.GetNumberOfNodes(), component) {
-				if cliqueNameLen := len(strings.ToLower(role.Name)); cliqueNameLen > maxCliqueNameLen {
-					maxCliqueNameLen = cliqueNameLen
-				}
-			}
 			// PCSG = lowerName, PCLQ = longest rendered role name.
-			budget = len(lowerName) + maxCliqueNameLen
+			budget = len(lowerName) + len(LongestPodCliqueNameForDGDComponent(componentName, component))
 		} else {
 			// Single-node: PCLQ = lowerName (no PCSG).
 			budget = len(lowerName)
@@ -1493,11 +1508,11 @@ func GenerateBasePodSpec(
 			return nil, fmt.Errorf("failed to merge podTemplate main container: %w", err)
 		}
 	}
-	if err := validateContainerVolumeMounts(container.VolumeMounts); err != nil {
-		return nil, err
-	}
 
 	if err := applyCompilationCache(&container, component, backendFramework); err != nil {
+		return nil, err
+	}
+	if err := validateContainerVolumeMounts(container.VolumeMounts); err != nil {
 		return nil, err
 	}
 
@@ -1556,15 +1571,8 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	if component.CompilationCache != nil {
-		podSpec.Volumes = appendUniqueVolume(podSpec.Volumes, corev1.Volume{
-			Name: component.CompilationCache.PVCName,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: component.CompilationCache.PVCName,
-				},
-			},
-		})
+	if err := applyCompilationCacheVolume(&podSpec, component.CompilationCache); err != nil {
+		return nil, err
 	}
 
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemorySize)
@@ -1671,31 +1679,88 @@ func applyCompilationCache(container *corev1.Container, component *v1beta1.Dynam
 	if component.CompilationCache == nil {
 		return nil
 	}
-	if component.CompilationCache.PVCName == "" {
+	compilationCache := component.CompilationCache
+	if compilationCache.PVCName == "" {
 		return fmt.Errorf("compilationCache.pvcName is required when compilationCache is set")
 	}
-	mountPath := component.CompilationCache.MountPath
+	mountPath := compilationCache.MountPath
 	if mountPath == "" {
 		mountPath = getDefaultCompilationCacheMountPoint(backendFramework)
 		if mountPath == "" {
 			return fmt.Errorf("compilationCache.mountPath is required for backend framework %s (no default available)", backendFramework)
 		}
-		component.CompilationCache.MountPath = mountPath
+		compilationCache.MountPath = mountPath
 	}
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      component.CompilationCache.PVCName,
-		MountPath: mountPath,
-	})
+
+	// Normalize cache mounts left by older conversions before validating the container.
+	normalizedMounts := make([]corev1.VolumeMount, 0, len(container.VolumeMounts)+1)
+	alreadyMounted := false
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == compilationCache.PVCName && mount.MountPath == "" {
+			mount.MountPath = mountPath
+		}
+		if mount.MountPath != mountPath {
+			normalizedMounts = append(normalizedMounts, mount)
+			continue
+		}
+		if mount.Name != compilationCache.PVCName {
+			return fmt.Errorf("compilationCache.mountPath %q is already used by volume %q", mountPath, mount.Name)
+		}
+		if mount.ReadOnly {
+			return fmt.Errorf("compilation cache volume %q at %q must be writable", compilationCache.PVCName, mountPath)
+		}
+		if alreadyMounted {
+			continue
+		}
+		normalizedMounts = append(normalizedMounts, mount)
+		alreadyMounted = true
+	}
+	if !alreadyMounted {
+		normalizedMounts = append(normalizedMounts, corev1.VolumeMount{
+			Name:      compilationCache.PVCName,
+			MountPath: mountPath,
+		})
+	}
+	container.VolumeMounts = normalizedMounts
 	return nil
 }
 
-func appendUniqueVolume(volumes []corev1.Volume, volume corev1.Volume) []corev1.Volume {
-	for i := range volumes {
-		if volumes[i].Name == volume.Name {
-			return volumes
-		}
+func applyCompilationCacheVolume(podSpec *corev1.PodSpec, compilationCache *v1beta1.CompilationCacheConfig) error {
+	if compilationCache == nil {
+		return nil
 	}
-	return append(volumes, volume)
+	found := false
+	for i := range podSpec.Volumes {
+		volume := &podSpec.Volumes[i]
+		if volume.Name != compilationCache.PVCName {
+			continue
+		}
+		if volume.PersistentVolumeClaim == nil {
+			return fmt.Errorf("compilation cache volume %q must reference PVC %q", volume.Name, compilationCache.PVCName)
+		}
+		if volume.PersistentVolumeClaim.ClaimName != compilationCache.PVCName {
+			return fmt.Errorf("compilation cache volume %q references PVC %q instead of %q", volume.Name, volume.PersistentVolumeClaim.ClaimName, compilationCache.PVCName)
+		}
+		if volume.PersistentVolumeClaim.ReadOnly {
+			return fmt.Errorf("compilation cache PVC %q must be writable", compilationCache.PVCName)
+		}
+		if found {
+			return fmt.Errorf("compilation cache volume %q is defined more than once", compilationCache.PVCName)
+		}
+		found = true
+	}
+	if found {
+		return nil
+	}
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+		Name: compilationCache.PVCName,
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+				ClaimName: compilationCache.PVCName,
+			},
+		},
+	})
+	return nil
 }
 
 func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.VolumeMount) []corev1.Volume {
@@ -1708,6 +1773,9 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 	seen := make(map[string]struct{}, len(volumes)+len(mounts))
 	for _, mount := range mounts {
 		if mount.Name == "" {
+			continue
+		}
+		if _, ok := seen[mount.Name]; ok {
 			continue
 		}
 		if volume, ok := volumesByName[mount.Name]; ok {
@@ -2077,6 +2145,8 @@ type cliqueParams struct {
 
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
 // injecting labels, annotations, checkpoint config, and scheduler settings.
+//
+//nolint:gocyclo
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
@@ -2103,46 +2173,31 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		}
 	}
 
-	// minAvailable controls Grove gang-scheduling: the clique is only
-	// considered available when at least this many replicas are Ready.
-	//
-	// The invariant we want is "minAvailable = Replicas unless the clique
-	// has redundant replicas". Concretely:
-	//
-	//   - Plain multinode (no inter-pod GMS failover): the worker clique
-	//     collapses non-leader ranks into a single clique with
-	//     Replicas = numberOfNodes - 1 and those pods are NCCL peers of each
-	//     other — losing any one breaks the collective, so all replicas
-	//     must be Ready. Standalone inter-pod GMS on multinode also lands
-	//     here but has Replicas = 1 per PCLQ (primary only, no shadows), so
-	//     the same rule evaluates to minAvailable = 1 without a special case.
-	//
-	//   - Inter-pod GMS failover (single- or multinode): within each rank
-	//     Replicas = primary + shadows and shadows ARE redundant hot spares
-	//     — requiring every shadow to be Ready would defeat failover, so
-	//     the clique stays at minAvailable = 1.
-	//
-	//   - Single-node clique (no multinode, with or without intra-pod
-	//     failover or standalone inter-pod GMS): Replicas is at most 1 or a
-	//     small DP fanout under the outer PCSG where the replicas are
-	//     independent of each other; minAvailable = 1 is correct.
-	//
-	// The two-line rule below captures all of the above: take the baseline
-	// of 1, then lift it to Replicas only on plain multinode without
-	// inter-pod failover (the only layout that combines >1 replicas per
-	// clique with no redundancy between them).
+	// MinAvailable serves two purposes for Grove PCLQ:
+	// 1. It defines the minimum number of pods that are guaranteed to be gang scheduled.
+	// 2. It defines the minimum requirement of available pods in a PodClique. Violation of this threshold will result
+	// in termination of the PodGang that it belongs to.
 	minAvailable := int32(1)
+	// single-node standalone pclq set to component.MinAvailable if defined
+	if !p.usesPCSG && p.component.MinAvailable != nil {
+		minAvailable = *p.component.MinAvailable
+	}
+	// pclqs that are part of a multi-node component set minAvailable to their
+	// replica count. Plain multi-node needs every leader/worker rank ready for
+	// collective operations. multi-node inter-pod GMS without failover creates
+	// one replica per rank PCLQ, so this also evaluates to minAvailable=1.
 	if p.isMultinode && !p.isInterPodFailover {
 		minAvailable = p.r.Replicas
 	}
 	replicas := p.r.Replicas
+	// if checkpoint is enabled and not ready, set replicas to 0
+	// to prevent the engine clique from being scheduled
 	if p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
 		p.checkpointInfo.Enabled &&
 		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!p.checkpointInfo.Ready {
 		replicas = 0
-		minAvailable = 0
 	}
 
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
@@ -2204,6 +2259,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	clique.Annotations = annotations
 
 	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName)
+	injectVolcanoSchedulerIfEnabled(clique, p.runtimeConfig)
 	return clique, nil
 }
 
@@ -2231,26 +2287,26 @@ func resolveGroveClusterTopologyDomains(ctx context.Context, kubeClient ctrlclie
 		return nil, nil
 	}
 	if kubeClient == nil {
-		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q requires a Kubernetes client to read ClusterTopology", kvt.ClusterTopologyName)
+		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q requires a Kubernetes client to read ClusterTopologyBinding", kvt.ClusterTopologyName)
 	}
 
-	ct := &grovev1alpha1.ClusterTopology{}
+	ct := &grovev1alpha1.ClusterTopologyBinding{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Name: kvt.ClusterTopologyName}, ct); err != nil {
 		if k8serrors.IsNotFound(err) {
-			return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopology resource that was not found", kvt.ClusterTopologyName)
+			return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopologyBinding resource that was not found", kvt.ClusterTopologyName)
 		}
-		return nil, fmt.Errorf("failed to read ClusterTopology %q for kvTransferPolicy: %w", kvt.ClusterTopologyName, err)
+		return nil, fmt.Errorf("failed to read ClusterTopologyBinding %q for kvTransferPolicy: %w", kvt.ClusterTopologyName, err)
 	}
 
 	domains := topologyDomainsFromClusterTopology(ct)
 	if !topologyDomainsContain(domains, kvt.Domain) {
-		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopology %q; available domains: %v",
+		return nil, fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopologyBinding %q; available domains: %v",
 			kvt.Domain, kvt.ClusterTopologyName, domains)
 	}
 	return domains, nil
 }
 
-func topologyDomainsFromClusterTopology(ct *grovev1alpha1.ClusterTopology) []v1beta1.TopologyDomain {
+func topologyDomainsFromClusterTopology(ct *grovev1alpha1.ClusterTopologyBinding) []v1beta1.TopologyDomain {
 	if ct == nil {
 		return nil
 	}
@@ -2268,6 +2324,21 @@ func topologyDomainsContain(domains []v1beta1.TopologyDomain, want v1beta1.Topol
 		}
 	}
 	return false
+}
+
+func resolveGroveSchedulerQueue(ctx context.Context, annotations map[string]string, runtimeConfig *controller_common.RuntimeConfig) (string, error) {
+	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled && runtimeConfig.VolcanoSchedulerEnabled {
+		return "", fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
+	}
+	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
+		return "", nil
+	}
+
+	queueName, err := DetermineKaiSchedulerQueue(ctx, annotations)
+	if err != nil {
+		return "", fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
+	}
+	return queueName, nil
 }
 
 func GenerateGrovePodCliqueSet(
@@ -2290,7 +2361,19 @@ func GenerateGrovePodCliqueSet(
 	}
 	gangSet.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
+	// Volcano queue selection is consumed by Grove from the PodCliqueSet annotation.
+	// KAI-Scheduler is injected later on each clique via schedulerName and queue label.
+	injectVolcanoQueueAnnotation(gangSet, dynamoDeployment.Annotations, runtimeConfig)
 	gangSet.Spec.Replicas = 1
+	updateStrategy, err := groveUpdateStrategyFromAnnotations(dynamoDeployment.Annotations)
+	if err != nil {
+		return nil, err
+	}
+	if updateStrategy != nil {
+		gangSet.Spec.UpdateStrategy = &grovev1alpha1.PodCliqueSetUpdateStrategy{
+			Type: *updateStrategy,
+		}
+	}
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
 		PublishNotReadyAddresses: true,
 	}
@@ -2304,14 +2387,9 @@ func GenerateGrovePodCliqueSet(
 	// specToGroveTopologyConstraint returns nil when input is nil, so this is a no-op without TAS.
 	gangSet.Spec.Template.TopologyConstraint = specToGroveTopologyConstraint(dynamoDeployment.Spec.TopologyConstraint)
 
-	// Validate kai-scheduler queue once if kai-scheduler is enabled
-	var validatedQueueName string
-	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled {
-		var err error
-		validatedQueueName, err = DetermineKaiSchedulerQueue(ctx, dynamoDeployment.Annotations)
-		if err != nil {
-			return nil, fmt.Errorf("failed to determine kai-scheduler queue: %w", err)
-		}
+	validatedQueueName, err := resolveGroveSchedulerQueue(ctx, dynamoDeployment.Annotations, runtimeConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	discoveryBackend := controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
@@ -2406,12 +2484,14 @@ func GenerateGrovePodCliqueSet(
 		if usesPCSG {
 			replicas := component.Replicas
 			minAvailable := ptr.To(int32(1))
+			if component.MinAvailable != nil {
+				minAvailable = ptr.To(*component.MinAvailable)
+			}
 			if checkpointInfo != nil &&
 				checkpointInfo.Enabled &&
 				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 				!checkpointInfo.Ready {
 				replicas = ptr.To(int32(0))
-				minAvailable = ptr.To(int32(0))
 			}
 			pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 				Name:               strings.ToLower(componentName),
@@ -2434,6 +2514,30 @@ func GenerateGrovePodCliqueSet(
 	}
 
 	return gangSet, nil
+}
+
+func groveUpdateStrategyFromAnnotations(annotations map[string]string) (*grovev1alpha1.UpdateStrategyType, error) {
+	value, ok := annotations[commonconsts.KubeAnnotationGroveUpdateStrategy]
+	if !ok {
+		return nil, nil
+	}
+
+	var strategy grovev1alpha1.UpdateStrategyType
+	switch value {
+	case string(grovev1alpha1.RollingRecreateStrategy):
+		strategy = grovev1alpha1.RollingRecreateStrategy
+	case string(grovev1alpha1.OnDeleteStrategy):
+		strategy = grovev1alpha1.OnDeleteStrategy
+	default:
+		return nil, fmt.Errorf(
+			"unsupported Grove update strategy annotation %q=%q: supported values are %q and %q",
+			commonconsts.KubeAnnotationGroveUpdateStrategy,
+			value,
+			grovev1alpha1.RollingRecreateStrategy,
+			grovev1alpha1.OnDeleteStrategy,
+		)
+	}
+	return &strategy, nil
 }
 
 // generatePodSpecForRole builds the pod spec for a single role, handling GMS

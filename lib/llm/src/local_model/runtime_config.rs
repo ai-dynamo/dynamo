@@ -4,6 +4,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    str::FromStr,
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -44,6 +45,58 @@ pub enum StructuralTagScope {
     Always,
 }
 
+pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
+
+/// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenizerBackend {
+    Default,
+    Fastokens,
+}
+
+impl TokenizerBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Fastokens => "fastokens",
+        }
+    }
+
+    pub fn is_fastokens(self) -> bool {
+        matches!(self, Self::Fastokens)
+    }
+
+    pub fn from_env_or_default() -> Self {
+        match std::env::var(ENV_TOKENIZER_BACKEND) {
+            Ok(v) if v == "fastokens" => Self::Fastokens,
+            Ok(v) if v == "default" || v.is_empty() => Self::Default,
+            Ok(v) => {
+                tracing::warn!(
+                    value = %v,
+                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
+                );
+                Self::Default
+            }
+            Err(_) => Self::Default,
+        }
+    }
+}
+
+impl FromStr for TokenizerBackend {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "default" => Ok(Self::Default),
+            "fastokens" => Ok(Self::Fastokens),
+            _ => Err(format!(
+                "invalid tokenizer backend '{value}' (expected 'default' or 'fastokens')"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct DisaggregatedEndpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +128,11 @@ pub struct ModelRuntimeConfig {
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// Frontend tokenizer backend override. When unset, direct Rust callers can still use
+    /// `DYN_TOKENIZER`; when set, this explicit value wins over process environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_backend: Option<TokenizerBackend>,
 
     /// Whether structural tag guided decoding is enabled for tool calls.
     #[serde(default)]
@@ -154,6 +212,14 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate(range(min = 0.0, max = 1.0))]
     pub kv_transfer_preferred_weight: Option<f32>,
+
+    /// Per-worker LoRA adapter slot capacity (e.g. vLLM `--max-loras`, SGLang
+    /// `--max-loras-per-batch`), advertised on the BASE worker registration so the LoRA
+    /// allocation controller can see idle-but-LoRA-capable workers before any adapter is
+    /// loaded on them. `None` for non-LoRA workers. Adapter (`card.lora`) registrations carry
+    /// the same value via `LoraInfo::max_gpu_lora_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gpu_lora_count: Option<u32>,
 }
 
 const fn default_data_parallel_start_rank() -> u32 {
@@ -185,6 +251,7 @@ impl Default for ModelRuntimeConfig {
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
+            tokenizer_backend: None,
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
@@ -201,6 +268,7 @@ impl Default for ModelRuntimeConfig {
             kv_transfer_domain: None,
             kv_transfer_enforcement: None,
             kv_transfer_preferred_weight: None,
+            max_gpu_lora_count: None,
         }
     }
 }
@@ -220,6 +288,13 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
 
     fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
+        self.runtime_data
+            .get("native_offloading_capacity")?
+            .get("total_tokens")?
+            .as_u64()
     }
 
     fn taints(&self) -> &HashSet<String> {
@@ -365,6 +440,19 @@ impl ModelRuntimeConfig {
         }
     }
 
+    pub fn effective_tokenizer_backend(&self) -> TokenizerBackend {
+        self.tokenizer_backend
+            .unwrap_or_else(TokenizerBackend::from_env_or_default)
+    }
+
+    pub fn set_tokenizer_backend(
+        &mut self,
+        tokenizer_backend: Option<TokenizerBackend>,
+    ) -> &mut Self {
+        self.tokenizer_backend = tokenizer_backend;
+        self
+    }
+
     /// Rebuild canonical topology taints derived from `topology_domains`.
     ///
     /// Existing caller-provided taints outside the reserved topology prefix are preserved; generated
@@ -460,6 +548,27 @@ mod tests {
     }
 
     #[test]
+    fn max_gpu_lora_count_roundtrips_and_is_omitted_when_none() {
+        // Worker LoRA capacity must survive the MDC -> discovery -> watcher wire so the frontend
+        // can seed set_worker_capacity for idle LoRA-capable workers.
+        let cfg = ModelRuntimeConfig {
+            max_gpu_lora_count: Some(8),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"max_gpu_lora_count\":8"));
+        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.max_gpu_lora_count, Some(8));
+
+        // Omitted from the wire (and defaults to None on read) for non-LoRA workers, so older
+        // payloads without the field stay backward-compatible.
+        let none_json = serde_json::to_string(&ModelRuntimeConfig::default()).unwrap();
+        assert!(!none_json.contains("max_gpu_lora_count"));
+        let from_legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_legacy.max_gpu_lora_count, None);
+    }
+
+    #[test]
     fn roundtrips_through_serde_json() {
         let cfg = ModelRuntimeConfig {
             stable_routing_id: Some("worker-7".to_string()),
@@ -477,6 +586,78 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(!json.contains("stable_routing_id"));
         assert!(!json.contains("context_length"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tokenizer_backend_env_fallback() {
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("fastokens"))], || {
+            let cfg = ModelRuntimeConfig::default();
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Fastokens
+            );
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("default"))], || {
+            let cfg = ModelRuntimeConfig::default();
+            assert_eq!(cfg.effective_tokenizer_backend(), TokenizerBackend::Default);
+        });
+
+        temp_env::with_vars_unset([ENV_TOKENIZER_BACKEND], || {
+            let cfg = ModelRuntimeConfig::default();
+            assert_eq!(cfg.effective_tokenizer_backend(), TokenizerBackend::Default);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tokenizer_backend_explicit_config_wins_over_env() {
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("fastokens"))], || {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(TokenizerBackend::Default),
+                ..Default::default()
+            };
+            assert_eq!(cfg.effective_tokenizer_backend(), TokenizerBackend::Default);
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("default"))], || {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(TokenizerBackend::Fastokens),
+                ..Default::default()
+            };
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Fastokens
+            );
+        });
+    }
+
+    #[test]
+    fn tokenizer_backend_roundtrips_through_serde_json() {
+        let cfg = ModelRuntimeConfig {
+            tokenizer_backend: Some(TokenizerBackend::Fastokens),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
+        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
+    }
+
+    #[test]
+    fn native_offloading_capacity_is_backend_neutral() {
+        use dynamo_kv_router::WorkerConfigLike;
+
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .set_engine_specific(
+                "native_offloading_capacity",
+                serde_json::json!({"total_tokens": 300}),
+            )
+            .unwrap();
+
+        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
     }
 
     #[test]
