@@ -64,7 +64,7 @@ use crate::protocols::{
     TokenIdType,
     common::{
         OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
-        extensions::{AgentHints, NvExtProvider, routing_constraints_to_kv},
+        extensions::{AgentHints, NvExtProvider, request_cache_salt, routing_constraints_to_kv},
     },
     openai::{
         DeltaGeneratorExt,
@@ -340,9 +340,6 @@ impl OpenAIPreprocessor {
             if let Some(ref fields) = nvext.extra_fields {
                 nvext_passthrough.insert("extra_fields".to_string(), serde_json::json!(fields));
             }
-            if let Some(ref salt) = nvext.cache_salt {
-                nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
-            }
             if let Some(ref metadata_upload) = nvext.metadata_upload {
                 nvext_passthrough.insert(
                     "metadata_upload".to_string(),
@@ -354,12 +351,7 @@ impl OpenAIPreprocessor {
             }
         }
 
-        if !nvext_passthrough.contains_key("cache_salt")
-            && let Some(salt) = request
-                .unsupported_fields()
-                .and_then(|fields| fields.get("cache_salt"))
-                .and_then(|value| value.as_str())
-        {
+        if let Some(salt) = request_cache_salt(request) {
             nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
         }
 
@@ -865,6 +857,7 @@ impl OpenAIPreprocessor {
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         let lora_name = self.lora_name.clone();
+        let cache_namespace = request_cache_salt(request).map(str::to_owned);
 
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
@@ -883,6 +876,7 @@ impl OpenAIPreprocessor {
                 strict_priority,
                 priority,
                 lora_name,
+                cache_namespace: cache_namespace.clone(),
                 allowed_worker_ids: None,
                 routing_constraints: nvext
                     .routing_constraints
@@ -890,11 +884,12 @@ impl OpenAIPreprocessor {
                     .map(routing_constraints_to_kv),
             };
             builder.routing(Some(routing));
-        } else if lora_name.is_some() {
-            // Ensure routing hints exist when we have LoRA,
-            // even when nvext is absent.
+        } else if lora_name.is_some() || cache_namespace.is_some() {
+            // Ensure routing hints exist when we have LoRA or a legacy
+            // top-level cache_salt, even when nvext is absent.
             builder.routing(Some(RoutingHints {
                 lora_name,
+                cache_namespace,
                 ..Default::default()
             }));
         }

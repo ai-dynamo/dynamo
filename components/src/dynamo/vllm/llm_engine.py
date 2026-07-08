@@ -72,6 +72,7 @@ from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import (
     VllmEnginePauseController,
+    _apply_nvext_cache_salt,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -79,6 +80,8 @@ from .logits_processing import (
     activate_logits_processors,
     register_dynamo_logits_processor,
 )
+from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
+from .multimodal_utils.media_config import create_frontend_media_config
 from .multimodal_utils.request_processor import VllmMultimodalRequestProcessor
 
 if TYPE_CHECKING:
@@ -175,6 +178,9 @@ class VllmLLMEngine(LLMEngine):
         dyn_reasoning_parser: Optional[str] = None,
         enable_rl: bool = False,
         enable_multimodal: bool = False,
+        frontend_decoding: bool = False,
+        multimodal_embedding_cache_capacity_gb: float = 0.0,
+        namespace: str = "dynamo",
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
@@ -184,6 +190,11 @@ class VllmLLMEngine(LLMEngine):
         self._dyn_reasoning_parser = dyn_reasoning_parser
         self.enable_rl = enable_rl
         self.enable_multimodal = enable_multimodal
+        self.frontend_decoding = frontend_decoding
+        self.multimodal_embedding_cache_capacity_gb = (
+            multimodal_embedding_cache_capacity_gb
+        )
+        self._namespace = namespace
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -262,16 +273,6 @@ class VllmLLMEngine(LLMEngine):
                 "unified encode worker is available"
             )
 
-        if config.enable_multimodal and config.disaggregation_mode in (
-            DisaggregationMode.PREFILL,
-            DisaggregationMode.DECODE,
-        ):
-            raise NotImplementedError(
-                "multimodal P/D is not supported by the unified vLLM entry "
-                "point yet; use aggregated unified serving or `python -m "
-                "dynamo.vllm`"
-            )
-
         if not config.served_model_name:
             config.served_model_name = (
                 config.engine_args.served_model_name
@@ -293,12 +294,22 @@ class VllmLLMEngine(LLMEngine):
             dyn_reasoning_parser=config.dyn_reasoning_parser,
             enable_rl=config.enable_rl,
             enable_multimodal=config.enable_multimodal,
+            frontend_decoding=config.frontend_decoding,
+            multimodal_embedding_cache_capacity_gb=(
+                config.multimodal_embedding_cache_capacity_gb
+            ),
+            namespace=config.namespace,
+        )
+        media_decoder, media_fetcher = create_frontend_media_config(
+            config.frontend_decoding
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,
             model_input=ModelInput.Tokens,
+            media_decoder=media_decoder,
+            media_fetcher=media_fetcher,
         )
         return engine, worker_config
 
@@ -322,6 +333,14 @@ class VllmLLMEngine(LLMEngine):
 
         self._prometheus_temp_dir = ensure_prometheus_multiproc_dir("vllm_prometheus_")
 
+        configure_multimodal_embedding_cache(
+            self.engine_args,
+            route_to_encoder=False,
+            capacity_gb=self.multimodal_embedding_cache_capacity_gb,
+            namespace=self._namespace,
+            component=self._component,
+        )
+
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
@@ -342,7 +361,10 @@ class VllmLLMEngine(LLMEngine):
             model=self.engine_args.model,
             engine_client=self.engine_client,
             enable_multimodal=self.enable_multimodal,
+            enable_frontend_decoding=self.frontend_decoding,
         )
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            self._multimodal_request_processor.initialize_prefill_handoff()
         # Resolve once the tokenizer is available (see logits_processor_spec()).
         self._logits_processor_spec = await self.logits_processor_spec()
         self._pause_controller = VllmEnginePauseController(self.engine_client)
@@ -400,6 +422,7 @@ class VllmLLMEngine(LLMEngine):
             self.disaggregation_mode,
         )
         prompt = prepared_prompt.prompt
+        _apply_nvext_cache_salt(prepared_prompt.request, prompt)
 
         # Multimodal decode may replace token_ids with the expanded prefill
         # sequence. Sampling limits must use that same effective request.
@@ -569,10 +592,18 @@ class VllmLLMEngine(LLMEngine):
                     # prefill terminal so PrefillRouter can forward it.
                     if is_prefill:
                         kv_transfer_params = getattr(res, "kv_transfer_params", None)
+                        handoff_params: dict[str, Any] = {}
                         if kv_transfer_params is not None:
-                            out["disaggregated_params"] = {
-                                "kv_transfer_params": kv_transfer_params,
-                            }
+                            handoff_params["kv_transfer_params"] = kv_transfer_params
+                        embedding_params = multimodal_processor.build_prefill_handoff(
+                            multi_modal_data=prepared_prompt.multi_modal_data,
+                            prompt_token_ids=list(res.prompt_token_ids or []),
+                            mm_processor_kwargs=prepared_prompt.mm_processor_kwargs,
+                        )
+                        if embedding_params is not None:
+                            handoff_params["embedding_params"] = embedding_params
+                        if handoff_params:
+                            out["disaggregated_params"] = handoff_params
 
                 yield out
 

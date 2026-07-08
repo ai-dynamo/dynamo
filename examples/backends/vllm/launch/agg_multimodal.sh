@@ -90,7 +90,11 @@ CURL
 
 # Start frontend with Rust OpenAIPreprocessor
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python -m dynamo.frontend &
+FRONTEND_ARGS=()
+if [[ -n "${DYN_CHAT_PROCESSOR:-}" ]]; then
+    FRONTEND_ARGS+=(--dyn-chat-processor "$DYN_CHAT_PROCESSOR")
+fi
+python -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 
 # ---- Per-model defaults ----
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
