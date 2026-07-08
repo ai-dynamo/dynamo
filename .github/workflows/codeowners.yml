@@ -54,14 +54,17 @@ jobs:
             --repo . \
             --strict
 
-      # Regenerate, then fail if the committed CODEOWNERS drifted from what
-      # areas.yaml produces (i.e. someone hand-edited the output, or changed
-      # areas.yaml without regenerating).
+      # Regenerate, then fail if the committed CODEOWNERS or CONTRIBUTORS.md
+      # drifted from what the sources produce (i.e. someone hand-edited an
+      # output, or changed areas.yaml / external_contributors.yaml without
+      # regenerating).
       - name: Regenerate and check for drift
         run: |
           python .github/codeowners/emit_codeowners.py \
             --areas .github/codeowners/areas.yaml \
             --repo . \
-            --out CODEOWNERS
-          git diff --exit-code CODEOWNERS \
-            || { echo "::error::CODEOWNERS is out of date. Regenerate from areas.yaml and commit."; exit 1; }
+            --out CODEOWNERS \
+            --external .github/codeowners/external_contributors.yaml \
+            --contributors-out CONTRIBUTORS.md
+          git diff --exit-code CODEOWNERS CONTRIBUTORS.md \
+            || { echo "::error::CODEOWNERS/CONTRIBUTORS.md are out of date. Regenerate from areas.yaml + external_contributors.yaml and commit."; exit 1; }

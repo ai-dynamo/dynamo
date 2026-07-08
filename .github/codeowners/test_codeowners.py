@@ -16,6 +16,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 # Allow `import codeowners_match` when pytest runs from the repo root.
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -28,6 +30,15 @@ from codeowners_match import (  # noqa: E402
     match,
     minimal_cover,
     resolve_owners,
+)
+from emit_codeowners import (  # noqa: E402
+    CONTRIBUTOR_LEVELS,
+    _handle,
+    _render_codeowners,
+    contributor_level,
+    decorate_owners,
+    render_contributors_md,
+    team_externals_map,
 )
 
 # ------------------------------------------------------------------
@@ -406,3 +417,196 @@ class TestTypedShapes:
     def test_shared_spec_keys(self) -> None:
         s: SharedSpec = {"glob": "x/", "owners": ["a", "b"]}
         assert s["glob"] == "x/"
+
+
+# ------------------------------------------------------------------
+# External contributors -- area-attached co-ownership + CONTRIBUTORS.md
+# ------------------------------------------------------------------
+
+
+class TestHandle:
+    def test_bare_username_gets_at(self) -> None:
+        assert _handle("octocat") == "@octocat"
+
+    def test_leading_at_not_doubled(self) -> None:
+        assert _handle("@octocat") == "@octocat"
+
+    def test_whitespace_stripped(self) -> None:
+        assert _handle("  octocat ") == "@octocat"
+
+
+class TestTeamExternalsMap:
+    def _label_to_team(self) -> dict[str, str]:
+        return {"router": "@ai-dynamo/router", "docs": "@ai-dynamo/docs"}
+
+    def test_maps_area_label_to_team_handles(self) -> None:
+        contributors = [{"name": "Jane", "github": "jane", "areas": ["router"]}]
+        mapping = team_externals_map(contributors, self._label_to_team())
+        assert mapping == {"@ai-dynamo/router": ["@jane"]}
+
+    def test_multiple_contributors_same_area(self) -> None:
+        contributors = [
+            {"name": "Jane", "github": "jane", "areas": ["router"]},
+            {"name": "Jo", "github": "jo", "areas": ["router"]},
+        ]
+        mapping = team_externals_map(contributors, self._label_to_team())
+        assert mapping["@ai-dynamo/router"] == ["@jane", "@jo"]
+
+    def test_contributor_multiple_areas(self) -> None:
+        contributors = [{"name": "Jane", "github": "jane", "areas": ["router", "docs"]}]
+        mapping = team_externals_map(contributors, self._label_to_team())
+        assert mapping["@ai-dynamo/router"] == ["@jane"]
+        assert mapping["@ai-dynamo/docs"] == ["@jane"]
+
+    def test_unknown_area_label_is_fatal(self) -> None:
+        contributors = [{"name": "Jane", "github": "jane", "areas": ["nope"]}]
+        with pytest.raises(SystemExit):
+            team_externals_map(contributors, self._label_to_team())
+
+    def test_missing_github_is_fatal(self) -> None:
+        contributors = [{"name": "Jane", "areas": ["router"]}]
+        with pytest.raises(SystemExit):
+            team_externals_map(contributors, self._label_to_team())
+
+
+class TestDecorateOwners:
+    def test_appends_handle_for_matching_team(self) -> None:
+        te = {"@team": ["@jane"]}
+        assert decorate_owners("@team", te) == "@team @jane"
+
+    def test_noop_when_no_externals(self) -> None:
+        assert decorate_owners("@team", {}) == "@team"
+
+    def test_team_not_present_unchanged(self) -> None:
+        te = {"@other": ["@jane"]}
+        assert decorate_owners("@team", te) == "@team"
+
+    def test_multi_owner_line_appends_once(self) -> None:
+        te = {"@team": ["@jane"]}
+        assert decorate_owners("@team @second", te) == "@team @second @jane"
+
+    def test_no_duplicate_handle(self) -> None:
+        te = {"@team": ["@jane", "@jane"]}
+        assert decorate_owners("@team", te) == "@team @jane"
+
+
+class TestContributorLevel:
+    def test_canonical_tokens_accepted(self) -> None:
+        for lvl in CONTRIBUTOR_LEVELS:
+            assert contributor_level({"name": "x", "level": lvl}) == lvl
+
+    def test_human_spelling_normalized(self) -> None:
+        assert (
+            contributor_level({"name": "x", "level": "Core Maintainer"})
+            == "core_maintainer"
+        )
+        assert (
+            contributor_level({"name": "x", "level": "trusted-contributor"})
+            == "trusted_contributor"
+        )
+
+    def test_missing_level_is_fatal(self) -> None:
+        with pytest.raises(SystemExit):
+            contributor_level({"name": "x", "github": "x"})
+
+    def test_invalid_level_is_fatal(self) -> None:
+        with pytest.raises(SystemExit):
+            contributor_level({"name": "x", "level": "overlord"})
+
+
+class TestRenderContributorsMd:
+    def test_empty_states_none_yet(self) -> None:
+        md = render_contributors_md([])
+        assert "# Contributors" in md
+        assert "_No external contributors yet._" in md
+        assert "codeownership" in md
+
+    def test_renders_row_with_link_level_and_area(self) -> None:
+        contributors = [
+            {
+                "name": "Jane Doe",
+                "github": "janedoe",
+                "level": "maintainer",
+                "affiliation": "Example Org",
+                "areas": ["router"],
+            }
+        ]
+        md = render_contributors_md(contributors)
+        assert "Jane Doe" in md
+        assert "Maintainer" in md
+        assert "Example Org" in md
+        assert "[@janedoe](https://github.com/janedoe)" in md
+        assert "`router`" in md
+
+    def test_missing_affiliation_falls_back(self) -> None:
+        contributors = [
+            {
+                "name": "Jane",
+                "github": "jane",
+                "level": "contributor",
+                "areas": ["router"],
+            }
+        ]
+        md = render_contributors_md(contributors)
+        assert "n/a" in md
+
+    def test_sorted_by_level_then_name(self) -> None:
+        contributors = [
+            {"name": "Zed", "github": "zed", "level": "contributor", "areas": ["a"]},
+            {
+                "name": "Amy",
+                "github": "amy",
+                "level": "core_maintainer",
+                "areas": ["a"],
+            },
+        ]
+        md = render_contributors_md(contributors)
+        assert md.index("Amy") < md.index("Zed")  # core_maintainer outranks contributor
+
+    def test_missing_github_is_fatal(self) -> None:
+        contributors = [{"name": "Jane", "level": "maintainer", "areas": ["router"]}]
+        with pytest.raises(SystemExit):
+            render_contributors_md(contributors)
+
+
+class TestRenderCodeownersWithExternals:
+    """End-to-end: an area-attached contributor rides every line the team owns."""
+
+    def _model_and_tree(self) -> tuple[ResolvedModel, list[str]]:
+        spec = {
+            "meta": {"catch_all": "@root"},
+            "areas": [
+                {
+                    "label": "runtime",
+                    "github_team": "@runtime",
+                    "path_globs": ["lib/llm/"],
+                },
+                {"label": "kvbm", "github_team": "@kvbm", "path_globs": []},
+            ],
+            "shared": [{"glob": "lib/llm/shared/", "owners": ["runtime", "kvbm"]}],
+            "advisory": [],
+            "classify": {"keyword_rules": [], "filetype_rules": []},
+        }
+        tree = ["lib/llm/a.rs", "lib/llm/b.rs", "lib/llm/shared/x.rs"]
+        return compute_resolution(spec, tree), tree
+
+    def test_base_line_gets_handle(self) -> None:
+        model, tree = self._model_and_tree()
+        external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
+        lines, _ = _render_codeowners(model, tree, group=True, external=external)
+        body = "\n".join(lines)
+        assert "@runtime @jane" in body
+
+    def test_shared_line_gets_handle(self) -> None:
+        model, tree = self._model_and_tree()
+        external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
+        lines, _ = _render_codeowners(model, tree, group=True, external=external)
+        shared_line = next(ln for ln in lines if ln.startswith("/lib/llm/shared/"))
+        assert "@runtime" in shared_line
+        assert "@kvbm" in shared_line
+        assert "@jane" in shared_line
+
+    def test_no_externals_is_unchanged(self) -> None:
+        model, tree = self._model_and_tree()
+        plain, _ = _render_codeowners(model, tree, group=True, external=[])
+        assert not any("@jane" in ln for ln in plain)
