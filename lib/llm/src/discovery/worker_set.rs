@@ -204,16 +204,6 @@ impl WorkerSet {
     pub fn set_instance_watcher(&mut self, rx: watch::Receiver<Vec<u64>>) {
         self.instance_count_rx = Some(rx);
     }
-
-    /// Whether this WorkerSet can serve requests. Delegates to the prefill router
-    /// if one exists; otherwise always returns true.
-    /// When the prefill router is deactivated and enforce_disagg is set, this returns
-    /// false, causing the model to be hidden from /v1/models and requests to be rejected.
-    pub fn can_serve_requests(&self) -> bool {
-        self.prefill_router
-            .as_ref()
-            .is_none_or(|pr| pr.can_serve_requests())
-    }
 }
 
 #[cfg(test)]

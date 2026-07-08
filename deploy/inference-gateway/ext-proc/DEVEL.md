@@ -132,7 +132,7 @@ The common local environment variables are:
 | `DYN_NAMESPACE_PREFIX` | unset | Preferred Dynamo discovery namespace prefix. |
 | `DYN_NAMESPACE` | unset | Exact Dynamo discovery namespace fallback. If unset, the binary uses `vllm-agg`. |
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component that exposes the `generate` endpoint. |
-| `DYN_ENFORCE_DISAGG` | `false` | Fail when prefill routing is unavailable instead of falling back to aggregated routing. |
+| `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |
 | `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode. The Rust EPP currently rejects `container`. |
 | `RUST_LOG` | `info` | Tracing log filter. |
 

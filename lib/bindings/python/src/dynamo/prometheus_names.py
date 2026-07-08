@@ -112,6 +112,14 @@ class frontend_service:
     # Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
     # pooling-model latencies (sub-second) without sacrificing resolution.
     EMBEDDING_LATENCY_SECONDS = "embedding_latency_seconds"
+    # Number of `image_url` content parts per request (histogram). Named
+    # `images_per_request` so the auto-emitted `_sum` (cumulative image volume),
+    # `_count` (requests observed), and `_bucket` all read naturally.
+    IMAGES_PER_REQUEST = "images_per_request"
+    # Number of `video_url` content parts per request (histogram)
+    VIDEOS_PER_REQUEST = "videos_per_request"
+    # Number of `audio_url` content parts per request (histogram)
+    AUDIO_PER_REQUEST = "audio_per_request"
     # Model configuration metrics
     # Runtime config metrics (from ModelRuntimeConfig):
     # Total KV blocks available for a worker serving the model
@@ -349,6 +357,8 @@ class router:
     REMOTE_INDEXER_QUERY_FAILURES_TOTAL = "router_remote_indexer_query_failures_total"
     # Total number of remote indexer routing-decision writes that failed
     REMOTE_INDEXER_WRITE_FAILURES_TOTAL = "router_remote_indexer_write_failures_total"
+    # Number of workers expected to publish KV events but missing query endpoints
+    KV_EVENT_SOURCE_MISMATCH_WORKERS = "router_kv_event_source_mismatch_workers"
     # Time to first token observed at the router (seconds)
     TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
     # Average inter-token latency observed at the router (seconds)

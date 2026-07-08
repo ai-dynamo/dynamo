@@ -13,8 +13,11 @@ Set these on every Dynamo process (frontend, router, workers) for metrics, trace
 |---|---|---|
 | `DYN_SYSTEM_PORT=8081` | Unified system port (metrics + health). | Yes for metrics. |
 | `OTEL_EXPORT_ENABLED=true` | Enable OpenTelemetry export. **Without this, traces and logs never leave the process** — Loki and Tempo will show nothing even if they are healthy. | Yes for traces/logs. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces (e.g. `http://tempo:4317`). Must be a gRPC listener — Dynamo's exporter does not speak OTLP/HTTP, even though the OTel Collector also listens on `:4318`. | Yes for traces. |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP gRPC endpoint for logs (e.g. `http://loki-otlp:4317`). Same gRPC-only constraint as the traces endpoint above. | Yes for logs. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Generic OTLP endpoint for both traces and logs (e.g. `http://otel-collector:4317`). With `http/protobuf`, Dynamo appends the signal path (`/v1/traces`, `/v1/logs`). | Yes, unless both signal-specific endpoints below are set. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Endpoint for traces only (e.g. `http://tempo:4317`), used as-is — no path is appended. Falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then the protocol default (`http://localhost:4317` for `grpc`, `http://localhost:4318/v1/traces` for `http/protobuf`). | Optional override. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Endpoint for logs only (e.g. `http://loki-otlp:4317`), used as-is. Same fallback chain as the traces endpoint (the `http/protobuf` default is `http://localhost:4318/v1/logs`). **Does not fall back to the traces endpoint** (changed in v1.3.0) — if you set only the traces endpoint, logs go to the protocol default and are silently dropped. | Optional override. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | OTLP transport: `grpc` (default) or `http/protobuf`. Override per signal with `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`. | Optional. |
+| `OTEL_TRACES_SAMPLE_RATIO` | Trace head-sampling ratio in `[0.0, 1.0]` (e.g. `0.01` keeps ~1% of traces). Unset exports every trace. | Optional. |
 | `DYN_LOGGING_JSONL=true` | Structured JSON log output (recommended for Loki). | Optional. |
 
 Source of truth: [`lib/runtime/src/logging.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/logging.rs) `setup_logging()`.
@@ -57,10 +60,11 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 | [Metrics](metrics.md) | Available metrics reference | `DYN_SYSTEM_PORT`† |
 | [Operator Metrics (Kubernetes)](../kubernetes/observability/operator-metrics.md) | Operator controller and webhook metrics for Kubernetes | N/A (configured via Helm) |
 | [Health Checks](health-checks.md) | Component health monitoring and readiness probes | `DYN_SYSTEM_PORT`†, `DYN_SYSTEM_STARTING_HEALTH_STATUS`, `DYN_SYSTEM_HEALTH_PATH`, `DYN_SYSTEM_LIVE_PATH`, `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` |
-| [Tracing](tracing.md) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
-| [Request Replay Tracing](request-tracing.md) | Per-request JSONL capture for direct DynoSim replay | `DYN_REQUEST_TRACE`, `DYN_REQUEST_TRACE_OUTPUT_PATH` |
-| [Logging](logging.md) | Structured logging and OTLP log export to Loki | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`† |
-| [Audit Payload Logging](logging.md#audit-payload-logging-otlp) | Per-request chat-completion payload capture exported over OTLP logs | `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`, `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`†, `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`† |
+| [Tracing](tracing.md) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_ENDPOINT`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_EXPORTER_OTLP_PROTOCOL`†, `OTEL_TRACES_SAMPLE_RATIO`, `OTEL_SERVICE_NAME`† |
+| [Forward Pass Metrics Tracing](forward-pass-metrics-tracing.md) | Best-effort rotating gzip JSONL capture of backend forward pass metrics | `DYN_FPM_TRACE`, `DYN_FPM_OUTPUT_PATH`, `DYN_FPM_MODE`, `DYN_FPM_SAMPLE_INTERVAL_MS`, `DYN_FPM_JSONL_GZ_ROLL_BYTES`, `DYN_FPM_MAX_SEGMENTS` |
+| [Request Replay Tracing](request-tracing.md) | Per-request trace capture for direct DynoSim replay and optional payload logging | `DYN_REQUEST_TRACE`, `DYN_REQUEST_TRACE_SINKS`, `DYN_REQUEST_TRACE_FILE_PATH`, `DYN_REQUEST_TRACE_RECORDS` |
+| [Logging](logging.md) | Structured logging and OTLP log export to Loki | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_ENDPOINT`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`†, `OTEL_EXPORTER_OTLP_PROTOCOL`† |
+| [Request Payload Logging](logging.md#request-payload-logging-otlp) | Per-request chat-completion payload rows exported over OTLP logs | `DYN_REQUEST_TRACE_SINKS`, `DYN_REQUEST_TRACE_RECORDS`, `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`†, `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`† |
 
 **Variables marked with † are shared across multiple observability systems.**
 

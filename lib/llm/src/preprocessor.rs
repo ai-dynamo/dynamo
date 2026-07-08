@@ -38,7 +38,6 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
-use std::borrow::Cow;
 use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -65,13 +64,11 @@ use crate::protocols::{
     TokenIdType,
     common::{
         OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
-        extensions::{AgentHints, NvExtProvider, routing_constraints_to_kv},
+        extensions::{AgentHints, NvExtProvider, request_cache_salt, routing_constraints_to_kv},
     },
     openai::{
         DeltaGeneratorExt,
-        chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse, jail::JailedStream,
-        },
+        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     },
@@ -83,7 +80,7 @@ use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInpu
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 pub use crate::protocols::common::metrics::{
-    ANNOTATION_AUDIT_USAGE, ANNOTATION_LLM_METRICS, LLMMetricAnnotation,
+    ANNOTATION_LLM_METRICS, ANNOTATION_PAYLOAD_USAGE, LLMMetricAnnotation,
 };
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
@@ -185,6 +182,33 @@ pub struct MmImageEntry {
     pub mm_hash: u64,
     pub width: u32,
     pub height: u32,
+}
+
+/// Per-request media content-part counts, carried to the metrics annotation.
+/// Derived from `multi_modal_data`, so independent of the `mm-routing` feature.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MultimodalCounts {
+    pub image: usize,
+    pub video: usize,
+    pub audio: usize,
+}
+
+impl MultimodalCounts {
+    /// Count `image_url` / `video_url` / `audio_url` parts (vec length per modality).
+    fn from_preprocessed(request: &PreprocessedRequest) -> Self {
+        let count = |key: &str| {
+            request
+                .multi_modal_data
+                .as_ref()
+                .and_then(|m| m.get(key))
+                .map_or(0, |v| v.len())
+        };
+        Self {
+            image: count("image_url"),
+            video: count("video_url"),
+            audio: count("audio_url"),
+        }
+    }
 }
 
 /// Derive the model's local directory from the MDC. The directory is the
@@ -316,9 +340,6 @@ impl OpenAIPreprocessor {
             if let Some(ref fields) = nvext.extra_fields {
                 nvext_passthrough.insert("extra_fields".to_string(), serde_json::json!(fields));
             }
-            if let Some(ref salt) = nvext.cache_salt {
-                nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
-            }
             if let Some(ref metadata_upload) = nvext.metadata_upload {
                 nvext_passthrough.insert(
                     "metadata_upload".to_string(),
@@ -330,12 +351,7 @@ impl OpenAIPreprocessor {
             }
         }
 
-        if !nvext_passthrough.contains_key("cache_salt")
-            && let Some(salt) = request
-                .unsupported_fields()
-                .and_then(|fields| fields.get("cache_salt"))
-                .and_then(|value| value.as_str())
-        {
+        if let Some(salt) = request_cache_salt(request) {
             nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
         }
 
@@ -676,6 +692,7 @@ impl OpenAIPreprocessor {
         let (token_ids, annotations) = {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
             self.gather_tokens(request, formatted_prompt.as_deref(), tracker)
+                .await
                 .with_context(|| "Failed to gather tokens")?
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
@@ -840,6 +857,7 @@ impl OpenAIPreprocessor {
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         let lora_name = self.lora_name.clone();
+        let cache_namespace = request_cache_salt(request).map(str::to_owned);
 
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
@@ -858,6 +876,7 @@ impl OpenAIPreprocessor {
                 strict_priority,
                 priority,
                 lora_name,
+                cache_namespace: cache_namespace.clone(),
                 allowed_worker_ids: None,
                 routing_constraints: nvext
                     .routing_constraints
@@ -865,11 +884,12 @@ impl OpenAIPreprocessor {
                     .map(routing_constraints_to_kv),
             };
             builder.routing(Some(routing));
-        } else if lora_name.is_some() {
-            // Ensure routing hints exist when we have LoRA,
-            // even when nvext is absent.
+        } else if lora_name.is_some() || cache_namespace.is_some() {
+            // Ensure routing hints exist when we have LoRA or a legacy
+            // top-level cache_salt, even when nvext is absent.
             builder.routing(Some(RoutingHints {
                 lora_name,
+                cache_namespace,
                 ..Default::default()
             }));
         }
@@ -1126,9 +1146,7 @@ impl OpenAIPreprocessor {
             }))
             .await;
 
-            for ((type_str, _content_part), result) in
-                fetch_tasks.into_iter().zip(results.into_iter())
-            {
+            for ((type_str, _content_part), result) in fetch_tasks.into_iter().zip(results) {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
                 let rdma_descriptor = result?;
 
@@ -1621,7 +1639,7 @@ impl OpenAIPreprocessor {
     /// the caller asked for. The caller owns the result and is responsible for
     /// installing it on the builder via `builder.token_ids(...)` once any
     /// downstream consumers (e.g. MM-routing) have borrowed it.
-    pub fn gather_tokens<
+    pub async fn gather_tokens<
         R: OAIChatLikeRequest
             + AnnotationsProvider
             + SamplingOptionsProvider
@@ -1704,10 +1722,10 @@ impl OpenAIPreprocessor {
                                 tracing::warn!(
                                     "backend_instance_id provided but no token_data; tokenizing prompt"
                                 );
-                                let encoding = self.encode_with_timing(prompt, tracker)?;
+                                let encoding = self.encode_with_timing(prompt, tracker).await?;
                                 (encoding.token_ids().to_vec(), false)
                             } else {
-                                let encoding = self.encode_with_timing(prompt, tracker)?;
+                                let encoding = self.encode_with_timing(prompt, tracker).await?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -1725,7 +1743,7 @@ impl OpenAIPreprocessor {
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encoding = self.encode_with_timing(&texts[0], tracker)?;
+                                let encoding = self.encode_with_timing(&texts[0], tracker).await?;
                                 let tokens = encoding.token_ids().to_vec();
                                 token_count = Some(tokens.len());
                                 tokens_out = tokens;
@@ -1772,19 +1790,25 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    fn encode_with_timing(
+    async fn encode_with_timing(
         &self,
         prompt: &str,
         tracker: Option<&RequestTracker>,
     ) -> anyhow::Result<Encoding> {
         let encode_start = Instant::now();
-        let prompt = if prompt.contains('\0') {
+        // Offload the CPU-heavy BPE encode to the bounded blocking pool instead of running it on
+        // the async event loop. For long prompts at high concurrency, a synchronous encode here
+        // stalls the frontend tokio runtime for seconds, starving the I/O tasks that share the
+        // runtime. Own the prompt + clone the tokenizer (Arc) so the closure is 'static + Send;
+        // mirrors the embedding path's spawn_blocking offload.
+        let owned = if prompt.contains('\0') {
             tracing::debug!("Prompt contains null bytes; stripping to avoid tokenizer divergence");
-            Cow::Owned(prompt.replace('\0', ""))
+            prompt.replace('\0', "")
         } else {
-            Cow::Borrowed(prompt)
+            prompt.to_string()
         };
-        let encoding = self.tokenizer.encode(prompt.as_ref())?;
+        let tokenizer = self.tokenizer.clone();
+        let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
@@ -2012,9 +2036,10 @@ impl OpenAIPreprocessor {
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
-        emit_audit_usage_chunk: bool,
+        emit_payload_usage_chunk: bool,
         trace_tokens_enabled: bool,
         trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
+        mm_counts: MultimodalCounts,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -2031,13 +2056,14 @@ impl OpenAIPreprocessor {
             cumulative_output_tokens: usize,
             finish_reason_sent: bool,
             usage_chunk_sent: bool,
-            /// Buffered plain usage chunk to send to the client after the audit
-            /// chunk (ANNOTATION_AUDIT_USAGE). Only Some when is_usage_enabled().
+            /// Buffered plain usage chunk to send to the client after the payload
+            /// chunk (ANNOTATION_PAYLOAD_USAGE). Only Some when is_usage_enabled().
             pending_client_usage: Option<Annotated<Resp>>,
             finished: bool,
-            emit_audit_usage_chunk: bool,
+            emit_payload_usage_chunk: bool,
             trace_tokens_enabled: bool,
             trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
+            mm_counts: MultimodalCounts,
         }
 
         let state = State {
@@ -2050,9 +2076,10 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: false,
             pending_client_usage: None,
             finished: false,
-            emit_audit_usage_chunk,
+            emit_payload_usage_chunk,
             trace_tokens_enabled,
             trace_finish_reason_metadata,
+            mm_counts,
         };
 
         // transform the common response stream into a chat response stream
@@ -2061,13 +2088,13 @@ impl OpenAIPreprocessor {
             async move {
                 // Drain the buffered client-facing plain usage chunk first.
                 // This MUST come before the `finished` guard: the stream-end
-                // handler sets inner.finished = true before returning the audit
+                // handler sets inner.finished = true before returning the payload
                 // chunk, so on the very next iteration the finished guard would
                 // terminate before we ever emit the client chunk.
                 if let Some(client_chunk) = inner.pending_client_usage.take() {
                     inner.finished = true;
-                    // Emit unconditionally to match the non-audit path below; the
-                    // chunk is only buffered after a finish_reason, so auditing must
+                    // Emit unconditionally to match the non-payload path below; the
+                    // chunk is only buffered after a finish_reason, so payload capture must
                     // not alter the client SSE tail.
                     return Some((client_chunk, inner));
                 }
@@ -2164,6 +2191,9 @@ impl OpenAIPreprocessor {
                         output_tokens: current_osl,
                         chunk_tokens,
                         cached_tokens: None,
+                        image_count: inner.mm_counts.image,
+                        video_count: inner.mm_counts.video,
+                        audio_count: inner.mm_counts.audio,
                         prefill_worker_id,
                         prefill_dp_rank,
                         prefill_worker_type,
@@ -2241,6 +2271,9 @@ impl OpenAIPreprocessor {
                             output_tokens: usage.completion_tokens as usize,
                             chunk_tokens: 0,
                             cached_tokens,
+                            image_count: inner.mm_counts.image,
+                            video_count: inner.mm_counts.video,
+                            audio_count: inner.mm_counts.audio,
                             prefill_worker_id,
                             prefill_dp_rank,
                             prefill_worker_type,
@@ -2273,9 +2306,9 @@ impl OpenAIPreprocessor {
 
                         let usage_requested = inner.response_generator.is_usage_enabled();
 
-                        if inner.emit_audit_usage_chunk {
-                            // Audit on: emit a dedicated audit-usage chunk that
-                            // always carries usage for the audit DeltaAggregator
+                        if inner.emit_payload_usage_chunk {
+                            // Payload capture on: emit a dedicated payload-usage chunk that
+                            // always carries usage for the payload DeltaAggregator
                             // (the EventConverter strips it entirely from the
                             // client), and buffer the plain client usage chunk only
                             // when include_usage was requested.
@@ -2294,16 +2327,16 @@ impl OpenAIPreprocessor {
                                     tracing::warn!("Failed to serialize metrics: {}", e);
                                     Annotated::<()>::from_data(())
                                 });
-                            let audit_usage = Annotated::<Resp> {
+                            let payload_usage = Annotated::<Resp> {
                                 id: None,
                                 data: Some(usage_chunk),
-                                event: Some(ANNOTATION_AUDIT_USAGE.to_string()),
+                                event: Some(ANNOTATION_PAYLOAD_USAGE.to_string()),
                                 comment: annotation.comment,
                                 error: None,
                             };
-                            Some((audit_usage, inner))
+                            Some((payload_usage, inner))
                         } else {
-                            // Audit off: a single usage chunk; data is present only
+                            // Payload capture off: a single usage chunk; data is present only
                             // when include_usage was requested. Metrics ride via the
                             // typed (serde-skip) llm_metrics field for internal
                             // observation, never reaching the client.
@@ -2422,7 +2455,20 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// Apply tool calling jail to the stream if needed
+    /// Apply tool calling jail to the stream if needed.
+    ///
+    /// The jail itself now lives in `dynamo-parsers`
+    /// (`dynamo_parsers::tool_calling::jail`), where it operates on the shared
+    /// `CreateChatCompletionStreamResponse` — dynamo-parsers cannot depend on
+    /// dynamo-runtime, so it does not know about `Annotated` or the `Nv`
+    /// newtype. This method is the boundary adapter: it unwraps the dynamo
+    /// `Annotated<Nv{inner, nvext}>` stream into the jail's
+    /// `Annotated<CreateChatCompletionStreamResponse>`, runs the moved jail, and
+    /// re-wraps the result.
+    ///
+    /// `nvext` is not populated on the streaming tool-call path (only the unary
+    /// aggregator/anthropic paths set it), so the jail never needs to preserve
+    /// it and re-wrapped chunks carry `nvext: None`.
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -2433,63 +2479,81 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        use dynamo_protocols::types::ChatCompletionToolChoiceOption;
+        use dynamo_parsers::tool_calling::jail::{
+            Annotated as JailAnnotated, apply_tool_calling_jail as jail_apply,
+        };
+        use std::sync::{Arc, Mutex};
 
-        let mut builder = JailedStream::builder();
-
-        // Set tool definitions if provided
-        if let Some(tool_definitions) = tool_definitions
-            && !tool_definitions.is_empty()
-        {
-            builder = builder.tool_definitions(tool_definitions);
+        // The jail operates on the shared `Create` payload and never touches the
+        // dynamo-only typed `llm_metrics`, which `transform_postprocessor_stream`
+        // stamps *upstream* of the jail. `Create` has no slot for it, so buffer it
+        // here on the way in and re-attach on the way out — keeping the metrics off
+        // the shared type while preserving them across the boundary.
+        //
+        // `llm_metrics` is cumulative (`output_tokens`) plus per-chunk
+        // (`chunk_tokens`), and the jail may fold N buffered input chunks into one
+        // emitted chunk. So accumulate `chunk_tokens` and stamp the running total,
+        // with the latest cumulative fields, onto the next emitted data chunk. That
+        // preserves what `metrics.rs` records: `observe_response` sums `chunk_tokens`
+        // and `observe_current_osl` takes the latest `output_tokens`. (The
+        // annotation form on data-less usage chunks rides through untouched via
+        // `event`/`comment`.)
+        #[derive(Default)]
+        struct PendingMetrics {
+            template: Option<LLMMetricAnnotation>,
+            chunk_tokens: usize,
         }
+        let pending = Arc::new(Mutex::new(PendingMetrics::default()));
+        let pending_in = Arc::clone(&pending);
 
-        // When structural_tag is active, the model output is already constrained by
-        // guided decoding into a model-specific format. Always use the marker-based
-        // parser to extract tool calls from that format.
-        if uses_tool_call_structural_tag {
-            if let Some(parser) = tool_call_parser {
-                builder = builder.tool_call_parser(parser);
+        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
+        let jail_input = stream.map(move |mut a| {
+            if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
+                let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
+                p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
+                p.template = Some(metrics);
             }
-        } else {
-            // Configure jail based on tool_choice
-            //
-            // For tool_choice=required or named we mirror SGLang / vLLM: assume the
-            // backend applied guided decoding and emit a bare JSON shape, so parse
-            // via the JSON array parser (base_json_parser) rather than the model's
-            // native-format parser.  If a parser is also configured we still carry
-            // it so the Immediate branch can fall back to marker-based parsing for
-            // backends that do not honor guided decoding (e.g. XML-native models
-            // like qwen3_coder — see regression test_tool_choice_required_with_
-            // qwen3_coder_parser).
-            match tool_choice {
-                Some(ChatCompletionToolChoiceOption::Named(named)) => {
-                    builder = builder
-                        .tool_choice_named(named.function.name.clone())
-                        .named_tool_filter(named.function.name.clone());
-                    if let Some(parser) = tool_call_parser {
-                        builder = builder.tool_call_parser(parser);
-                    }
-                }
-                Some(ChatCompletionToolChoiceOption::Required) => {
-                    builder = builder.tool_choice_required();
-                    if let Some(parser) = tool_call_parser {
-                        builder = builder.tool_call_parser(parser);
-                    }
-                }
-                Some(ChatCompletionToolChoiceOption::Auto)
-                | Some(ChatCompletionToolChoiceOption::None)
-                | None => {
-                    // Traditional marker-based jail for auto/none/unspecified
-                    if let Some(parser) = tool_call_parser {
-                        builder = builder.tool_call_parser(parser);
-                    }
-                }
+            JailAnnotated {
+                data: a.data.map(|nv| nv.inner),
+                id: a.id,
+                event: a.event,
+                comment: a.comment,
+                error: a.error.map(|e| e.to_string()),
             }
-        }
+        });
 
-        let jail = builder.build();
-        jail.apply_with_finish_reason(stream)
+        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach llm_metrics)
+        jail_apply(
+            tool_call_parser,
+            tool_choice,
+            tool_definitions,
+            uses_tool_call_structural_tag,
+            jail_input,
+        )
+        .map(move |a| {
+            // Stamp the accumulated metrics onto the next emitted data chunk;
+            // data-less/synthesized chunks carry it forward (or `None`).
+            let llm_metrics = a.data.as_ref().and_then(|_| {
+                let mut p = pending.lock().expect("jail metrics buffer poisoned");
+                let chunk_tokens = p.chunk_tokens;
+                p.chunk_tokens = 0;
+                p.template.take().map(|mut metrics| {
+                    metrics.chunk_tokens = chunk_tokens;
+                    metrics
+                })
+            });
+            Annotated {
+                data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                    inner,
+                    nvext: None,
+                    llm_metrics,
+                }),
+                id: a.id,
+                event: a.event,
+                comment: a.comment,
+                error: a.error.map(DynamoError::msg),
+            }
+        })
     }
 
     /// Whether the selected tool-call or reasoning parser depends on the
@@ -2971,18 +3035,18 @@ impl
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
 
-        // Build audit handle (None if no DYN_AUDIT_SINKS / not audit-eligible).
+        // Build request payload handle (None if request trace is disabled / not eligible).
         // The handle snapshots the pristine request and its arrival time here;
-        // the single combined record is published once at stream completion
+        // the single payload record is published once at stream completion
         // (or with an empty response on cancel/timeout), off the request path.
-        let audit_handle = crate::audit::handle::create_handle(&request, &request_id);
+        let payload_handle = crate::request_trace::payload::create_handle(&request, &request_id);
 
         // For non-streaming requests (stream=false), enable usage by default
         // This ensures compliance with OpenAI API spec where non-streaming responses
         // always include usage statistics
         request.enable_usage_for_nonstreaming(original_stream_flag);
 
-        // Set stream=true for internal processing (after audit capture)
+        // Set stream=true for internal processing (after request payload capture)
         request.inner.stream = Some(true);
 
         // create a response generator
@@ -3021,6 +3085,9 @@ impl
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
 
+        // Capture media counts before `common_request` is moved into the context.
+        let mm_counts = MultimodalCounts::from_preprocessed(&common_request);
+
         let mut response_generator = Box::new(response_generator);
 
         // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
@@ -3049,9 +3116,10 @@ impl
             response_stream,
             response_generator,
             context.clone(),
-            audit_handle.is_some(),
+            payload_handle.is_some(),
             trace_tokens_enabled,
             trace_finish_reason_metadata,
+            mm_counts,
         );
 
         let transformed_stream = self.postprocessor_parsing_stream(
@@ -3061,32 +3129,32 @@ impl
             uses_tool_call_structural_tag,
         )?;
 
-        // Apply audit aggregation strategy.
-        // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
-        // while the non-audit branch boxes the impl Stream from postprocessor_parsing_stream.
-        let final_stream = if let Some(audit) = audit_handle {
-            let (stream, agg_fut) = if audit.streaming() {
+        // Apply request payload aggregation strategy.
+        // The payload branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
+        // while the non-payload branch boxes the impl Stream from postprocessor_parsing_stream.
+        let final_stream = if let Some(payload) = payload_handle {
+            let (stream, agg_fut) = if payload.streaming() {
                 // Streaming: apply scan (pass-through + parallel aggregation)
-                crate::audit::stream::scan_aggregate_with_future(transformed_stream)
+                crate::request_trace::payload_stream::scan_aggregate_with_future(transformed_stream)
             } else {
                 // Non-streaming: apply fold (collect all, then emit single chunk)
-                crate::audit::stream::fold_aggregate_with_future(transformed_stream)
+                crate::request_trace::payload_stream::fold_aggregate_with_future(transformed_stream)
             };
 
-            // Spawn the audit emit off the request path. `agg_fut` resolves to
+            // Spawn the payload emit off the request path. `agg_fut` resolves to
             // None on client cancel / gateway timeout / aggregation failure; we
-            // still emit the combined record with an empty response so those
-            // cases remain auditable. The record carries the request snapshot
+            // still emit the payload record with an empty response so those
+            // cases remain inspectable. The record carries the request snapshot
             // and arrival time captured at handle creation.
             tokio::spawn(async move {
                 match agg_fut.await {
-                    Some(final_resp) => audit.emit(Some(Arc::new(final_resp))),
+                    Some(final_resp) => payload.emit(Some(Arc::new(final_resp))),
                     None => {
                         tracing::debug!(
-                            request_id = %audit.request_id(),
-                            "audit: response aggregation incomplete (client cancel / timeout); emitting request-only record"
+                            request_id = %payload.request_id(),
+                            "request payload: response aggregation incomplete (client cancel / timeout); emitting request-only record"
                         );
-                        audit.emit(None);
+                        payload.emit(None);
                     }
                 }
             });
@@ -3168,7 +3236,9 @@ impl
         } else {
             // Normal path: tokenize the prompt; embeddings don't need MM routing,
             // so install tokens on the builder right away.
-            let (token_ids, ann) = self.gather_tokens(&request, None, tracker.as_deref())?;
+            let (token_ids, ann) = self
+                .gather_tokens(&request, None, tracker.as_deref())
+                .await?;
             builder.token_ids(token_ids);
             ann
         };
@@ -3221,7 +3291,8 @@ impl
         // Extract context once
         let context = response_stream.context();
 
-        // transform the postprocessor stream
+        // transform the postprocessor stream. Legacy `/v1/completions` is
+        // text-only, so multimodal counts are always zero here.
         let stream = Self::transform_postprocessor_stream(
             response_stream,
             response_generator,
@@ -3229,6 +3300,7 @@ impl
             false,
             trace_tokens_enabled,
             trace_finish_reason_metadata,
+            MultimodalCounts::default(),
         );
 
         let stream = crate::request_trace::wrap_completion_request_end_stream(
@@ -3358,6 +3430,52 @@ mod strip_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::common::preprocessor::MultimodalData;
+    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+
+    fn url_entry(u: &str) -> MultimodalData {
+        MultimodalData::Url(url::Url::parse(u).unwrap())
+    }
+
+    fn preprocessed_with_media(media: Option<MultimodalDataMap>) -> PreprocessedRequest {
+        let mut b = PreprocessedRequest::builder();
+        b.model("m".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default());
+        if let Some(m) = media {
+            b.multi_modal_data(Some(m));
+        }
+        b.build().unwrap()
+    }
+
+    #[test]
+    fn test_multimodal_counts_from_preprocessed_mixed() {
+        // 2 images, 1 video, 0 audio -> counts reflect vec lengths per modality.
+        let mut map: MultimodalDataMap = HashMap::new();
+        map.insert(
+            "image_url".to_string(),
+            vec![url_entry("http://x/a.png"), url_entry("http://x/b.png")],
+        );
+        map.insert("video_url".to_string(), vec![url_entry("http://x/c.mp4")]);
+
+        let req = preprocessed_with_media(Some(map));
+        let counts = MultimodalCounts::from_preprocessed(&req);
+        assert_eq!(counts.image, 2);
+        assert_eq!(counts.video, 1);
+        assert_eq!(counts.audio, 0);
+    }
+
+    #[test]
+    fn test_multimodal_counts_from_preprocessed_text_only() {
+        // No multi_modal_data -> all zero.
+        let req = preprocessed_with_media(None);
+        let counts = MultimodalCounts::from_preprocessed(&req);
+        assert_eq!(counts.image, 0);
+        assert_eq!(counts.video, 0);
+        assert_eq!(counts.audio, 0);
+    }
 
     #[test]
     fn routing_priorities_keep_strict_tier_independent() {
@@ -3389,18 +3507,19 @@ mod tests {
             tokenize_latency: Some(std::time::Duration::from_millis(5)),
             detokenize_total_latency: Some(std::time::Duration::from_micros(50)),
             detokenize_count: Some(6),
+            ..Default::default()
         }
     }
 
     #[test]
     fn llm_metrics_from_annotation_recognizes_both_metric_event_tags() {
-        // Both the per-chunk `llm_metrics` event and the audit-only `audit_usage`
+        // Both the per-chunk `llm_metrics` event and the payload-only `payload_usage`
         // event carry the serialized LLMMetricAnnotation as their comment and must
         // be observed by the metrics collector.
         let base = test_llm_metrics_annotation()
             .to_annotation::<()>()
             .expect("metrics annotation serializes");
-        for tag in [ANNOTATION_LLM_METRICS, ANNOTATION_AUDIT_USAGE] {
+        for tag in [ANNOTATION_LLM_METRICS, ANNOTATION_PAYLOAD_USAGE] {
             let tagged = Annotated::<()> {
                 id: None,
                 data: None,
