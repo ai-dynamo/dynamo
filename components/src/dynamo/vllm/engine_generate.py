@@ -47,6 +47,23 @@ def payload(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
+def reconstructed_payload(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Rebuild vLLM's request with the canonical internal token IDs.
+
+    The frontend carries token IDs once in ``PreprocessedRequest.token_ids``.
+    Accept a duplicated legacy envelope only when its copy agrees.
+    """
+    generate_request = payload(request)
+    if generate_request is None:
+        return None
+
+    token_ids = list(request.get("token_ids") or [])
+    envelope_token_ids = generate_request.get("token_ids")
+    if envelope_token_ids is not None and token_ids != list(envelope_token_ids):
+        raise ValueError("core token_ids do not match extra_args.vllm_tito.token_ids")
+    return {**generate_request, "token_ids": token_ids}
+
+
 def priority(request: Dict[str, Any]) -> int:
     generate_request = payload(request)
     if generate_request is None:
@@ -74,14 +91,11 @@ def merge_kv_transfer_params(caller: Any, framework: Any) -> Dict[str, Any] | An
 
 
 def build_prompt(request: Dict[str, Any]) -> Any:
-    generate_request = payload(request)
+    generate_request = reconstructed_payload(request)
     if generate_request is None:
         raise ValueError("extra_args.vllm_tito is missing from token-native request")
 
-    token_ids = list(request.get("token_ids") or [])
-    envelope_token_ids = list(generate_request.get("token_ids") or [])
-    if token_ids != envelope_token_ids:
-        raise ValueError("core token_ids do not match extra_args.vllm_tito.token_ids")
+    token_ids = generate_request["token_ids"]
 
     cache_salt = generate_request.get("cache_salt")
     features = generate_request.get("features")
@@ -145,7 +159,7 @@ def build_sampling_params(
     default_sampling_params: Dict[str, Any],
     model_max_len: int | None,
 ) -> SamplingParams:
-    generate_request = payload(request)
+    generate_request = reconstructed_payload(request)
     if generate_request is None:
         raise ValueError("extra_args.vllm_tito is missing from token-native request")
 

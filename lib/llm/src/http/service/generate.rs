@@ -21,21 +21,24 @@ use axum::{
     routing::post,
 };
 use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
+use futures::StreamExt;
 use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::create_connection_monitor;
-use super::metrics::{CancellationLabels, ErrorType};
+use super::metrics::{CancellationLabels, ErrorType, HttpQueueGuard, ResponseMetricCollector};
 use super::openai::{
     check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
     get_or_create_request_id, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
 use crate::protocols::common::preprocessor::PreprocessedRequest;
+use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
+use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
@@ -218,7 +221,10 @@ fn preprocessed_from_generate(
     let min_tokens = sampling.min_tokens();
     let ignore_eos = sampling.ignore_eos();
     let routing_priority = dynamo_routing_priority(request.priority);
+    let input_tokens = request.token_ids.len();
     let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(input_tokens, None);
     let GenerateRequest {
         token_ids,
         cache_salt,
@@ -254,8 +260,77 @@ fn preprocessed_from_generate(
             // that field from PreprocessedRequest.token_ids after routing.
             "vllm_tito": vllm_tito,
         })))
+        .tracker(Some(tracker))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
+}
+
+/// Metrics adapter for the raw engine stream used by `/inference/v1/generate`.
+///
+/// Unlike the OpenAI text endpoints, Generate deliberately bypasses the
+/// tokenizer/postprocessor pipeline that emits `LLMMetricAnnotation`. Its
+/// token IDs are already rendered, so observe the same response metrics from
+/// the raw token deltas while leaving tokenizer and media metrics untouched.
+struct GenerateMetricCollector {
+    response: ResponseMetricCollector,
+    http_queue: Option<HttpQueueGuard>,
+    tracker: Arc<RequestTracker>,
+    input_tokens: usize,
+    output_tokens: usize,
+}
+
+impl GenerateMetricCollector {
+    fn new(
+        metrics: Arc<super::metrics::Metrics>,
+        model: &str,
+        tracker: Arc<RequestTracker>,
+        input_tokens: usize,
+    ) -> Self {
+        Self {
+            response: metrics.clone().create_response_collector(model),
+            http_queue: Some(metrics.create_http_queue_guard(model)),
+            tracker,
+            input_tokens,
+            output_tokens: 0,
+        }
+    }
+
+    fn observe(&mut self, annotated: &Annotated<LLMEngineOutput>) {
+        let Some(output) = annotated.data.as_ref() else {
+            return;
+        };
+
+        if let Some(worker) = self.tracker.get_worker_info() {
+            self.response.set_worker_info(
+                worker.prefill_worker_id,
+                worker.prefill_dp_rank,
+                self.tracker.prefill_worker_type().map(String::from),
+                worker.decode_worker_id,
+                worker.decode_dp_rank,
+                self.tracker.decode_worker_type().map(String::from),
+            );
+        }
+
+        let cached_tokens = output
+            .completion_usage
+            .as_ref()
+            .and_then(|usage| usage.prompt_tokens_details.as_ref())
+            .and_then(|details| details.cached_tokens)
+            .map(|tokens| tokens as usize);
+        self.response.observe_cached_tokens(cached_tokens);
+
+        let chunk_tokens = output.token_ids.len();
+        self.output_tokens += chunk_tokens;
+        self.response.observe_current_osl(self.output_tokens);
+        if self.response.is_first_token()
+            && chunk_tokens > 0
+            && let Some(guard) = self.http_queue.take()
+        {
+            drop(guard);
+        }
+        self.response
+            .observe_response(self.input_tokens, chunk_tokens);
+    }
 }
 
 /// Resolve, route, and dispatch a frontend-native token-in/token-out request.
@@ -395,12 +470,21 @@ async fn generate_dispatch(
     state: Arc<service_v2::State>,
     response_options: GenerateResponseOptions,
 ) -> Response {
+    let metric_model = state.manager().metric_model_for(&model).to_string();
+    let input_tokens = context.content().token_ids.len();
+    let tracker = context.content().tracker.clone().unwrap_or_else(|| {
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(input_tokens, None);
+        tracker
+    });
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
-        state.manager().metric_model_for(&model),
+        &metric_model,
         super::metrics::Endpoint::Generate,
         false,
         &request_id,
     );
+    let mut metric_collector =
+        GenerateMetricCollector::new(state.metrics_clone(), &metric_model, tracker, input_tokens);
     let request_context = context.context();
     let generate_result =
         match run_until_killed(request_context.as_ref(), engine.generate(context)).await {
@@ -434,7 +518,7 @@ async fn generate_dispatch(
                 tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected generate request");
                 state
                     .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Generate);
+                    .inc_rejection(&metric_model, super::metrics::Endpoint::Generate);
                 return generate_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
@@ -447,6 +531,7 @@ async fn generate_dispatch(
     };
 
     let engine_context = stream.context();
+    let stream = stream.inspect(move |annotated| metric_collector.observe(annotated));
     let response_result = match run_until_killed(
         request_context.as_ref(),
         GenerateResponse::from_annotated_stream_with_options(
@@ -583,6 +668,8 @@ mod tests {
 
     struct CancelledEngine;
 
+    struct MetricEngine;
+
     #[async_trait::async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
         for CancelledEngine
@@ -612,6 +699,41 @@ mod tests {
                 finish_reason: Some(self.0.clone()),
                 ..Default::default()
             })]);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for MetricEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let stream = futures::stream::iter([
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![10],
+                    index: Some(0),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![11],
+                    index: Some(0),
+                    finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                    completion_usage: Some(dynamo_protocols::types::CompletionUsage {
+                        prompt_tokens: 3,
+                        completion_tokens: 2,
+                        total_tokens: 5,
+                        prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                            audio_tokens: None,
+                            cached_tokens: Some(2),
+                        }),
+                        completion_tokens_details: None,
+                    }),
+                    ..Default::default()
+                }),
+            ]);
             Ok(ResponseStream::new(Box::pin(stream), request.context()))
         }
     }
@@ -890,6 +1012,13 @@ mod tests {
             .and_then(|object| object.remove("token_ids"))
             .expect("token_ids in client request");
         assert_eq!(preprocessed.token_ids, vec![1, 2]);
+        assert_eq!(
+            preprocessed
+                .tracker
+                .as_ref()
+                .and_then(|tracker| tracker.isl_tokens()),
+            Some(2)
+        );
         assert_eq!(expected_token_ids, serde_json::json!([1, 2]));
         assert_eq!(envelope, &expected_envelope);
         assert!(envelope.get("token_ids").is_none());
@@ -982,6 +1111,28 @@ mod tests {
                 .build()
                 .expect("build dispatch test request"),
         )
+    }
+
+    fn metric_value<'a>(
+        families: &'a [prometheus::proto::MetricFamily],
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> &'a prometheus::proto::Metric {
+        let family = families
+            .iter()
+            .find(|family| family.name() == name)
+            .unwrap_or_else(|| panic!("missing metric family {name}"));
+        family
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                labels.iter().all(|(expected_name, expected_value)| {
+                    metric.get_label().iter().any(|label| {
+                        label.name() == *expected_name && label.value() == *expected_value
+                    })
+                })
+            })
+            .unwrap_or_else(|| panic!("missing {name} series with labels {labels:?}"))
     }
 
     fn assert_cancelled_dispatch_metrics(state: &service_v2::State) {
@@ -1123,6 +1274,173 @@ mod tests {
 
         assert_eq!(response.status().as_u16(), 499);
         assert_cancelled_dispatch_metrics(state.as_ref());
+    }
+
+    #[tokio::test]
+    async fn successful_generate_populates_frontend_metrics() {
+        const MODEL: &str = "generate-metric-test-model";
+        const WORKER_ID: &str = "987654321";
+        const DP_RANK: &str = "3";
+
+        let tracker = Arc::new(RequestTracker::new());
+        tracker.record_isl(3, None);
+        tracker.record_worker(
+            WORKER_ID.parse().unwrap(),
+            Some(DP_RANK.parse().unwrap()),
+            crate::discovery::WORKER_TYPE_DECODE,
+        );
+        let context = Context::new(
+            PreprocessedRequest::builder()
+                .model(MODEL.to_string())
+                .token_ids(vec![1, 2, 3])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .tracker(Some(tracker))
+                .build()
+                .expect("build metric test request"),
+        );
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(MetricEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let metric_model = state.manager().metric_model_for(MODEL).to_string();
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+
+        let response = generate_dispatch(
+            engine,
+            context,
+            "req-generate-metrics".to_string(),
+            MODEL.to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(state.metrics_clone().get_inflight_count(&metric_model), 0);
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                &metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            1
+        );
+
+        let families = registry.gather();
+        let model_labels = [("model", metric_model.as_str())];
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_requests_started_total",
+                &[("model", metric_model.as_str()), ("endpoint", "generate")],
+            )
+            .get_counter()
+            .value(),
+            1.0
+        );
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_active_requests", &model_labels)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_queued_requests", &model_labels)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_request_duration_seconds",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_input_sequence_tokens",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_sum(),
+            3.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_sum(),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_output_tokens_total",
+                &model_labels,
+            )
+            .get_counter()
+            .value(),
+            2.0
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_time_to_first_token_seconds",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_inter_token_latency_seconds",
+                &model_labels,
+            )
+            .get_histogram()
+            .get_sample_count(),
+            1
+        );
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels,)
+                .get_histogram()
+                .get_sample_sum(),
+            2.0
+        );
+
+        let worker_labels = [WORKER_ID, DP_RANK, crate::discovery::WORKER_TYPE_DECODE];
+        assert_eq!(
+            crate::http::service::metrics::WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE
+                .with_label_values(&worker_labels)
+                .get(),
+            3
+        );
+        assert!(
+            crate::http::service::metrics::WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE
+                .with_label_values(&worker_labels)
+                .get()
+                > 0.0
+        );
+        assert!(
+            crate::http::service::metrics::WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE
+                .with_label_values(&worker_labels)
+                .get()
+                > 0.0
+        );
     }
 
     #[test]

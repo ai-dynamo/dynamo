@@ -24,6 +24,15 @@ python tests/serve/tito_parity/run_pd_three_way.py \
   --model Qwen/Qwen3.5-35B-A3B-FP8 \
   --suite full
 
+# Scrape and verify Generate frontend metrics in each Dynamo topology.
+python tests/serve/tito_parity/verify_generate_metrics.py \
+  --model Qwen/Qwen3.5-2B \
+  --topology aggregated
+
+python tests/serve/tito_parity/verify_generate_metrics.py \
+  --model Qwen/Qwen3.5-2B \
+  --topology disaggregated
+
 # Qwen3.5 supports video input.
 python tests/serve/tito_parity/run_pd_three_way.py \
   --model Qwen/Qwen3.5-2B \
@@ -61,3 +70,12 @@ That mode intentionally reports any upstream/Dynamo drift instead of weakening
 the comparison. The aggregated runner writes beneath `logs/tito-parity/`; the
 P/D runner writes metadata, requests, per-deployment logs, raw responses,
 field-level checks, and summaries beneath `logs/tito-pd-three-way/`.
+
+`verify_generate_metrics.py` enables prefix caching, sends deterministic text
+and VLM Generate requests, and verifies Prometheus deltas for request lifecycle,
+input/output tokens, TTFT/ITL, cached tokens, live queue/active gauges, and
+P/D per-worker timing attribution. Its P/D run opts the existing launcher into
+KV routing so the request tracker receives both selected worker IDs; ordinary
+parity runs retain their default router. The verifier also checks that the
+token-in/token-out path does not report tokenizer latency. Artifacts are written
+beneath `logs/tito-generate-metrics/`.

@@ -33,7 +33,6 @@ def _request(sampling_params=None, **top_level):
     envelope = {
         "request_id": "request-1",
         "model": "test-model",
-        "token_ids": [11, 22, 33],
         "sampling_params": sampling_params,
         **top_level,
     }
@@ -124,9 +123,20 @@ def test_text_prompt_preserves_exact_tokens_and_cache_salt():
 
 def test_prompt_rejects_envelope_core_token_mismatch():
     request = _request({})
+    request["extra_args"]["vllm_tito"]["token_ids"] = [11, 22, 33]
     request["token_ids"] = [11, 22]
     with pytest.raises(ValueError, match="do not match"):
         _build_engine_generate_prompt(request)
+
+
+def test_sampling_params_reconstruct_canonical_token_ids():
+    request = _request({"temperature": 0, "max_tokens": 2})
+    assert "token_ids" not in request["extra_args"]["vllm_tito"]
+
+    params = build_sampling_params(request, default_sampling_params={})
+
+    assert params.temperature == 0
+    assert params.max_tokens == 2
 
 
 def test_multimodal_cache_hit_prompt_preserves_hashes_and_placeholders():
