@@ -3,6 +3,7 @@
 
 """Unit tests for SGLang backend components."""
 
+import json
 import logging
 import os
 import re
@@ -86,6 +87,58 @@ def _make_sglang_config(**overrides):
     for key, value in overrides.items():
         setattr(config, key, value)
     return config
+
+
+@pytest.mark.parametrize(
+    ("guided_decoding", "expected"),
+    [
+        (
+            {"json": {"type": "object", "required": ["city"]}},
+            {"json_schema": json.dumps({"type": "object", "required": ["city"]})},
+        ),
+        (
+            {"json": '{"type":"object","required":["city"]}'},
+            {"json_schema": '{"type":"object","required":["city"]}'},
+        ),
+        ({"regex": r"[A-Z]{3}-\d{4}"}, {"regex": r"[A-Z]{3}-\d{4}"}),
+        (
+            {"grammar": 'root ::= "yes" | "no"'},
+            {"ebnf": 'root ::= "yes" | "no"'},
+        ),
+        ({"choice": ["yes", "no"]}, {"regex": "(yes|no)"}),
+    ],
+    ids=["json-object", "json-string", "regex", "grammar", "choice"],
+)
+def test_unified_guided_decoding_maps_sglang_constraints(guided_decoding, expected):
+    assert (
+        sglang_llm_engine.SglangLLMEngine._get_guided_decoding_params(guided_decoding)
+        == expected
+    )
+
+
+def test_unified_guided_decoding_escapes_choice_regex_metacharacters():
+    params = sglang_llm_engine.SglangLLMEngine._get_guided_decoding_params(
+        {"choice": ["a+b", "answer (A)", "[done]?"]}
+    )
+
+    assert params == {"regex": r"(a\+b|answer\ \(A\)|\[done\]\?)"}
+    for choice in ("a+b", "answer (A)", "[done]?"):
+        assert re.fullmatch(params["regex"], choice)
+
+
+def test_unified_guided_decoding_ignores_empty_choice():
+    assert (
+        sglang_llm_engine.SglangLLMEngine._get_guided_decoding_params({"choice": []})
+        == {}
+    )
+
+
+def test_unified_guided_decoding_preserves_structural_tag():
+    structural_tag = {"begin": "<tool>", "schema": {"type": "object"}}
+
+    assert sglang_llm_engine.SglangLLMEngine._get_guided_decoding_params(
+        {"structural_tag": structural_tag}
+    ) == {"structural_tag": json.dumps(structural_tag)}
 
 
 def test_compat_restores_sglang_top_level_exports():
