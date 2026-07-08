@@ -178,6 +178,8 @@ type OrchestratorConfiguration struct {
 	LWS LWSConfiguration `json:"lws"`
 	// KaiScheduler configuration
 	KaiScheduler KaiSchedulerConfiguration `json:"kaiScheduler"`
+	// VolcanoScheduler configuration
+	VolcanoScheduler VolcanoSchedulerConfiguration `json:"volcanoScheduler"`
 }
 
 // GroveConfiguration holds Grove orchestrator settings.
@@ -198,6 +200,12 @@ type LWSConfiguration struct {
 // KaiSchedulerConfiguration holds Kai-scheduler settings.
 type KaiSchedulerConfiguration struct {
 	// Enabled overrides auto-detection. nil = auto-detect.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// VolcanoSchedulerConfiguration holds Volcano scheduler settings.
+type VolcanoSchedulerConfiguration struct {
+	// EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets.
 	Enabled *bool `json:"enabled,omitempty"`
 }
 

@@ -71,6 +71,7 @@ python -m dynamo.frontend --router-mode kv &
 
 # Elastic-EP head node on the unified backend.
 # --data-parallel-backend ray is required for scale_elastic_ep.
+# --enforce-eager is for quick deployment; remove for production.
 DYN_SYSTEM_PORT="$SYSTEM_PORT" \
 python3 -m dynamo.vllm.unified_main \
    --model "$MODEL" \

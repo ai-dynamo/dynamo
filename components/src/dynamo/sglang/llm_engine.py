@@ -56,6 +56,7 @@ from dynamo.common.backend.health_check import (
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
@@ -67,6 +68,7 @@ from dynamo.sglang._disagg import (
 )
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.capacity import (
+    get_hicache_native_offloading_capacity,
     kv_metrics_block_values,
     local_dp_rank_bounds,
     runtime_capacity,
@@ -91,11 +93,19 @@ def _warmup_enabled() -> bool:
     return raw.strip().lower() not in ("1", "true", "yes", "on")
 
 
-def _get_runtime_data(server_args) -> dict[str, Any] | None:
+def _get_runtime_data(
+    server_args, scheduler_info: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    runtime_data: dict[str, Any] = {}
     worker_group_id = get_sglang_worker_group_id(server_args)
-    if worker_group_id is None:
-        return None
-    return {SGLANG_WORKER_GROUP_ID_KEY: worker_group_id}
+    if worker_group_id is not None:
+        runtime_data[SGLANG_WORKER_GROUP_ID_KEY] = worker_group_id
+    offloading_capacity = get_hicache_native_offloading_capacity(
+        server_args, scheduler_info or {}
+    )
+    if offloading_capacity is not None:
+        runtime_data[NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY] = offloading_capacity
+    return runtime_data or None
 
 
 def _local_dp_rank_range(server_args) -> tuple[int, int]:
@@ -232,7 +242,7 @@ class SglangLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
-            runtime_data=_get_runtime_data(self.server_args),
+            runtime_data=_get_runtime_data(self.server_args, scheduler_info),
             llm=LlmRegistration(
                 context_length=self.server_args.context_length,
                 kv_cache_block_size=page_size,
@@ -512,6 +522,11 @@ class SglangLLMEngine(LLMEngine):
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
+                    "prompt_tokens_details": (
+                        {"cached_tokens": meta_info["cached_tokens"]}
+                        if meta_info.get("cached_tokens") is not None
+                        else None
+                    ),
                 }
                 prompt_payload = (
                     _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(meta_info)
