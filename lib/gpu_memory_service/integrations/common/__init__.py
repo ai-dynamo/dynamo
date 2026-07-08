@@ -3,9 +3,9 @@
 
 """Common utilities shared across GMS integrations."""
 
+from gpu_memory_service.common.utils import GMS_TAGS
 from gpu_memory_service.integrations.common.patches import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
-    GMS_TAGS,
     GMSCommittedMemoryStats,
     finalize_gms_write,
     setup_meta_tensor_workaround,

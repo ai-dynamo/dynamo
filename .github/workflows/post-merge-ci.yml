@@ -1289,7 +1289,10 @@ jobs:
             test-xpu
         run: |
           JOBS_JSON=$(mktemp)
-          curl -sSL \
+          # --fail + --retry-all-errors: retry transient API errors (5xx / secondary
+          # rate limits) and fail loudly on a genuine non-200 instead of writing an
+          # error body that later trips up jq with "Cannot iterate over null".
+          curl -sS --fail --retry 3 --retry-all-errors --retry-delay 3 \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
@@ -1299,7 +1302,7 @@ jobs:
           IGNORED_JSON=$(printf '%s\n' "$IGNORED_JOBS" | jq -R 'gsub("^\\s+|\\s+$";"")' | jq -s 'map(select(length > 0))')
 
           # Drop any failed job whose name contains one of the ignored substrings.
-          FAILED_JOBS=$(jq -r --argjson ignored "$IGNORED_JSON" '.jobs[] | select(.conclusion == "failure") | select(.name as $n | ($ignored | any(. as $i | $n | contains($i))) | not) | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
+          FAILED_JOBS=$(jq -r --argjson ignored "$IGNORED_JSON" '(.jobs // [])[] | select(.conclusion == "failure") | select(.name as $n | ($ignored | any(. as $i | $n | contains($i))) | not) | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
           echo $FAILED_JOBS
           {
             echo "FAILED_JOBS<<EOF"

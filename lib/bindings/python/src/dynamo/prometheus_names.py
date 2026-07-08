@@ -112,6 +112,14 @@ class frontend_service:
     # Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
     # pooling-model latencies (sub-second) without sacrificing resolution.
     EMBEDDING_LATENCY_SECONDS = "embedding_latency_seconds"
+    # Number of `image_url` content parts per request (histogram). Named
+    # `images_per_request` so the auto-emitted `_sum` (cumulative image volume),
+    # `_count` (requests observed), and `_bucket` all read naturally.
+    IMAGES_PER_REQUEST = "images_per_request"
+    # Number of `video_url` content parts per request (histogram)
+    VIDEOS_PER_REQUEST = "videos_per_request"
+    # Number of `audio_url` content parts per request (histogram)
+    AUDIO_PER_REQUEST = "audio_per_request"
     # Model configuration metrics
     # Runtime config metrics (from ModelRuntimeConfig):
     # Total KV blocks available for a worker serving the model
