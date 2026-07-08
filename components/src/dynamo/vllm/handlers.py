@@ -1121,7 +1121,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def _load_custom_encoder(self, config: Config) -> None:
         """Import, instantiate, and load the --custom-encoder-class encoder."""
-        custom_encoder_class = getattr(config, "custom_encoder_class", None)
+        custom_encoder_class = config.custom_encoder_class
         if not custom_encoder_class:
             return
         # The custom encoder path only ever submits a mixed EmbedsPrompt, so fail
@@ -1144,8 +1144,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"VisionEncoderBackend subclass, got {backend_cls!r}."
             )
         # The author writes the VisionEncoderBackend; Dynamo wraps it in the
-        # AsyncVisionEncoder glue, which owns the preprocess pool + actor
-        # thread + micro-batcher. load() runs backend.build() on the actor thread
+        # AsyncVisionEncoder glue, which owns the preprocess pool and actor
+        # thread. load() runs backend.build() on the actor thread
         # (the backend picks its own device) and cleans that thread up on failure.
         encoder = AsyncVisionEncoder(backend_cls())
         encoder.load(config.model)
@@ -2954,9 +2954,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         image_items = mm_map.get(IMAGE_URL_KEY) or []
         image_urls = [
-            item["Url"]
+            item[URL_VARIANT_KEY]
             for item in image_items
-            if isinstance(item, dict) and "Url" in item
+            if isinstance(item, dict) and URL_VARIANT_KEY in item
         ]
         if len(image_urls) != len(image_items):
             # At least one image item was malformed — not a dict with a 'Url'
@@ -2982,9 +2982,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # failure becomes a structured request error instead of escaping the
         # request coroutine and tearing down the stream.
         try:
-            # encode() is async; AsyncVisionEncoder preprocesses off-thread and the
-            # ThreadedMicroBatcher coalesces concurrent calls onto one dedicated
-            # actor thread. The worker holds no lock — batching is the encoder's.
+            # encode() preprocesses off-thread and serializes forwards on one
+            # dedicated actor thread.
             img_tensors: list[torch.Tensor] = await self._custom_encoder.encode(
                 image_urls
             )

@@ -185,14 +185,21 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
     def shutdown(self) -> None:
         """Run ``backend.close`` on the actor thread, then stop both pools. Safe
         before ``load`` and idempotent."""
-        if self._actor is not None:
+        # Detach both executors before teardown so a repeated cleanup is a no-op,
+        # including when backend.close() itself raises.
+        actor = self._actor
+        pool = self._pool
+        self._actor = None
+        self._pool = None
+
+        if actor is not None:
             try:
-                self._actor.submit(self._backend.close).result(timeout=10)
+                actor.submit(self._backend.close).result(timeout=10)
             except BaseException:  # noqa: BLE001 — teardown best-effort
                 logger.exception(
                     "AsyncVisionEncoder(%s): backend.close raised during teardown",
                     self._name,
                 )
-            self._actor.shutdown(wait=False)
-        if self._pool is not None:
-            self._pool.shutdown(wait=False)
+            actor.shutdown(wait=False)
+        if pool is not None:
+            pool.shutdown(wait=False)

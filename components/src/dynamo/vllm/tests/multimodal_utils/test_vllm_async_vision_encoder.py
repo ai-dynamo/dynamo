@@ -44,6 +44,7 @@ class _FakeBackend(VisionEncoderBackend):
         self.build_thread = None
         self.close_thread = None
         self.closed = False
+        self.close_calls = 0
         self.model_id = None
         self.forward_threads: list[int] = []
         self.forward_calls: list[list] = []  # one entry per forward_batch call
@@ -65,6 +66,7 @@ class _FakeBackend(VisionEncoderBackend):
     def close(self):
         self.close_thread = threading.get_ident()
         self.closed = True
+        self.close_calls += 1
 
 
 async def test_encode_returns_one_tensor_per_raw():
@@ -162,6 +164,17 @@ def test_shutdown_runs_backend_close_on_actor_thread():
     assert be.close_thread == be.build_thread
 
 
+def test_shutdown_is_idempotent():
+    be = _FakeBackend()
+    enc = AsyncVisionEncoder(be)
+    enc.load("m")
+    enc.shutdown()
+    enc.shutdown()
+    assert be.close_calls == 1
+    assert enc._actor is None
+    assert enc._pool is None
+
+
 def test_load_fails_fast_on_build_error_and_reaps_threads():
     class _BadBuild(_FakeBackend):
         def build(self, model_id):
@@ -170,8 +183,8 @@ def test_load_fails_fast_on_build_error_and_reaps_threads():
     enc = AsyncVisionEncoder(_BadBuild())
     with pytest.raises(RuntimeError, match="build failed"):
         enc.load("m")
-    assert enc._actor is not None and enc._actor._shutdown is True
-    assert enc._pool is not None and enc._pool._shutdown is True
+    assert enc._actor is None
+    assert enc._pool is None
 
 
 def test_load_fails_fast_on_missing_image_token_id():
@@ -181,7 +194,8 @@ def test_load_fails_fast_on_missing_image_token_id():
     enc = AsyncVisionEncoder(_NoTokenId())
     with pytest.raises(ValueError, match="image_token_id"):
         enc.load("m")
-    assert enc._actor is not None and enc._actor._shutdown is True
+    assert enc._actor is None
+    assert enc._pool is None
 
 
 def test_shutdown_before_load_is_safe():
