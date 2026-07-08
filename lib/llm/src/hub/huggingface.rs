@@ -3,18 +3,23 @@
 
 use std::{
     env,
+    future::Future,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::Context;
 use hf_hub::{
     Cache, Repo, RepoType,
-    api::tokio::{Api, ApiBuilder},
+    api::tokio::{Api, ApiBuilder, ApiError},
 };
 
 use dynamo_runtime::config::environment_names::model as env_model;
 
 use super::is_offline_mode;
+
+const LORA_DOWNLOAD_TIMEOUT_SECS: &str = "LORA_DOWNLOAD_TIMEOUT_SECS";
+const DEFAULT_LORA_DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
 
 /// A Hugging Face model repository and the revision requested by an `hf://` URI.
 #[derive(Debug, Eq, PartialEq)]
@@ -191,6 +196,30 @@ fn build_hf_api(cache: Cache) -> anyhow::Result<Api> {
     builder.build().context("building Hugging Face Hub client")
 }
 
+fn hf_download_timeout() -> Duration {
+    Duration::from_secs(
+        env::var(LORA_DOWNLOAD_TIMEOUT_SECS)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(DEFAULT_LORA_DOWNLOAD_TIMEOUT_SECS),
+    )
+}
+
+async fn with_hf_timeout<T>(
+    timeout: Duration,
+    operation: impl Future<Output = Result<T, ApiError>>,
+    context: String,
+) -> anyhow::Result<T> {
+    let timeout_context = format!(
+        "{context} timed out after {} seconds; configure {LORA_DOWNLOAD_TIMEOUT_SECS} to adjust the limit",
+        timeout.as_secs()
+    );
+    tokio::time::timeout(timeout, operation)
+        .await
+        .context(timeout_context)?
+        .with_context(|| context)
+}
+
 /// Download one immutable repository snapshot into hf-hub's native cache layout.
 ///
 /// The requested branch/tag is resolved once via `info()`. Every sibling is then
@@ -209,17 +238,14 @@ pub(crate) async fn download_hf_snapshot(
     }
 
     let api = build_hf_api(cache.clone())?;
+    let download_timeout = hf_download_timeout();
     let requested_repo = spec.repo();
-    let info = api
-        .repo(requested_repo.clone())
-        .info()
-        .await
-        .with_context(|| {
-            format!(
-                "resolving Hugging Face repository {} at revision {}",
-                spec.repo_id, spec.revision
-            )
-        })?;
+    let requested_api = api.repo(requested_repo.clone());
+    let info_context = format!(
+        "resolving Hugging Face repository {} at revision {}",
+        spec.repo_id, spec.revision
+    );
+    let info = with_hf_timeout(download_timeout, requested_api.info(), info_context).await?;
 
     validate_hf_commit_sha(&info.sha)?;
     if info.siblings.is_empty() {
@@ -236,23 +262,17 @@ pub(crate) async fn download_hf_snapshot(
     let pinned_repo = Repo::with_revision(spec.repo_id.clone(), RepoType::Model, info.sha.clone());
     let pinned_api = api.repo(pinned_repo);
     for sibling in &info.siblings {
-        pinned_api.get(&sibling.rfilename).await.with_context(|| {
-            format!(
-                "downloading {} from Hugging Face repository {}@{}",
-                sibling.rfilename, spec.repo_id, info.sha
-            )
-        })?;
+        let download_context = format!(
+            "downloading {} from Hugging Face repository {}@{}",
+            sibling.rfilename, spec.repo_id, info.sha
+        );
+        with_hf_timeout(
+            download_timeout,
+            pinned_api.get(&sibling.rfilename),
+            download_context,
+        )
+        .await?;
     }
-
-    cache
-        .repo(requested_repo.clone())
-        .create_ref(&info.sha)
-        .with_context(|| {
-            format!(
-                "publishing Hugging Face cache ref {}@{}",
-                spec.repo_id, spec.revision
-            )
-        })?;
 
     let snapshot = cache
         .path()
@@ -265,6 +285,16 @@ pub(crate) async fn download_hf_snapshot(
             snapshot.display()
         );
     }
+
+    cache
+        .repo(requested_repo)
+        .create_ref(&info.sha)
+        .with_context(|| {
+            format!(
+                "publishing Hugging Face cache ref {}@{}",
+                spec.repo_id, spec.revision
+            )
+        })?;
     Ok(snapshot)
 }
 
@@ -375,6 +405,34 @@ mod tests {
                 None,
             ),
             PathBuf::from("/xdg/huggingface/hub")
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn hf_download_timeout_uses_lora_download_configuration() {
+        temp_env::with_var("LORA_DOWNLOAD_TIMEOUT_SECS", Some("17"), || {
+            assert_eq!(hf_download_timeout().as_secs(), 17);
+        });
+        temp_env::with_var("LORA_DOWNLOAD_TIMEOUT_SECS", Some("invalid"), || {
+            assert_eq!(hf_download_timeout().as_secs(), 3600);
+        });
+    }
+
+    #[tokio::test]
+    async fn hf_timeout_reports_operation_context() {
+        let error = with_hf_timeout(
+            std::time::Duration::ZERO,
+            std::future::pending::<Result<(), hf_hub::api::tokio::ApiError>>(),
+            "testing Hugging Face timeout".to_string(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("testing Hugging Face timeout timed out after 0 seconds")
         );
     }
 }
