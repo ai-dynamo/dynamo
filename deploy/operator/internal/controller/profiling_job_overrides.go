@@ -370,12 +370,54 @@ func applyPodSpecOverrides(spec *corev1.PodSpec, overrides *corev1.PodSpec) {
 	spec.InitContainers = mergeNamedSlice(spec.InitContainers, overrides.InitContainers, func(c corev1.Container) string { return c.Name })
 
 	if len(overrides.Containers) > 0 && len(spec.Containers) > 0 {
-		applyContainerOverrides(&spec.Containers[0], &overrides.Containers[0])
+		if profilerOverride := profilerContainerOverride(overrides.Containers); profilerOverride != nil {
+			applyContainerOverrides(&spec.Containers[0], profilerOverride)
+		}
+	}
+	if outputCopierOverride := findContainerOverride(overrides.Containers, ContainerNameOutputCopier); outputCopierOverride != nil {
+		if idx := findContainerIndex(spec.Containers, ContainerNameOutputCopier); idx >= 0 {
+			applyContainerOverrides(&spec.Containers[idx], outputCopierOverride)
+		}
 	}
 }
 
-// applyContainerOverrides merges fields from the user's first container override
-// into the controller-generated profiler container.
+// findContainerOverride returns the first override container with the given name.
+func findContainerOverride(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
+}
+
+// findContainerIndex returns the index of the container with the given name, or -1.
+func findContainerIndex(containers []corev1.Container, name string) int {
+	for i := range containers {
+		if containers[i].Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// profilerContainerOverride selects the override entry for the profiler container.
+// Prefers an entry named "profiler"; otherwise the first entry that is not the
+// output-copier sidecar (preserving backward compatibility for unnamed overrides).
+func profilerContainerOverride(overrides []corev1.Container) *corev1.Container {
+	if override := findContainerOverride(overrides, ContainerNameProfiler); override != nil {
+		return override
+	}
+	for i := range overrides {
+		if overrides[i].Name == "" || overrides[i].Name != ContainerNameOutputCopier {
+			return &overrides[i]
+		}
+	}
+	return nil
+}
+
+// applyContainerOverrides merges fields from the user's container override
+// into a controller-generated container (profiler or output-copier sidecar).
 func applyContainerOverrides(container *corev1.Container, overrides *corev1.Container) {
 	if overrides.Image != "" {
 		container.Image = overrides.Image
