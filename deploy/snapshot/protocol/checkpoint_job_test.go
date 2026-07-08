@@ -169,6 +169,82 @@ func TestNewCheckpointJobWrapsTargetContainer(t *testing.T) {
 	}
 }
 
+func TestNewCheckpointJobDisablesServiceMeshInjection(t *testing.T) {
+	cases := []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{
+			name:        "nil annotations",
+			annotations: nil,
+		},
+		{
+			name: "pre-existing enabled injection overwritten",
+			annotations: map[string]string{
+				linkerdInjectAnnotation:      "enabled",
+				istioSidecarInjectAnnotation: "true",
+				"example.com/keep":           "keep-value",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var originalAnnotations map[string]string
+			if tc.annotations != nil {
+				originalAnnotations = make(map[string]string, len(tc.annotations))
+				for k, v := range tc.annotations {
+					originalAnnotations[k] = v
+				}
+			}
+
+			source := &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: tc.annotations,
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:    "main",
+						Command: []string{"python3"},
+					}},
+				},
+			}
+			if source.Annotations == nil {
+				source.Annotations = map[string]string{}
+			}
+			source.Annotations[TargetContainersAnnotation] = "main"
+
+			job, err := NewCheckpointJob(source, CheckpointJobOptions{
+				Namespace:    "test-ns",
+				CheckpointID: "hash",
+				Name:         "test-job",
+			})
+			if err != nil {
+				t.Fatalf("NewCheckpointJob() error = %v", err)
+			}
+
+			got := job.Spec.Template.Annotations
+			if got[linkerdInjectAnnotation] != linkerdInjectDisabled {
+				t.Errorf("linkerd annotation = %q, want %q", got[linkerdInjectAnnotation], linkerdInjectDisabled)
+			}
+			if got[istioSidecarInjectAnnotation] != istioSidecarInjectDisabled {
+				t.Errorf("istio annotation = %q, want %q", got[istioSidecarInjectAnnotation], istioSidecarInjectDisabled)
+			}
+			if tc.annotations != nil {
+				if v, ok := tc.annotations["example.com/keep"]; ok && got["example.com/keep"] != v {
+					t.Errorf("user annotation lost: got %q, want %q", got["example.com/keep"], v)
+				}
+				// Source template must not be mutated.
+				for k, origV := range originalAnnotations {
+					if tc.annotations[k] != origV {
+						t.Errorf("source template mutated: key %q changed from %q to %q", k, origV, tc.annotations[k])
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestNewCheckpointJobRequiresTargetAnnotation(t *testing.T) {
 	_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
 		Spec: corev1.PodSpec{
