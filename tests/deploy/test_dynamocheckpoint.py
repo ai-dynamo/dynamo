@@ -141,28 +141,23 @@ CHECKPOINT_BACKENDS = {
         frontend_component=FRONTEND_COMPONENT,
         target_container=TARGET_CONTAINER,
         model=CHECKPOINT_MODEL,
+        # Only the CI-sizing overrides that differ from TensorRT-LLM defaults
+        # are passed. The remaining single-GPU snapshot settings from
+        # examples/backends/trtllm/engine_configs/qwen3/snapshot.yaml are already
+        # defaults or no-ops for dense Qwen3-0.6B: tensor/pipeline parallel = 1,
+        # no expert parallel or attention DP, pytorch backend (forced by the
+        # worker), and chunked prefill (inert at max-batch-size 1).
         args=(
             "--model-path",
             CHECKPOINT_MODEL,
             "--served-model-name",
             CHECKPOINT_MODEL,
-            "--tensor-parallel-size",
-            "1",
             "--max-num-tokens",
             "1024",
             "--max-batch-size",
             "1",
             "--free-gpu-memory-fraction",
             "0.10",
-            "--expert-parallel-size",
-            "1",
-            "--no-enable-attention-dp",
-            "--trtllm.trust_remote_code",
-            "true",
-            "--trtllm.backend",
-            "pytorch",
-            "--trtllm.enable_chunked_prefill",
-            "false",
         ),
         # Keep the raw DGD PVC-free: the checkpoint operator mounts
         # snapshot-pvc at /checkpoints for checkpoint/restore pods, so HF_HOME
@@ -223,22 +218,6 @@ def _component(spec: dict[str, Any], name: str) -> dict[str, Any]:
     raise AssertionError(f"component {name!r} not found in DGD spec")
 
 
-def _merge_named_items(
-    items: list[dict[str, Any]], extras: tuple[dict[str, Any], ...]
-) -> None:
-    items_by_name = {item.get("name"): item for item in items if item.get("name")}
-    for extra in extras:
-        name = extra.get("name")
-        if not name:
-            raise AssertionError(f"extra pod item must have a name: {extra!r}")
-        if name in items_by_name:
-            items_by_name[name].update(copy.deepcopy(extra))
-        else:
-            item = copy.deepcopy(extra)
-            items.append(item)
-            items_by_name[name] = item
-
-
 def _new_checkpoint_spec(
     backend: CheckpointBackendConfig,
     name: str,
@@ -271,10 +250,12 @@ def _new_checkpoint_spec(
     if backend.container_resources:
         container["resources"] = copy.deepcopy(backend.container_resources)
     if backend.extra_volumes:
-        _merge_named_items(pod_spec.setdefault("volumes", []), backend.extra_volumes)
+        pod_spec.setdefault("volumes", []).extend(
+            copy.deepcopy(volume) for volume in backend.extra_volumes
+        )
     if backend.extra_volume_mounts:
-        _merge_named_items(
-            container.setdefault("volumeMounts", []), backend.extra_volume_mounts
+        container.setdefault("volumeMounts", []).extend(
+            copy.deepcopy(mount) for mount in backend.extra_volume_mounts
         )
     if backend.env:
         env = container.setdefault("env", [])
