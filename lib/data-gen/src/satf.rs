@@ -512,7 +512,7 @@ fn tool_end_us(tool: &ToolEntry) -> u64 {
 }
 
 fn tool_start_us(tool: &ToolEntry) -> u64 {
-    tool_end_us(tool).saturating_sub(tool_duration_us(tool))
+    nonnegative_us(tool.start_ms)
 }
 
 fn nonnegative_us(value_ms: i64) -> u64 {
@@ -662,7 +662,7 @@ mod tests {
         .unwrap();
         writeln!(
             file,
-            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"agent_context":{{"session_id":"root"}},"tool":{{"tool_call_id":"call-1","tool_class":"fallback","started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":90.0}}}}"#
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"agent_context":{{"session_id":"root"}},"tool":{{"tool_call_id":"call-1","tool_class":"fallback","started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":50.0}}}}"#
         )
         .unwrap();
         writeln!(
@@ -676,6 +676,11 @@ mod tests {
 
         assert_eq!(session.nodes.len(), 4);
         assert_eq!(session.edges.len(), 3);
+        assert!(session.edges.iter().any(|edge| {
+            edge.from == "llm:req-1"
+                && edge.to == "tool_call:0"
+                && edge.delay_after_predecessor_us == Some(10_000)
+        }));
         assert!(session.edges.iter().any(|edge| {
             edge.from == "tool_result:0"
                 && edge.to == "llm:req-2"
