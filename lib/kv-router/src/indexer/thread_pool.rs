@@ -197,7 +197,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     }
 
     pub fn new_with_metrics_and_pruning(
-        backend: T,
+        mut backend: T,
         num_workers: usize,
         kv_block_size: u32,
         metrics: Option<Arc<KvIndexerMetrics>>,
@@ -209,6 +209,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             "backend does not support routing-decision pruning"
         );
         super::warn_on_unit_block_size("thread_pool", kv_block_size);
+        backend.configure_metrics(metrics.as_deref());
 
         let backend = Arc::new(backend);
         let mut worker_event_senders = Vec::new();

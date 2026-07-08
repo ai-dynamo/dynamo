@@ -19,12 +19,17 @@ pub(crate) const MAX_VERIFICATION_WINDOW: usize = 8;
 const DEFAULT_SEED: u64 = 0x5DEE_CE66_D1B5_4A33;
 const DEFAULT_MAX_KICKS: usize = 500;
 const DEFAULT_EXPECTED_BLOCKS_PER_DC: usize = 1;
-const DEFAULT_VERIFICATION_WINDOW: usize = 8;
+const DEFAULT_VERIFICATION_WINDOW: usize = 2;
 
 /// Search behavior for CKF prefix lookups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrefixSearchConfig {
     /// Number of positions immediately before the tentative depth to verify linearly.
+    ///
+    /// If the first miss is the window's left edge, search may also scan the
+    /// previously discarded gap after the predecessor of the terminal lower bound.
+    /// Stable snapshots make that contradiction evidence of a false terminal branch;
+    /// concurrent mutation can instead expose temporary false negatives.
     pub verification_window: usize,
 }
 

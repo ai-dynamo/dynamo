@@ -19,7 +19,10 @@ use super::addressing::{CkfAddressing, CkfProbe};
 use super::bucket::{CuckooBucketStore, PackedBucket, TransposedCkfTable};
 use super::event_indexer::bucket_count;
 use super::mutator::{CuckooMutator, DcWriterState};
-use super::search::{find_prefix_depths, linear_prefix_depths};
+use super::search::{
+    find_prefix_depths, find_prefix_depths_with_test_stats, fixed_window_prefix_depths,
+    linear_prefix_depths,
+};
 use super::{CkfBuildError, CkfConfig, DC_COUNT, EventTransposedCkfIndexer};
 
 const TEST_SEED: u64 = 0x1234_5678_9ABC_DEF0;
@@ -462,9 +465,9 @@ fn window_eight_repairs_holes_at_offsets_two_through_eight() {
         let mut masks = [1u16; QUERY_LEN];
         masks[hole] = 0;
         let window_one =
-            find_prefix_depths::<1>(QUERY_LEN, 1, 1, |_| {}, |position| masks[position]);
+            fixed_window_prefix_depths::<1>(QUERY_LEN, 1, 1, |_| {}, |position| masks[position]);
         let window_eight =
-            find_prefix_depths::<1>(QUERY_LEN, 1, 8, |_| {}, |position| masks[position]);
+            fixed_window_prefix_depths::<1>(QUERY_LEN, 1, 8, |_| {}, |position| masks[position]);
         let linear = linear_prefix_depths::<1>(QUERY_LEN, 1, |position| masks[position]);
 
         assert_eq!(window_one, [QUERY_LEN as u32], "offset={offset}");
@@ -479,11 +482,121 @@ fn holes_beyond_the_terminal_window_remain_advisory() {
     const HOLE: usize = QUERY_LEN - 9;
     let mut masks = [1u16; QUERY_LEN];
     masks[HOLE] = 0;
-    let window_eight = find_prefix_depths::<1>(QUERY_LEN, 1, 8, |_| {}, |position| masks[position]);
+    let window_eight =
+        fixed_window_prefix_depths::<1>(QUERY_LEN, 1, 8, |_| {}, |position| masks[position]);
     let linear = linear_prefix_depths::<1>(QUERY_LEN, 1, |position| masks[position]);
 
     assert_eq!(window_eight, [QUERY_LEN as u32]);
     assert_eq!(linear, [HOLE as u32]);
+}
+
+#[test]
+fn terminal_branch_fallback_groups_lanes_and_repairs_a_clipped_false_pivot() {
+    const QUERY_LEN: usize = 65;
+    const LINEAR_MISS: usize = 40;
+    const FALSE_PIVOT: usize = 48;
+
+    let membership = |position: usize| {
+        if position < LINEAR_MISS || position == FALSE_PIVOT {
+            0b11
+        } else {
+            0
+        }
+    };
+    let mut probed = Vec::new();
+    let result = find_prefix_depths_with_test_stats::<2>(
+        QUERY_LEN,
+        0b11,
+        2,
+        |_| {},
+        |position| {
+            probed.push(position);
+            membership(position)
+        },
+    );
+    let linear = linear_prefix_depths::<2>(QUERY_LEN, 0b11, membership);
+
+    assert_eq!(result.depths, linear);
+    assert_eq!(result.depths, [LINEAR_MISS as u32; 2]);
+    assert!(!probed.contains(&17), "fallback must begin after B=32");
+    for fallback_position in 33..=LINEAR_MISS {
+        assert_eq!(
+            probed
+                .iter()
+                .filter(|&&position| position == fallback_position)
+                .count(),
+            1,
+            "fallback_position={fallback_position}"
+        );
+    }
+    assert_eq!(result.fallback.left_edge_lanes, 2);
+    assert_eq!(result.fallback.activated_lanes, 2);
+    assert_eq!(result.fallback.probe_calls, 8);
+    assert_eq!(result.fallback.lane_probes, 16);
+    assert_eq!(result.fallback.provenance_skips, 0);
+}
+
+#[test]
+fn terminal_branch_fallback_skips_second_order_provenance_without_an_inverted_range() {
+    const QUERY_LEN: usize = 65;
+    const LINEAR_MISS: usize = 41;
+
+    let membership =
+        |position: usize| u16::from(position < LINEAR_MISS || (48..=51).contains(&position));
+    let result = find_prefix_depths_with_test_stats::<1>(QUERY_LEN, 1, 8, |_| {}, membership);
+
+    assert_eq!(linear_prefix_depths::<1>(QUERY_LEN, 1, membership), [41]);
+    assert_eq!(result.depths, [44]);
+    assert_eq!(result.fallback.left_edge_lanes, 1);
+    assert_eq!(result.fallback.activated_lanes, 0);
+    assert_eq!(result.fallback.probe_calls, 0);
+    assert_eq!(result.fallback.provenance_skips, 1);
+}
+
+#[test]
+fn terminal_branch_fallback_documents_a_false_predecessor_residual() {
+    const QUERY_LEN: usize = 65;
+    const LINEAR_MISS: usize = 20;
+
+    let membership =
+        |position: usize| u16::from(position < LINEAR_MISS || position == 32 || position == 48);
+    let result = find_prefix_depths_with_test_stats::<1>(QUERY_LEN, 1, 8, |_| {}, membership);
+
+    assert_eq!(linear_prefix_depths::<1>(QUERY_LEN, 1, membership), [20]);
+    assert_eq!(result.depths, [33]);
+    assert_eq!(result.fallback.left_edge_lanes, 1);
+    assert_eq!(result.fallback.activated_lanes, 1);
+    assert_eq!(result.fallback.probe_calls, 1);
+    assert_eq!(result.fallback.provenance_skips, 0);
+}
+
+#[cfg(feature = "metrics")]
+#[test]
+fn provenance_fallback_metrics_record_prebound_lane_and_probe_counts() {
+    use crate::indexer::{
+        KvIndexerMetrics, METRIC_CKF_FALLBACK_ACTIVATED_LANES, METRIC_CKF_FALLBACK_LANE_PROBES,
+        METRIC_CKF_FALLBACK_LEFT_EDGE_LANES, METRIC_CKF_FALLBACK_PROBE_CALLS,
+        METRIC_CKF_FALLBACK_PROVENANCE_SKIPS,
+    };
+
+    let membership = |position: usize| u16::from(position < 40 || position == 48);
+    let result = find_prefix_depths_with_test_stats::<1>(65, 1, 2, |_| {}, membership);
+    let metrics = KvIndexerMetrics::new_unregistered();
+    let counters = metrics.prebind_ckf_search();
+    counters.record(
+        result.fallback.left_edge_lanes,
+        result.fallback.activated_lanes,
+        result.fallback.probe_calls,
+        result.fallback.lane_probes,
+        result.fallback.provenance_skips,
+    );
+
+    let value = |kind| metrics.ckf_search_fallback.with_label_values(&[kind]).get();
+    assert_eq!(value(METRIC_CKF_FALLBACK_LEFT_EDGE_LANES), 1);
+    assert_eq!(value(METRIC_CKF_FALLBACK_ACTIVATED_LANES), 1);
+    assert_eq!(value(METRIC_CKF_FALLBACK_PROBE_CALLS), 8);
+    assert_eq!(value(METRIC_CKF_FALLBACK_LANE_PROBES), 8);
+    assert_eq!(value(METRIC_CKF_FALLBACK_PROVENANCE_SKIPS), 0);
 }
 
 #[test]
@@ -780,8 +893,8 @@ fn study_corpus_contains_1024_distinct_queries_at_every_length() {
 }
 
 #[test]
-#[ignore = "deterministic million-observation CKF accuracy study"]
-fn verification_window_study() {
+#[ignore = "deterministic fixed-window CKF accuracy control"]
+fn fixed_verification_window_study() {
     const BUCKETS: usize = 16_384;
     const QUERIES_PER_CELL: usize = 1_024;
     const MAX_QUERY_LEN: usize = 512;
@@ -834,7 +947,7 @@ fn verification_window_study() {
                             table.probe(probes[position])
                         });
                     let mut window_one_probes = 0u64;
-                    let window_one = find_prefix_depths::<DC_COUNT>(
+                    let window_one = fixed_window_prefix_depths::<DC_COUNT>(
                         probes.len(),
                         u16::MAX,
                         1,
@@ -845,7 +958,7 @@ fn verification_window_study() {
                         },
                     );
                     let mut window_eight_probes = 0u64;
-                    let window_eight = find_prefix_depths::<DC_COUNT>(
+                    let window_eight = fixed_window_prefix_depths::<DC_COUNT>(
                         probes.len(),
                         u16::MAX,
                         8,
@@ -872,7 +985,7 @@ fn verification_window_study() {
     assert_eq!(totals.observations, 1_966_080);
     let expected_default = selected_verification_window(&totals);
     println!(
-        "queries={} distinct_queries={} observations={} expected_default={} paired_depth_differences={} paired_array_differences={} w1_full_map_mismatches={} w8_full_map_mismatches={} w1_lane_mismatches={} w8_lane_mismatches={} w1_inflation={} w8_inflation={} w1_inflation_magnitude={} w8_inflation_magnitude={} w1_under_reports={} w8_under_reports={} w1_wrong_best={} w8_wrong_best={} w1_probes={} w8_probes={}",
+        "FIXED_WINDOW_STUDY queries={} distinct_queries={} observations={} expected_fixed_window={} paired_depth_differences={} paired_array_differences={} w1_full_map_mismatches={} w8_full_map_mismatches={} w1_lane_mismatches={} w8_lane_mismatches={} w1_inflation={} w8_inflation={} w1_inflation_magnitude={} w8_inflation_magnitude={} w1_under_reports={} w8_under_reports={} w1_wrong_best={} w8_wrong_best={} w1_probes={} w8_probes={}",
         totals.queries,
         totals.distinct_queries,
         totals.observations,
@@ -894,10 +1007,224 @@ fn verification_window_study() {
         totals.window_one_probes,
         totals.window_eight_probes,
     );
+    assert_eq!(expected_default, 8);
+}
+
+#[derive(Debug, Default)]
+struct FallbackCandidateStats {
+    full_map_mismatches: u64,
+    lane_mismatches: u64,
+    inflation: u64,
+    inflation_magnitude: u64,
+    under_reports: u64,
+    wrong_best: u64,
+    probes: u64,
+    fallback_probes: u64,
+}
+
+impl FallbackCandidateStats {
+    fn record(
+        &mut self,
+        linear: [u32; DC_COUNT],
+        actual: [u32; DC_COUNT],
+        probes: u64,
+        fallback_probes: u64,
+    ) {
+        self.full_map_mismatches += u64::from(linear != actual);
+        self.wrong_best += u64::from(best_lane(linear) != best_lane(actual));
+        self.probes += probes;
+        self.fallback_probes += fallback_probes;
+        for (linear, actual) in linear.into_iter().zip(actual) {
+            match actual.cmp(&linear) {
+                std::cmp::Ordering::Greater => {
+                    self.lane_mismatches += 1;
+                    self.inflation += 1;
+                    self.inflation_magnitude += u64::from(actual - linear);
+                }
+                std::cmp::Ordering::Less => {
+                    self.lane_mismatches += 1;
+                    self.under_reports += 1;
+                }
+                std::cmp::Ordering::Equal => {}
+            }
+        }
+    }
+
+    fn matches_linear(&self) -> bool {
+        self.lane_mismatches == 0
+    }
+}
+
+#[derive(Debug, Default)]
+struct FallbackWindowStudyStats {
+    queries: u64,
+    distinct_queries: u64,
+    observations: u64,
+    window_one: FallbackCandidateStats,
+    window_two: FallbackCandidateStats,
+    window_eight: FallbackCandidateStats,
+}
+
+fn selected_fallback_window(stats: &FallbackWindowStudyStats) -> usize {
+    if stats.window_one.matches_linear() {
+        1
+    } else if stats.window_two.matches_linear() {
+        2
+    } else {
+        8
+    }
+}
+
+#[test]
+fn fallback_selection_prefers_the_smallest_linear_equivalent_window() {
+    let window_two = FallbackWindowStudyStats {
+        window_one: FallbackCandidateStats {
+            lane_mismatches: 1,
+            ..FallbackCandidateStats::default()
+        },
+        ..FallbackWindowStudyStats::default()
+    };
+    assert_eq!(selected_fallback_window(&window_two), 2);
+
+    let window_eight = FallbackWindowStudyStats {
+        window_one: FallbackCandidateStats {
+            lane_mismatches: 1,
+            ..FallbackCandidateStats::default()
+        },
+        window_two: FallbackCandidateStats {
+            lane_mismatches: 1,
+            ..FallbackCandidateStats::default()
+        },
+        ..FallbackWindowStudyStats::default()
+    };
+    assert_eq!(selected_fallback_window(&window_eight), 8);
+}
+
+#[test]
+#[ignore = "deterministic provenance-fallback window accuracy study"]
+fn provenance_fallback_window_study() {
+    const BUCKETS: usize = 16_384;
+    const QUERIES_PER_CELL: usize = 1_024;
+    const MAX_QUERY_LEN: usize = 512;
+    const MAX_RESIDENT_PREFIX: usize = 32;
+    const MAX_KICKS: usize = 4_096;
+    const OCCUPANCIES: [usize; 3] = [50, 80, 90];
+    const QUERY_LENGTHS: [usize; 5] = [1, 8, 32, 128, 512];
+    const SEEDS: usize = 8;
+
+    let mut totals = FallbackWindowStudyStats::default();
+    for seed_index in 0..SEEDS {
+        let seed = study_seed(seed_index);
+        let addressing = CkfAddressing::new(BUCKETS, seed);
+        let chains = study_chains(seed, addressing, QUERIES_PER_CELL, MAX_QUERY_LEN);
+        let query_hashes: HashSet<u64> = chains
+            .iter()
+            .flat_map(|chain| chain.sequence_hashes.iter().copied())
+            .collect();
+        let prefix_depths = study_prefix_depths(seed_index, QUERIES_PER_CELL, MAX_RESIDENT_PREFIX);
+        let distinct_queries: HashMap<usize, usize> = QUERY_LENGTHS
+            .into_iter()
+            .map(|query_len| (query_len, distinct_query_count(&chains, query_len)))
+            .collect();
+        assert!(
+            distinct_queries
+                .values()
+                .all(|&count| count == QUERIES_PER_CELL),
+            "seed_index={seed_index} distinct_queries={distinct_queries:?}"
+        );
+
+        for occupancy in OCCUPANCIES {
+            let table = TransposedCkfTable::<DC_COUNT>::new(BUCKETS).unwrap();
+            fill_study_table(
+                &table,
+                addressing,
+                &chains,
+                &prefix_depths,
+                &query_hashes,
+                occupancy,
+                MAX_KICKS,
+                seed,
+            );
+
+            for query_len in QUERY_LENGTHS {
+                totals.distinct_queries += distinct_queries[&query_len] as u64;
+                for chain in chains.iter().take(QUERIES_PER_CELL) {
+                    let probes = &chain.probes[..query_len];
+                    let linear =
+                        linear_prefix_depths::<DC_COUNT>(probes.len(), u16::MAX, |position| {
+                            table.probe(probes[position])
+                        });
+                    let (window_one, window_one_probes) = run_fallback_candidate(&table, probes, 1);
+                    let (window_two, window_two_probes) = run_fallback_candidate(&table, probes, 2);
+                    let (window_eight, window_eight_probes) =
+                        run_fallback_candidate(&table, probes, 8);
+
+                    totals.queries += 1;
+                    totals.observations += DC_COUNT as u64;
+                    totals.window_one.record(
+                        linear,
+                        window_one.depths,
+                        window_one_probes,
+                        window_one.fallback.probe_calls,
+                    );
+                    totals.window_two.record(
+                        linear,
+                        window_two.depths,
+                        window_two_probes,
+                        window_two.fallback.probe_calls,
+                    );
+                    totals.window_eight.record(
+                        linear,
+                        window_eight.depths,
+                        window_eight_probes,
+                        window_eight.fallback.probe_calls,
+                    );
+                }
+            }
+        }
+    }
+
+    assert_eq!(totals.queries, 122_880);
+    assert_eq!(totals.distinct_queries, totals.queries);
+    assert_eq!(totals.observations, 1_966_080);
+    let expected_default = selected_fallback_window(&totals);
+    println!(
+        "FALLBACK_WINDOW_STUDY queries={} distinct_queries={} observations={} expected_default={} w1={:?} w2={:?} w8={:?}",
+        totals.queries,
+        totals.distinct_queries,
+        totals.observations,
+        expected_default,
+        totals.window_one,
+        totals.window_two,
+        totals.window_eight,
+    );
+    assert!(!totals.window_one.matches_linear());
+    assert!(totals.window_two.matches_linear());
+    assert!(totals.window_eight.matches_linear());
+    assert_eq!(expected_default, 2);
     assert_eq!(
         CkfConfig::default().search.verification_window,
         expected_default
     );
+}
+
+fn run_fallback_candidate(
+    table: &TransposedCkfTable<DC_COUNT>,
+    probes: &[CkfProbe],
+    window: usize,
+) -> (super::search::PrefixSearchResult<DC_COUNT>, u64) {
+    let mut probe_calls = 0u64;
+    let result = find_prefix_depths_with_test_stats::<DC_COUNT>(
+        probes.len(),
+        u16::MAX,
+        window,
+        |position| table.prefetch_probe(probes[position]),
+        |position| {
+            probe_calls += 1;
+            table.probe(probes[position])
+        },
+    );
+    (result, probe_calls)
 }
 
 struct StudyChain {

@@ -12,16 +12,101 @@ struct ProbeGroup {
     lanes: u16,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct FallbackStats {
+    pub(super) left_edge_lanes: u64,
+    pub(super) activated_lanes: u64,
+    pub(super) probe_calls: u64,
+    pub(super) lane_probes: u64,
+    pub(super) provenance_skips: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PrefixSearchResult<const D: usize> {
+    pub(super) depths: [u32; D],
+    pub(super) fallback: FallbackStats,
+}
+
 pub(super) fn find_prefix_depths<const D: usize>(
+    sequence_len: usize,
+    initial_mask: u16,
+    verification_window: usize,
+    prefetch: impl FnMut(usize),
+    probe: impl FnMut(usize) -> u16,
+) -> [u32; D] {
+    find_prefix_depths_impl::<D, true>(
+        sequence_len,
+        initial_mask,
+        verification_window,
+        prefetch,
+        probe,
+    )
+    .depths
+}
+
+#[cfg(feature = "metrics")]
+pub(super) fn find_prefix_depths_with_stats<const D: usize>(
+    sequence_len: usize,
+    initial_mask: u16,
+    verification_window: usize,
+    prefetch: impl FnMut(usize),
+    probe: impl FnMut(usize) -> u16,
+) -> PrefixSearchResult<D> {
+    find_prefix_depths_impl::<D, true>(
+        sequence_len,
+        initial_mask,
+        verification_window,
+        prefetch,
+        probe,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn fixed_window_prefix_depths<const D: usize>(
+    sequence_len: usize,
+    initial_mask: u16,
+    verification_window: usize,
+    prefetch: impl FnMut(usize),
+    probe: impl FnMut(usize) -> u16,
+) -> [u32; D] {
+    find_prefix_depths_impl::<D, false>(
+        sequence_len,
+        initial_mask,
+        verification_window,
+        prefetch,
+        probe,
+    )
+    .depths
+}
+
+#[cfg(test)]
+pub(super) fn find_prefix_depths_with_test_stats<const D: usize>(
+    sequence_len: usize,
+    initial_mask: u16,
+    verification_window: usize,
+    prefetch: impl FnMut(usize),
+    probe: impl FnMut(usize) -> u16,
+) -> PrefixSearchResult<D> {
+    find_prefix_depths_impl::<D, true>(
+        sequence_len,
+        initial_mask,
+        verification_window,
+        prefetch,
+        probe,
+    )
+}
+
+fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool>(
     sequence_len: usize,
     initial_mask: u16,
     verification_window: usize,
     mut prefetch: impl FnMut(usize),
     mut probe: impl FnMut(usize) -> u16,
-) -> [u32; D] {
+) -> PrefixSearchResult<D> {
     let mut depths = [0u32; D];
+    let mut fallback = FallbackStats::default();
     if sequence_len == 0 {
-        return depths;
+        return PrefixSearchResult { depths, fallback };
     }
 
     debug_assert!((1..=MAX_LANES).contains(&D));
@@ -29,10 +114,11 @@ pub(super) fn find_prefix_depths<const D: usize>(
     let configured_mask = lane_mask::<D>();
     let active = initial_mask & configured_mask & probe(0);
     if active == 0 {
-        return depths;
+        return PrefixSearchResult { depths, fallback };
     }
 
     let mut lower = [0usize; D];
+    let mut lower_predecessor = [0usize; D];
     let mut upper = [sequence_len; D];
     let mut sampling = active;
     let mut position = 1usize;
@@ -50,6 +136,7 @@ pub(super) fn find_prefix_depths<const D: usize>(
         for lane in 0..D {
             let lane_bit = 1u16 << lane;
             if hit_lanes & lane_bit != 0 {
+                lower_predecessor[lane] = lower[lane];
                 lower[lane] = position;
             } else if miss_lanes & lane_bit != 0 {
                 upper[lane] = position;
@@ -89,6 +176,7 @@ pub(super) fn find_prefix_depths<const D: usize>(
                     continue;
                 }
                 if hits & lane_bit != 0 {
+                    lower_predecessor[lane] = lower[lane];
                     lower[lane] = group.position;
                 } else {
                     upper[lane] = group.position;
@@ -105,12 +193,15 @@ pub(super) fn find_prefix_depths<const D: usize>(
 
     let mut verification_groups = [ProbeGroup::default(); MAX_VERIFICATION_GROUPS];
     let mut verification_group_count = 0usize;
+    let mut verification_start = [0usize; D];
     for (lane, &depth) in upper.iter().enumerate() {
         let lane_bit = 1u16 << lane;
         if active & lane_bit == 0 {
             continue;
         }
-        for verify_position in depth.saturating_sub(verification_window)..depth {
+        let start = depth.saturating_sub(verification_window);
+        verification_start[lane] = start;
+        for verify_position in start..depth {
             add_group(
                 &mut verification_groups,
                 &mut verification_group_count,
@@ -122,6 +213,7 @@ pub(super) fn find_prefix_depths<const D: usize>(
     verification_groups[..verification_group_count].sort_unstable_by_key(|group| group.position);
 
     let mut verifying = active;
+    let mut fallback_lanes = 0u16;
     for group in &verification_groups[..verification_group_count] {
         let participants = group.lanes & verifying;
         if participants == 0 {
@@ -133,12 +225,83 @@ pub(super) fn find_prefix_depths<const D: usize>(
             let lane_bit = 1u16 << lane;
             if misses & lane_bit != 0 {
                 *depth = group.position.min(u32::MAX as usize) as u32;
+                if group.position == verification_start[lane] {
+                    fallback_lanes |= lane_bit;
+                }
             }
         }
         verifying &= !misses;
     }
 
-    depths
+    if !FALLBACK {
+        return PrefixSearchResult { depths, fallback };
+    }
+    fallback.left_edge_lanes = u64::from(fallback_lanes.count_ones());
+
+    // A miss at the window's left edge can expose a false terminal branch. Scan only
+    // the previously unexamined gap after the terminal lower bound's predecessor.
+    let mut fallback_next = [0usize; D];
+    let mut fallback_end = [0usize; D];
+    for lane in 0..D {
+        let lane_bit = 1u16 << lane;
+        if fallback_lanes & lane_bit == 0 {
+            continue;
+        }
+        let start = lower_predecessor[lane].saturating_add(1);
+        let end = verification_start[lane];
+        if lower_predecessor[lane] >= end {
+            fallback.provenance_skips += 1;
+            fallback_lanes &= !lane_bit;
+            continue;
+        }
+        if start == end {
+            fallback_lanes &= !lane_bit;
+            continue;
+        }
+        fallback_next[lane] = start;
+        fallback_end[lane] = end;
+    }
+    fallback.activated_lanes = u64::from(fallback_lanes.count_ones());
+    if fallback_lanes == 0 {
+        return PrefixSearchResult { depths, fallback };
+    }
+
+    while fallback_lanes != 0 {
+        let position = (0..D)
+            .filter(|&lane| fallback_lanes & (1u16 << lane) != 0)
+            .map(|lane| fallback_next[lane])
+            .min()
+            .expect("at least one fallback lane");
+        let mut participants = 0u16;
+        for (lane, next) in fallback_next.iter().enumerate() {
+            let lane_bit = 1u16 << lane;
+            if fallback_lanes & lane_bit != 0 && *next == position {
+                participants |= lane_bit;
+            }
+        }
+
+        prefetch(position);
+        let misses = participants & !probe(position);
+        fallback.probe_calls += 1;
+        fallback.lane_probes += u64::from(participants.count_ones());
+        for (lane, depth) in depths.iter_mut().enumerate() {
+            let lane_bit = 1u16 << lane;
+            if participants & lane_bit == 0 {
+                continue;
+            }
+            if misses & lane_bit != 0 {
+                *depth = position.min(u32::MAX as usize) as u32;
+                fallback_lanes &= !lane_bit;
+                continue;
+            }
+            fallback_next[lane] += 1;
+            if fallback_next[lane] == fallback_end[lane] {
+                fallback_lanes &= !lane_bit;
+            }
+        }
+    }
+
+    PrefixSearchResult { depths, fallback }
 }
 
 #[cfg(any(test, feature = "bench"))]

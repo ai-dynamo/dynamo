@@ -183,6 +183,9 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
+    /// Bind optional shared metrics before the backend is published to worker threads.
+    fn configure_metrics(&mut self, _metrics: Option<&KvIndexerMetrics>) {}
+
     fn worker(
         &self,
         event_receiver: flume::Receiver<WorkerTask>,

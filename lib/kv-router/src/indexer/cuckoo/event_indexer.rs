@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+#[cfg(feature = "metrics")]
+use crate::indexer::PreBoundCkfSearchCounters;
 #[cfg(feature = "bench")]
 use crate::indexer::WorkerObservationState;
 use crate::indexer::{
@@ -19,7 +21,10 @@ use crate::protocols::{
 use super::addressing::CkfAddressing;
 use super::bucket::{CuckooBucketStore, PackedBucket, TransposedCkfTable};
 use super::mutator::{CuckooMutator, DcWriterState, DirtyBucket, lane_rng_seed};
+#[cfg(not(feature = "metrics"))]
 use super::search::find_prefix_depths;
+#[cfg(feature = "metrics")]
+use super::search::find_prefix_depths_with_stats;
 #[cfg(any(test, feature = "bench"))]
 use super::search::linear_prefix_depths;
 use super::{CkfBuildError, CkfConfig, DC_COUNT, MAX_KICKS, MAX_VERIFICATION_WINDOW};
@@ -33,6 +38,8 @@ pub struct EventTransposedCkfIndexer {
     worker_to_lane: FxHashMap<WorkerWithDpRank, usize>,
     worker_lane_masks: FxHashMap<WorkerId, u16>,
     pub(super) config: CkfConfig,
+    #[cfg(feature = "metrics")]
+    search_counters: Option<PreBoundCkfSearchCounters>,
 }
 
 impl EventTransposedCkfIndexer {
@@ -66,6 +73,8 @@ impl EventTransposedCkfIndexer {
             worker_to_lane,
             worker_lane_masks,
             config,
+            #[cfg(feature = "metrics")]
+            search_counters: None,
         })
     }
 
@@ -276,6 +285,15 @@ impl EventTransposedCkfIndexer {
 }
 
 impl SyncIndexer for EventTransposedCkfIndexer {
+    fn configure_metrics(&mut self, metrics: Option<&KvIndexerMetrics>) {
+        #[cfg(feature = "metrics")]
+        {
+            self.search_counters = metrics.map(KvIndexerMetrics::prebind_ckf_search);
+        }
+        #[cfg(not(feature = "metrics"))]
+        let _ = metrics;
+    }
+
     fn worker(
         &self,
         event_receiver: flume::Receiver<WorkerTask>,
@@ -356,6 +374,7 @@ impl SyncIndexer for EventTransposedCkfIndexer {
         }
 
         let probes = self.prepared_probes(sequence);
+        #[cfg(not(feature = "metrics"))]
         let depths = find_prefix_depths::<DC_COUNT>(
             probes.len(),
             u16::MAX,
@@ -363,6 +382,26 @@ impl SyncIndexer for EventTransposedCkfIndexer {
             |position| self.table.prefetch_probe(probes[position]),
             |position| self.table.probe(probes[position]),
         );
+        #[cfg(feature = "metrics")]
+        let depths = {
+            let result = find_prefix_depths_with_stats::<DC_COUNT>(
+                probes.len(),
+                u16::MAX,
+                self.config.search.verification_window,
+                |position| self.table.prefetch_probe(probes[position]),
+                |position| self.table.probe(probes[position]),
+            );
+            if let Some(counters) = &self.search_counters {
+                counters.record(
+                    result.fallback.left_edge_lanes,
+                    result.fallback.activated_lanes,
+                    result.fallback.probe_calls,
+                    result.fallback.lane_probes,
+                    result.fallback.provenance_skips,
+                );
+            }
+            result.depths
+        };
 
         let mut scores = OverlapScores::new();
         scores

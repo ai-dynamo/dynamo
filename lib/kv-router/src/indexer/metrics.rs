@@ -133,6 +133,9 @@ pub struct KvIndexerMetrics {
     /// Counter of suspicious-but-valid KV events.
     #[cfg(feature = "metrics")]
     pub kv_cache_event_warnings: IntCounterVec,
+    /// Counters for CKF provenance-fallback behavior.
+    #[cfg(feature = "metrics")]
+    pub ckf_search_fallback: IntCounterVec,
 }
 
 /// Metric status labels.
@@ -150,6 +153,13 @@ pub const METRIC_EVENT_CLEARED: &str = "cleared";
 
 /// Metric warning labels.
 pub const METRIC_WARNING_DUPLICATE_STORE: &str = "duplicate_store";
+
+/// CKF search-fallback metric labels.
+pub const METRIC_CKF_FALLBACK_LEFT_EDGE_LANES: &str = "left_edge_lanes";
+pub const METRIC_CKF_FALLBACK_ACTIVATED_LANES: &str = "activated_lanes";
+pub const METRIC_CKF_FALLBACK_PROBE_CALLS: &str = "probe_calls";
+pub const METRIC_CKF_FALLBACK_LANE_PROBES: &str = "lane_probes";
+pub const METRIC_CKF_FALLBACK_PROVENANCE_SKIPS: &str = "provenance_skips";
 
 /// Metric name for KV cache events applied counter.
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
@@ -169,16 +179,29 @@ const KV_CACHE_EVENT_WARNINGS_HELP: &str =
     "Total number of suspicious KV cache events seen by the router indexer";
 #[cfg(feature = "metrics")]
 const KV_CACHE_EVENT_WARNINGS_LABELS: &[&str] = &["warning_kind"];
+#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+const CKF_SEARCH_FALLBACK_SUFFIX: &str = "ckf_search_fallback";
+#[cfg(feature = "metrics")]
+const CKF_SEARCH_FALLBACK_NAME: &str = "dynamo_kvrouter_ckf_search_fallback";
+#[cfg(feature = "metrics")]
+const CKF_SEARCH_FALLBACK_HELP: &str = "CKF provenance-fallback activity and grouped probe cost";
+#[cfg(feature = "metrics")]
+const CKF_SEARCH_FALLBACK_LABELS: &[&str] = &["kind"];
 
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
 
 impl KvIndexerMetrics {
     #[cfg(feature = "metrics")]
-    fn new(kv_cache_events_applied: IntCounterVec, kv_cache_event_warnings: IntCounterVec) -> Self {
+    fn new(
+        kv_cache_events_applied: IntCounterVec,
+        kv_cache_event_warnings: IntCounterVec,
+        ckf_search_fallback: IntCounterVec,
+    ) -> Self {
         Self {
             kv_cache_events_applied,
             kv_cache_event_warnings,
+            ckf_search_fallback,
         }
     }
 
@@ -193,6 +216,10 @@ impl KvIndexerMetrics {
                 Opts::new(KV_CACHE_EVENT_WARNINGS_NAME, KV_CACHE_EVENT_WARNINGS_HELP),
                 KV_CACHE_EVENT_WARNINGS_LABELS,
             )?,
+            IntCounterVec::new(
+                Opts::new(CKF_SEARCH_FALLBACK_NAME, CKF_SEARCH_FALLBACK_HELP),
+                CKF_SEARCH_FALLBACK_LABELS,
+            )?,
         ))
     }
 
@@ -202,6 +229,7 @@ impl KvIndexerMetrics {
         let metrics = Arc::new(Self::new_prometheus()?);
         registry.register(Box::new(metrics.kv_cache_events_applied.clone()))?;
         registry.register(Box::new(metrics.kv_cache_event_warnings.clone()))?;
+        registry.register(Box::new(metrics.ckf_search_fallback.clone()))?;
         Ok(metrics)
     }
 
@@ -226,11 +254,23 @@ impl KvIndexerMetrics {
                             KV_CACHE_EVENT_WARNINGS_LABELS,
                             &[],
                         ),
-                    ) {
-                        (Ok(kv_cache_events_applied), Ok(kv_cache_event_warnings)) => Arc::new(
-                            Self::new(kv_cache_events_applied, kv_cache_event_warnings),
+                        component.metrics().create_intcountervec(
+                            CKF_SEARCH_FALLBACK_SUFFIX,
+                            CKF_SEARCH_FALLBACK_HELP,
+                            CKF_SEARCH_FALLBACK_LABELS,
+                            &[],
                         ),
-                        (Err(e), _) | (_, Err(e)) => {
+                    ) {
+                        (
+                            Ok(kv_cache_events_applied),
+                            Ok(kv_cache_event_warnings),
+                            Ok(ckf_search_fallback),
+                        ) => Arc::new(Self::new(
+                            kv_cache_events_applied,
+                            kv_cache_event_warnings,
+                            ckf_search_fallback,
+                        )),
+                        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                             tracing::warn!("Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.", e);
                             Arc::new(Self::new_unregistered())
                         }
@@ -309,6 +349,49 @@ impl KvIndexerMetrics {
     /// `with_label_values` hashmap lookup on every event.
     pub fn prebind(&self) -> PreBoundEventCounters {
         PreBoundEventCounters::new(self)
+    }
+
+    #[cfg(feature = "metrics")]
+    pub(crate) fn prebind_ckf_search(&self) -> PreBoundCkfSearchCounters {
+        PreBoundCkfSearchCounters::new(&self.ckf_search_fallback)
+    }
+}
+
+#[cfg(feature = "metrics")]
+#[derive(Clone, Debug)]
+pub(crate) struct PreBoundCkfSearchCounters {
+    left_edge_lanes: IntCounter,
+    activated_lanes: IntCounter,
+    probe_calls: IntCounter,
+    lane_probes: IntCounter,
+    provenance_skips: IntCounter,
+}
+
+#[cfg(feature = "metrics")]
+impl PreBoundCkfSearchCounters {
+    fn new(counters: &IntCounterVec) -> Self {
+        Self {
+            left_edge_lanes: counters.with_label_values(&[METRIC_CKF_FALLBACK_LEFT_EDGE_LANES]),
+            activated_lanes: counters.with_label_values(&[METRIC_CKF_FALLBACK_ACTIVATED_LANES]),
+            probe_calls: counters.with_label_values(&[METRIC_CKF_FALLBACK_PROBE_CALLS]),
+            lane_probes: counters.with_label_values(&[METRIC_CKF_FALLBACK_LANE_PROBES]),
+            provenance_skips: counters.with_label_values(&[METRIC_CKF_FALLBACK_PROVENANCE_SKIPS]),
+        }
+    }
+
+    pub(crate) fn record(
+        &self,
+        left_edge_lanes: u64,
+        activated_lanes: u64,
+        probe_calls: u64,
+        lane_probes: u64,
+        provenance_skips: u64,
+    ) {
+        self.left_edge_lanes.inc_by(left_edge_lanes);
+        self.activated_lanes.inc_by(activated_lanes);
+        self.probe_calls.inc_by(probe_calls);
+        self.lane_probes.inc_by(lane_probes);
+        self.provenance_skips.inc_by(provenance_skips);
     }
 }
 
