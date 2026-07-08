@@ -75,6 +75,7 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         ErrorType::CannotConnect,
         ErrorType::Disconnected,
         ErrorType::ConnectionTimeout,
+        ErrorType::Unavailable,
         ErrorType::Backend(BackendError::EngineShutdown),
     ];
     const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
@@ -1264,6 +1265,16 @@ mod tests {
         );
 
         assert!(is_migratable(err.as_ref()));
+    }
+
+    #[test]
+    fn test_typed_unavailable_worker_set_is_migratable() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::Unavailable)
+            .message("No workers available for endpoint dynamo/backend/generate")
+            .build();
+
+        assert!(is_migratable(&err));
     }
 
     #[test]

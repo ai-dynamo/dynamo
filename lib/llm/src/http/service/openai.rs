@@ -141,6 +141,19 @@ async fn get_completions_engine_with_failover_wait(
     .await
 }
 
+async fn wait_for_model_serving_ready(
+    state: &Arc<service_v2::State>,
+    model: &str,
+) -> Result<(), ErrorResponse> {
+    service_v2::wait_for_failover(
+        "model worker set",
+        model,
+        || check_model_serving_ready(state, model),
+        |_| true,
+    )
+    .await
+}
+
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
 /// Can be configured at runtime using the DYN_HTTP_BODY_LIMIT_MB environment variable.
@@ -683,7 +696,7 @@ async fn handler_completions(
 
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.inner.model)?;
+    wait_for_model_serving_ready(&state, &request.inner.model).await?;
 
     request.nvext = if state.nvext_enabled() {
         apply_header_routing_overrides(request.nvext.take(), &headers)
@@ -1284,7 +1297,7 @@ async fn handler_chat_completions(
     check_ready(&state)?;
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     if !resolved_model.is_empty() {
-        check_model_serving_ready(&state, resolved_model)?;
+        wait_for_model_serving_ready(&state, resolved_model).await?;
     }
 
     request.nvext = if state.nvext_enabled() {
@@ -2187,7 +2200,7 @@ async fn handler_responses(
         template.as_ref(),
     );
     if !resolved_model.is_empty() {
-        check_model_serving_ready(&state, resolved_model)?;
+        wait_for_model_serving_ready(&state, resolved_model).await?;
     }
 
     request.nvext = if state.nvext_enabled() {
