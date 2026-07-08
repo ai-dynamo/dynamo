@@ -11,16 +11,6 @@ import pytest
 
 
 def _install_sglang_test_compat_modules() -> None:
-    if "sglang.srt.observability.trace" not in sys.modules:
-        observability_module = sys.modules.setdefault(
-            "sglang.srt.observability",
-            types.ModuleType("sglang.srt.observability"),
-        )
-        trace_module = types.ModuleType("sglang.srt.observability.trace")
-        trace_module.set_global_trace_level = lambda *_args, **_kwargs: None
-        setattr(observability_module, "trace", trace_module)
-        sys.modules["sglang.srt.observability.trace"] = trace_module
-
     if "dynamo.sglang.register" not in sys.modules:
         register_module = types.ModuleType("dynamo.sglang.register")
 
