@@ -185,10 +185,16 @@ runs:
         # (flat NOTICES-<Eco>.txt + osrb-deps.csv + osrb.cdx.json). Runs on one
         # platform, so buildx exports directly into dest. Keep BASELINE_SBOM_FILE
         # in sync with the build-and-push step above.
+        BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
+        BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=go@e86c88d0")
+        while IFS= read -r build_arg; do
+          if [[ -n "${build_arg}" ]]; then
+            BUILD_ARGS+=("--build-arg" "${build_arg}")
+          fi
+        done <<< "${{ inputs.extra_build_args }}"
         docker buildx build \
             --platform ${{ steps.settings.outputs.compliance_platform }} \
-            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-            --build-arg BASELINE_SBOM_FILE=go@e86c88d0 \
+            "${BUILD_ARGS[@]}" \
             --build-context snapshot=../snapshot \
             --build-context compliance=../../container/compliance \
             --target compliance_artifact \
@@ -198,8 +204,11 @@ runs:
         # Name the OSRB files: osrb-operator-<arch>-<sha8>.{csv,cdx.json}.
         SHA8=$(echo "${{ github.sha }}" | cut -c1-8); [ -z "${SHA8}" ] && SHA8="nosha"
         ARCH=$(echo "${{ steps.settings.outputs.compliance_platform }}" | sed 's|.*linux/||')
-        [ -f /tmp/compliance/osrb-deps.csv ] && mv /tmp/compliance/osrb-deps.csv "/tmp/compliance/osrb-operator-${ARCH}-${SHA8}.csv"
-        [ -f /tmp/compliance/osrb.cdx.json ] && mv /tmp/compliance/osrb.cdx.json "/tmp/compliance/osrb-operator-${ARCH}-${SHA8}.cdx.json"
+        for f in /tmp/compliance/osrb-deps.csv /tmp/compliance/osrb.cdx.json; do
+          if [ ! -s "${f}" ]; then echo "::error::Missing/empty compliance output: ${f}"; exit 1; fi
+        done
+        mv /tmp/compliance/osrb-deps.csv "/tmp/compliance/osrb-operator-${ARCH}-${SHA8}.csv"
+        mv /tmp/compliance/osrb.cdx.json "/tmp/compliance/osrb-operator-${ARCH}-${SHA8}.cdx.json"
 
     # /sources/ extraction: opt-in via archive_sources. PR / on-demand leave it
     # false; post-merge-ci.yml sets it true for push to main + release branches.
@@ -211,11 +220,17 @@ runs:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         mkdir -p /tmp/sources
+        BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
+        BUILD_ARGS+=("--build-arg" "BASELINE_SBOM_FILE=go@e86c88d0")
+        BUILD_ARGS+=("--build-arg" "ENABLE_SOURCE_ARCHIVAL=true")
+        while IFS= read -r build_arg; do
+          if [[ -n "${build_arg}" ]]; then
+            BUILD_ARGS+=("--build-arg" "${build_arg}")
+          fi
+        done <<< "${{ inputs.extra_build_args }}"
         docker buildx build \
             --platform ${{ steps.settings.outputs.compliance_platform }} \
-            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-            --build-arg BASELINE_SBOM_FILE=go@e86c88d0 \
-            --build-arg ENABLE_SOURCE_ARCHIVAL=true \
+            "${BUILD_ARGS[@]}" \
             --build-context snapshot=../snapshot \
             --build-context compliance=../../container/compliance \
             --target sources_archive \

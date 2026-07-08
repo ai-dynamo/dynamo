@@ -154,7 +154,7 @@ RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
             ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
             -v ; \
     else \
-        : > /sources.zip ; \
+        python3 -c "import zipfile; zipfile.ZipFile('/sources.zip','w').close()" ; \
     fi
 
 
