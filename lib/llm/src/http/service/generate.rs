@@ -121,8 +121,19 @@ fn dynamo_routing_priority(vllm_priority: i32) -> i32 {
     vllm_priority.saturating_neg()
 }
 
-fn generate_dispatch_span(request_id: &str) -> tracing::Span {
-    tracing::info_span!(target: "request_span", "generate", request_id = %request_id)
+fn generate_dispatch_span(request_id: &str, model: &str) -> tracing::Span {
+    tracing::info_span!(
+        target: "request_span",
+        "generate",
+        request_id = %request_id,
+        model = %model,
+        input_tokens = tracing::field::Empty,
+        output_tokens = tracing::field::Empty,
+        ttft_ms = tracing::field::Empty,
+        avg_itl_ms = tracing::field::Empty,
+        prefill_worker_id = tracing::field::Empty,
+        decode_worker_id = tracing::field::Empty,
+    )
 }
 
 async fn run_until_killed<T>(
@@ -426,7 +437,7 @@ async fn handler_generate(
     )
     .await;
 
-    let dispatch_span = generate_dispatch_span(&request_id);
+    let dispatch_span = generate_dispatch_span(&request_id, &model);
     // Unary work must outlive the Axum handler so dropping the handler can signal
     // the armed connection monitor. The detached dispatch observes that kill at
     // each backend await point and then exits promptly.
@@ -663,6 +674,11 @@ mod tests {
 
     struct MetricEngine;
 
+    struct TokenThenPendingEngine {
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
     #[async_trait::async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
         for CancelledEngine
@@ -731,6 +747,27 @@ mod tests {
                 })
             });
             let stream = first.chain(second);
+            Ok(ResponseStream::new(Box::pin(stream), request.context()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for TokenThenPendingEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let first = futures::stream::once(async {
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![10],
+                    index: Some(0),
+                    ..Default::default()
+                })
+            });
+            let pending = PendingOperation::new(self.started.clone(), self.dropped.clone());
+            let stream = first.chain(pending);
             Ok(ResponseStream::new(Box::pin(stream), request.context()))
         }
     }
@@ -1089,12 +1126,28 @@ mod tests {
             tracing_subscriber::registry().with(RequestIdCaptureLayer(captured_request_id.clone())),
         );
 
-        let _dispatch_span = generate_dispatch_span("header-request");
+        let dispatch_span = generate_dispatch_span("header-request", "test-model");
 
         assert_eq!(
             captured_request_id.lock().unwrap().as_deref(),
             Some("header-request")
         );
+        let fields = dispatch_span
+            .metadata()
+            .expect("dispatch span metadata")
+            .fields();
+        for field in [
+            "request_id",
+            "model",
+            "input_tokens",
+            "output_tokens",
+            "ttft_ms",
+            "avg_itl_ms",
+            "prefill_worker_id",
+            "decode_worker_id",
+        ] {
+            assert!(fields.field(field).is_some(), "missing span field {field}");
+        }
     }
 
     fn dispatch_test_context() -> Context<PreprocessedRequest> {
@@ -1153,7 +1206,11 @@ mod tests {
             .unwrap_or(0)
     }
 
-    fn assert_cancelled_dispatch_metrics(state: &service_v2::State) {
+    fn assert_cancelled_dispatch_metrics(
+        state: &service_v2::State,
+        expected_ttft_samples: u64,
+        expected_osl_samples: u64,
+    ) {
         let metric_model = state.manager().metric_model_for("test-model");
         let metrics = state.metrics_clone();
         assert_eq!(metrics.get_inflight_count(metric_model), 0);
@@ -1184,7 +1241,7 @@ mod tests {
                 "dynamo_frontend_time_to_first_token_seconds",
                 &model_labels,
             ),
-            0
+            expected_ttft_samples
         );
         assert_eq!(
             histogram_sample_count_or_zero(
@@ -1192,7 +1249,7 @@ mod tests {
                 "dynamo_frontend_output_sequence_tokens",
                 &model_labels,
             ),
-            0
+            expected_osl_samples
         );
     }
 
@@ -1207,7 +1264,7 @@ mod tests {
             .expect("dispatch task panicked");
         assert_eq!(response.status().as_u16(), 499);
         assert!(dropped.load(Ordering::SeqCst));
-        assert_cancelled_dispatch_metrics(state);
+        assert_cancelled_dispatch_metrics(state, 0, 0);
     }
 
     async fn assert_request_kill_interrupts_pending(phase: PendingPhase) {
@@ -1297,7 +1354,7 @@ mod tests {
                 .await;
 
         assert_eq!(response.status().as_u16(), 499);
-        assert_cancelled_dispatch_metrics(state.as_ref());
+        assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
     }
 
     #[tokio::test]
@@ -1318,7 +1375,41 @@ mod tests {
         .await;
 
         assert_eq!(response.status().as_u16(), 499);
-        assert_cancelled_dispatch_metrics(state.as_ref());
+        assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
+    }
+
+    #[tokio::test]
+    async fn request_kill_after_first_token_records_partial_metrics() {
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(TokenThenPendingEngine {
+                started: started.clone(),
+                dropped: dropped.clone(),
+            });
+        let context = dispatch_test_context();
+        let request_context = context.context();
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+        let task = tokio::spawn(generate_dispatch(
+            engine,
+            context,
+            "req-token-then-pending".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        ));
+
+        started.notified().await;
+        request_context.kill();
+
+        let response = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("dispatch did not stop promptly after request kill")
+            .expect("dispatch task panicked");
+        assert_eq!(response.status().as_u16(), 499);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_cancelled_dispatch_metrics(state.as_ref(), 1, 1);
     }
 
     #[tokio::test]
