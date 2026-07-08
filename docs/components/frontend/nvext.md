@@ -34,10 +34,11 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `use_raw_prompt` | `bool` | `None` | Preprocessor | Bypasses the prompt template and passes the prompt directly to the tokenizer. |
 | `annotations` | `string[]` | `None` | Preprocessor | Triggers out-of-band information in the SSE stream via the `event:` field. |
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
-| `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When provided with `backend_instance_id`, tokenization is skipped. |
+| `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the frontend skips tokenization. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
 | `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. vLLM and TensorRT-LLM also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
-| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`. |
+| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
+| `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. The object accepts one required `url` field. Requires an RL-enabled SGLang worker. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
@@ -237,9 +238,11 @@ When the client requests response metadata via `extra_fields`, the response incl
 |-------|---------------|-------------|
 | `worker_id` | `extra_fields: ["worker_id"]` | Prefill/decode worker IDs and data parallel ranks that processed the request. |
 | `timing` | `extra_fields: ["timing"]` | Per-request timing information (TTFT, ITL, queue time, etc.). |
-| `routed_experts` | `extra_fields: ["routed_experts"]` | Routed expert capture payload returned by SGLang-backed requests. |
+| `routed_experts` | `extra_fields: ["routed_experts"]` | Backend-specific routed expert capture payload returned by compatible vLLM and SGLang engines. |
 | `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |
 | `stop_reason` | `extra_fields: ["stop_reason"]` | Backend-specific matched stop condition, returned under `nvext` because it is not part of the OpenAI completions schema. Dynamo currently serves this as a response-level field for single-choice requests; supporting `n > 1` will require an indexed per-choice shape. |
+| `completion_token_ids` | `extra_fields: ["completion_token_ids"]` | Generated token IDs. Requires a single prompt and one generated choice. |
+| `prompt_logprobs` | `extra_fields: ["prompt_logprobs"]` | Prompt log probabilities requested with the top-level `prompt_logprobs` field. Emitted on the final response. |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
 
 ### Example response `nvext`
@@ -266,6 +269,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 | Document | Description |
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
+| [Reinforcement Learning Integration](../../features/rl/README.md) | Token-level rollout data, worker discovery, direct engine routes, and SGLang metadata upload |
 | [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
 | [Session IDs](../../agents/session-ids.md) | Passive session identity |
 | [Agent Tracing](../../agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |

@@ -321,6 +321,8 @@ navigation:
                 path: agents/agent-harnesses.md
               - page: ThunderAgent Program Scheduler
                 path: agents/thunderagent-router.md
+          - page: Reinforcement Learning
+            path: features/rl/README.md
           - page: LoRA Adapters
             path: features/lora/README.md
           - section: Multimodal
