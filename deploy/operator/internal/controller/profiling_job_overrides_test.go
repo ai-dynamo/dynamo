@@ -953,6 +953,53 @@ func TestApplyProfilingJobOverrides_SidecarUntouched(t *testing.T) {
 	}
 }
 
+func TestApplyProfilingJobOverrides_OutputCopierImage(t *testing.T) {
+	job := baseJob()
+	job.Spec.Template.Spec.Containers[1].Command = []string{"/bin/sh", "-c"}
+	job.Spec.Template.Spec.Containers[1].Args = []string{"echo sidecar-script"}
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: "internal-registry/kubectl:1.29",
+					},
+				},
+			},
+		},
+	})
+	sidecar := job.Spec.Template.Spec.Containers[1]
+	if sidecar.Image != "internal-registry/kubectl:1.29" {
+		t.Errorf("expected output-copier image override, got %s", sidecar.Image)
+	}
+	if len(sidecar.Command) == 0 || sidecar.Command[0] != "/bin/sh" {
+		t.Error("output-copier command was unexpectedly overwritten")
+	}
+	if len(sidecar.Args) == 0 || sidecar.Args[0] != "echo sidecar-script" {
+		t.Error("output-copier args were unexpectedly overwritten")
+	}
+}
+
+func TestApplyProfilingJobOverrides_OutputCopierDoesNotOverrideProfiler(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  ContainerNameOutputCopier,
+						Image: "internal-registry/kubectl:1.29",
+					},
+				},
+			},
+		},
+	})
+	if job.Spec.Template.Spec.Containers[0].Image != "profiler:latest" {
+		t.Errorf("profiler image should be unchanged, got %s", job.Spec.Template.Spec.Containers[0].Image)
+	}
+}
+
 func TestApplyProfilingJobOverrides_Combined(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
