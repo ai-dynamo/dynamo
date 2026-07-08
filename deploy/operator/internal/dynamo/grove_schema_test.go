@@ -148,17 +148,65 @@ func TestGeneratedGroveTopologyConstraintsValidateAgainstPinnedCRD(t *testing.T)
 
 func TestLegacyGroveTopologyConstraintUpgradeValidatesAgainstPinnedCRD(t *testing.T) {
 	validator := newGrovePodCliqueSetRequestValidator(t)
-	modern := generateTopologyTestPodCliqueSet(t, "", false)
-	require.Len(t, modern.Spec.Template.Cliques, 1)
-	require.NotNil(t, modern.Spec.Template.Cliques[0].TopologyConstraint)
-	legacy := modern.DeepCopy()
-	legacy.Spec.Template.Cliques[0].TopologyConstraint = &grovev1alpha1.TopologyConstraint{PackDomain: "rack"}
-	repaired := modern.DeepCopy()
-	repaired.Spec.Template.Cliques[0].TopologyConstraint = &grovev1alpha1.TopologyConstraint{
-		TopologyName: "grove-topology",
-		PackDomain:   "rack",
+
+	tests := []struct {
+		name       string
+		modern     func(*testing.T) *grovev1alpha1.PodCliqueSet
+		constraint func(*grovev1alpha1.PodCliqueSet) *grovev1alpha1.TopologyConstraint
+		packDomain grovev1alpha1.TopologyDomain
+	}{
+		{
+			name: "template",
+			modern: func(t *testing.T) *grovev1alpha1.PodCliqueSet {
+				return generateTopologyTestPodCliqueSet(t, "zone", false)
+			},
+			constraint: func(pcs *grovev1alpha1.PodCliqueSet) *grovev1alpha1.TopologyConstraint {
+				return pcs.Spec.Template.TopologyConstraint
+			},
+			packDomain: "zone",
+		},
+		{
+			name: "clique",
+			modern: func(t *testing.T) *grovev1alpha1.PodCliqueSet {
+				pcs := generateTopologyTestPodCliqueSet(t, "", false)
+				require.Len(t, pcs.Spec.Template.Cliques, 1)
+				return pcs
+			},
+			constraint: func(pcs *grovev1alpha1.PodCliqueSet) *grovev1alpha1.TopologyConstraint {
+				return pcs.Spec.Template.Cliques[0].TopologyConstraint
+			},
+			packDomain: "rack",
+		},
+		{
+			name: "scaling group",
+			modern: func(t *testing.T) *grovev1alpha1.PodCliqueSet {
+				pcs := generateTopologyTestPodCliqueSet(t, "", true)
+				require.Len(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+				return pcs
+			},
+			constraint: func(pcs *grovev1alpha1.PodCliqueSet) *grovev1alpha1.TopologyConstraint {
+				return pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].TopologyConstraint
+			},
+			packDomain: "rack",
+		},
 	}
 
-	validator.validate(t, repaired, legacy)
-	validator.validate(t, modern, repaired)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			modern := tt.modern(t)
+			modernConstraint := tt.constraint(modern)
+			require.NotNil(t, modernConstraint)
+
+			legacy := modern.DeepCopy()
+			*tt.constraint(legacy) = grovev1alpha1.TopologyConstraint{PackDomain: tt.packDomain}
+			repaired := modern.DeepCopy()
+			*tt.constraint(repaired) = grovev1alpha1.TopologyConstraint{
+				TopologyName: modernConstraint.TopologyName,
+				PackDomain:   tt.packDomain,
+			}
+
+			validator.validate(t, repaired, legacy)
+			validator.validate(t, modern, repaired)
+		})
+	}
 }
