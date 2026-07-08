@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Navigation structure for Dynamo docs
-# Tab-based navigation: Home, User Guide, Well-Lit Paths, Recipes, Developer Guide, Reference, Blog, Community.
+# Tab-based navigation: Home, User Guide, Use Cases, Well-Lit Paths, Recipes, Developer Guide, Reference, Blog, Community.
 # Each content tab sets skip-slug: true so page URLs derive from the file path and stay
 # independent of which tab a page lives in. The recipes tab keeps its recipes/ URL prefix.
 
@@ -26,6 +26,10 @@ tabs:
   user-guide:
     display-name: User Guide
     icon: book-open
+    skip-slug: true
+  use-cases:
+    display-name: Use Cases
+    icon: magnifying-glass-chart
     skip-slug: true
   well-lit-paths:
     display-name: Well-Lit Paths
@@ -152,15 +156,8 @@ navigation:
       - section: Operations
         icon: screwdriver-wrench
         contents:
-          - section: Observability
-            collapsed: true
-            contents:
-              - page: Metrics
-                path: kubernetes/observability/metrics.md
-              - page: Logging
-                path: kubernetes/observability/logging.md
-              - page: Operator Metrics
-                path: kubernetes/observability/operator-metrics.md
+          - page: Observability
+            path: kubernetes/observability/metrics.md
           - section: CLI Tools
             collapsed: true
             contents:
@@ -194,14 +191,12 @@ navigation:
                 path: observability/README.md
               - page: Prometheus + Grafana
                 path: observability/prometheus-grafana.md
-              - page: Metrics
-                path: observability/metrics.md
               - page: Health Checks
                 path: observability/health-checks.md
               - page: Tracing
                 path: observability/tracing.md
               - page: Logging
-                path: observability/logging.md 
+                path: observability/logging.md
           - section: KV Cache Offloading
             collapsed: true
             contents:
@@ -213,6 +208,101 @@ navigation:
                 path: integrations/flexkv-integration.md
               - page: Custom KV Events
                 path: integrations/kv-events-custom-engines.md
+
+  - tab: use-cases
+    layout:
+      # ==================== Use Cases ====================
+      - section: Use Cases
+        icon: magnifying-glass-chart
+        contents:
+          - section: Tool Calling & Reasoning
+            slug: parsing
+            contents:
+              - page: Overview
+                path: tool-calling/parsing.md
+              - page: Tool Call Parsing
+                path: tool-calling/README.md
+              - page: Reasoning Parsing
+                path: reasoning/README.md
+              - page: Parser Engine Fallback
+                path: tool-calling/engine-fallback.md
+              - page: Parser Configuration
+                path: tool-calling/parser-configuration.md
+              - page: Tool Calling Probe Snapshot (1.2)
+                path: tool-calling/release-1.2-probe-snapshot.md
+              - page: Troubleshooting Tool Calls
+                path: tool-calling/troubleshooting.md
+          - page: Fastokens Tokenizer
+            path: features/tokenizer/README.md
+          - page: LoRA Adapters
+            path: features/lora/README.md
+          - section: Fault Tolerance
+            contents:
+              - page: Overview
+                path: fault-tolerance/README.md
+              - page: Request Migration
+                path: fault-tolerance/request-migration.md
+              - page: Request Cancellation
+                path: fault-tolerance/request-cancellation.md
+              - page: Request Rejection
+                path: fault-tolerance/request-rejection.md
+              - page: Graceful Shutdown
+                path: fault-tolerance/graceful-shutdown.md
+              - page: Testing
+                path: fault-tolerance/testing.md
+          - section: Inference Simulation (DynoSim)
+            slug: dynosim
+            contents:
+              - page: Overview
+                path: dynosim/README.md
+              - page: Live Simulation with Mocker
+                path: dynosim/mocker.md
+              - page: Simulation Runs
+                path: dynosim/runs.md
+              - page: Simulation Sweeps
+                path: dynosim/sweeps.md
+              - page: Planner Simulation Benchmarking
+                path: dynosim/planner-benchmarking.md
+          - section: Agents
+            slug: agents
+            contents:
+              - page: Overview
+                path: agents/README.md
+              - page: SGLang for Agentic Workloads
+                path: backends/sglang/agents.md
+              - page: Agent Tracing
+                path: agents/agent-tracing.md
+              - page: Agent Hints
+                path: agents/agent-hints.md
+              - page: Use Pi-Mono with Dynamo
+                path: agents/pi-mono.md
+              - page: ThunderAgent Program Scheduler
+                path: agents/thunderagent-router.md
+          - section: Multimodal
+            contents:
+              - page: Overview
+                path: features/multimodal/README.md
+              - page: Embedding Cache
+                path: features/multimodal/embedding-cache.md
+              - page: Encoder Disaggregation
+                path: features/multimodal/encoder-disaggregation.md
+              - page: Multimodal KV Routing
+                path: features/multimodal/multimodal-kv-routing.md
+          - section: Diffusion (Preview)
+            slug: diffusion
+            contents:
+              - page: Overview
+                path: features/diffusion/README.md
+              - page: FastVideo
+                slug: fastvideo
+                path: features/diffusion/fastvideo.md
+              - page: vLLM-Omni
+                path: backends/vllm/vllm-omni.md
+              - page: SGLang Diffusion
+                path: backends/sglang/sglang-diffusion.md
+              - page: TRT-LLM Diffusion
+                path: backends/trtllm/trtllm-diffusion.md
+          # TODO: add Reinforcement Learning (RL) use-case docs here when available.
 
   - tab: well-lit-paths
     layout:
@@ -262,96 +352,6 @@ navigation:
 
   - tab: developer-guide
     layout:
-      # ==================== Deep Dive by Use Case ====================
-      - section: Deep Dive by Use Case
-        icon: magnifying-glass-chart
-        contents:
-          - section: Tool Calling & Reasoning
-            slug: parsing
-            path: tool-calling/parsing.md
-            contents:
-              - page: Tool Call Parsing
-                path: tool-calling/README.md
-              - page: Reasoning Parsing
-                path: reasoning/README.md
-              - page: Parser Engine Fallback
-                path: tool-calling/engine-fallback.md
-              - page: Parser Configuration
-                path: tool-calling/parser-configuration.md
-              - page: Tool Calling Probe Snapshot (1.2)
-                path: tool-calling/release-1.2-probe-snapshot.md
-              - page: Troubleshooting Tool Calls
-                path: tool-calling/troubleshooting.md
-          - page: Fastokens Tokenizer
-            path: features/tokenizer/README.md
-          - page: LoRA Adapters
-            path: features/lora/README.md
-          - section: Fault Tolerance
-            contents:
-              - page: Overview
-                path: fault-tolerance/README.md
-              - page: Request Migration
-                path: fault-tolerance/request-migration.md
-              - page: Request Cancellation
-                path: fault-tolerance/request-cancellation.md
-              - page: Request Rejection
-                path: fault-tolerance/request-rejection.md
-              - page: Graceful Shutdown
-                path: fault-tolerance/graceful-shutdown.md
-              - page: Testing
-                path: fault-tolerance/testing.md
-          - section: Inference Simulation (DynoSim)
-            slug: dynosim
-            path: dynosim/README.md
-            contents:
-              - page: Live Simulation with Mocker
-                path: dynosim/mocker.md
-              - page: Simulation Runs
-                path: dynosim/runs.md
-              - page: Simulation Sweeps
-                path: dynosim/sweeps.md
-              - page: Planner Simulation Benchmarking
-                path: dynosim/planner-benchmarking.md
-          - section: Agents
-            slug: agents
-            path: agents/README.md
-            contents:
-              - page: SGLang for Agentic Workloads
-                path: backends/sglang/agents.md
-              - page: Agent Tracing
-                path: agents/agent-tracing.md
-              - page: Agent Hints
-                path: agents/agent-hints.md
-              - page: Use Pi-Mono with Dynamo
-                path: agents/pi-mono.md
-              - page: ThunderAgent Program Scheduler
-                path: agents/thunderagent-router.md
-          - section: Multimodal
-            contents:
-              - page: Overview
-                path: features/multimodal/README.md
-              - page: Embedding Cache
-                path: features/multimodal/embedding-cache.md
-              - page: Encoder Disaggregation
-                path: features/multimodal/encoder-disaggregation.md
-              - page: Multimodal KV Routing
-                path: features/multimodal/multimodal-kv-routing.md
-          - section: Diffusion (Preview)
-            slug: diffusion
-            contents:
-              - page: Overview
-                path: features/diffusion/README.md
-              - page: FastVideo
-                slug: fastvideo
-                path: features/diffusion/fastvideo.md
-              - page: vLLM-Omni
-                path: backends/vllm/vllm-omni.md
-              - page: SGLang Diffusion
-                path: backends/sglang/sglang-diffusion.md
-              - page: TRT-LLM Diffusion
-                path: backends/trtllm/trtllm-diffusion.md
-          # TODO: add Reinforcement Learning (RL) use-case docs here when available.
-
       # ==================== Knowledge Base ====================
       - section: Knowledge Base
         icon: book-open

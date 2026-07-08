@@ -16,14 +16,11 @@ does not list a parser for your model, see
 
 ## Prerequisites
 
-To enable reasoning parsing, launch the backend worker with:
+To enable reasoning parsing, set the following flag on the backend worker in your DynamoGraphDeployment (DGD):
 
 - `--dyn-reasoning-parser`: select the reasoning parser from the supported list below
 
-```bash
-# <backend> can be sglang, trtllm, vllm, etc. based on your installation
-python -m dynamo.<backend> --help
-```
+The flag is a worker `args:` entry — `dynamo.vllm`, `dynamo.sglang`, or `dynamo.trtllm`. For the full list of worker flags, see the backend guides ([vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)) or run the worker with `--help`. New to authoring a DGD? Start with [Deploy with DGD](../kubernetes/dgd-guide.md).
 
 > [!TIP]
 > Some models need both a reasoning parser and a tool call parser. For supported tool call parser names, see [Tool Call Parsing (Dynamo)](../tool-calling/README.md).
@@ -78,17 +75,66 @@ Reasoning parsing happens before tool call parsing. If a model emits both reason
 
 ## Examples
 
-### Launch Dynamo Frontend and Backend
+### Deploy Frontend and worker
+
+Reasoning parsing is configured on the **worker** with `--dyn-reasoning-parser` (pair it with `--dyn-tool-call-parser` when the model also emits tool calls). The Frontend needs no extra flags. This DGD serves Qwen3.5-4B on SGLang — swap the worker for `dynamo.vllm` or `dynamo.trtllm` with the same `--dyn-*` flags:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-reasoning
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+  - name: SGLangWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3.5-4B
+          - --served-model-name
+          - Qwen/Qwen3.5-4B
+          - --dyn-tool-call-parser
+          - qwen3_coder
+          - --dyn-reasoning-parser
+          - qwen3
+```
+
+Apply it and wait for the deployment to become ready:
 
 ```bash
-# launch backend worker (or dynamo.vllm)
-python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
-
-# launch frontend worker
-python -m dynamo.frontend
+kubectl apply -f qwen35-reasoning.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dynamographdeployment/qwen35-reasoning \
+  -n ${NAMESPACE} --timeout=600s
 ```
 
 ### Reasoning Request Example
+
+Port-forward the Frontend Service, then send the request:
+
+```bash
+kubectl port-forward svc/qwen35-reasoning-frontend 8000:8000 -n ${NAMESPACE}
+```
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \

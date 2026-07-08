@@ -25,7 +25,55 @@ The mocker simulates:
 
 ## Quick Start
 
-### Basic Usage
+The mocker runs as a real Dynamo worker: it registers with the frontend, publishes KV events, and exercises the router and planner paths. Deploy it as a DGD to simulate a live Dynamo deployment without GPUs, or launch it locally for quick iteration.
+
+### On Kubernetes (DGD)
+
+Deploy a Frontend plus a `dynamo.mocker` worker. The mocker ships in the `dynamo-planner` image (no GPU resources requested). This DGD is adapted from [`examples/backends/mocker/deploy/v1beta1/agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/v1beta1/agg.yaml):
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: mocker-agg
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${PLANNER_IMAGE}       # nvcr.io/nvidia/ai-dynamo/dynamo-planner:<tag>
+  - name: decode
+    type: decode
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${PLANNER_IMAGE}
+          workingDir: /workspace
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --speedup-ratio
+          - "1.0"
+```
+
+Apply it, then port-forward the Frontend (`kubectl port-forward svc/mocker-agg-frontend 8000:8000 -n ${NAMESPACE}`) and send OpenAI-compatible requests as you would to a real backend. For a disaggregated simulation, add a second component with `--disaggregation-mode prefill` (see [`.../deploy/v1beta1/disagg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/v1beta1/disagg.yaml)).
+
+### Locally
+
+For no-cluster iteration, launch the mocker directly. The same flags apply.
 
 ```bash
 # Launch a single mocker worker
@@ -44,7 +92,7 @@ python -m dynamo.mocker \
     --speedup-ratio 10.0
 ```
 
-### Disaggregated Serving
+### Disaggregated Serving (local)
 
 ```bash
 # Launch prefill worker
@@ -59,7 +107,7 @@ python -m dynamo.mocker \
     --disaggregation-mode decode
 ```
 
-### Multiple Workers in One Process
+### Multiple Workers in One Process (local)
 
 ```bash
 # Launch 4 mocker workers sharing the same tokio runtime

@@ -10,18 +10,7 @@ Dynamo provides health check and liveness HTTP endpoints for each component whic
 can be used to configure startup, liveness and readiness probes in
 orchestration frameworks such as Kubernetes.
 
-## Environment Variables
-
-| Variable | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `DYN_SYSTEM_PORT` | System status server port | `-1` (disabled) | `8081` |
-| `DYN_SYSTEM_STARTING_HEALTH_STATUS` | Initial health status | `notready` | `ready`, `notready` |
-| `DYN_SYSTEM_HEALTH_PATH` | Custom health endpoint path | `/health` | `/custom/health` |
-| `DYN_SYSTEM_LIVE_PATH` | Custom liveness endpoint path | `/live` | `/custom/live` |
-| `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Endpoints required for ready state | none | `["generate"]` |
-| `DYN_HEALTH_CHECK_ENABLED` | Enable canary health checks | `false` (K8s: `true`) | `true`, `false` |
-| `DYN_CANARY_WAIT_TIME` | Seconds before sending canary health check | `10` | `5`, `30` |
-| `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | Health check request timeout in seconds | `3` | `5`, `10` |
+The variables that configure these endpoints — `DYN_SYSTEM_PORT`, the health/live paths, the required-endpoints list, and the canary settings — are documented in [Environment Variables](../reference/observability/environment-variables.mdx#health-checks).
 
 ## Getting Started Quickly
 
@@ -275,13 +264,7 @@ export DYN_HEALTH_CHECK_REQUEST_TIMEOUT=5  # 5 second timeout
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 ```
 
-#### Configuration Options
-
-| Environment Variable | Description | Default | Notes |
-|---------------------|-------------|---------|-------|
-| `DYN_HEALTH_CHECK_ENABLED` | Enable/disable canary health checks | `false` (K8s: `true`) | Automatically set to `true` in K8s |
-| `DYN_CANARY_WAIT_TIME` | Seconds to wait (during idle) before sending health check | `10` | Lower values = more frequent checks |
-| `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | Max seconds to wait for health check response | `3` | Higher values = more tolerance for slow responses |
+See [Environment Variables](../reference/observability/environment-variables.mdx#health-checks) for the canary settings (`DYN_HEALTH_CHECK_ENABLED`, `DYN_CANARY_WAIT_TIME`, `DYN_HEALTH_CHECK_REQUEST_TIMEOUT`) and their defaults.
 
 ### Health Check Payloads
 

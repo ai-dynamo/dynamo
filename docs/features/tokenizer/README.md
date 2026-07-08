@@ -62,22 +62,50 @@ Stay on the default backend if:
 
 ## Quick Start
 
-Enable `fastokens` on the frontend with either the CLI flag or the environment variable. The CLI flag takes precedence.
+`fastokens` is a **frontend** setting. Enable it on the Frontend component with the `DYN_TOKENIZER` environment variable (the operator-friendly form) or the `--tokenizer` flag; the flag takes precedence if both are set.
 
-```bash
-# CLI flag
-python -m dynamo.frontend --tokenizer fastokens
-
-# Environment variable
-export DYN_TOKENIZER=fastokens
-python -m dynamo.frontend
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-deployment
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          env:
+          - name: DYN_TOKENIZER
+            value: fastokens
+  # ... worker component unchanged
 ```
 
-To return to the default HuggingFace tokenizer backend, omit the flag or set `DYN_TOKENIZER=default`.
+The `--tokenizer` flag form sets the same option through the Frontend `args:`:
 
-```bash
-python -m dynamo.frontend --tokenizer default
+```yaml
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --tokenizer
+          - fastokens
 ```
+
+To return to the default HuggingFace tokenizer backend, set `DYN_TOKENIZER=default` (or omit it). Changing the value requires the Frontend pod to be replaced, which `kubectl apply` does automatically.
 
 No client changes are required. Request payloads, OpenAI-compatible API behavior, and streamed responses remain the same.
 
@@ -148,7 +176,7 @@ See the [frontend benchmarking guide](https://github.com/ai-dynamo/dynamo/tree/m
 ## Troubleshooting
 
 **I enabled `fastokens`, but the logs do not show `Using fastokens tokenizer backend`.**
-Make sure the setting is applied to the frontend process, not only to the backend worker. For local launches, pass `--tokenizer fastokens` to `python -m dynamo.frontend` or set `DYN_TOKENIZER=fastokens` before starting the frontend. For benchmark DGD templates, use `DYN_TOKENIZER=fastokens`; the sweep runner maps `--tokenizers fastokens` to that value and restarts the frontend pod.
+Make sure the setting is applied to the frontend process, not only to the backend worker. Set `DYN_TOKENIZER=fastokens` (or `--tokenizer fastokens`) on the **Frontend** component and re-apply so the frontend pod restarts. For benchmark DGD templates, use `DYN_TOKENIZER=fastokens`; the sweep runner maps `--tokenizers fastokens` to that value and restarts the frontend pod.
 
 **The frontend logs `Failed to load fastokens, falling back to HuggingFace`.**
 The model's tokenizer file uses a feature that `fastokens` does not support, or it is not a BPE `tokenizer.json` path. Dynamo has already fallen back to HuggingFace and should keep serving traffic. Check the tokenizer format, compare against the [tested models list](https://github.com/crusoecloud/fastokens#tested-models), and use `--tokenizer default` if you want to avoid the warning.

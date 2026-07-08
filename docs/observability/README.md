@@ -1,33 +1,99 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Observability (Local)
-subtitle: Monitor Dynamo deployments with metrics, logging, and tracing
+title: Observability
+subtitle: Install the monitoring stack and enable metrics, logging, and tracing for Dynamo deployments
 ---
 
-## Required environment variables
+Dynamo emits three signals — **metrics** (Prometheus), **logs** (structured text or JSONL, exportable to Loki), and **traces** (OpenTelemetry, exportable to Tempo). This page installs the backends that collect them. Enabling each signal is a matter of setting a few environment variables per process or deployment.
 
-Set these on every Dynamo process (frontend, router, workers) for metrics, traces, and logs to flow:
+## Signals at a glance
 
-| Variable | Purpose | Required |
-|---|---|---|
-| `DYN_SYSTEM_PORT=8081` | Unified system port (metrics + health). | Yes for metrics. |
-| `OTEL_EXPORT_ENABLED=true` | Enable OpenTelemetry export. **Without this, traces and logs never leave the process** — Loki and Tempo will show nothing even if they are healthy. | Yes for traces/logs. |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces (e.g. `http://tempo:4317`). Must be a gRPC listener — Dynamo's exporter does not speak OTLP/HTTP, even though the OTel Collector also listens on `:4318`. | Yes for traces. |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP gRPC endpoint for logs (e.g. `http://loki-otlp:4317`). Same gRPC-only constraint as the traces endpoint above. | Yes for logs. |
-| `DYN_LOGGING_JSONL=true` | Structured JSON log output (recommended for Loki). | Optional. |
+| Signal | Turn it on with | Collected by |
+|--------|-----------------|--------------|
+| Metrics | `DYN_SYSTEM_PORT` (workers/router); the frontend serves metrics on its HTTP port | Prometheus |
+| Traces | `OTEL_EXPORT_ENABLED=true` + `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Tempo |
+| Logs | `DYN_LOGGING_JSONL=true` (+ `OTEL_EXPORT_ENABLED` to export) | Loki |
 
-Source of truth: [`lib/runtime/src/logging.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/logging.rs) `setup_logging()`.
+`OTEL_EXPORT_ENABLED` is the master switch for both traces and logs — without it, neither leaves the process even when Tempo and Loki are healthy. OTLP endpoints must be gRPC listeners (Dynamo's exporter does not speak OTLP/HTTP). For the full variable catalog — defaults, per-signal grouping, and the Kubernetes operator presets — see [Environment Variables](../reference/observability/environment-variables.mdx).
 
-Passing `--enable-metrics` on an individual backend only exposes metrics *per backend*. The unified frontend metrics surface (scraped by Prometheus) requires `DYN_SYSTEM_PORT` to be set on the frontend process as well — setting it on workers alone is not enough.
+> [!NOTE]
+> Prometheus metric families are registered lazily: each label set is created the first time it fires, so a freshly-started process shows empty metric families until the first relevant request. An idle cluster does not mean scraping is broken.
 
-Prometheus metric families in Dynamo are registered lazily: each label set is created the first time it fires, so a freshly-started process shows empty metric families until the first relevant request. This is expected — an idle cluster does not mean scraping is broken.
+## Kubernetes stack
 
-## Getting Started Quickly
+On Kubernetes, install the monitoring backends once, then enable signals per deployment — see [Observability](../kubernetes/observability/metrics.md) under Operations for the per-deployment steps. The Dynamo operator wires metrics scraping automatically (it adds a `PodMonitor` to every managed pod), so the only one-time work is installing Prometheus, the exporters, and the logging stack.
 
-This is an example to get started quickly on a single machine.
+### kube-prometheus-stack
 
-### Prerequisites
+Install Prometheus, Grafana, and the Prometheus Operator. The selector flags let Prometheus discover `PodMonitor` and `ServiceMonitor` resources created outside its own Helm release (such as the ones the Dynamo operator creates):
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+helm install prometheus prometheus-community/kube-prometheus-stack \
+  --namespace monitoring --create-namespace \
+  --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+  --set-json 'prometheus.prometheusSpec.podMonitorNamespaceSelector={}' \
+  --set-json 'prometheus.prometheusSpec.probeNamespaceSelector={}'
+```
+
+> [!NOTE]
+> The Dynamo install command in the [Installation Guide](../kubernetes/installation-guide.md#kube-prometheus-stack) sets `dynamo-operator.dynamo.metrics.prometheusEndpoint` to point the operator at this Prometheus. Set it there, in one pass, rather than here.
+>
+> An older form of the discovery flags used `--set ...podMonitorNamespaceSelector.matchLabels=null` (and the same for `probeNamespaceSelector`). The `--set-json '...={}'` form above is equivalent and preferred; use one form or the other consistently, not both.
+
+kube-prometheus-stack bundles **node-exporter** by default, which supplies the node CPU, system load, and container resource panels on the Dynamo dashboard. Verify it is running:
+
+```bash
+kubectl get daemonset -A | grep node-exporter
+```
+
+If you run a custom Prometheus instead of kube-prometheus-stack, deploy node-exporter separately as a DaemonSet.
+
+### DCGM exporter (GPU metrics)
+
+GPU-utilization panels are populated by [dcgm-exporter](https://docs.nvidia.com/datacenter/cloud-native/gpu-telemetry/latest/dcgm-exporter.html). Check whether it is already running (the NVIDIA GPU Operator installs it as part of its monitoring components):
+
+```bash
+kubectl get daemonset -A | grep dcgm-exporter
+```
+
+If the output is empty, install it via the GPU Operator or the standalone dcgm-exporter chart.
+
+### Loki + Alloy (logging stack)
+
+To collect pod logs into Grafana Loki, install Loki and the Grafana Alloy collector. This reference setup suits development and testing clusters (including Minikube and MicroK8s); use a high-availability configuration for production.
+
+Set the namespaces once:
+
+```bash
+export MONITORING_NAMESPACE=monitoring    # where Loki is installed
+export DYN_NAMESPACE=dynamo-system        # where Dynamo is installed
+```
+
+Install Loki in single-binary mode (local MinIO storage), then install Alloy pointed at it:
+
+```bash
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+
+# Loki
+helm install --values deploy/observability/logging/values/loki-values.yaml \
+  loki grafana/loki -n $MONITORING_NAMESPACE
+
+# Alloy collector (k8s-monitoring chart), templated with the namespaces above
+envsubst < deploy/observability/logging/values/alloy-values.yaml > alloy-custom-values.yaml
+helm install --values alloy-custom-values.yaml \
+  alloy grafana/k8s-monitoring -n $MONITORING_NAMESPACE
+```
+
+The Alloy values file forwards logs to Loki, restricts collection to `$DYN_NAMESPACE`, and maps the `nvidia.com/dynamo-component-type` and `nvidia.com/dynamo-graph-deployment-name` pod labels into Loki labels so the logging dashboard can filter by deployment and component. Applying the Grafana datasource and logging dashboard, and enabling JSONL logging on a deployment, are covered in [Observability](../kubernetes/observability/metrics.md#logging) under Operations.
+
+## Local stack (single machine)
+
+Bring up the full stack on one machine with Docker Compose for local development and demos.
 
 Install these on your machine:
 
@@ -50,31 +116,16 @@ docker compose -f dev/docker-observability.yml up -d
 
 For detailed setup instructions and configuration, see [Prometheus + Grafana Setup](prometheus-grafana.md).
 
-## Observability Documentation
+### Signal how-tos
 
-| Guide | Description | Environment Variables to Control |
-|-------|-------------|----------------------------------|
-| [Metrics](metrics.md) | Available metrics reference | `DYN_SYSTEM_PORT`† |
-| [Operator Metrics (Kubernetes)](../kubernetes/observability/operator-metrics.md) | Operator controller and webhook metrics for Kubernetes | N/A (configured via Helm) |
-| [Health Checks](health-checks.md) | Component health monitoring and readiness probes | `DYN_SYSTEM_PORT`†, `DYN_SYSTEM_STARTING_HEALTH_STATUS`, `DYN_SYSTEM_HEALTH_PATH`, `DYN_SYSTEM_LIVE_PATH`, `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` |
-| [Tracing](tracing.md) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
-| [Request Replay Tracing](request-tracing.md) | Per-request JSONL capture for Mooncake replay | `DYN_REQUEST_TRACE`, `DYN_REQUEST_TRACE_OUTPUT_PATH` |
-| [Logging](logging.md) | Structured logging and OTLP log export to Loki | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`† |
+Once the stack is running, each signal has a how-to guide:
 
-**Variables marked with † are shared across multiple observability systems.**
+- [Prometheus + Grafana](prometheus-grafana.md) — visualize metrics on the local stack
+- [Tracing](tracing.md) — distributed tracing with OpenTelemetry and Tempo
+- [Logging](logging.md) — structured logging and OTLP log export to Loki
+- [Health Checks](health-checks.md) — component health and readiness endpoints
 
-## Developer Guides
-
-| Guide | Description | Environment Variables to Control |
-|-------|-------------|----------------------------------|
-| [Metrics Developer Guide](metrics-developer-guide.md) | Creating custom metrics in Rust and Python | `DYN_SYSTEM_PORT`† |
-| [Local Resource Monitor](local-resource-monitor.md) | Per-process VRAM / PCIe / CPU exporter for engine-startup profiling (200 ms scrape, profile-gated) | N/A (host-side script) |
-
-## Kubernetes
-
-For Kubernetes-specific setup and configuration, see [docs/kubernetes/observability/](../kubernetes/observability/metrics.md).
-
-**Operator Metrics**: The Dynamo Operator running in Kubernetes exposes its own set of metrics for monitoring controller reconciliation, webhook validation, and resource inventory. See the [Operator Metrics Guide](../kubernetes/observability/operator-metrics.md).
+For the metric, label, and variable catalogs, see the [Observability reference](../reference/observability/metrics-catalog.mdx). To create your own metrics, see the [Metrics Developer Guide](metrics-developer-guide.md).
 
 ---
 

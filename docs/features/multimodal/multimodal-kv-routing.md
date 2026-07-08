@@ -139,6 +139,9 @@ Without both pieces, the routing-side hash and the server-side hash decouple and
 
 ## Launching
 
+> [!NOTE]
+> The `bash examples/.../launch/*.sh` scripts below are local development entry points. Each script's tunables (`MODEL`, `NUM_WORKERS`, `BLOCK_SIZE`, `GPU_MEMORY_UTILIZATION`, and the `VLLM_EXTRA_ARGS` / `SGLANG_EXTRA_ARGS` pass-throughs) map to a DGD as follows: the model and `--frontend-decoding`-style flags become worker `args:`, and the numeric knobs become worker `args:` or `env:`. Deploy a KV-routed Frontend (`--router-mode kv`) plus the multimodal worker, then `kubectl port-forward` the Frontend Service.
+
 ### vLLM (default — Rust frontend)
 
 ```bash
@@ -163,7 +166,7 @@ Key environment variables:
 | `SINGLE_GPU` | `false` | Pack all workers onto GPU 0 (testing-only override; pass `--single-gpu` or set `SINGLE_GPU=true` for functional tests on a single-GPU box) |
 | `KV_EVENTS_PORT_BASE` | `5557` | Worker `i` publishes ZMQ KV events on `BASE + i - 1` |
 | `DYN_LOG` | `info,mm_routing=debug,...` | Frontend log filter |
-| `VLLM_EXTRA_ARGS` | (unset) | Pass-through args to `python -m dynamo.vllm`. Set `--frontend-decoding` to enable content-addressed `mm_hash` (cross-URL KV-cache reuse). |
+| `VLLM_EXTRA_ARGS` | (unset) | Pass-through args to the vLLM worker (`dynamo.vllm`). In a DGD these are worker `args:` entries. Set `--frontend-decoding` to enable content-addressed `mm_hash` (cross-URL KV-cache reuse). |
 
 To opt into frontend image decoding (so the frontend downloads + decodes once and `mm_hash` becomes content-addressed instead of URL-addressed):
 
@@ -222,7 +225,7 @@ Key environment variables:
 | `SINGLE_GPU` | `false` | Pack all workers onto GPU 0 (for single-GPU functional tests) |
 | `KV_EVENTS_PORT_BASE` | `29090` | Worker `i` publishes ZMQ KV events on `BASE + i - 1` |
 | `DYN_LOG` | `info,mm_routing=debug,…` | Frontend log filter |
-| `SGLANG_EXTRA_ARGS` | (unset) | Pass-through args to `python -m dynamo.sglang` |
+| `SGLANG_EXTRA_ARGS` | (unset) | Pass-through args to the SGLang worker (`dynamo.sglang`). In a DGD these are worker `args:` entries. |
 
 Both prerequisites are enabled by default in the dynamo sglang image; the list below is only for users building dynamo from source:
 

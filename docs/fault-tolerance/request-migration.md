@@ -31,7 +31,7 @@ Key responsibilities:
 The migration limit is configured at the **frontend** level and applies globally to all models served by that frontend. This parameter specifies the maximum number of times a request can be migrated to another worker:
 
 - Default behavior: no migration allowed (migration_limit=0)
-- Set via `--migration-limit` flag on the frontend
+- Set via `--migration-limit` in the Frontend `args:`, or `DYN_MIGRATION_LIMIT` in the Frontend `env:` (see [Graceful Shutdown](graceful-shutdown.md#2-enable-request-migration) for the DGD snippet)
 - Applies to all models served by the frontend
 
 ### Max Sequence Length Configuration

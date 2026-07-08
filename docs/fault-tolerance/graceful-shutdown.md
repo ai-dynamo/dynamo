@@ -216,10 +216,20 @@ Match `terminationGracePeriodSeconds` to your expected request completion time:
 
 ### 2. Enable Request Migration
 
-Enable migration at the frontend to allow request recovery when workers shut down:
+Enable migration on the Frontend so disconnected streams retry on healthy workers. Set `DYN_MIGRATION_LIMIT` in the Frontend `env:` (or `--migration-limit` in its `args:`):
 
-```bash
-python3 -m dynamo.frontend ... --migration-limit 3  # Allow up to 3 migration attempts
+```yaml
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          env:
+          - name: DYN_MIGRATION_LIMIT
+            value: "3"                 # allow up to 3 migration attempts
 ```
 
 This allows the frontend to automatically retry disconnected streams on healthy workers.

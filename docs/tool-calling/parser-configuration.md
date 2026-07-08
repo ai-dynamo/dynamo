@@ -40,33 +40,98 @@ Tool calling and reasoning are independent — set one, the other, or both — b
 
 ## Examples
 
-Default (Dynamo-native) — the common case. The same `--dyn-*` flags work on every backend; pick one worker. The chat processor defaults to `dynamo`, so the frontend flag is optional:
+**Default (Dynamo-native) — the common case.** The chat processor defaults to `dynamo`, so the Frontend needs no extra flags; the parsers go on the **worker** as `--dyn-*` args. The same worker flags work on vLLM, SGLang, or TRT-LLM — pick one worker:
 
-```bash
-# Frontend — chat processor defaults to `dynamo`, so these two are identical:
-python -m dynamo.frontend
-python -m dynamo.frontend --dyn-chat-processor dynamo
-
-# Worker selects the Dynamo parsers — same flags on vLLM, SGLang, or TRT-LLM:
-python -m dynamo.vllm   --model Qwen/Qwen3-0.6B \
-  --dyn-tool-call-parser hermes --dyn-reasoning-parser qwen3
-python -m dynamo.sglang --model Qwen/Qwen3-0.6B \
-  --dyn-tool-call-parser hermes --dyn-reasoning-parser qwen3
-python -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B \
-  --dyn-tool-call-parser hermes --dyn-reasoning-parser qwen3
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-parsers
+spec:
+  components:
+  - name: Frontend            # chat processor defaults to `dynamo` — no args needed
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+  - name: VllmWorker          # worker selects the Dynamo parsers
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --dyn-tool-call-parser
+          - hermes
+          - --dyn-reasoning-parser
+          - qwen3
 ```
 
-Engine fallback — only when Dynamo lacks a parser for your model. Supported on vLLM and SGLang (not TRT-LLM); the parser flags go on the **frontend** and use the engine's own parser names:
+To set the chat processor explicitly, add `DYN_CHAT_PROCESSOR: dynamo` to the Frontend `env:` (equivalent to the default).
 
-```bash
-# vLLM chat processor — frontend carries the parser flags, then launch the worker:
-python -m dynamo.frontend --dyn-chat-processor vllm   --tool-call-parser hermes  --reasoning-parser qwen3
-python -m dynamo.vllm   --model Qwen/Qwen3-0.6B
+**Engine fallback — only when Dynamo lacks a parser for your model.** Supported on vLLM and SGLang (not TRT-LLM). The parser flags move to the **Frontend** `args:` and use the engine's own parser names; the worker carries no parser flags. Set `--dyn-chat-processor vllm` (or `sglang`) on the Frontend to match the worker's backend:
 
-# SGLang chat processor
-python -m dynamo.frontend --dyn-chat-processor sglang --tool-call-parser qwen25  --reasoning-parser qwen3
-python -m dynamo.sglang --model Qwen/Qwen3-0.6B
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-engine-fallback
+spec:
+  components:
+  - name: Frontend            # engine fallback: parser flags live here
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --dyn-chat-processor
+          - vllm
+          - --tool-call-parser
+          - hermes
+          - --reasoning-parser
+          - qwen3
+  - name: VllmWorker          # no parser flags on the worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
 ```
+
+For SGLang engine fallback, set `--dyn-chat-processor sglang` on the Frontend (with the SGLang parser names, e.g. `qwen25`) and run a `dynamo.sglang` worker.
 
 ## Parser names and per-stage details
 

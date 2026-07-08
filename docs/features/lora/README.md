@@ -56,26 +56,84 @@ The LoRA system consists of:
 
 ### Prerequisites
 
-- Dynamo installed with vLLM support
-- For S3 sources: AWS credentials configured
+- A Kubernetes cluster with the Dynamo Platform installed and a vLLM runtime image
+- For S3 sources: AWS credentials available as a Kubernetes Secret
 - A LoRA adapter compatible with your base model
 
-### Local Development
+### Deploy a LoRA-enabled worker
 
-**1. Start Dynamo with LoRA support:**
+Enable LoRA on the **worker**: add `--enable-lora` and `--max-lora-rank` to `args:`, and set the LoRA and worker-system environment variables in `env:`. `DYN_SYSTEM_ENABLED` / `DYN_SYSTEM_PORT` expose the load/unload API on the worker. This DGD is adapted from [`examples/backends/vllm/deploy/v1beta1/agg_lora.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/v1beta1/agg_lora.yaml):
 
-```bash
-# Start vLLM worker with LoRA flags
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
-    python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager \
-    --enable-lora \
-    --max-lora-rank 64
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-lora
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+  - name: VllmDecodeWorker
+    type: decode
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          workingDir: /workspace/examples/backends/vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          env:
+          - name: DYN_LORA_ENABLED
+            value: "true"
+          - name: DYN_LORA_PATH
+            value: /tmp/dynamo_loras
+          - name: DYN_SYSTEM_ENABLED
+            value: "true"
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --enable-lora
+          - --max-lora-rank
+          - "64"
+          - --enforce-eager
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
 ```
 
-**2. Load a LoRA adapter:**
+Apply it and wait for the deployment to become ready:
 
 ```bash
-curl -X POST http://localhost:8081/v1/loras \
+kubectl apply -f vllm-agg-lora.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dynamographdeployment/vllm-agg-lora \
+  -n ${NAMESPACE} --timeout=600s
+```
+
+### Load a LoRA adapter
+
+For declarative, cluster-native management, use the [`DynamoModel` CRD](#dynamomodel-crd) below — it discovers the worker endpoints and loads the adapter for you. To load imperatively against the worker's system API, port-forward the worker system port (`DYN_SYSTEM_PORT`) and POST to `/v1/loras`:
+
+```bash
+kubectl port-forward svc/vllm-agg-lora-vllmdecodeworker 9090:9090 -n ${NAMESPACE}
+```
+
+```bash
+curl -X POST http://localhost:9090/v1/loras \
   -H "Content-Type: application/json" \
   -d '{
     "lora_name": "my-lora",
@@ -85,7 +143,13 @@ curl -X POST http://localhost:8081/v1/loras \
   }'
 ```
 
-**3. Run inference with the LoRA:**
+### Run inference with the LoRA
+
+Port-forward the Frontend and send a request whose `model` field is the `lora_name`:
+
+```bash
+kubectl port-forward svc/vllm-agg-lora-frontend 8000:8000 -n ${NAMESPACE}
+```
 
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
@@ -99,17 +163,34 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 
 ### S3-Compatible Storage
 
-For production deployments, store LoRA adapters in S3-compatible storage:
+For production deployments, store LoRA adapters in S3-compatible storage and give the worker credentials through its `env:`. Keep the secret keys in a Kubernetes Secret (`valueFrom.secretKeyRef`) and the non-secret endpoint/region inline:
+
+```yaml
+          env:
+          - name: DYN_LORA_ENABLED
+            value: "true"
+          - name: AWS_ENDPOINT
+            value: http://minio:9000        # for MinIO; omit for AWS S3
+          - name: AWS_REGION
+            value: us-east-1
+          - name: AWS_ALLOW_HTTP
+            value: "true"                    # MinIO/non-TLS only
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                name: minio-secret
+                key: AWS_ACCESS_KEY_ID
+          - name: AWS_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: minio-secret
+                key: AWS_SECRET_ACCESS_KEY
+```
+
+Then load the adapter with an `s3://` URI (via the `DynamoModel` CRD or the `/v1/loras` API):
 
 ```bash
-# Configure S3 credentials
-export AWS_ACCESS_KEY_ID=your-access-key
-export AWS_SECRET_ACCESS_KEY=your-secret-key
-export AWS_ENDPOINT=http://minio:9000  # For MinIO
-export AWS_REGION=us-east-1
-
-# Load LoRA from S3
-curl -X POST http://localhost:8081/v1/loras \
+curl -X POST http://localhost:9090/v1/loras \
   -H "Content-Type: application/json" \
   -d '{
     "lora_name": "customer-support-lora",
@@ -123,6 +204,8 @@ curl -X POST http://localhost:8081/v1/loras \
 
 ### Environment Variables
 
+Set these in the worker container's `env:` block (secret values via `valueFrom.secretKeyRef`, as shown in [S3-Compatible Storage](#s3-compatible-storage)):
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DYN_LORA_ENABLED` | Enable LoRA adapter support | `false` |
@@ -134,6 +217,8 @@ curl -X POST http://localhost:8081/v1/loras \
 | `AWS_ALLOW_HTTP` | Allow HTTP (non-TLS) connections | `false` |
 
 ### vLLM Arguments
+
+Add these to the worker's `args:` list:
 
 | Argument | Description |
 |----------|-------------|
@@ -284,7 +369,7 @@ kubectl logs deployment/my-worker | grep -i lora
 ### Model Not Found After Loading
 
 - Verify the LoRA name matches exactly (case-sensitive)
-- Check if the LoRA is listed: `curl http://localhost:8081/v1/loras`
+- Check if the LoRA is listed: `curl http://localhost:9090/v1/loras` (port-forward the worker's `DYN_SYSTEM_PORT` first)
 - Ensure discovery registration succeeded (check worker logs)
 
 ### Inference Returns Base Model Response

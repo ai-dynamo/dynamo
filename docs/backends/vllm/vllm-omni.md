@@ -31,6 +31,9 @@ pip install git+https://github.com/vllm-project/vllm-omni.git@<version>
 
 The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`. When set to `audio`, the worker serves `/v1/audio/speech`.
 
+> [!NOTE]
+> The `bash examples/backends/vllm/launch/agg_omni_*.sh` commands below are local quickstart scripts. On Kubernetes, deploy the equivalent DGD: a `dynamo.vllm.omni` worker with the model and `--output-modalities` flag (see [CLI Reference](#cli-reference) for the worker skeleton) plus a Frontend, then `kubectl port-forward` the Frontend Service before sending the requests shown here.
+
 ## Tested Models
 
 | Modality | Models |
@@ -248,7 +251,36 @@ Available voices and languages are loaded dynamically from the model's `config.j
 
 ## CLI Reference
 
-The omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
+The omni backend uses a dedicated entrypoint: `python3 -m dynamo.vllm.omni`. In a DGD, set it as the worker `command` and pass the omni flags below as `args:`:
+
+```yaml
+  - name: OmniWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.vllm.omni
+          args:
+          - --model
+          - Qwen/Qwen-Image
+          - --omni
+          - --output-modalities
+          - image
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+```
+
+Pair it with a standard `type: frontend` component. The flags:
 
 | Flag | Description |
 |---|---|
@@ -277,17 +309,24 @@ The omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
 
 Generated images, videos, and audio files are stored via [fsspec](https://filesystem-spec.readthedocs.io/), which supports local filesystems, S3, GCS, and Azure Blob.
 
-By default, media is written to the local filesystem at `file:///tmp/dynamo_media`. To use cloud storage:
+By default, media is written to the local filesystem at `file:///tmp/dynamo_media` (ephemeral per pod). To use cloud storage, set the URLs on the worker `args:`:
 
-```bash
-bash examples/backends/vllm/launch/agg_omni_video.sh \
-  --media-output-fs-url s3://my-bucket/media \
-  --media-output-http-url https://cdn.example.com/media
+```yaml
+          args:
+          - --model
+          - Qwen/Qwen-Image
+          - --omni
+          - --output-modalities
+          - image
+          - --media-output-fs-url
+          - s3://my-bucket/media
+          - --media-output-http-url
+          - https://cdn.example.com/media
 ```
 
 When `--media-output-http-url` is set, response URLs are rewritten as `{base-url}/{storage-path}` (e.g., `https://cdn.example.com/media/videos/req-id.mp4`). When unset, the raw filesystem path is returned.
 
-For S3 credential configuration, set the standard AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) or use IAM roles. See the [fsspec S3 docs](https://s3fs.readthedocs.io/en/latest/#credentials) for details.
+For S3 credential configuration, provide the standard AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) to the worker — in a DGD, set them in the worker `env:` (secret values via `valueFrom.secretKeyRef`) — or use IAM roles. See the [fsspec S3 docs](https://s3fs.readthedocs.io/en/latest/#credentials) for details.
 
 ## Stage Configuration
 

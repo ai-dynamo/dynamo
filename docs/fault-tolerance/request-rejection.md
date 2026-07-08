@@ -42,14 +42,31 @@ When all workers exceed their configured busy thresholds, new requests receive a
 
 ### Frontend Arguments
 
-Configure busy thresholds when starting the frontend. `--admission-control token-capacity` is required to activate the thresholds; the default (`none`) leaves them disabled.
+Configure busy thresholds on the **Frontend** component. `--admission-control token-capacity` is required to activate the thresholds; the default (`none`) leaves them disabled. Set them as Frontend `args:`:
 
-```bash
-python -m dynamo.frontend \
-    --admission-control token-capacity \
-    --active-decode-blocks-threshold 0.85 \
-    --active-prefill-tokens-threshold 10000
+```yaml
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --admission-control
+          - token-capacity
+          - --active-decode-blocks-threshold
+          - "0.85"
+          - --active-prefill-tokens-threshold
+          - "10000"
 ```
+
+Each flag has an environment-variable equivalent (`DYN_ADMISSION_CONTROL`, `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD`, `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD`), so you can set them in the Frontend `env:` block instead of `args:` — see the [Frontend Configuration Reference](../components/frontend/configuration.md).
 
 | Argument | Type | Description |
 |----------|------|-------------|
@@ -60,7 +77,7 @@ python -m dynamo.frontend \
 
 ### Dynamic Configuration via API
 
-Thresholds can be adjusted at runtime via the `/busy_threshold` endpoint:
+Thresholds can be adjusted at runtime via the `/busy_threshold` endpoint. Port-forward the Frontend first (`kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}`):
 
 #### Set Thresholds
 
@@ -218,11 +235,13 @@ dynamo_frontend_model_rejection_total{endpoint="completions",model="Qwen/Qwen3-0
 
 ### Conservative Settings (Latency-Focused)
 
-For applications prioritizing low latency:
+For applications prioritizing low latency, set these on the Frontend `args:`:
 
-```bash
---active-decode-blocks-threshold 0.70
---active-prefill-tokens-threshold 5000
+```yaml
+          - --active-decode-blocks-threshold
+          - "0.70"
+          - --active-prefill-tokens-threshold
+          - "5000"
 ```
 
 - Rejects earlier, before workers become fully loaded
@@ -233,9 +252,11 @@ For applications prioritizing low latency:
 
 For applications prioritizing throughput:
 
-```bash
---active-decode-blocks-threshold 0.95
---active-prefill-tokens-threshold 20000
+```yaml
+          - --active-decode-blocks-threshold
+          - "0.95"
+          - --active-prefill-tokens-threshold
+          - "20000"
 ```
 
 - Allows higher worker utilization
@@ -244,35 +265,27 @@ For applications prioritizing throughput:
 
 ### Disabled (No Rejection)
 
-To disable request rejection entirely:
-
-```bash
-# Simply don't set the threshold arguments
-python -m dynamo.frontend
-```
-
-Without thresholds configured, all requests are accepted regardless of worker load.
+To disable request rejection entirely, leave `--admission-control` at its default (`none`) — omit the threshold args from the Frontend. Without thresholds configured, all requests are accepted regardless of worker load.
 
 ## Best Practices
 
 ### 1. Start Conservative, Then Tune
 
-Begin with conservative thresholds and increase based on observed behavior:
+Begin with conservative thresholds and increase based on observed behavior. Edit the Frontend `args:` value and re-apply the DGD:
 
-```bash
-# Start here
---active-decode-blocks-threshold 0.75
-
-# Increase if rejection rate is too high
---active-decode-blocks-threshold 0.85
+```yaml
+          # Start here
+          - --active-decode-blocks-threshold
+          - "0.75"
+          # Increase if rejection rate is too high → "0.85"
 ```
 
 ### 2. Monitor Before Enabling
 
-Observe worker load patterns before setting thresholds:
+Observe worker load patterns before setting thresholds. Scrape the Frontend `/metrics` endpoint (via a ServiceMonitor, or port-forward for a quick look):
 
 ```bash
-# Watch KV cache utilization
+kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}
 watch -n 1 'curl -s localhost:8000/metrics | grep kv_blocks'
 ```
 
@@ -284,12 +297,11 @@ In disaggregated deployments:
 
 ### 4. Coordinate with Autoscaling
 
-If using Kubernetes HPA, ensure rejection thresholds trigger before autoscaling:
+If using Kubernetes HPA, ensure rejection thresholds trigger before autoscaling. For example, if the HPA scales at 70% utilization, set rejection at 85% to provide a buffer:
 
 ```yaml
-# HPA triggers at 70% utilization
-# Rejection at 85% provides buffer
---active-decode-blocks-threshold 0.85
+          - --active-decode-blocks-threshold
+          - "0.85"
 ```
 
 ## Worker-Side Request Admission
@@ -297,7 +309,9 @@ If using Kubernetes HPA, ensure rejection thresholds trigger before autoscaling:
 In addition to the frontend's metric-driven busy detection above, a worker can
 enforce a hard concurrency cap directly at its request-plane ingress. This is
 disabled by default — when neither knob is set, the worker behaves exactly as
-before (a large pool plus a large overflow queue, no rejection).
+before (a large pool plus a large overflow queue, no rejection). Set these on the
+**worker** component (`--engine-request-limit` as an `args:` entry, or its env var
+in `env:`):
 
 ### Knobs
 

@@ -21,13 +21,20 @@ Dynamo's agent hints give the router per-request metadata. SGLang's engine flags
 
 ### Priority Scheduling
 
-Enable priority-based scheduling so the engine respects the `priority` value from `nvext.agent_hints.priority`:
+Enable priority-based scheduling so the engine respects the `priority` value from `nvext.agent_hints.priority`. Add the flag to the SGLang worker's `args:` in your DGD:
 
-```bash
-python -m dynamo.sglang \
-  --model-path <model> \
-  --enable-priority-scheduling \
-  ...
+```yaml
+  - name: SGLangWorker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          command: [python3, -m, dynamo.sglang]
+          args:
+          - --model-path
+          - <model>
+          - --enable-priority-scheduling
 ```
 
 | Flag                           | Description                                                |
@@ -42,13 +49,21 @@ Router queue priority is configured separately on the frontend with
 
 ### Priority-Based KV Cache Eviction
 
-By default, SGLang evicts radix tree nodes using LRU. You can switch to priority-based eviction so that low-priority cache entries are evicted before high-priority ones:
+By default, SGLang evicts radix tree nodes using LRU. You can switch to priority-based eviction so that low-priority cache entries are evicted before high-priority ones. Add the flag to the worker `args:`:
 
-```bash
-python -m dynamo.sglang \
-  --model-path <model> \
-  --radix-eviction-policy priority \
-  ...
+```yaml
+  - name: SGLangWorker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          command: [python3, -m, dynamo.sglang]
+          args:
+          - --model-path
+          - <model>
+          - --radix-eviction-policy
+          - priority
 ```
 
 | Flag                      | Values            | Default | Description                                                                                                |
@@ -82,6 +97,8 @@ Dynamo's `nvext.agent_hints` fields are consumed by the router and forwarded to 
 | `speculative_prefill` | After response completes, sends a `max_tokens=1` prefill to warm the KV cache for the predicted next turn. | SGLang processes the prefill request normally, populating the radix cache.                                                                |
 
 ### Example: Agentic Request with Hints
+
+Port-forward the Frontend Service (`kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}`), then send a request carrying `nvext.agent_hints`:
 
 ```python
 from openai import OpenAI
@@ -179,25 +196,39 @@ Session control is request-driven. The `StickySessionRouter` activates automatic
 > [!IMPORTANT]
 > Streaming sessions require SGLang `0.5.11` or later, which includes changes from [sgl-project/sglang#21875](https://github.com/sgl-project/sglang/pull/21875) (session-aware cache, race condition fixes, session metrics).
 
-**SGLang worker:**
+**SGLang worker** — add `--enable-streaming-session` to the worker `args:`:
 
-```bash
-python -m dynamo.sglang \
-  --model-path <model> \
-  --enable-streaming-session \
-  ...
+```yaml
+  - name: SGLangWorker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          command: [python3, -m, dynamo.sglang]
+          args:
+          - --model-path
+          - <model>
+          - --enable-streaming-session
 ```
 
 | Flag                         | Description                                                                                                 |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `--enable-streaming-session` | Wraps the radix cache with `SessionAwareCache`, enabling streaming session slots for subagent KV isolation. |
 
-**Router:**
+**Router** — set KV routing mode on the Frontend `args:`:
 
-```bash
-python -m dynamo.frontend \
-  --router-mode kv \
-  ...
+```yaml
+  - name: Frontend
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          command: [python3, -m, dynamo.frontend]
+          args:
+          - --router-mode
+          - kv
 ```
 
 ### Request Format
@@ -292,6 +323,9 @@ bash examples/backends/sglang/launch/agg_agent.sh
 ```
 
 The frontend listens on port 8000 (override with `DYN_HTTP_PORT`). Worker metrics are on port 8081.
+
+> [!NOTE]
+> This script is a local convenience for development. On Kubernetes, assemble the same setup in a DGD: a `--router-mode kv` Frontend plus an SGLang worker carrying `--enable-streaming-session` (and any priority/eviction flags from the sections above), then `kubectl port-forward` the Frontend Service.
 
 ### Testing with OpenCode
 

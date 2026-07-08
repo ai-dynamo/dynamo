@@ -23,14 +23,98 @@ These are distinct from the Dynamo-native `--dyn-tool-call-parser` / `--dyn-reas
 
 ## Examples
 
-```bash
-# vLLM chat processor — frontend carries the parser flags, then launch the worker:
-python -m dynamo.frontend --dyn-chat-processor vllm   --tool-call-parser hermes --reasoning-parser qwen3
-python -m dynamo.vllm   --model Qwen/Qwen3-0.6B
+Engine fallback puts the parser flags on the **Frontend** and leaves the worker clean. Set `--dyn-chat-processor` to match the worker's backend (`vllm` or `sglang`), and use the engine's own parser names.
 
-# SGLang chat processor
-python -m dynamo.frontend --dyn-chat-processor sglang --tool-call-parser qwen25 --reasoning-parser qwen3
-python -m dynamo.sglang --model Qwen/Qwen3-0.6B
+**vLLM chat processor:**
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-vllm-fallback
+spec:
+  components:
+  - name: Frontend            # frontend carries the engine-fallback parser flags
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --dyn-chat-processor
+          - vllm
+          - --tool-call-parser
+          - hermes
+          - --reasoning-parser
+          - qwen3
+  - name: VllmWorker          # no parser flags on the worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+```
+
+**SGLang chat processor** — swap the Frontend to `--dyn-chat-processor sglang` with the SGLang parser name (`qwen25`) and run a `dynamo.sglang` worker:
+
+```yaml
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --dyn-chat-processor
+          - sglang
+          - --tool-call-parser
+          - qwen25
+          - --reasoning-parser
+          - qwen3
+  - name: SGLangWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
 ```
 
 > [!TIP]

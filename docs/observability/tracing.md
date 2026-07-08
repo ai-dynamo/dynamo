@@ -16,16 +16,6 @@ This guide covers single GPU demo setup using Docker Compose. For Kubernetes dep
 
 **Note:** This section has overlap with [Logging of OpenTelemetry Tracing](logging.md) since OpenTelemetry has aspects of both logging and tracing. The tracing approach documented here is for persistent trace visualization and analysis. For short debugging sessions examining trace context directly in logs, see the [Logging](logging.md) guide.
 
-## Environment Variables
-
-| Variable | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for tracing) | `false` | `true` |
-| `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `false` | `true` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces | `http://localhost:4317` | `http://tempo:4317` |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP gRPC endpoint for logs (defaults to traces endpoint) | same as traces | `http://localhost:4317` |
-| `OTEL_SERVICE_NAME` | Service name for identifying components | `dynamo` | `dynamo-frontend` |
-
 ## Getting Started Quickly
 
 ### 1. Start Observability Stack
@@ -116,7 +106,7 @@ Tracing-enabled variants of the example deployments are provided:
 - **Aggregated:** `examples/backends/vllm/deploy/agg_tracing.yaml`
 - **Disaggregated:** `examples/backends/vllm/deploy/disagg_tracing.yaml`
 
-These add the [Environment Variables](#environment-variables) to the base `agg.yaml` / `disagg.yaml` deployments. To override the Tempo endpoint, edit `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in the YAML.
+These add the tracing environment variables (see [Environment Variables](../reference/observability/environment-variables.mdx#opentelemetry-traces-and-logs)) to the base `agg.yaml` / `disagg.yaml` deployments. To override the Tempo endpoint, edit `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in the YAML.
 
 Apply a tracing-enabled deployment:
 

@@ -31,15 +31,46 @@ Benefits:
 
 ## Quick Start
 
-```bash
-# Launch backend with structural tag enabled
-python -m dynamo.sglang \
-  --model Qwen/Qwen3.5-4B \
-  --dyn-tool-call-parser qwen3_coder \
-  --dyn-enable-structural-tag
+Enable structural tags on the **worker** with `--dyn-enable-structural-tag`, alongside the tool-call parser. The Frontend needs no extra flags:
 
-# Launch frontend
-python -m dynamo.frontend
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-structural-tag
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+  - name: SGLangWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3.5-4B
+          - --served-model-name
+          - Qwen/Qwen3.5-4B
+          - --dyn-tool-call-parser
+          - qwen3_coder
+          - --dyn-enable-structural-tag
 ```
 
 Eligible tool-calling requests will now use xgrammar structural tags for guided
@@ -138,14 +169,36 @@ KV cache reuse.
 
 ## Example
 
-```bash
-# Launch with structural tag, strict schema, always scope
-python -m dynamo.sglang \
-  --model Qwen/Qwen3.5-4B \
-  --dyn-tool-call-parser qwen3_coder \
-  --dyn-enable-structural-tag \
-  --dyn-structural-tag-scope always \
-  --dyn-structural-tag-schema strict
+To pin the scope and schema, add `--dyn-structural-tag-scope` and `--dyn-structural-tag-schema` to the worker `args:` alongside the parser and master switch:
+
+```yaml
+  - name: SGLangWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3.5-4B
+          - --served-model-name
+          - Qwen/Qwen3.5-4B
+          - --dyn-tool-call-parser
+          - qwen3_coder
+          - --dyn-enable-structural-tag
+          - --dyn-structural-tag-scope
+          - always
+          - --dyn-structural-tag-schema
+          - strict
 ```
 
 ## See Also

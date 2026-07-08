@@ -27,14 +27,14 @@ diagnostic info.
 >
 > If the worker is the SGLang backend, `logprobs: true` is rejected by
 > default because SGLang's tokenizer manager detokenizes top-k tokens
-> serially, causing latency degradation. Launch the worker with
-> `DYN_SGL_ALLOW_TOP_LOGPROBS=1` set in the environment to opt in for the
-> duration of the repro request, then unset it afterward. Tracked at
+> serially, causing latency degradation. Set
+> `DYN_SGL_ALLOW_TOP_LOGPROBS=1` in the SGLang worker's `env:` to opt in,
+> then remove it and re-apply once the repro is captured. Tracked at
 > [sgl-project/sglang#24447](https://github.com/sgl-project/sglang/pull/24447).
 
 ## The request
 
-Add `"logprobs": true` to your failing request:
+Add `"logprobs": true` to your failing request. Port-forward the Frontend Service first (`kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}`):
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \

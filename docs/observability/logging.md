@@ -14,22 +14,7 @@ JSONL is enabled, logs support `trace_id` and `span_id` fields for
 distributed tracing. Span creation and exit events can be optionally
 enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 
-## Environment Variables
-
-| Variable | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `DYN_LOGGING_JSONL` | Enable JSONL logging format | `false` | `true` |
-| `DYN_LOGGING_SPAN_EVENTS` | Enable span entry/close event logging (`SPAN_FIRST_ENTRY`, `SPAN_CLOSED` messages) | `false` | `true` |
-| `DYN_LOG` | Log levels per target `<default_level>,<module_path>=<level>,<module_path>=<level>` | `info` | `DYN_LOG=info,dynamo_runtime::system_status_server:trace` |
-| `DYN_LOG_USE_LOCAL_TZ` | Use local timezone for timestamps (default is UTC) | `false` | `true` |
-| `DYN_LOGGING_CONFIG_PATH` | Path to custom TOML logging configuration | none | `/path/to/config.toml` |
-| `VLLM_LOGGING_LEVEL` | vLLM backend log level (independent of `DYN_LOG`) | `INFO` | `DEBUG` |
-| `TLLM_LOG_LEVEL` | TensorRT-LLM backend log level (independent of `DYN_LOG`) | `INFO` | `DEBUG` |
-| `DYN_SKIP_SGLANG_LOG_FORMATTING` | Disable Dynamo's SGLang log configuration | `false` | `true` |
-| `OTEL_SERVICE_NAME` | Service name for trace and span information | `dynamo` | `dynamo-frontend` |
-| `OTEL_EXPORT_ENABLED` | Enable OTLP export of both traces and logs | `false` | `true` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces | `http://localhost:4317` | `http://tempo:4317` |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP gRPC endpoint for logs (defaults to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` if not set) | same as traces endpoint | `http://localhost:4317` |
+For the full set of logging variables — levels, timezone, config path, and the per-backend log-level variables — see [Environment Variables](../reference/observability/environment-variables.mdx#logging).
 
 ## OTLP Log Export
 
@@ -283,14 +268,7 @@ Notice how the `x_request_id` field appears in all log entries, alongside the `t
 
 ## Backend Engine Log Levels
 
-Dynamo's `DYN_LOG` environment variable controls Dynamo's own logging. Each
-inference backend has its own log level control that is **independent** of
-`DYN_LOG`.
-
-### vLLM
-
-vLLM log level is controlled by the `VLLM_LOGGING_LEVEL` environment variable.
-It defaults to `INFO` and is completely independent of `DYN_LOG`.
+`DYN_LOG` controls Dynamo's own logging. Each inference backend has its own log-level control that is **independent** of `DYN_LOG` — set it separately to raise or lower engine verbosity without affecting Dynamo's:
 
 ```bash
 # Set vLLM to debug while keeping Dynamo at info
@@ -298,42 +276,11 @@ export DYN_LOG=info
 export VLLM_LOGGING_LEVEL=DEBUG
 ```
 
-Valid values: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`.
-
-### TensorRT-LLM
-
-TensorRT-LLM log level is controlled by the `TLLM_LOG_LEVEL` environment
-variable. It defaults to `INFO` and is completely independent of `DYN_LOG`.
-
-```bash
-# Set TRT-LLM to info while keeping Dynamo at warn
-export DYN_LOG=warn
-export TLLM_LOG_LEVEL=INFO
-```
-
-Valid values: `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, `INTERNAL_ERROR`.
-
-**Note:** `TLLM_LOG_LEVEL` is read once at TensorRT-LLM import time. It must
-be set before the process starts.
-
-### SGLang
-
-SGLang logging is currently configured through Dynamo and follows the
-`DYN_LOG` level by default. To disable Dynamo's SGLang log configuration
-and manage it independently, set:
-
-```bash
-export DYN_SKIP_SGLANG_LOG_FORMATTING=true
-```
-
-Alternatively, pass the `--log-level` argument to the SGLang worker
-command to set the SGLang engine's log level directly (e.g.
-`--log-level DEBUG`). This is independent of `DYN_LOG`.
+The per-backend variables — `VLLM_LOGGING_LEVEL`, `TLLM_LOG_LEVEL` (read once at import time; set it before the process starts), and `DYN_SKIP_SGLANG_LOG_FORMATTING` (hand SGLang logging back to the engine's own `--log-level`) — with their valid values are documented in [Environment Variables](../reference/observability/environment-variables.mdx#logging).
 
 ## Related Documentation
 
 - [Distributed Tracing with Tempo](tracing.md)
-- [Log Aggregation in Kubernetes](../kubernetes/observability/logging.md)
 - [Observability Getting Started](README.md)
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 - [Dynamo Architecture Overview](../design-docs/architecture.md)

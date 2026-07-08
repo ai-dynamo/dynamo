@@ -26,18 +26,14 @@ does not list a parser for your model, see
 
 ## Prerequisites
 
-To enable this feature, you should set the following flag while launching the backend worker
+To enable this feature, set the following flag on the backend worker in your DynamoGraphDeployment (DGD):
 
 - `--dyn-tool-call-parser`: select the tool call parser from the supported list below
 
-```bash
-# <backend> can be sglang, trtllm, vllm, etc. based on your installation
-python -m dynamo.<backend> --help
-```
+The flag is a worker `args:` entry — `dynamo.vllm`, `dynamo.sglang`, or `dynamo.trtllm`. For the full list of worker flags, see the backend guides ([vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)) or run the worker with `--help`. New to authoring a DGD? Start with [Deploy with DGD](../kubernetes/dgd-guide.md).
 
 > [!TIP]
-> If your model's default chat template doesn't support tool calling, but the model itself does, you can specify a custom chat template per worker
-> with `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`.
+> If your model's default chat template doesn't support tool calling, but the model itself does, add `--custom-jinja-template /path/to/template.jinja` to the worker `args:` (the template must be readable inside the container).
 
 > [!TIP]
 > If your model also emits reasoning content that should be separated from normal output, see [Reasoning Parsing (Dynamo)](../reasoning/README.md) for the supported `--dyn-reasoning-parser` values.
@@ -80,17 +76,66 @@ parser exists for this format.
 
 ## Examples
 
-### Launch Dynamo Frontend and Backend
+### Deploy Frontend and worker
+
+Tool-call parsing is configured on the **worker** with `--dyn-tool-call-parser`. The Frontend needs no extra flags (the default `dynamo` chat processor parses tool calls for every backend). This DGD serves Qwen3.5-4B on SGLang with tool-call and reasoning parsing enabled — swap the worker for `dynamo.vllm` or `dynamo.trtllm` with the same `--dyn-*` flags:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-tools
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+  - name: SGLangWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3.5-4B
+          - --served-model-name
+          - Qwen/Qwen3.5-4B
+          - --dyn-tool-call-parser
+          - qwen3_coder
+          - --dyn-reasoning-parser
+          - qwen3
+```
+
+Apply it and wait for the deployment to become ready:
 
 ```bash
-# launch backend worker (or dynamo.vllm)
-python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
-
-# launch frontend worker
-python -m dynamo.frontend
+kubectl apply -f qwen35-tools.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready dynamographdeployment/qwen35-tools \
+  -n ${NAMESPACE} --timeout=600s
 ```
 
 ### Tool Calling Request Example
+
+Port-forward the Frontend Service, then send the request:
+
+```bash
+kubectl port-forward svc/qwen35-tools-frontend 8000:8000 -n ${NAMESPACE}
+```
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \

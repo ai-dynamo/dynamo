@@ -11,31 +11,6 @@ For the task-oriented walkthrough — authoring a request step by step — see [
 
 This page documents the `nvidia.com/v1beta1` API — the served, storage version.
 
-## DGDR, DGD, and recipes
-
-Dynamo provides two custom resources for deploying inference graphs:
-
-| | DGD (canonical live deployment) | DGDR (generator/profiler) |
-|---|---|---|
-| **You provide** | Full deployment spec (components, parallelism, replicas, resource limits) | Model, backend, workload, hardware, and optional SLA targets |
-| **What happens** | The operator reconciles the DGD into `DynamoComponentDeployment` resources and pods | The profiler generates a DGD; with `autoApply: true`, the operator creates it |
-| **Best for** | Known-good configs, tuned recipes, or full manual control | New model/hardware combinations, SLA-driven sizing, or generated DGD YAML |
-| **Persistence** | Persists and serves traffic | Reaches a terminal state after generation/deploy |
-
-Use a DGD directly when you have a hand-crafted configuration for a specific model/hardware combination. Most [recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes) are tuned DGD manifests. Use a DGDR when you want Dynamo to generate the DGD for you.
-
-## Minimal example
-
-```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: my-model
-spec:
-  model: Qwen/Qwen3-0.6B
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
-```
-
 ## Spec reference
 
 Only `model` is required; every other field has a default or is auto-detected.
@@ -64,8 +39,6 @@ Only `model` is required; every other field has a default or is auto-detected.
   Automatically create a DGD after profiling completes. When `false`, the generated spec is stored in `status` for manual review instead of being applied.
 </ParamField>
 
-### Workload
-
 <ParamField path="workload" type="WorkloadSpec">
   Expected workload characteristics for SLA-based profiling.
 </ParamField>
@@ -84,8 +57,6 @@ Only `model` is required; every other field has a default or is auto-detected.
     Target request rate in requests per second. Required (or `concurrency`) when the planner is disabled.
   </ParamField>
 </Indent>
-
-### SLA
 
 <ParamField path="sla" type="SLASpec">
   Service-level agreement targets that drive profiling optimization.
@@ -108,9 +79,6 @@ Only `model` is required; every other field has a default or is auto-detected.
   </ParamField>
 </Indent>
 
-### Hardware
-
-All hardware fields are auto-detected from cluster GPU nodes when omitted (requires cluster-wide mode with GPU discovery enabled). `gpuSku` is a selector that restricts which nodes are considered; the other fields are overrides passed to the profiler. If all fields are set, discovery is skipped.
 
 <ParamField path="hardware" type="HardwareSpec">
   GPU hardware for profiling and deployment.
@@ -137,10 +105,8 @@ All hardware fields are auto-detected from cluster GPU nodes when omitted (requi
   </ParamField>
 </Indent>
 
-### Model cache
-
 <ParamField path="modelCache" type="ModelCacheSpec">
-  Optional PVC configuration for pre-downloaded model weights. When set, weights are loaded from the PVC instead of downloading from HuggingFace. See [Model Caching](model-caching.md).
+  Optional PVC configuration for pre-downloaded model weights. When set, weights are loaded from the PVC instead of downloading from HuggingFace.
 </ParamField>
 
 <Indent>
@@ -154,8 +120,6 @@ All hardware fields are auto-detected from cluster GPU nodes when omitted (requi
     Mount path for the PVC inside the container.
   </ParamField>
 </Indent>
-
-### Features
 
 <ParamField path="features" type="FeaturesSpec">
   Optional Dynamo platform features in the generated deployment.

@@ -36,18 +36,55 @@ The pipeline type is **auto-detected** from the model's `model_index.json` — n
 
 ### Video Diffusion
 
-#### Launch worker
+#### Deploy worker
 
-```bash
-python -m dynamo.trtllm \
-  --modality video_diffusion \
-  --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
-  --media-output-fs-url file:///tmp/dynamo_media
+Serve a video-diffusion model by setting `--modality video_diffusion` on a TensorRT-LLM worker. This DGD deploys Wan 2.1:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: wan-t2v
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+  - name: TRTLLMWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --modality
+          - video_diffusion
+          - --model-path
+          - Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+          - --media-output-fs-url
+          - file:///tmp/dynamo_media
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
 ```
 
 #### API Endpoint
 
-Video generation uses the `/v1/videos` endpoint:
+Video generation uses the `/v1/videos` endpoint. Port-forward the Frontend (`kubectl port-forward svc/wan-t2v-frontend 8000:8000 -n ${NAMESPACE}`), then:
 
 ```bash
 curl -X POST http://localhost:8000/v1/videos \
@@ -65,13 +102,36 @@ curl -X POST http://localhost:8000/v1/videos \
 
 ### Image Diffusion
 
-#### Launch worker
+#### Deploy worker
 
-```bash
-python -m dynamo.trtllm \
-  --modality image_diffusion \
-  --model-path black-forest-labs/FLUX.1-dev \
-  --media-output-fs-url file:///tmp/dynamo_media
+Set `--modality image_diffusion` on the worker instead. This DGD deploys FLUX.1-dev:
+
+```yaml
+  - name: TRTLLMWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.trtllm
+          args:
+          - --modality
+          - image_diffusion
+          - --model-path
+          - black-forest-labs/FLUX.1-dev
+          - --media-output-fs-url
+          - file:///tmp/dynamo_media
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
 ```
 
 #### API Endpoint
