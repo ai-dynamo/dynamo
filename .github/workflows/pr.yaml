@@ -283,8 +283,9 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files]
     # `sample` is here because sample tests piggyback on this image and run as part of vllm-test.
-    # `operator` and `snapshot` are here because DynamoCheckpoint deploy tests
-    # build a snapshot placeholder from the CI-built vLLM runtime image.
+    # `operator` is here because operator changes run the deploy tests, which
+    # deploy the CI-built runtime image. `snapshot` is here because
+    # DynamoCheckpoint deploy tests build a snapshot placeholder from it.
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||
@@ -322,8 +323,9 @@ jobs:
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files]
-    # `operator` and `snapshot` are here because DynamoCheckpoint deploy tests
-    # build a snapshot placeholder from the CI-built SGLang runtime image.
+    # `operator` is here because operator changes run the deploy tests, which
+    # deploy the CI-built runtime image. `snapshot` is here because
+    # DynamoCheckpoint deploy tests build a snapshot placeholder from it.
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
@@ -360,7 +362,13 @@ jobs:
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    # `operator` is here because operator changes run the deploy tests, which
+    # deploy the CI-built runtime image.
+    if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.deploy == 'true' ||
+      needs.changed-files.outputs.operator == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -838,7 +846,10 @@ jobs:
     needs: [changed-files, trtllm-build]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true') &&
       needs.trtllm-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -855,7 +866,8 @@ jobs:
   deploy-operator:
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' ||
+      (needs.changed-files.outputs.operator == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
@@ -887,7 +899,9 @@ jobs:
     needs: [changed-files, deploy-operator, vllm-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
@@ -903,7 +917,9 @@ jobs:
     needs: [changed-files, deploy-operator, sglang-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
@@ -919,7 +935,9 @@ jobs:
     needs: [changed-files, deploy-operator, trtllm-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.operator == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
