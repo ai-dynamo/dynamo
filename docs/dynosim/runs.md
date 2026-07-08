@@ -586,7 +586,9 @@ If you violate those constraints, DynoSim fails immediately with a validation er
 - on Apple Silicon, run the `aarch64` wheel natively (`docker run --platform linux/arm64 ...`);
   amd64 emulation under Rosetta hits an Apple translation defect that segfaults multi-worker
   multi-turn runs ([issue #11228](https://github.com/ai-dynamo/dynamo/issues/11228)). To run
-  `linux/amd64` anyway, disable Docker Desktop's Rosetta option to fall back to QEMU
+  `linux/amd64` anyway, disable Docker Desktop's Rosetta option to fall back to QEMU. Bare
+  `docker run` defaults to the native arm64 image but silently reuses a previously pulled amd64
+  image under the same tag; pass `--platform linux/arm64` explicitly after running amd64 variants
 
 ## When To Use This vs AIPerf
 
