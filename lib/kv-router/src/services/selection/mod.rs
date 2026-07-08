@@ -6,6 +6,7 @@
 //! The service owns worker selection and reservation state, but never forwards
 //! model requests and never owns model responses.
 
+mod cache;
 mod catalog;
 mod core;
 mod error;
