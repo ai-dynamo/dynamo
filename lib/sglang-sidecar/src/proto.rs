@@ -3,7 +3,7 @@
 
 //! Generated protobuf / gRPC types for the `sglang.runtime.v1` package.
 //!
-//! Codegen is driven by `build.rs` from the vendored `proto/sglang.proto`.
+//! Codegen is driven by `build.rs` from a checksum-verified SGLang source pin.
 
 #![allow(clippy::all)]
 #![allow(missing_docs)]
