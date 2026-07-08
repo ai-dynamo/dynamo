@@ -211,6 +211,7 @@ impl KvPushRouter {
             context_id.clone(),
             request,
             selection.scheduler_tracked,
+            selection.admission_managed,
         );
 
         let record_result: Result<(), Error> = async {
@@ -340,7 +341,7 @@ impl KvPushRouter {
             }
         };
 
-        guard.mark_dispatched();
+        guard.mark_dispatched().await;
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
         let wrapped_stream = Box::pin(async_stream::stream! {

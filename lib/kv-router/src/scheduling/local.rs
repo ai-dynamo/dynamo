@@ -16,6 +16,7 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
+use super::queue_admission::PolicyClassAdmissionStrategies;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
@@ -129,6 +130,41 @@ where
         worker_type: &'static str,
         monitor_worker_configs: bool,
     ) -> Self {
+        Self::new_with_policy_profile_and_admission_strategies(
+            slots,
+            workers_with_configs,
+            profile,
+            block_size,
+            selector,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+            PolicyClassAdmissionStrategies::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policy_profile_and_admission_strategies(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        profile: PolicyProfile,
+        block_size: u32,
+        selector: Sel,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+        admission_strategies: PolicyClassAdmissionStrategies,
+    ) -> Self {
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
             let mut monitor_rx = workers_with_configs.clone();
@@ -166,16 +202,19 @@ where
             });
         }
 
-        let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
-            Arc::clone(&slots),
-            workers_with_configs,
-            profile,
-            block_size,
-            selector,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-        ));
+        let queue = Arc::new(
+            SchedulerQueue::new_with_policy_profile_and_admission_strategies(
+                Arc::clone(&slots),
+                workers_with_configs,
+                profile,
+                block_size,
+                selector,
+                prefill_load_estimator,
+                overlap_scores_refresh,
+                overloaded_worker_provider,
+                admission_strategies,
+            ),
+        );
         let (queue_updates, _) = watch::channel(());
         let queue_remote_updates = Arc::clone(&queue);
         let queue_periodic_updates = Arc::clone(&queue);
@@ -447,14 +486,27 @@ where
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
+        self.finish(request_id, 0).await
+    }
+
+    pub async fn mark_dispatched(&self, request_id: &str) {
+        self.queue.dispatched(request_id).await;
+    }
+
+    pub fn record_output_tokens(&self, request_id: &str, output_tokens: usize) {
+        self.queue.progress(request_id, output_tokens);
+    }
+
+    pub async fn finish(&self, request_id: &str, total_tokens: usize) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
-        self.slots.free(&request_id, Instant::now())?;
+        let result = self.slots.free(&request_id, Instant::now());
+        self.queue.finish(&request_id, total_tokens).await;
         match worker {
             Some(worker) => self.queue.update_worker(worker).await,
             None => self.queue.update().await,
         }
-        Ok(())
+        result
     }
 
     pub fn pending_count(&self) -> usize {

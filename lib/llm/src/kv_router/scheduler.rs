@@ -6,8 +6,8 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PolicyClassAdmissionStrategies,
+    PotentialLoad, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -26,6 +26,7 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_thunderagent::{STRATEGY_NAME, ThunderAgent, ThunderAgentConfig, WatchWorkerCapacity};
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -61,6 +62,40 @@ where
         model_name: Option<&str>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
+        Self::start_with_admission_strategies(
+            component,
+            block_size,
+            workers_with_configs,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+            model_name,
+            worker_type,
+            PolicyClassAdmissionStrategies::new(),
+        )
+        .await
+    }
+
+    /// Start the scheduler with caller-provided policy-class strategies.
+    ///
+    /// A provided class strategy overrides built-in construction for that
+    /// class; configured built-ins are still created for other classes.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn start_with_admission_strategies(
+        component: Component,
+        block_size: u32,
+        workers_with_configs: RuntimeConfigWatch,
+        selector: Sel,
+        kv_router_config: &KvRouterConfig,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        model_name: Option<&str>,
+        worker_type: &'static str,
+        provided_strategies: PolicyClassAdmissionStrategies,
+    ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
@@ -83,6 +118,12 @@ where
         let profile = kv_router_config
             .policy_profile(model_name)
             .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
+        let admission_strategies = build_admission_strategies(
+            &profile,
+            workers_with_configs.clone(),
+            block_size,
+            provided_strategies,
+        )?;
         let metric_model = model_name.unwrap_or("unknown");
         let queue_metrics = profile
             .classes()
@@ -96,21 +137,24 @@ where
             .map(|(index, class)| (class.name.clone(), index))
             .collect();
 
-        let inner = Arc::new(LocalScheduler::new_with_policy_profile(
-            slots,
-            workers_with_configs.clone(),
-            profile,
-            block_size,
-            selector,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-            kv_router_config.router_queue_recheck_interval(),
-            kv_router_config.router_track_prefill_tokens,
-            component.drt().child_token(),
-            worker_type,
-            watch_worker_configs,
-        ));
+        let inner = Arc::new(
+            LocalScheduler::new_with_policy_profile_and_admission_strategies(
+                slots,
+                workers_with_configs.clone(),
+                profile,
+                block_size,
+                selector,
+                prefill_load_estimator,
+                overlap_scores_refresh,
+                overloaded_worker_provider,
+                kv_router_config.router_queue_recheck_interval(),
+                kv_router_config.router_track_prefill_tokens,
+                component.drt().child_token(),
+                worker_type,
+                watch_worker_configs,
+                admission_strategies,
+            ),
+        );
 
         let metrics_scheduler = Arc::clone(&inner);
         let background_metrics = queue_metrics.clone();
@@ -333,7 +377,19 @@ where
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.inner.free(request_id).await?;
+        self.finish(request_id, 0).await
+    }
+
+    pub async fn mark_dispatched(&self, request_id: &str) {
+        self.inner.mark_dispatched(request_id).await;
+    }
+
+    pub fn record_output_tokens(&self, request_id: &str, output_tokens: usize) {
+        self.inner.record_output_tokens(request_id, output_tokens);
+    }
+
+    pub async fn finish(&self, request_id: &str, total_tokens: usize) -> Result<(), SequenceError> {
+        self.inner.finish(request_id, total_tokens).await?;
         self.update_queue_metrics();
         Ok(())
     }
@@ -388,6 +444,48 @@ where
     }
 }
 
+fn build_admission_strategies(
+    profile: &dynamo_kv_router::scheduling::PolicyProfile,
+    workers: RuntimeConfigWatch,
+    block_size: u32,
+    mut strategies: PolicyClassAdmissionStrategies,
+) -> Result<PolicyClassAdmissionStrategies, KvSchedulerError> {
+    let mut thunderagent_class = None;
+    for class in profile.classes() {
+        let Some(admission) = &class.queue_admission else {
+            continue;
+        };
+        if strategies.contains_key(&class.name) {
+            continue;
+        }
+        if admission.strategy != STRATEGY_NAME {
+            return Err(KvSchedulerError::InitFailed(format!(
+                "unsupported queue admission strategy {:?} for policy class {:?}",
+                admission.strategy, class.name
+            )));
+        }
+        if class.queue_policy != dynamo_kv_router::RouterQueuePolicy::Fcfs {
+            return Err(KvSchedulerError::InitFailed(format!(
+                "ThunderAgent queue admission requires FCFS for policy class {:?}",
+                class.name
+            )));
+        }
+        if let Some(existing) = thunderagent_class.replace(class.name.as_str()) {
+            return Err(KvSchedulerError::InitFailed(format!(
+                "ThunderAgent queue admission may be configured for only one policy class (found {existing:?} and {:?})",
+                class.name
+            )));
+        }
+        let config = ThunderAgentConfig::from_options(&admission.options)
+            .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
+        let capacity = WatchWorkerCapacity::new(workers.clone(), block_size);
+        let strategy = ThunderAgent::new(capacity, config)
+            .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
+        strategies.insert(class.name.clone(), Box::new(strategy));
+    }
+    Ok(strategies)
+}
+
 fn update_queue_metrics(
     handles: &[RouterQueueMetricHandles],
     mut stats_for: impl FnMut(usize) -> Option<dynamo_kv_router::queue::ClassQueueStats>,
@@ -413,6 +511,10 @@ fn update_queue_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::scheduling::{
+        AdmissionDecision, AdmissionRequest, PolicyClassAdmissionStrategy, RouterPolicyConfig,
+        WorkerPlacement,
+    };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
@@ -425,6 +527,14 @@ mod tests {
         namespace
             .component(format!("test-component-{name}"))
             .unwrap()
+    }
+
+    struct CustomStrategy;
+
+    impl PolicyClassAdmissionStrategy for CustomStrategy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Ready(WorkerPlacement::Any)
+        }
     }
 
     #[test]
@@ -457,6 +567,99 @@ mod tests {
                 stats.pending_cached_tokens as i64
             );
         }
+    }
+
+    #[test]
+    fn builds_thunderagent_from_policy_class_options() {
+        let profile = RouterPolicyConfig::from_yaml(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: agents
+    policy_family: standard
+    cache_bucket: all
+    queue_admission:
+      type: session_aware
+      pause_threshold: 0.7
+      pause_target: 0.6
+      resume_hysteresis: 0.05
+    quantum: 1
+"#,
+        )
+        .unwrap()
+        .resolve_profile(None, None, dynamo_kv_router::RouterQueuePolicy::Fcfs);
+        let (_tx, rx) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
+        let strategies =
+            build_admission_strategies(&profile, rx, 16, PolicyClassAdmissionStrategies::new())
+                .unwrap();
+        assert!(strategies.contains_key("agents"));
+    }
+
+    #[test]
+    fn rejects_unknown_admission_strategy_at_composition_boundary() {
+        let profile = RouterPolicyConfig::from_yaml(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: agents
+    policy_family: standard
+    cache_bucket: all
+    queue_admission:
+      type: custom
+    quantum: 1
+"#,
+        )
+        .unwrap()
+        .resolve_profile(None, None, dynamo_kv_router::RouterQueuePolicy::Fcfs);
+        let (_tx, rx) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
+        let error = match build_admission_strategies(
+            &profile,
+            rx,
+            16,
+            PolicyClassAdmissionStrategies::new(),
+        ) {
+            Ok(_) => panic!("unknown strategy unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported queue admission strategy")
+        );
+    }
+
+    #[test]
+    fn caller_can_supply_custom_strategy_without_composition_changes() {
+        let profile = RouterPolicyConfig::from_yaml(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: agents
+    policy_family: standard
+    cache_bucket: all
+    queue_admission:
+      type: custom
+    quantum: 1
+"#,
+        )
+        .unwrap()
+        .resolve_profile(None, None, dynamo_kv_router::RouterQueuePolicy::Fcfs);
+        let (_tx, rx) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
+        let mut provided = PolicyClassAdmissionStrategies::new();
+        provided.insert("agents".to_owned(), Box::new(CustomStrategy));
+
+        let strategies = build_admission_strategies(&profile, rx, 16, provided).unwrap();
+
+        assert!(strategies.contains_key("agents"));
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::queue_admission::WorkerPlacement;
+use super::queue_admission::{AdmissionId, WorkerPlacement};
 use crate::protocols::WorkerWithDpRank;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +190,7 @@ impl PartialOrd for WorkerLaneHead {
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
     pending: BinaryHeap<PolicyQueueEntry<T>>,
+    deferred: FxHashMap<AdmissionId, PolicyQueueEntry<T>>,
     stats: PolicyQueueStats,
     deficit: usize,
     ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
@@ -198,7 +199,7 @@ struct PolicyClassQueue<T> {
 }
 
 impl<T> PolicyClassQueue<T> {
-    fn is_empty(&self) -> bool {
+    fn ready_is_empty(&self) -> bool {
         self.pending.is_empty() && self.ready_by_worker.is_empty()
     }
 
@@ -206,6 +207,7 @@ impl<T> PolicyClassQueue<T> {
         self.pending
             .iter()
             .chain(self.ready_by_worker.values().flat_map(|ready| ready.iter()))
+            .chain(self.deferred.values())
     }
 
     fn push_ready(&mut self, placement: WorkerPlacement, entry: PolicyQueueEntry<T>) {
@@ -405,6 +407,11 @@ pub struct PolicyQueue<T> {
     candidates: Vec<Option<DispatchCandidate>>,
 }
 
+enum QueueEntryState {
+    Ready(WorkerPlacement),
+    Deferred(AdmissionId),
+}
+
 impl<T> PolicyQueue<T> {
     pub fn new(profile: PolicyProfile) -> Self {
         let class_count = profile.classes().len();
@@ -416,6 +423,7 @@ impl<T> PolicyQueue<T> {
                 .map(|config| PolicyClassQueue {
                     config,
                     pending: BinaryHeap::new(),
+                    deferred: FxHashMap::default(),
                     ready_by_worker: FxHashMap::default(),
                     blocked_workers: FxHashSet::default(),
                     candidate_worker_heads: BTreeSet::new(),
@@ -460,7 +468,7 @@ impl<T> PolicyQueue<T> {
     }
 
     pub fn has_backlog(&self, class_index: usize) -> bool {
-        !self.classes[class_index].is_empty()
+        !self.classes[class_index].ready_is_empty()
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &PolicyQueueEntry<T>> {
@@ -473,6 +481,7 @@ impl<T> PolicyQueue<T> {
         self.pending_count = 0;
         for class in &mut self.classes {
             class.pending.retain(|entry| keep(entry.payload()));
+            class.deferred.retain(|_, entry| keep(entry.payload()));
             class.ready_by_worker.retain(|_, ready| {
                 ready.retain(|entry| keep(entry.payload()));
                 !ready.is_empty()
@@ -486,7 +495,7 @@ impl<T> PolicyQueue<T> {
             }
             class.stats = stats;
             self.pending_count += count;
-            if class.is_empty() {
+            if class.ready_is_empty() {
                 class.deficit = 0;
             }
         }
@@ -506,6 +515,54 @@ impl<T> PolicyQueue<T> {
         placement: WorkerPlacement,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
+        self.enqueue_with_state(
+            class_index,
+            worker_count,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            QueueEntryState::Ready(placement),
+            payload,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn enqueue_deferred(
+        &mut self,
+        class_index: usize,
+        worker_count: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        admission_id: AdmissionId,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
+        self.enqueue_with_state(
+            class_index,
+            worker_count,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            QueueEntryState::Deferred(admission_id),
+            payload,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_with_state(
+        &mut self,
+        class_index: usize,
+        worker_count: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        state: QueueEntryState,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
             return Err((rejection, payload));
@@ -523,9 +580,113 @@ impl<T> PolicyQueue<T> {
         );
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
-        class.push_ready(placement, entry);
+        match state {
+            QueueEntryState::Ready(placement) => class.push_ready(placement, entry),
+            QueueEntryState::Deferred(admission_id) => {
+                let replaced = class.deferred.insert(admission_id, entry);
+                debug_assert!(replaced.is_none(), "duplicate deferred admission ID");
+            }
+        }
         self.pending_count += 1;
         Ok(())
+    }
+
+    pub(crate) fn make_ready(
+        &mut self,
+        class_index: usize,
+        admission_id: AdmissionId,
+        placement: WorkerPlacement,
+    ) -> bool {
+        let class = &mut self.classes[class_index];
+        let Some(entry) = class.deferred.remove(&admission_id) else {
+            return false;
+        };
+        class.push_ready(placement, entry);
+        true
+    }
+
+    pub(crate) fn deferred_payload_mut(
+        &mut self,
+        class_index: usize,
+        admission_id: AdmissionId,
+    ) -> Option<&mut T> {
+        self.classes[class_index]
+            .deferred
+            .get_mut(&admission_id)
+            .map(PolicyQueueEntry::payload_mut)
+    }
+
+    pub(crate) fn remove_deferred(
+        &mut self,
+        class_index: usize,
+        admission_id: AdmissionId,
+    ) -> Option<PolicyQueueEntry<T>> {
+        let class = &mut self.classes[class_index];
+        let entry = class.deferred.remove(&admission_id)?;
+        subtract_stats(&mut class.stats, entry.snapshot);
+        self.pending_count -= 1;
+        if class.ready_is_empty() {
+            class.deficit = 0;
+        }
+        Some(entry)
+    }
+
+    pub(crate) fn take_if(
+        &mut self,
+        mut predicate: impl FnMut(&T) -> bool,
+    ) -> Vec<PolicyQueueEntry<T>> {
+        let mut removed = Vec::new();
+        for class in &mut self.classes {
+            let remove_sequences: FxHashSet<u64> = class
+                .entries()
+                .filter(|entry| predicate(entry.payload()))
+                .map(|entry| entry.enqueue_seq)
+                .collect();
+            if remove_sequences.is_empty() {
+                continue;
+            }
+            let removed_start = removed.len();
+
+            let mut retained = BinaryHeap::with_capacity(class.pending.len());
+            for entry in class.pending.drain() {
+                if remove_sequences.contains(&entry.enqueue_seq) {
+                    removed.push(entry);
+                } else {
+                    retained.push(entry);
+                }
+            }
+            class.pending = retained;
+
+            let deferred: Vec<PolicyQueueEntry<T>> = class
+                .deferred
+                .extract_if(|_, entry| remove_sequences.contains(&entry.enqueue_seq))
+                .map(|(_, entry)| entry)
+                .collect();
+            removed.extend(deferred);
+
+            class.ready_by_worker.retain(|_, ready| {
+                let mut retained = BinaryHeap::with_capacity(ready.len());
+                for entry in ready.drain() {
+                    if remove_sequences.contains(&entry.enqueue_seq) {
+                        removed.push(entry);
+                    } else {
+                        retained.push(entry);
+                    }
+                }
+                *ready = retained;
+                !ready.is_empty()
+            });
+            class.rebuild_worker_heads();
+
+            for entry in &removed[removed_start..] {
+                subtract_stats(&mut class.stats, entry.snapshot);
+                self.pending_count -= 1;
+            }
+            if class.ready_is_empty() {
+                class.deficit = 0;
+            }
+        }
+        removed
     }
 
     /// Runs one DRR ring pass over dispatchable class heads. If no head has
@@ -551,7 +712,7 @@ impl<T> PolicyQueue<T> {
                 return Some(self.pop_candidate(class_index, candidate));
             }
             self.candidates[class_index] = candidate;
-            if class.is_empty() {
+            if class.ready_is_empty() {
                 class.deficit = 0;
             }
         }
@@ -567,7 +728,7 @@ impl<T> PolicyQueue<T> {
                 class.next_dispatchable(class_index, &mut is_dispatchable)
             };
             let Some(candidate) = candidate else {
-                if class.is_empty() {
+                if class.ready_is_empty() {
                     class.deficit = 0;
                 }
                 continue;
@@ -632,6 +793,7 @@ impl<T> PolicyQueue<T> {
                 .pending
                 .into_iter()
                 .chain(class.ready_by_worker.into_values().flatten())
+                .chain(class.deferred.into_values())
         })
     }
 
@@ -648,7 +810,7 @@ impl<T> PolicyQueue<T> {
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
         subtract_stats(&mut class.stats, entry.snapshot);
         self.pending_count -= 1;
-        if class.is_empty() {
+        if class.ready_is_empty() {
             class.deficit = 0;
         } else {
             self.carry_class = (class.deficit > 0).then_some(class_index);
@@ -761,6 +923,54 @@ policy_classes:
     quantum: 10
 "#,
         )
+    }
+
+    #[test]
+    fn deferred_entries_count_toward_limits_without_blocking_ready_work() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let deferred_id = AdmissionId::new(7);
+        queue
+            .enqueue_deferred(
+                0,
+                1,
+                QueueSnapshot::new(20, 5),
+                0.0,
+                0.0,
+                0,
+                deferred_id,
+                "deferred",
+            )
+            .unwrap();
+        assert!(!queue.has_backlog(0));
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(10, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "ready",
+            )
+            .unwrap();
+        assert!(queue.has_backlog(0));
+
+        assert_eq!(queue.pending_count(), 2);
+        assert_eq!(queue.class_stats(0).requests, 2);
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "ready"
+        );
+        assert!(queue.pop_next(|_, _, _| true).is_none());
+
+        assert!(queue.make_ready(0, deferred_id, WorkerPlacement::Any));
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "deferred"
+        );
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
     }
 
     #[test]

@@ -36,7 +36,7 @@ pub use prefill_load::{
 };
 pub use queue_admission::{
     AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
-    PolicyClassAdmissionStrategy, QueueAdmissionConfig, WorkerEligibility,
-    WorkerEligibilitySnapshot, WorkerPlacement,
+    PolicyClassAdmissionStrategies, PolicyClassAdmissionStrategy, QueueAdmissionConfig,
+    WorkerEligibility, WorkerEligibilitySnapshot, WorkerPlacement,
 };
 pub use types::*;

@@ -2564,6 +2564,7 @@ dependencies = [
  "dynamo-renderer",
  "dynamo-rl",
  "dynamo-runtime",
+ "dynamo-thunderagent",
  "dynamo-tokenizers",
  "dynamo-tokens",
  "either",
@@ -2873,6 +2874,18 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-thunderagent"
+version = "1.3.0"
+dependencies = [
+ "dynamo-kv-router",
+ "indexmap 2.14.0",
+ "serde",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

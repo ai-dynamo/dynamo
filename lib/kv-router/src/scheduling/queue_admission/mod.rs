@@ -10,6 +10,13 @@ use serde_yaml::Mapping;
 
 use crate::protocols::WorkerWithDpRank;
 
+mod controller;
+
+pub use controller::PolicyClassAdmissionStrategies;
+pub(crate) use controller::{
+    AdmissionTicket, ClassAdmissionAction, PolicyClassAdmissionController,
+};
+
 /// Router-assigned identity for one request's admission lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AdmissionId(u64);

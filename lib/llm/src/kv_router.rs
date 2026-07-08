@@ -76,6 +76,7 @@ pub enum FindBestMatchOutcome {
         effective_overlap_blocks: f64,
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
+        admission_managed: bool,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -251,6 +252,43 @@ where
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
+        Self::new_with_admission_strategies(
+            endpoint,
+            client,
+            workers_with_configs,
+            block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_type,
+            model_name,
+            is_eagle,
+            shared_cache,
+            lora_filter,
+            scheduling::PolicyClassAdmissionStrategies::new(),
+        )
+        .await
+    }
+
+    /// Construct a router with caller-provided policy-class admission
+    /// strategies. Provided strategies override built-in construction for the
+    /// matching class without changing queue internals.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_admission_strategies(
+        endpoint: Endpoint,
+        client: Client,
+        workers_with_configs: RuntimeConfigWatch,
+        block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+        admission_strategies: scheduling::PolicyClassAdmissionStrategies,
+    ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
         let component = endpoint.component();
@@ -289,7 +327,7 @@ where
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
-        let scheduler = KvScheduler::start(
+        let scheduler = KvScheduler::start_with_admission_strategies(
             component.clone(),
             block_size,
             workers_with_configs.clone(),
@@ -300,6 +338,7 @@ where
             Some(overloaded_worker_provider),
             model_name.as_deref(),
             worker_type,
+            admission_strategies,
         )
         .await?;
 
@@ -689,6 +728,7 @@ where
             effective_overlap_blocks: response.effective_overlap_blocks,
             cached_tokens: response.cached_tokens,
             routing_hashes,
+            admission_managed: response.admission_managed,
         })
     }
 
@@ -798,8 +838,21 @@ where
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
+    pub async fn mark_dispatched(&self, request_id: &str) {
+        self.scheduler.mark_dispatched(request_id).await;
+    }
+
+    pub fn record_output_tokens(&self, request_id: &str, output_tokens: usize) {
+        self.scheduler
+            .record_output_tokens(request_id, output_tokens);
+    }
+
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
+    }
+
+    pub async fn finish(&self, request_id: &str, total_tokens: usize) -> Result<(), SequenceError> {
+        self.scheduler.finish(request_id, total_tokens).await
     }
 
     /// Number of requests currently parked in the scheduler queue.
