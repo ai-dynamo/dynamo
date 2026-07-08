@@ -78,8 +78,9 @@ For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_
 | `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | — | Absolute token count for prefill busy detection. Setting a value independently enables this rejection check |
 | `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | — | Fraction of `max_num_batched_tokens` for prefill busy detection. Setting a value independently enables this rejection check and uses OR logic with the absolute threshold |
 
-The removed `--admission-control` and `DYN_ADMISSION_CONTROL` settings no longer gate these
-thresholds. See [Request Rejection](../../fault-tolerance/request-rejection.md#migrate-from-admission-control)
+The deprecated `--admission-control` and `DYN_ADMISSION_CONTROL` settings are accepted but ignored
+with a startup warning and no longer gate these thresholds. See
+[Request Rejection](../../fault-tolerance/request-rejection.md#migrate-from-admission-control)
 for migration instructions.
 
 ## Model Discovery

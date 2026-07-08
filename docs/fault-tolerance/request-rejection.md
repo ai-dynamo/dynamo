@@ -107,8 +107,10 @@ Response:
 
 ### Migrate from `--admission-control`
 
-The `--admission-control` flag has been removed. `DYN_ADMISSION_CONTROL` is ignored with a startup
-warning. Configure only the rejection thresholds that you want Dynamo to enforce:
+The `--admission-control` flag and the `DYN_ADMISSION_CONTROL` environment variable no longer have
+any effect. Both are still accepted so that existing launch commands keep starting, but they are
+ignored with a startup warning. Configure only the rejection thresholds that you want Dynamo to
+enforce:
 
 | Previous configuration | Replacement |
 | --- | --- |

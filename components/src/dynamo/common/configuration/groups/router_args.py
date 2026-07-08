@@ -12,6 +12,7 @@ returns a dict that can be unpacked into
 remain parseable but are not forwarded.
 """
 
+import argparse
 import logging
 import math
 import os
@@ -46,6 +47,19 @@ _ADMISSION_CONTROL_REMOVAL_WARNING = (
     "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD, DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD, "
     "and DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC directly"
 )
+
+_ADMISSION_CONTROL_FLAG_REMOVAL_WARNING = (
+    "--admission-control is no longer supported and is ignored; configure "
+    "--active-decode-blocks-threshold, --active-prefill-tokens-threshold, "
+    "and --active-prefill-tokens-threshold-frac directly"
+)
+
+
+class _IgnoredAdmissionControlAction(argparse.Action):
+    """Warn and store nothing, so the namespace never carries the value."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        logger.warning(_ADMISSION_CONTROL_FLAG_REMOVAL_WARNING)
 
 
 class RouterConfigBase(ConfigBase):
@@ -126,6 +140,17 @@ class RouterArgGroup(ArgGroup):
             logger.warning(_ADMISSION_CONTROL_REMOVAL_WARNING)
 
         g = parser.add_argument_group("Router Options")
+
+        # Removed master switch, still accepted so existing launch commands
+        # keep starting; warns and sets nothing on the namespace (parity with
+        # the DYN_ADMISSION_CONTROL handling above). Not in _ROUTER_FIELDS.
+        g.add_argument(
+            "--admission-control",
+            choices=("token-capacity", "none"),
+            action=_IgnoredAdmissionControlAction,
+            default=argparse.SUPPRESS,
+            help=argparse.SUPPRESS,
+        )
 
         add_argument(
             g,

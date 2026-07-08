@@ -545,16 +545,30 @@ def test_enforce_disagg_environment_is_deprecated_and_not_forwarded(
     assert "deprecated and ignored" in caplog.text
 
 
-def test_admission_control_cli_flag_is_removed(
+def test_admission_control_cli_flag_warns_and_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     _clear_rejection_threshold_env(monkeypatch)
+    caplog.set_level("WARNING")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
     assert "--admission-control" not in parser.format_help()
-    with pytest.raises(SystemExit):
+
+    config = FrontendConfig.from_cli_args(
         parser.parse_args(["--admission-control", "none"])
+    )
+    config.validate()
+
+    assert not hasattr(config, "admission_control")
+    assert config.active_decode_blocks_threshold is None
+    assert config.active_prefill_tokens_threshold is None
+    assert config.active_prefill_tokens_threshold_frac is None
+    assert "--admission-control is no longer supported and is ignored" in caplog.text
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--admission-control", "bogus"])
 
 
 def test_removed_admission_control_environment_warns_and_is_ignored(
