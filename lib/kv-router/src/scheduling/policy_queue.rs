@@ -166,10 +166,6 @@ impl<T> PolicyClassQueue<T> {
         match intent {
             WorkerPlacement::Any => self.pending.push(entry),
             WorkerPlacement::Exact(worker) => {
-                debug_assert!(matches!(
-                    self.admission,
-                    PolicyClassAdmissionController::SessionAware
-                ));
                 self.ready_by_worker.entry(worker).or_default().push(entry);
             }
         }

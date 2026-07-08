@@ -18,6 +18,7 @@ use super::overlap_refresh::{
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
+use super::queue_admission::WorkerPlacement;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
@@ -516,19 +517,23 @@ impl<
         let arrival_offset = self.start_time.elapsed().as_secs_f64();
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
+        let placement = request
+            .pinned_worker
+            .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
         let queued = QueuedRequest {
             request,
             enqueue_at: decay_now,
             block_hashes,
         };
         let worker_count = self.workers_with_configs.borrow().len();
-        if let Err((rejection, queued)) = self.pending.enqueue(
+        if let Err((rejection, queued)) = self.pending.enqueue_ready(
             class_index,
             worker_count,
             snapshot,
             arrival_offset,
             priority_jump,
             strict_priority,
+            placement,
             queued,
         ) {
             let mut request = queued.request;
@@ -2302,7 +2307,7 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_pinned_head_blocks_class_backlog_despite_other_worker_capacity() {
+    async fn test_blocked_pinned_lane_does_not_block_other_worker() {
         let (queue, slots) = make_queue(2, 16, 256, Some(0.0));
 
         let (mut first, first_rx) = make_request("pinned-1", 256);
@@ -2320,17 +2325,19 @@ policy_classes:
             "request should remain queued"
         );
 
-        let (unpinned, mut unpinned_rx) = make_request("unpinned", 256);
-        queue.enqueue(unpinned).await;
+        let (mut other_worker, mut other_worker_rx) = make_request("pinned-0", 256);
+        other_worker.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        queue.enqueue(other_worker).await;
         assert_eq!(queue.pending_count(), 2);
 
         queue.update().await;
 
-        assert_eq!(queue.pending_count(), 2);
-        assert!(
-            unpinned_rx.try_recv().is_err(),
-            "unpinned request should remain queued behind the pinned head"
-        );
+        assert_eq!(queue.pending_count(), 1);
+        let other_worker_resp = other_worker_rx
+            .try_recv()
+            .expect("other worker request should have been scheduled")
+            .expect("scheduling returned error");
+        assert_eq!(other_worker_resp.best_worker, WorkerWithDpRank::new(0, 0));
         assert!(
             second_rx.try_recv().is_err(),
             "pinned request should still be queued"
@@ -2347,12 +2354,6 @@ policy_classes:
             .expect("pinned request should have been scheduled");
         let second_resp = second_resp.expect("scheduling returned error");
         assert_eq!(second_resp.best_worker, WorkerWithDpRank::new(1, 0));
-
-        let unpinned_resp = unpinned_rx
-            .try_recv()
-            .expect("unpinned request should have been scheduled");
-        let unpinned_resp = unpinned_resp.expect("scheduling returned error");
-        assert_eq!(unpinned_resp.best_worker, WorkerWithDpRank::new(0, 0));
         assert_eq!(queue.pending_count(), 0);
     }
 
