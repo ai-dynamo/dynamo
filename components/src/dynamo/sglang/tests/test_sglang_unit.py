@@ -20,6 +20,8 @@ from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
+    require_reasoning_kwargs,
+    start_profile_compat,
 )
 from dynamo.sglang.args import (
     _normalize_multimodal_disaggregation_args,
@@ -247,6 +249,54 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
 
 
+@pytest.mark.parametrize(
+    ("request_data", "expected"),
+    [
+        ({"require_reasoning": True}, {"require_reasoning": True}),
+        ({"require_reasoning": False}, {"require_reasoning": False}),
+        ({}, {"require_reasoning": False}),
+    ],
+)
+def test_require_reasoning_kwarg_preserves_request_intent(request_data, expected):
+    """The internal reasoning intent reaches SGLang, including explicit false."""
+
+    class ReasoningEngine:
+        async def async_generate(self, require_reasoning=False):
+            return None
+
+    assert require_reasoning_kwargs(ReasoningEngine(), request_data) == expected
+
+
+def test_require_reasoning_kwarg_warns_once_when_dropped(caplog):
+    """A dropped true reasoning requirement is visible without log spam."""
+
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            return None
+
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+    with caplog.at_level(logging.WARNING):
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": True}) == {}
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": True}) == {}
+
+    assert caplog.text.count("Dropping require_reasoning=true") == 1
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+
+
+def test_require_reasoning_kwarg_silently_drops_false(caplog):
+    """A dropped false value preserves the quiet compatibility fallback."""
+
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            return None
+
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+    with caplog.at_level(logging.WARNING):
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": False}) == {}
+
+    assert "Dropping require_reasoning=true" not in caplog.text
+
+
 def test_routed_experts_kwarg_omitted_when_flag_off():
     """Default config (no enable_return_routed_experts) → empty dict."""
 
@@ -423,6 +473,24 @@ async def test_tool_call_parser_both_flags_error(mock_sglang_cli):
 
     with pytest.raises(SystemExit):
         await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_reasoning_parser_both_flags_are_allowed(mock_sglang_cli):
+    """Native gating and Dynamo response parsing may use separate reasoners."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--dyn-reasoning-parser",
+        "qwen3",
+        "--reasoning-parser",
+        "qwen3",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.dynamo_args.dyn_reasoning_parser == "qwen3"
+    assert config.server_args.reasoning_parser == "qwen3"
 
 
 @pytest.mark.asyncio

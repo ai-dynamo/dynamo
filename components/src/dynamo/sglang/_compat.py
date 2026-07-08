@@ -22,10 +22,20 @@ Runtime data-contract notes (not code-level shims):
 
 import inspect
 import logging
+from collections.abc import Mapping
 from functools import lru_cache, wraps
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _warn_require_reasoning_unsupported() -> None:
+    logger.warning(
+        "Dropping require_reasoning=true because SGLang Engine.async_generate "
+        "does not support it; reasoning-aware guided decoding may fail. "
+        "Upgrade SGLang to enable this request mode."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +161,61 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the optional SGLang per-request reasoning-gate argument."""
+    require_reasoning = bool(request.get("require_reasoning", False))
+    kwargs = filter_supported_async_generate_kwargs(
+        engine,
+        {"require_reasoning": require_reasoning},
+    )
+    if require_reasoning and "require_reasoning" not in kwargs:
+        _warn_require_reasoning_unsupported()
+    return kwargs
+
+
+@lru_cache(maxsize=32)
+def _start_profile_accepts_request_object(start_profile: Any) -> bool:
+    """Return whether TokenizerManager.start_profile expects a ProfileReq."""
+    try:
+        signature = inspect.signature(start_profile)
+    except (TypeError, ValueError):
+        logger.debug(
+            "Could not inspect SGLang TokenizerManager.start_profile signature; "
+            "using the legacy keyword-argument API"
+        )
+        return False
+
+    return "req" in signature.parameters
+
+
+def _build_profile_request(body: dict[str, Any]) -> Any:
+    from sglang.srt.managers.io_struct import ProfileReq
+
+    return ProfileReq(**body)
+
+
+async def start_profile_compat(tokenizer_manager: Any, body: dict[str, Any]) -> None:
+    """Start profiling across SGLang's old and new control APIs.
+
+    SGLang 0.5.11 accepts profiling fields as keyword arguments. Newer builds
+    accept one ``ProfileReq`` object instead.
+    """
+    start_profile = tokenizer_manager.start_profile
+    signature_source = getattr(start_profile, "__func__", start_profile)
+
+    try:
+        accepts_request_object = _start_profile_accepts_request_object(signature_source)
+    except TypeError:
+        accepts_request_object = _start_profile_accepts_request_object.__wrapped__(
+            signature_source
+        )
+
+    if accepts_request_object:
+        await start_profile(_build_profile_request(body))
+    else:
+        await start_profile(**body)
+
+
 def enable_disjoint_streaming_output(server_args: Any) -> None:
     """Enable SGLang's disjoint streaming output.
 
@@ -166,4 +231,6 @@ __all__ = [
     "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
+    "require_reasoning_kwargs",
+    "start_profile_compat",
 ]
