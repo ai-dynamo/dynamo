@@ -160,8 +160,7 @@ fn generate_internal_error_response() -> Response {
 /// the vLLM request from that field.
 #[derive(Serialize)]
 struct VllmTitoEnvelope<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    request_id: Option<&'a str>,
+    request_id: &'a str,
     sampling_params: &'a SamplingParams,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a str>,
@@ -177,10 +176,10 @@ struct VllmTitoEnvelope<'a> {
     passthrough: &'a serde_json::Map<String, serde_json::Value>,
 }
 
-impl<'a> From<&'a GenerateRequest> for VllmTitoEnvelope<'a> {
-    fn from(request: &'a GenerateRequest) -> Self {
+impl<'a> VllmTitoEnvelope<'a> {
+    fn new(request: &'a GenerateRequest, request_id: &'a str) -> Self {
         let GenerateRequest {
-            request_id,
+            request_id: _,
             token_ids: _,
             sampling_params,
             model,
@@ -192,7 +191,7 @@ impl<'a> From<&'a GenerateRequest> for VllmTitoEnvelope<'a> {
             passthrough,
         } = request;
         Self {
-            request_id: request_id.as_deref(),
+            request_id,
             sampling_params,
             model: model.as_deref(),
             stream: *stream,
@@ -212,11 +211,12 @@ fn preprocessed_from_generate(
     request: &GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
+    request_id: &str,
 ) -> anyhow::Result<PreprocessedRequest> {
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
     let routing_priority = dynamo_routing_priority(request.priority);
-    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::from(request))?;
+    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(request, request_id))?;
 
     PreprocessedRequest::builder()
         .model(model.to_string())
@@ -235,6 +235,7 @@ fn preprocessed_from_generate(
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
             expected_output_tokens: max_tokens,
+            cache_namespace: request.cache_salt.clone(),
             // `priority_jump` is a boost-only scheduler input. Preserve penalties
             // in signed `priority`, matching the standard preprocessor projection.
             priority_jump: Some(routing_priority.max(0) as f64),
@@ -316,17 +317,21 @@ async fn handler_generate(
     };
 
     let request_context = resolve_generate_request_context(&headers, request.request_id.as_deref());
-    let preprocessed =
-        match preprocessed_from_generate(&request, &model, request_context.data_parallel_rank) {
-            Ok(preprocessed) => preprocessed,
-            Err(error) => {
-                return generate_error_response(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    error.to_string(),
-                );
-            }
-        };
+    let preprocessed = match preprocessed_from_generate(
+        &request,
+        &model,
+        request_context.data_parallel_rank,
+        &request_context.request_id,
+    ) {
+        Ok(preprocessed) => preprocessed,
+        Err(error) => {
+            return generate_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                error.to_string(),
+            );
+        }
+    };
 
     let request_id = request_context.request_id;
     let context: Context<PreprocessedRequest> =
@@ -811,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_fields_reach_envelope_without_duplicate_token_ids() {
+    fn engine_fields_reach_envelope_with_resolved_id_and_cache_namespace() {
         let raw = serde_json::json!({
             "request_id": "req-forward",
             "token_ids": [1, 2],
@@ -832,7 +837,8 @@ mod tests {
             serde_json::from_value(raw.clone()).expect("deserialize request");
 
         let preprocessed =
-            preprocessed_from_generate(&request, "test-model", None).expect("build request");
+            preprocessed_from_generate(&request, "test-model", None, "resolved-request")
+                .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -857,6 +863,13 @@ mod tests {
                 .and_then(|routing| routing.priority_jump),
             Some(0.0)
         );
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.cache_namespace.as_deref()),
+            Some("tenant-a")
+        );
         let envelope = preprocessed
             .extra_args
             .as_ref()
@@ -864,6 +877,7 @@ mod tests {
             .expect("vllm_tito envelope");
 
         let mut expected_envelope = raw;
+        expected_envelope["request_id"] = serde_json::json!("resolved-request");
         let expected_token_ids = expected_envelope
             .as_object_mut()
             .and_then(|object| object.remove("token_ids"))
@@ -884,7 +898,8 @@ mod tests {
         .expect("deserialize request");
 
         let preprocessed =
-            preprocessed_from_generate(&request, "test-model", None).expect("build request");
+            preprocessed_from_generate(&request, "test-model", None, "resolved-request")
+                .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, None);
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -906,7 +921,8 @@ mod tests {
         .expect("deserialize request");
 
         let preprocessed =
-            preprocessed_from_generate(&request, "test-model", None).expect("build request");
+            preprocessed_from_generate(&request, "test-model", None, "resolved-request")
+                .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
     }
 
@@ -1112,7 +1128,8 @@ mod tests {
         .expect("deserialize request");
 
         let preprocessed =
-            preprocessed_from_generate(&request, "test-model", Some(3)).expect("build request");
+            preprocessed_from_generate(&request, "test-model", Some(3), "resolved-request")
+                .expect("build request");
         let routing = preprocessed.routing.as_ref().expect("routing hints");
 
         assert_eq!(routing.dp_rank, Some(3));
