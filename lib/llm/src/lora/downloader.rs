@@ -51,7 +51,7 @@ impl LoRADownloader {
                 && exists
             {
                 let downloaded_path = source.download(lora_uri, &dest_path).await?;
-                if self.cache.validate_cached(&cache_key)? {
+                if LoRACache::validate_path(&downloaded_path)? {
                     return Ok(downloaded_path);
                 } else {
                     tracing::warn!(
@@ -68,5 +68,52 @@ impl LoRADownloader {
     /// Convert URI to cache key (delegates to LoRACache for consistency)
     fn uri_to_cache_key(&self, uri: &str) -> String {
         LoRACache::uri_to_cache_key(uri)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    struct ExternalSnapshotSource {
+        snapshot: PathBuf,
+    }
+
+    #[async_trait]
+    impl LoRASource for ExternalSnapshotSource {
+        async fn download(&self, _lora_uri: &str, _dest_path: &Path) -> Result<PathBuf> {
+            Ok(self.snapshot.clone())
+        }
+
+        async fn exists(&self, _lora_uri: &str) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_valid_snapshot_returned_outside_dynamo_cache() {
+        let dynamo_cache = TempDir::new().unwrap();
+        let hf_cache = TempDir::new().unwrap();
+        std::fs::write(hf_cache.path().join("adapter_config.json"), "{}").unwrap();
+        std::fs::write(hf_cache.path().join("adapter_model.safetensors"), "").unwrap();
+
+        let source = ExternalSnapshotSource {
+            snapshot: hf_cache.path().to_path_buf(),
+        };
+        let downloader = LoRADownloader::new(
+            vec![Arc::new(source)],
+            LoRACache::new(dynamo_cache.path().to_path_buf()),
+        );
+
+        let result = downloader
+            .download_if_needed("hf://org/adapter")
+            .await
+            .unwrap();
+
+        assert_eq!(result, hf_cache.path());
     }
 }

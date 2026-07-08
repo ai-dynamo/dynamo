@@ -32,7 +32,7 @@ pub use routing::{
     McfPlacementResult, McfPlacementSolver, McfSolveParams, RendezvousHasher,
     create_lora_allocator,
 };
-pub use source::{LoRASource, LocalLoRASource, S3LoRASource};
+pub use source::{HuggingFaceLoRASource, LoRASource, LocalLoRASource, S3LoRASource};
 pub use state_tracker::LoraStateTracker;
 
 /// Returns true when LoRA serving is enabled via the `DYN_LORA_ENABLED` env var
