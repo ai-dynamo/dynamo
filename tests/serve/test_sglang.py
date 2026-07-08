@@ -793,9 +793,10 @@ sglang_configs = {
         script_name="diffusion_llada.sh",
         marks=[
             pytest.mark.gpu_1,
-            # TODO: profile actual VRAM peak (e.g. tests/utils/profile_pytest.py)
-            # and tighten this. Conservative placeholder until then.
-            pytest.mark.profiled_vram_gib(24.0),
+            # No profiled_vram_gib: needs the sglang runtime image +
+            # LLaDA2.0-mini-preview to profile locally. Not guessed — runs in the
+            # sequential GPU stage; profile the real peak with
+            # tests/utils/profile_pytest.py in the sglang env.
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],
