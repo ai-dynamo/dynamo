@@ -33,3 +33,7 @@
 # canonical release/support-matrix links added by the version bump 404 from CI
 # until then. Remove this entry once the v1.3.0 release is published.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.3\.0$
+
+# GitHub intermittently returns 404 to link checkers on the stargazers page
+# (valid public URL; fails lychee deterministically on CI runners)
+^https://github\.com/ai-dynamo/dynamo/stargazers$
