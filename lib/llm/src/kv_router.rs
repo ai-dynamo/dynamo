@@ -254,7 +254,14 @@ where
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
         let component = endpoint.component();
-        let cancellation_token = component.drt().primary_token();
+        // Use a child token, not the primary (root) token. The `Drop` impl
+        // below cancels this token to tear down only this router's background
+        // tasks (indexer, scheduler, overlap refresher, ...). Cancelling the
+        // primary token would propagate to the entire DistributedRuntime --
+        // including the etcd lease keep-alive -- so dropping a KvRouter during a
+        // rebuild (e.g. all workers for a model exit and a new one starts) would
+        // tear down the lease and bring down the whole runtime.
+        let cancellation_token = component.drt().child_token();
         let min_initial_workers = min_initial_workers_from_env()?;
 
         let indexer = Indexer::new(
