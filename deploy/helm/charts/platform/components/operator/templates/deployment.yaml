@@ -65,7 +65,7 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if and .Values.apiOwnership.enabled .Values.upgradeCRD }}
+      {{- if and .Values.apiOwner .Values.upgradeCRD }}
       initContainers:
       - name: crd-apply
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
@@ -82,7 +82,7 @@ spec:
       - args:
         - --config=/etc/dynamo-operator/config.yaml
         - --operator-version={{ .Chart.AppVersion }}
-        - --api-owner={{ .Values.apiOwnership.enabled }}
+        - --api-owner={{ .Values.apiOwner }}
         command:
         - /manager
         env:

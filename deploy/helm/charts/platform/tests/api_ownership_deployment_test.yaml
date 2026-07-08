@@ -25,7 +25,7 @@ tests:
     template: charts/dynamo-operator/templates/deployment.yaml
     set:
       dynamo-operator.namespaceRestriction.enabled: true
-      dynamo-operator.apiOwnership.enabled: false
+      dynamo-operator.apiOwner: false
       dynamo-operator.upgradeCRD: false
     asserts:
       - contains:
@@ -61,20 +61,20 @@ tests:
     template: charts/dynamo-operator/templates/deployment.yaml
     set:
       dynamo-operator.namespaceRestriction.enabled: true
-      dynamo-operator.apiOwnership.enabled: false
+      dynamo-operator.apiOwner: false
       dynamo-operator.upgradeCRD: true
     asserts:
       - failedTemplate:
-          errorPattern: "upgradeCRD=true requires apiOwnership.enabled=true"
+          errorPattern: "upgradeCRD=true requires apiOwner=true"
 
   - it: rejects a cluster-wide API non-owner
     template: charts/dynamo-operator/templates/deployment.yaml
     set:
-      dynamo-operator.apiOwnership.enabled: false
+      dynamo-operator.apiOwner: false
       dynamo-operator.upgradeCRD: false
     asserts:
       - failedTemplate:
-          errorPattern: "A cluster-wide operator must set apiOwnership.enabled=true"
+          errorPattern: "A cluster-wide operator must set apiOwner=true"
 
   - it: rejects namespace-scoped admission
     template: charts/dynamo-operator/templates/deployment.yaml

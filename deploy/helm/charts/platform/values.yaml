@@ -64,12 +64,10 @@ dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 
-  # -- Cluster-wide Dynamo API ownership settings.
-  apiOwnership:
-    # -- Whether this installation owns cluster-wide Dynamo API machinery. Exactly one installation per cluster may enable this. Running all parallel operators at the same version is strongly recommended; if versions differ, exactly one installation at the newest version must be the owner. Admission-affecting settings must also be compatible across installations.
-    enabled: true
+  # -- Whether this installation owns cluster-wide Dynamo API machinery. Defaults to true for backward compatibility. Exactly one installation per cluster may enable this. Running all parallel operators at the same version is strongly recommended; if versions differ, exactly one installation at the newest version must be the owner. Admission-affecting settings must also be compatible across installations.
+  apiOwner: true
 
-  # -- Whether the API owner applies bundled CRDs via the operator init container. Requires apiOwnership.enabled=true. Helm's special CRD installation must be disabled separately when this installation must not bootstrap missing CRDs.
+  # -- Whether the API owner applies bundled CRDs via the operator init container. Requires apiOwner=true. Helm's special CRD installation must be disabled separately when this installation must not bootstrap missing CRDs.
   upgradeCRD: true
 
   # Environment variables to pass to operator Deployment.

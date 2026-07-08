@@ -76,8 +76,7 @@ dynamo-operator:
   namespaceRestriction:
     enabled: true
     targetNamespace: "my-tenant-namespace"  # Optional, defaults to release namespace
-  apiOwnership:
-    enabled: true
+  apiOwner: true
   upgradeCRD: true
 ```
 
@@ -89,8 +88,7 @@ upgrades:
 dynamo-operator:
   namespaceRestriction:
     enabled: true
-  apiOwnership:
-    enabled: false
+  apiOwner: false
   upgradeCRD: false
 ```
 
@@ -109,9 +107,9 @@ during the transfer.
 
 ### Validation and Safety
 
-The chart includes validation and a fixed cluster-scoped owner marker:
+The chart uses a fixed cluster-scoped ClusterRole as an API-ownership mutex:
 
-- **Single API Owner**: Only one Helm release can own the fixed API-owner ClusterRole
+- **Single API Owner**: Helm ownership of the fixed mutex prevents two releases from enabling `apiOwner`
 - **Flag Consistency**: Rejects `upgradeCRD: true` when API ownership is disabled
 - **Prevents Multiple Cluster-Wide**: Installation will fail if another cluster-wide operator exists
 - **Prevents Mixed Deployments (Type 1)**: Installation will fail if trying to install namespace-restricted operator when cluster-wide exists

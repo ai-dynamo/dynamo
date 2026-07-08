@@ -76,8 +76,7 @@ dynamo-operator:
   namespaceRestriction:
     enabled: true
     targetNamespace: "my-tenant-namespace"  # Optional, defaults to release namespace
-  apiOwnership:
-    enabled: true
+  apiOwner: true
   upgradeCRD: true
 ```
 
@@ -89,8 +88,7 @@ upgrades:
 dynamo-operator:
   namespaceRestriction:
     enabled: true
-  apiOwnership:
-    enabled: false
+  apiOwner: false
   upgradeCRD: false
 ```
 
@@ -109,9 +107,9 @@ during the transfer.
 
 ### Validation and Safety
 
-The chart includes validation and a fixed cluster-scoped owner marker:
+The chart uses a fixed cluster-scoped ClusterRole as an API-ownership mutex:
 
-- **Single API Owner**: Only one Helm release can own the fixed API-owner ClusterRole
+- **Single API Owner**: Helm ownership of the fixed mutex prevents two releases from enabling `apiOwner`
 - **Flag Consistency**: Rejects `upgradeCRD: true` when API ownership is disabled
 - **Prevents Multiple Cluster-Wide**: Installation will fail if another cluster-wide operator exists
 - **Prevents Mixed Deployments (Type 1)**: Installation will fail if trying to install namespace-restricted operator when cluster-wide exists
@@ -153,9 +151,8 @@ The chart includes validation and a fixed cluster-scoped owner marker:
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
-| dynamo-operator.apiOwnership | object | `{"enabled":true}` | Cluster-wide Dynamo API ownership settings. |
-| dynamo-operator.apiOwnership.enabled | bool | `true` | Whether this installation owns cluster-wide Dynamo API machinery. Exactly one installation per cluster may enable this. Running all parallel operators at the same version is strongly recommended; if versions differ, exactly one installation at the newest version must be the owner. Admission-affecting settings must also be compatible across installations. |
-| dynamo-operator.upgradeCRD | bool | `true` | Whether the API owner applies bundled CRDs via the operator init container. Requires apiOwnership.enabled=true. Helm's special CRD installation must be disabled separately when this installation must not bootstrap missing CRDs. |
+| dynamo-operator.apiOwner | bool | `true` | Whether this installation owns cluster-wide Dynamo API machinery. Defaults to true for backward compatibility. Exactly one installation per cluster may enable this. Running all parallel operators at the same version is strongly recommended; if versions differ, exactly one installation at the newest version must be the owner. Admission-affecting settings must also be compatible across installations. |
+| dynamo-operator.upgradeCRD | bool | `true` | Whether the API owner applies bundled CRDs via the operator init container. Requires apiOwner=true. Helm's special CRD installation must be disabled separately when this installation must not bootstrap missing CRDs. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port" |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |

@@ -21,7 +21,7 @@ tests:
   - it: does not render admission configurations for a non-owner
     set:
       dynamo-operator.namespaceRestriction.enabled: true
-      dynamo-operator.apiOwnership.enabled: false
+      dynamo-operator.apiOwner: false
       dynamo-operator.upgradeCRD: false
     asserts:
       - hasDocuments:

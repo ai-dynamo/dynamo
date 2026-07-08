@@ -15,27 +15,27 @@
 
 {{/* Validate the explicit, cluster-wide API ownership contract. */}}
 {{- define "dynamo-operator.validateAPIOwnership" -}}
-{{- if and .Values.upgradeCRD (not .Values.apiOwnership.enabled) -}}
-  {{- fail "VALIDATION ERROR: upgradeCRD=true requires apiOwnership.enabled=true. A non-owner must not install or update cluster-wide CRD schemas." -}}
+{{- if and .Values.upgradeCRD (not .Values.apiOwner) -}}
+  {{- fail "VALIDATION ERROR: upgradeCRD=true requires apiOwner=true. A non-owner must not install or update cluster-wide CRD schemas." -}}
 {{- end -}}
 
-{{- if and (not .Values.namespaceRestriction.enabled) (not .Values.apiOwnership.enabled) -}}
-  {{- fail "VALIDATION ERROR: A cluster-wide operator must set apiOwnership.enabled=true. API non-owners are supported only for namespace-restricted installations." -}}
+{{- if and (not .Values.namespaceRestriction.enabled) (not .Values.apiOwner) -}}
+  {{- fail "VALIDATION ERROR: A cluster-wide operator must set apiOwner=true. API non-owners are supported only for namespace-restricted installations." -}}
 {{- end -}}
 
 {{- if not (empty .Values.webhook.namespaceSelector) -}}
   {{- fail "VALIDATION ERROR: webhook.namespaceSelector must be empty. The single API owner must serve admission cluster-wide so it stays aligned with the cluster-wide CRD schema and conversion implementation." -}}
 {{- end -}}
 
-{{- if .Values.apiOwnership.enabled -}}
-  {{- $ownerRoleName := include "dynamo-operator.apiOwnerRoleName" . -}}
-  {{- $existingOwner := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" $ownerRoleName -}}
-  {{- if $existingOwner -}}
-    {{- $annotations := $existingOwner.metadata.annotations | default dict -}}
+{{- if .Values.apiOwner -}}
+  {{- $mutexName := include "dynamo-operator.apiOwnershipMutexName" . -}}
+  {{- $existingMutex := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" $mutexName -}}
+  {{- if $existingMutex -}}
+    {{- $annotations := $existingMutex.metadata.annotations | default dict -}}
     {{- $existingRelease := index $annotations "meta.helm.sh/release-name" | default "unknown" -}}
     {{- $existingNamespace := index $annotations "meta.helm.sh/release-namespace" | default "unknown" -}}
     {{- if or (ne $existingRelease .Release.Name) (ne $existingNamespace .Release.Namespace) -}}
-      {{- fail (printf "VALIDATION ERROR: API ownership is already held by Helm release '%s' in namespace '%s' (ClusterRole: %s). Exactly one operator installation in the cluster may set apiOwnership.enabled=true. Running parallel operators at the same version is strongly recommended. If versions differ, the owner must be one and only one installation running the newest version." $existingRelease $existingNamespace $ownerRoleName) -}}
+      {{- fail (printf "VALIDATION ERROR: The API-ownership mutex is already held by Helm release '%s' in namespace '%s' (mutex ClusterRole: %s). Exactly one operator installation in the cluster may set apiOwner=true. Running parallel operators at the same version is strongly recommended. If versions differ, the owner must be one and only one installation running the newest version." $existingRelease $existingNamespace $mutexName) -}}
     {{- end -}}
   {{- end -}}
 {{- end -}}
