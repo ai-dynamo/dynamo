@@ -11,6 +11,11 @@ name: On-Demand Release
 # workflow_dispatch is capped at 10 inputs by GitHub — this block is at 10;
 # fold any new knob into an existing input.
 on:
+  # TEMPORARY(test): push events have no inputs, so the fallbacks below run the
+  # test flow as release_version 1.3.0 on release/1.3.0. REVERT before merge.
+  push:
+    branches:
+      - pvijayakrish/on-demand-release
   workflow_dispatch:
     inputs:
       source_ref:
@@ -90,9 +95,11 @@ jobs:
     steps:
       - name: Validate inputs
         env:
-          RELEASE_VERSION: ${{ inputs.release_version }}
-          SOURCE_REF: ${{ inputs.source_ref }}
-          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          # TEMPORARY(test): the || fallbacks cover inputless push events. REVERT
+          # to bare inputs.* before merge.
+          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
+          SOURCE_REF: ${{ inputs.source_ref || 'main' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0' || '') }}
           RC_ROUND: ${{ inputs.rc_round || '5' }}
         run: |
           set -euo pipefail
@@ -235,15 +242,17 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ inputs.source_ref }}
+          # TEMPORARY(test): || 'main' covers inputless push events. REVERT.
+          ref: ${{ inputs.source_ref || 'main' }}
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Set version and create branch
         id: bump
         env:
-          RELEASE_VERSION: ${{ inputs.release_version }}
-          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          # TEMPORARY(test): push fallbacks. REVERT to bare inputs.* before merge.
+          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0' || '') }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CONTAINERS: ${{ steps.resolve.outputs.containers }}
@@ -363,9 +372,9 @@ jobs:
   await-post-merge:
     name: Wait for post-merge builds
     needs: [prepare-branch]
-    # Test branches (is_test) stop at the branch cut: post-merge + release-branch
-    # checks still run on them, but nothing is staged or published.
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    # TEMPORARY(test): run the full chain on push too. REVERT to the commented line.
+    if: ${{ !inputs.dry_run }}
+    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     runs-on: prod-tester-amd-v1
     environment: automated-release
     permissions:
@@ -469,7 +478,9 @@ jobs:
   release-approval:
     name: Release approval gate
     needs: [prepare-branch, await-post-merge]
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    # TEMPORARY(test): run the full chain on push too. REVERT to the commented line.
+    if: ${{ !inputs.dry_run }}
+    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     runs-on: prod-default-small-v2
     environment: manual-release-approval
     permissions:
@@ -487,12 +498,15 @@ jobs:
   invoke-release:
     name: Stage release
     needs: [prepare-branch, await-post-merge, release-approval]
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    # TEMPORARY(test): run the full chain on push too. REVERT to the commented line.
+    if: ${{ !inputs.dry_run }}
+    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     uses: ./.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
       on_demand: true
-      release_version: ${{ inputs.release_version }}
+      # TEMPORARY(test): || fallback for inputless push events. REVERT.
+      release_version: ${{ inputs.release_version || '1.3.0' }}
       # Operator-chosen internal-staging rc (immutable registries can't be overwritten).
       rc_number: ${{ needs.prepare-branch.outputs.rc_number }}
       # Normalized subsets from resolve-selection.
