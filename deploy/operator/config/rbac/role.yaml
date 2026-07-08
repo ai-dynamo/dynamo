@@ -140,7 +140,7 @@ rules:
 - apiGroups:
   - grove.io
   resources:
-  - clustertopologies
+  - clustertopologybindings
   - podcliques
   - podcliquescalinggroups
   verbs:

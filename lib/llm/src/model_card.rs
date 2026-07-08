@@ -42,6 +42,41 @@ fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_TOKENIZER_CACHE_BYTES)
 }
 
+fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
+    let cached_tokens = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+        .with_label_values(&[model]);
+    let uncached_tokens =
+        dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+            .with_label_values(&[model]);
+
+    Arc::new(move |usage| {
+        cached_tokens.inc_by(usage.cached_tokens as u64);
+        uncached_tokens.inc_by(usage.uncached_tokens as u64);
+    })
+}
+
+fn instrumented_tokenizer_cache(
+    raw: Arc<dyn crate::tokenizers::traits::Tokenizer>,
+    special_tokens: Vec<String>,
+    cache_bytes: usize,
+    cache_extend: bool,
+    model: &str,
+) -> Arc<dyn crate::tokenizers::traits::Tokenizer> {
+    Arc::new(
+        crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)
+            .with_extend(cache_extend)
+            .with_observer(
+                Arc::new(|| {
+                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL.inc();
+                }),
+                Arc::new(|| {
+                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL.inc();
+                }),
+            )
+            .with_token_observer(tokenizer_cache_token_observer(model)),
+    )
+}
+
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
@@ -1130,19 +1165,12 @@ impl ModelDeploymentCard {
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
                     );
-                    Arc::new(
-                        crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
-                            .with_extend(cache_extend)
-                            .with_observer(
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
-                                        .inc();
-                                }),
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
-                                        .inc();
-                                }),
-                            ),
+                    instrumented_tokenizer_cache(
+                        raw,
+                        specials,
+                        cache_bytes,
+                        cache_extend,
+                        self.name(),
                     )
                 } else {
                     raw
@@ -1162,25 +1190,19 @@ impl ModelDeploymentCard {
 
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
-                    // Empty specials -> L1 always misses; wrapper is a thin passthrough.
-                    // Special-token extraction for tiktoken is out of scope for v1.
+                    // Empty specials disable L1, so the wrapper bypasses cache observers.
+                    // The instrumentation helper still binds zero-valued per-model token
+                    // series, ready for future tiktoken special-token extraction.
                     tracing::info!(
                         cache_bytes,
-                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 will not hit until tiktoken special-token extraction is added)",
+                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 is disabled until tiktoken special-token extraction is added)",
                     );
-                    Arc::new(
-                        crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
-                            .with_extend(cache_extend)
-                            .with_observer(
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
-                                        .inc();
-                                }),
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
-                                        .inc();
-                                }),
-                            ),
+                    instrumented_tokenizer_cache(
+                        raw,
+                        Vec::new(),
+                        cache_bytes,
+                        cache_extend,
+                        self.name(),
                     )
                 } else {
                     raw
@@ -2082,6 +2104,50 @@ mod tests {
     use super::{HFConfig, ModelDeploymentCard};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn tokenizer_cache_token_observer_records_per_model_totals() {
+        let model_a = "token-observer-test-model-a";
+        let model_b = "token-observer-test-model-b";
+        let cached_a = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+            .with_label_values(&[model_a]);
+        let uncached_a =
+            dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+                .with_label_values(&[model_a]);
+        let cached_b = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+            .with_label_values(&[model_b]);
+        let uncached_b =
+            dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+                .with_label_values(&[model_b]);
+
+        let before_a = (cached_a.get(), uncached_a.get());
+        let before_b = (cached_b.get(), uncached_b.get());
+
+        super::tokenizer_cache_token_observer(model_a)(crate::tokenizers::CacheTokenUsage {
+            cached_tokens: 7,
+            uncached_tokens: 5,
+        });
+
+        assert_eq!(
+            (cached_a.get(), uncached_a.get()),
+            (before_a.0 + 7, before_a.1 + 5)
+        );
+        assert_eq!((cached_b.get(), uncached_b.get()), before_b);
+
+        super::tokenizer_cache_token_observer(model_b)(crate::tokenizers::CacheTokenUsage {
+            cached_tokens: 3,
+            uncached_tokens: 11,
+        });
+
+        assert_eq!(
+            (cached_a.get(), uncached_a.get()),
+            (before_a.0 + 7, before_a.1 + 5)
+        );
+        assert_eq!(
+            (cached_b.get(), uncached_b.get()),
+            (before_b.0 + 3, before_b.1 + 11)
+        );
+    }
 
     #[test]
     fn tokenizer_cache_is_enabled_by_default_and_disabled_only_by_zero() {

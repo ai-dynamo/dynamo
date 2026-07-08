@@ -100,7 +100,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | file://components/operator | dynamo-operator | 1.3.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.8 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.11 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
 
 ## Values
@@ -111,6 +111,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | global.nats.install | bool | `true` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes). |
 | global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
 | global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
+| global.volcano-scheduler.enabled | bool | `false` | EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets. Set to true when Volcano is available in the cluster and Grove is configured with Volcano scheduler support. The operator uses this to inject schedulerName and map nvidia.com/volcano-queue to Grove's Volcano queue annotation. |
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
@@ -218,13 +219,29 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 |-----------------|---------------|-------|
 | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
+| 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
+| 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.11 |
+
+Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
 After installing them separately, enable Dynamo integration:
+
+Kai Scheduler:
 
 ```yaml
 global:
   kai-scheduler:
     enabled: true   # Enables queue creation and schedulerName injection
+  grove:
+    enabled: true   # Enables multinode orchestration via PodCliqueSets
+```
+
+Volcano:
+
+```yaml
+global:
+  volcano-scheduler:
+    enabled: true   # EXPERIMENTAL: Enables Volcano schedulerName injection for Grove PodCliqueSets
   grove:
     enabled: true   # Enables multinode orchestration via PodCliqueSets
 ```

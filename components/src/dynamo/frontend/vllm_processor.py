@@ -667,9 +667,14 @@ class VllmProcessor:
                 output_request_ids[output_idx] = child_request_id
                 registered_request_ids.append(child_request_id)
 
-        # llm_metrics totals; Rust postprocessor is bypassed on this path.
+        # Rust postprocessor is bypassed on this path, so emit the multimodal
+        # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        _mm_counts = extract_mm_urls(request.get("messages") or []) or {}
+        image_count = len(_mm_counts.get("image_url", []))
+        video_count = len(_mm_counts.get("video_url", []))
+        audio_count = len(_mm_counts.get("audio_url", []))
 
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
@@ -797,6 +802,13 @@ class VllmProcessor:
                     "output_tokens": cumulative_output_tokens,
                     "chunk_tokens": chunk_tokens,
                 }
+                # Include nonzero counts on every frame (text-only carries nothing).
+                if image_count:
+                    metrics["image_count"] = image_count
+                if video_count:
+                    metrics["video_count"] = video_count
+                if audio_count:
+                    metrics["audio_count"] = audio_count
                 envelope["event"] = "llm_metrics"
                 envelope["comment"] = [json.dumps(metrics)]
 

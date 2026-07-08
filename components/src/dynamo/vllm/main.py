@@ -38,8 +38,6 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
-    MediaDecoder,
-    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -62,6 +60,8 @@ from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
+from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
+from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
 
@@ -549,31 +549,14 @@ def setup_vllm_engine(
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
 
-    # Configure ec_both mode with DynamoMultimodalEmbeddingCacheConnector.
-    # Must happen BEFORE engine setup so vLLM sees ec_transfer_config.
-    if (
-        not config.route_to_encoder
-        and config.multimodal_embedding_cache_capacity_gb > 0
-    ):
-        from vllm.config import ECTransferConfig
-
-        logger.info(
-            "Configuring ec_both mode with DynamoMultimodalEmbeddingCacheConnector "
-            "(capacity=%.2f GB)",
-            config.multimodal_embedding_cache_capacity_gb,
-        )
-        instance_id = 0
-        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
-        engine_args.ec_transfer_config = ECTransferConfig(
-            engine_id=engine_id,
-            ec_role="ec_both",
-            ec_connector="DynamoMultimodalEmbeddingCacheConnector",
-            ec_connector_module_path="dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
-            ec_connector_extra_config={
-                "multimodal_embedding_cache_capacity_gb": config.multimodal_embedding_cache_capacity_gb,
-            },
-        )
-        logger.info("Configured ec_both with engine_id=%s", engine_id)
+    # Must happen before create_engine_config() so vLLM sees ec_transfer_config.
+    configure_multimodal_embedding_cache(
+        engine_args,
+        route_to_encoder=config.route_to_encoder,
+        capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+        namespace=config.namespace,
+        component=config.component,
+    )
 
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
@@ -751,18 +734,9 @@ async def register_vllm_model(
 
     # Configure media decoder for frontend image decoding when enabled
     # This enables frontend to decode images and transfer via NIXL RDMA
-    media_decoder = None
-    media_fetcher = None
-    if config.frontend_decoding:
-        media_decoder = MediaDecoder()
-        media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
-        # media_decoder.enable_video({})
-
-        media_fetcher = MediaFetcher()
-        media_fetcher.timeout_ms(30000)
-        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
-        media_fetcher.allow_direct_ip(allow_internal)
-        media_fetcher.allow_direct_port(allow_internal)
+    media_decoder, media_fetcher = create_frontend_media_config(
+        config.frontend_decoding
+    )
 
     await register_model(
         model_input,

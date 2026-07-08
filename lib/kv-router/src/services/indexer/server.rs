@@ -127,8 +127,7 @@ pub struct QueryRequest {
     pub tenant_id: String,
     #[serde(default)]
     pub lora_name: Option<String>,
-    /// Optional per-request cache salt (Mooncake RFC #1403). Currently accepted
-    /// but not yet mixed into hashes — engines apply their own internally.
+    /// Optional per-request cache salt (Mooncake RFC #1403), mixed into `/query` hashes.
     #[serde(default)]
     pub cache_salt: Option<String>,
 }
@@ -139,8 +138,8 @@ pub struct QueryByHashRequest {
     pub model_name: String,
     #[serde(default = "default_tenant")]
     pub tenant_id: String,
-    /// Optional per-request cache salt (Mooncake RFC #1403). Currently accepted
-    /// but not yet mixed into hashes — engines apply their own internally.
+    /// Invalid for `/query_by_hash`. Callers must precompute `block_hashes` with the intended
+    /// cache salt and omit this field; a non-null value is rejected.
     #[serde(default)]
     pub cache_salt: Option<String>,
 }
@@ -339,6 +338,7 @@ async fn query(State(state): State<Arc<AppState>>, Json(req): Json<QueryRequest>
         block_size,
         BlockHashOptions {
             lora_name: req.lora_name.as_deref(),
+            cache_namespace: req.cache_salt.as_deref(),
             ..Default::default()
         },
     );
@@ -353,6 +353,18 @@ async fn query_by_hash(
     Json(req): Json<QueryByHashRequest>,
 ) -> Response {
     let model = req.model_name.clone();
+    if req.cache_salt.is_some() {
+        let mut resp = (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cache_salt is not accepted by /query_by_hash; block_hashes must already include the intended cache salt"
+            })),
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
+    }
+
     let key = IndexerKey {
         model_name: req.model_name,
         tenant_id: req.tenant_id,

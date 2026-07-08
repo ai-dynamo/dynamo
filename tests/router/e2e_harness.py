@@ -8,6 +8,7 @@ from typing import Any, Callable, ContextManager
 
 from tests.router.common import (
     _test_router_basic,
+    _test_router_cache_salt_isolation,
     _test_router_decisions,
     _test_router_decisions_disagg,
     _test_router_indexers_sync,
@@ -282,6 +283,36 @@ def run_router_decisions_test(
             block_size=block_size,
             initial_wait=initial_wait,
             **scenario_kwargs,
+        )
+
+
+def run_cache_salt_isolation_test(
+    *,
+    engine_process_cls,
+    engine_args_name: str,
+    engine_args: dict[str, Any],
+    request,
+    request_plane: str,
+    model_name: str,
+    block_size: int,
+    component_name: str,
+):
+    process = _create_engine_process(
+        engine_process_cls=engine_process_cls,
+        engine_args_name=engine_args_name,
+        engine_args=engine_args,
+        request=request,
+        request_plane=request_plane,
+        default_process_kwargs={"num_workers": 2, "single_gpu": True},
+        engine_process_kwargs=None,
+    )
+    with process as engine_workers:
+        endpoint = get_engine_endpoint(engine_workers, request_plane, component_name)
+        _test_router_cache_salt_isolation(
+            engine_workers,
+            endpoint,
+            model_name,
+            block_size,
         )
 
 

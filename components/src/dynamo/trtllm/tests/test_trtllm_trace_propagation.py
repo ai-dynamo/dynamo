@@ -77,8 +77,10 @@ def _make_engine(generate_async) -> TrtllmLLMEngine:
     return engine
 
 
-async def _drain(engine: TrtllmLLMEngine, ctx: _FakeContext) -> None:
-    async for _ in engine.generate({"token_ids": [1, 2, 3]}, ctx):
+async def _drain(
+    engine: TrtllmLLMEngine, ctx: _FakeContext, request: dict | None = None
+) -> None:
+    async for _ in engine.generate(request or {"token_ids": [1, 2, 3]}, ctx):
         pass
 
 
@@ -111,3 +113,19 @@ async def test_omits_trace_headers_when_no_trace_context():
 
     # kwarg omitted (engine_trace_kwargs returns {}).
     assert "trace_headers" not in captured
+
+
+async def test_forwards_routing_cache_salt():
+    captured: dict = {}
+
+    def fake_generate_async(**kwargs):
+        captured.update(kwargs)
+        return _empty_async_iter()
+
+    await _drain(
+        _make_engine(fake_generate_async),
+        _FakeContext(),
+        {"token_ids": [1, 2, 3], "routing": {"cache_salt": "tenant-a"}},
+    )
+
+    assert captured["cache_salt"] == "tenant-a"

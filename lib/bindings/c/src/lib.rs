@@ -18,7 +18,9 @@ use dynamo_kv_router::{
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::{NvExt, routing_constraints_to_kv};
+use dynamo_llm::protocols::common::extensions::{
+    NvExt, request_cache_salt, routing_constraints_to_kv,
+};
 use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
@@ -234,6 +236,7 @@ fn kv_event_create_stored_block_from_parts(
         kv_block_size,
         BlockHashOptions {
             lora_name,
+            cache_namespace: None,
             ..Default::default()
         },
     )[0];
@@ -417,6 +420,10 @@ pub struct CRoutingResult {
     pub token_ids: *mut u32,
     /// Number of tokens in the request
     pub token_count: usize,
+    /// UTF-8 cache namespace bytes (needed for add_request callback)
+    pub cache_namespace: *mut u8,
+    /// Number of bytes in the cache namespace
+    pub cache_namespace_len: usize,
 }
 
 impl Default for CRoutingResult {
@@ -429,6 +436,8 @@ impl Default for CRoutingResult {
             decode_dp_rank: 0,
             token_ids: ptr::null_mut(),
             token_count: 0,
+            cache_namespace: ptr::null_mut(),
+            cache_namespace_len: 0,
         }
     }
 }
@@ -458,6 +467,7 @@ impl RouterHandles {
         tokens: &[u32],
         block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -473,6 +483,7 @@ impl RouterHandles {
                 tokens,
                 block_mm_infos,
                 lora_name,
+                cache_namespace,
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
@@ -513,10 +524,12 @@ impl RouterHandles {
     /// selection. State updates require a `context_id` (request id) and are managed via the
     /// explicit bookkeeping APIs (`add_request`, `mark_prefill_complete`, `free_request`).
     /// Returns (worker, overlap_blocks) on success.
+    #[expect(clippy::too_many_arguments)]
     async fn query_decode_worker(
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -549,6 +562,7 @@ impl RouterHandles {
                 false,
                 false,
                 None,
+                cache_namespace,
                 priority_jump,
                 strict_priority,
                 None,
@@ -609,7 +623,6 @@ fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
         .map(routing_constraints_to_kv)
         .unwrap_or_default()
 }
-
 /// Opaque handle for the router pair
 pub type RouterHandlesPtr = *mut RouterHandles;
 
@@ -879,6 +892,42 @@ pub unsafe extern "C" fn add_request(
     worker_id: u64,
     dp_rank: u32,
 ) -> QueryRouterResult {
+    unsafe {
+        add_request_with_cache_namespace(
+            handle,
+            request_id,
+            token_ids,
+            token_count,
+            worker_id,
+            dp_rank,
+            ptr::null(),
+            0,
+        )
+    }
+}
+
+/// Add a cache-namespaced request to the router's bookkeeping after worker selection.
+///
+/// This preserves the original `add_request` ABI for unsalted callers while allowing callers
+/// that routed with a namespace to use the same hashes for scheduler bookkeeping.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_id` must be a valid null-terminated C string
+/// - `token_ids` must point to at least `token_count` valid u32 values
+/// - `cache_namespace` must point to at least `cache_namespace_len` valid UTF-8 bytes when the
+///   length is non-zero
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn add_request_with_cache_namespace(
+    handle: RouterHandlesPtr,
+    request_id: *const c_char,
+    token_ids: *const u32,
+    token_count: usize,
+    worker_id: u64,
+    dp_rank: u32,
+    cache_namespace: *const u8,
+    cache_namespace_len: usize,
+) -> QueryRouterResult {
     if handle.is_null() || request_id.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
@@ -887,6 +936,19 @@ pub unsafe extern "C" fn add_request(
     let request_id_str = match unsafe { CStr::from_ptr(request_id) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
+    let cache_namespace = if cache_namespace_len == 0 {
+        None
+    } else if cache_namespace.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    } else {
+        match std::str::from_utf8(unsafe {
+            std::slice::from_raw_parts(cache_namespace, cache_namespace_len)
+        }) {
+            Ok("") => None,
+            Ok(namespace) => Some(namespace.to_owned()),
+            Err(_) => return QueryRouterResult::ErrInvalidParam,
+        }
     };
 
     let tokens: Vec<u32> = if token_count > 0 && !token_ids.is_null() {
@@ -911,7 +973,7 @@ pub unsafe extern "C" fn add_request(
 
             // Compute overlap_blocks using the public method
             let overlap_blocks = match decode_router
-                .get_overlap_blocks(&tokens, None, worker, None)
+                .get_overlap_blocks(&tokens, None, worker, None, cache_namespace.as_deref())
                 .await
             {
                 Ok(overlap) => overlap,
@@ -931,6 +993,7 @@ pub unsafe extern "C" fn add_request(
                     None,
                     worker,
                     None, // lora_name
+                    cache_namespace.clone(),
                     Some(&router_config_override),
                 )
                 .await;
@@ -939,6 +1002,7 @@ pub unsafe extern "C" fn add_request(
                 request_id = %request_id_str,
                 worker_id = worker_id,
                 dp_rank = dp_rank,
+                has_cache_namespace = cache_namespace.is_some(),
                 overlap_blocks = overlap_blocks,
                 token_count = tokens.len(),
                 "add_request completed"
@@ -1109,6 +1173,18 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
         res.token_ids = ptr::null_mut();
         res.token_count = 0;
     }
+
+    // Free cache namespace bytes
+    if !res.cache_namespace.is_null() && res.cache_namespace_len > 0 {
+        drop(unsafe {
+            Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                res.cache_namespace,
+                res.cache_namespace_len,
+            ))
+        });
+        res.cache_namespace = ptr::null_mut();
+        res.cache_namespace_len = 0;
+    }
 }
 
 /// Parse a JSON request string, collect completion prompts directly or apply
@@ -1120,10 +1196,12 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 /// absent. This mirrors the standalone Dynamo preprocessor lift in
 /// `lib/llm/src/preprocessor.rs` so the GAIE/EPP path produces the same queue
 /// ordering as a non-EPP deployment.
+type PreprocessedRequest = (Vec<u32>, Option<String>, f64, u32, RoutingConstraints);
+
 unsafe fn preprocess_request(
     handles: &RouterHandles,
     request_json: *const c_char,
-) -> Result<(Vec<u32>, f64, u32, RoutingConstraints), QueryRouterResult> {
+) -> Result<PreprocessedRequest, QueryRouterResult> {
     let preprocessor = match &handles.preprocessor {
         Some(p) => p,
         None => {
@@ -1155,6 +1233,7 @@ unsafe fn preprocess_request(
         };
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
+        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let (token_ids, _) = match handles
             .runtime
@@ -1178,6 +1257,7 @@ unsafe fn preprocess_request(
 
         return Ok((
             token_ids,
+            cache_namespace,
             priority_jump,
             strict_priority,
             routing_constraints,
@@ -1194,6 +1274,7 @@ unsafe fn preprocess_request(
 
     let priority_jump = extract_priority_jump(request.nvext.as_ref());
     let strict_priority = extract_strict_priority(request.nvext.as_ref());
+    let cache_namespace = request_cache_salt(&request).map(str::to_owned);
     let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
 
     let formatted_prompt = match preprocessor.apply_template(&request) {
@@ -1224,6 +1305,7 @@ unsafe fn preprocess_request(
 
     Ok((
         token_ids,
+        cache_namespace,
         priority_jump,
         strict_priority,
         routing_constraints,
@@ -1284,6 +1366,17 @@ fn write_tokens_to_result(tokens: &[u32], out: &mut CRoutingResult) {
     std::mem::forget(tokens_boxed);
 }
 
+/// Write cache namespace bytes into a `CRoutingResult`, transferring ownership to the caller.
+fn write_cache_namespace_to_result(cache_namespace: Option<&str>, out: &mut CRoutingResult) {
+    let Some(cache_namespace) = cache_namespace.filter(|namespace| !namespace.is_empty()) else {
+        return;
+    };
+    let mut namespace_boxed = cache_namespace.as_bytes().to_vec().into_boxed_slice();
+    out.cache_namespace = namespace_boxed.as_mut_ptr();
+    out.cache_namespace_len = namespace_boxed.len();
+    std::mem::forget(namespace_boxed);
+}
+
 /// Route a request to select the best **prefill** worker only.
 ///
 /// This is used in disaggregated mode where the EPP runs separate prefill and decode
@@ -1313,7 +1406,7 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump, strict_priority, routing_constraints) =
+    let (tokens, cache_namespace, priority_jump, strict_priority, routing_constraints) =
         match unsafe { preprocess_request(handles, request_json) } {
             Ok(t) => t,
             Err(code) => return code,
@@ -1327,6 +1420,7 @@ pub unsafe extern "C" fn route_prefill_request(
                 &tokens,
                 None,
                 None,
+                cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
@@ -1356,6 +1450,7 @@ pub unsafe extern "C" fn route_prefill_request(
             out.prefill_worker_id = prefill_worker_id;
             out.prefill_dp_rank = prefill_dp_rank;
             write_tokens_to_result(&tokens, out);
+            write_cache_namespace_to_result(cache_namespace.as_deref(), out);
             QueryRouterResult::Ok
         }
         Err(code) => code,
@@ -1394,7 +1489,7 @@ pub unsafe extern "C" fn route_decode_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump, strict_priority, routing_constraints) =
+    let (tokens, cache_namespace, priority_jump, strict_priority, routing_constraints) =
         match unsafe { preprocess_request(handles, request_json) } {
             Ok(t) => t,
             Err(code) => return code,
@@ -1407,6 +1502,7 @@ pub unsafe extern "C" fn route_decode_request(
             .query_decode_worker(
                 &tokens,
                 is_disaggregated,
+                cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
@@ -1435,6 +1531,7 @@ pub unsafe extern "C" fn route_decode_request(
             out.decode_worker_id = decode_worker.worker_id;
             out.decode_dp_rank = decode_worker.dp_rank;
             write_tokens_to_result(&tokens, out);
+            write_cache_namespace_to_result(cache_namespace.as_deref(), out);
             QueryRouterResult::Ok
         }
         Err(code) => code,
@@ -1689,5 +1786,21 @@ mod tests {
             )
             .expect("test request must parse as completion");
         assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
+    }
+
+    #[test]
+    fn routing_result_round_trips_cache_namespace_bytes() {
+        let mut result = CRoutingResult::default();
+        write_cache_namespace_to_result(Some("tenant\0a"), &mut result);
+
+        assert_eq!(result.cache_namespace_len, 8);
+        let namespace = unsafe {
+            std::slice::from_raw_parts(result.cache_namespace, result.cache_namespace_len)
+        };
+        assert_eq!(namespace, b"tenant\0a");
+
+        unsafe { free_routing_result(&mut result) };
+        assert!(result.cache_namespace.is_null());
+        assert_eq!(result.cache_namespace_len, 0);
     }
 }

@@ -18,7 +18,9 @@ spec:
           ulimit -n 1048576
           ulimit -u 65536
 
-          apt update && apt install -y tmux curl jq
+          # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
+          # GB200 benchmark pods need build tools to compile it from source.
+          apt update && apt install -y tmux curl jq build-essential
           pip install aiperf==0.10.0
 
           echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."

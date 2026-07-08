@@ -3,11 +3,9 @@
 
 """Per-worker retention budget derived from worker model deployment cards.
 
-The device KV pool is always published as ``block_size * total_kv_blocks``.
-When SGLang HiCache is enabled, its exact host-pool capacity is published in
-runtime metadata and added to the program-retention budget. SGLang still owns
-device admission, eviction, and restore; this value only prevents the program
-scheduler from pausing before native GPU-to-host spill can happen.
+The device KV pool is always ``block_size * total_kv_blocks``. Backends may
+publish additional native offloading capacity through common runtime metadata.
+The backend remains responsible for admission, spill, restore, and eviction.
 """
 
 from __future__ import annotations
@@ -16,12 +14,11 @@ import json
 import logging
 from typing import Optional
 
+from dynamo.common.native_offloading import get_native_offloading_capacity_tokens
 from dynamo.llm import FpmEventSubscriber
 from dynamo.runtime import Endpoint
 
 logger = logging.getLogger(__name__)
-
-_SGLANG_HICACHE_CAPACITY_RUNTIME_KEY = "sglang_hicache_capacity"
 
 
 class WorkerCapacityProvider:
@@ -91,17 +88,8 @@ class WorkerCapacityProvider:
                 runtime_data = (card.get("runtime_config") or {}).get(
                     "runtime_data", {}
                 )
-                hicache = (
-                    runtime_data.get(_SGLANG_HICACHE_CAPACITY_RUNTIME_KEY, {})
-                    if isinstance(runtime_data, dict)
-                    else {}
-                )
-                host_tokens = (
-                    hicache.get("host_total_tokens")
-                    if isinstance(hicache, dict)
-                    else None
-                )
-                if isinstance(host_tokens, (int, float)) and host_tokens > 0:
-                    result += int(host_tokens)
+                offloaded_tokens = get_native_offloading_capacity_tokens(runtime_data)
+                if offloaded_tokens is not None:
+                    result += offloaded_tokens
         self._parsed[card_json] = result
         return result

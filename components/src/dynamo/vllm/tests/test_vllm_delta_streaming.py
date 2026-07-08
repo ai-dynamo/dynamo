@@ -245,6 +245,9 @@ async def test_generate_tokens_keeps_multichunk_delta_logprobs_aligned():
 async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
     pytest.importorskip("vllm.usage.usage_lib")
     from dynamo.vllm.llm_engine import VllmLLMEngine
+    from dynamo.vllm.multimodal_utils.request_processor import (
+        VllmMultimodalRequestProcessor,
+    )
 
     responses = [
         _request_output([_output([1])], prompt_token_ids=[10, 11]),
@@ -258,6 +261,10 @@ async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
     engine._model_max_len = None
     engine.disaggregation_mode = DisaggregationMode.AGGREGATED
     engine.enable_rl = False
+    engine._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model="test-model",
+        enable_multimodal=False,
+    )
     engine._dp_range = None
 
     chunks = [
@@ -282,3 +289,37 @@ async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
         "completion_tokens": 3,
         "total_tokens": 5,
     }
+
+
+@pytest.mark.asyncio
+async def test_unified_llm_engine_forwards_cache_salt_to_prompt():
+    pytest.importorskip("vllm.usage.usage_lib")
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+    from dynamo.vllm.multimodal_utils.request_processor import (
+        VllmMultimodalRequestProcessor,
+    )
+
+    engine = VllmLLMEngine.__new__(VllmLLMEngine)
+    engine.engine_client = _FakeEngineClient([])
+    engine._default_sampling_params = {}
+    engine._model_max_len = None
+    engine.disaggregation_mode = DisaggregationMode.AGGREGATED
+    engine.enable_rl = False
+    engine._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model="test-model",
+        enable_multimodal=False,
+    )
+    engine._dp_range = None
+
+    request = {
+        "token_ids": [10, 11],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+        "extra_args": {"nvext": {"cache_salt": "tenant-a"}},
+    }
+    async for _ in VllmLLMEngine.generate(engine, request, _FakeContext()):
+        pass
+
+    prompt = engine.engine_client.calls[0][0][0]
+    assert prompt["cache_salt"] == "dynamo-cache-salt:tenant-a"

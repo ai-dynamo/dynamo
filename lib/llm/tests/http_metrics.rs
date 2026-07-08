@@ -72,6 +72,78 @@ impl
                     tokenize_latency: None,
                     detokenize_total_latency: None,
                     detokenize_count: None,
+                    ..Default::default()
+                };
+                if let Ok(ann) = metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
+                    annotated.event = ann.event;
+                    annotated.comment = ann.comment;
+                }
+                yield annotated;
+            }
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// Counts the media parts in the incoming request (same enum the preprocessor
+/// uses) so the test's asserted counts flow from the actual request inputs.
+fn count_request_media(request: &NvCreateChatCompletionRequest) -> (usize, usize, usize) {
+    use dynamo_protocols::types::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent as Content,
+        ChatCompletionRequestUserMessageContentPart as Part,
+    };
+    let (mut images, mut videos, mut audio) = (0, 0, 0);
+    for message in &request.inner.messages {
+        if let ChatCompletionRequestMessage::User(user) = message
+            && let Content::Array(parts) = &user.content
+        {
+            for part in parts {
+                match part {
+                    Part::ImageUrl(_) => images += 1,
+                    Part::VideoUrl(_) => videos += 1,
+                    Part::AudioUrl(_) => audio += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    (images, videos, audio)
+}
+
+/// Emits chunks whose `LLMMetricAnnotation` carries the media counts derived from
+/// the request, verifying the annotation -> observe -> exposition path end to end.
+struct MockMultimodalEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for MockMultimodalEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let (image_count, video_count, audio_count) = count_request_media(&request);
+        let mut generator = request.response_generator(ctx.id().to_string());
+
+        let stream = stream! {
+            for i in 0..3 {
+                let output = generator.create_choice(i, Some(format!("chunk {i}")), None, None);
+                let mut annotated = Annotated::from_data(output);
+                let metrics = LLMMetricAnnotation {
+                    input_tokens: 5,
+                    output_tokens: (i + 1) as usize,
+                    chunk_tokens: 1,
+                    image_count,
+                    video_count,
+                    audio_count,
+                    ..Default::default()
                 };
                 if let Ok(ann) = metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
                     annotated.event = ann.event;
@@ -313,6 +385,100 @@ async fn test_metrics_with_mock_model() {
         assert!(metrics_body.contains("status=\"success\""));
 
         // Clean up
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_multimodal_count_metrics_exposed() {
+    // End-to-end: POST a request whose engine emits multimodal counts, consume
+    // the stream, then GET /metrics and assert the per-request histograms are
+    // registered and exposed with the right sums/count. Covers annotation
+    // parsing -> observe -> registration -> Prometheus exposition as one path.
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+
+        let card = ModelDeploymentCard::with_name_only("mmmodel");
+        let mock_engine = Arc::new(MockMultimodalEngine {});
+        manager
+            .add_chat_completions_model("mmmodel", card.mdcsum(), mock_engine)
+            .unwrap();
+
+        wait_for_metrics_ready(port).await;
+
+        let client = reqwest::Client::new();
+        // Real mixed-media request (2 images, 1 video); the mock derives the counts
+        // from these inputs, so the assertions below reflect the actual request.
+        let request = serde_json::json!({
+            "model": "mmmodel",
+            "stream": true,
+            "max_tokens": 50,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "compare"},
+                    {"type": "image_url", "image_url": {"url": "http://example.com/a.png"}},
+                    {"type": "image_url", "image_url": {"url": "http://example.com/b.png"}},
+                    {"type": "video_url", "video_url": {"url": "http://example.com/c.mp4"}}
+                ]
+            }]
+        });
+
+        let response = client
+            .post(format!("http://localhost:{}/v1/chat/completions", port))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let _ = response.bytes().await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let metrics_body = client
+            .get(format!("http://localhost:{}/metrics", port))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        // Observed once per request; sums == the request's media counts (2/1/0).
+        // Trailing newline so a value like `1` can't prefix-match `10`.
+        assert!(
+            metrics_body
+                .contains("dynamo_frontend_images_per_request_count{model=\"mmmodel\"} 1\n"),
+            "images_per_request_count should be 1; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body.contains("dynamo_frontend_images_per_request_sum{model=\"mmmodel\"} 2\n"),
+            "images_per_request_sum should be 2; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body.contains("dynamo_frontend_videos_per_request_sum{model=\"mmmodel\"} 1\n"),
+            "videos_per_request_sum should be 1; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body.contains("dynamo_frontend_audio_per_request_sum{model=\"mmmodel\"} 0\n"),
+            "audio_per_request_sum should be 0; got:\n{metrics_body}"
+        );
+
         cancel_token.cancel();
         task.await.unwrap().unwrap();
     })

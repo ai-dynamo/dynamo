@@ -1,7 +1,50 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Approved External Contributor
+# Intent
+# ------
+# Safely approve trusted CI for the exact head commit of a pull request from a fork. Fork PRs do
+# not receive this approval automatically because their code is external to the repository. This
+# workflow evaluates who is responsible for the PR update, verifies every PR commit, and posts the
+# `/ok to test <head-sha>` command that starts the trusted CI flow only when all checks pass.
+#
+# When this workflow runs
+# -----------------------
+# The workflow receives `pull_request_target` events when a fork PR is opened, synchronized by a
+# new push, or reopened. The job is skipped for branches in this repository because those branches
+# use the normal internal-contributor CI path.
+#
+# A fork PR can reach the signature check through either of these approval paths:
+#
+# 1. The PR author is listed in the `APPROVED_EXTERNAL_CONTRIBUTORS` environment secret. This path
+#    applies when the PR is opened, synchronized, or reopened.
+# 2. A user with write, maintain, or admin access to this repository synchronizes the PR branch.
+#    For example, a maintainer may merge `main` into a contributor's branch. This path approves
+#    only the head created by that synchronization; it does not make the PR or contributor trusted
+#    for later pushes.
+#
+# Both paths require every commit currently in the PR to have a signature that GitHub reports as
+# verified. If any commit is unsigned, the workflow explains which commits failed verification and
+# does not post `/ok to test`. Repository-permission lookup failures fail closed for the maintainer
+# path, and malformed contributor-list configuration fails closed for the approved-author path.
+#
+# Why a contributor's PR may not trigger trusted CI
+# -------------------------------------------------
+# - A new contributor who is not on the approved list needs a maintainer to approve the current
+#   head, either by synchronizing the branch or by posting the approval command manually.
+# - A contributor push after a maintainer synchronization creates a new head and removes the
+#   one-head approval. The new head must be approved again.
+# - Every PR commit must be signed and verified, including commits added before a maintainer update.
+# - Contributors must enable "Allow edits from maintainers" before a maintainer can update a branch
+#   in a user-owned fork.
+#
+# Desired state
+# -------------
+# The workflow posts an `/ok to test` command containing the current PR head SHA only after the
+# current head has a trusted approval path and all commits are verified. Every later push creates a
+# different head SHA and causes the complete approval process to run again.
+
+name: Trigger CI Approval Flow
 
 on:
   pull_request_target:
@@ -40,16 +83,59 @@ jobs:
             echo "Author $PR_AUTHOR is not in APPROVED_EXTERNAL_CONTRIBUTORS."
             echo "is_approved=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Validate triggering actor
+        id: actor_check
+        if: github.event.action == 'synchronize' && steps.author_check.outputs.is_approved != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          TRIGGERING_ACTOR: ${{ github.actor }}
+        run: |
+          # This checks effective repository permission, not organization membership. GitHub's
+          # collaborator-permission endpoint supports the repository-scoped GitHub App installation
+          # token provided by github.token and requires only repository Metadata read access.
+          if ! actor_permission=$(gh api \
+            "repos/$REPO_OWNER/$REPO_NAME/collaborators/$TRIGGERING_ACTOR/permission" \
+            --jq '.permission'); then
+            echo "Warning: Could not determine repository permission for $TRIGGERING_ACTOR." >&2
+            echo "is_approved=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "$actor_permission" in
+            admin|maintain|write)
+              echo "Actor $TRIGGERING_ACTOR has $actor_permission repository permission."
+              echo "is_approved=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Actor $TRIGGERING_ACTOR does not have write repository permission."
+              echo "is_approved=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+      - name: Determine CI approval
+        id: approval_check
+        env:
+          AUTHOR_APPROVED: ${{ steps.author_check.outputs.is_approved }}
+          ACTOR_APPROVED: ${{ steps.actor_check.outputs.is_approved }}
+        run: |
+          if [[ "$AUTHOR_APPROVED" == "true" || "$ACTOR_APPROVED" == "true" ]]; then
+            echo "is_approved=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_approved=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Verify commit signatures
         id: signature_check
-        if: steps.author_check.outputs.is_approved == 'true'
+        if: steps.approval_check.outputs.is_approved == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          commit_shas=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER/commits" --jq '.[].sha')
+          commit_shas=$(gh api --paginate \
+            "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER/commits?per_page=100" \
+            --jq '.[].sha')
 
           if [[ -z "$commit_shas" ]]; then
             echo "Warning: No commits found in PR." >&2
@@ -88,7 +174,7 @@ jobs:
             echo "unsigned_commits=$unsigned_commits" >> "$GITHUB_OUTPUT"
           fi
       - name: Clean up previous unsigned-commits comments
-        if: steps.author_check.outputs.is_approved == 'true'
+        if: steps.approval_check.outputs.is_approved == 'true'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
@@ -104,7 +190,7 @@ jobs:
               gh api --method DELETE "repos/$REPO_OWNER/$REPO_NAME/issues/comments/$comment_id"
             done
       - name: Comment unsigned commits
-        if: steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'false'
+        if: steps.approval_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'false'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
@@ -128,7 +214,7 @@ jobs:
             --repo "$REPO_OWNER/$REPO_NAME" \
             --body "$body"
       - name: Comment /ok to test
-        if: steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
+        if: steps.approval_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}

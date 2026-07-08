@@ -390,10 +390,6 @@ kubectl logs -f <profiling-pod-name> -n $NAMESPACE
 # View generated DGD spec (when autoApply: false)
 kubectl get dgdr my-model -n $NAMESPACE \
   -o jsonpath='{.status.profilingResults.selectedConfig}' | python3 -m json.tool
-
-# View Pareto-optimal configs from profiling
-kubectl get dgdr my-model -n $NAMESPACE \
-  -o jsonpath='{.status.profilingResults.pareto}'
 ```
 
 ### Resource Ownership

@@ -412,6 +412,10 @@ func TestCreateProfilingJobPersistsDiscoveredHardware(t *testing.T) {
 
 	requeue, err = r.createProfilingJob(ctx, &stored)
 	require.NoError(t, err)
+	require.True(t, requeue)
+
+	requeue, err = r.createProfilingJob(ctx, &stored)
+	require.NoError(t, err)
 	require.False(t, requeue)
 
 	job := &batchv1.Job{}
@@ -457,6 +461,10 @@ func TestCreateProfilingJobWithManualHardwareDoesNotRequireAPIReader(t *testing.
 	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: dgdr.Name, Namespace: dgdr.Namespace}, &fetched))
 
 	requeue, err := r.createProfilingJob(ctx, &fetched)
+	require.NoError(t, err)
+	require.True(t, requeue)
+
+	requeue, err = r.createProfilingJob(ctx, &fetched)
 	require.NoError(t, err)
 	require.False(t, requeue)
 

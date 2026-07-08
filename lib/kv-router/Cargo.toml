@@ -26,6 +26,7 @@ standalone-selection = ["standalone-indexer"]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true, optional = true }
+dynamo-kv-hashing = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace

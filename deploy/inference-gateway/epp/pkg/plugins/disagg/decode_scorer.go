@@ -58,6 +58,7 @@ type DecodeRoutingState struct {
 	DpRank          uint32
 	PrefillWorkerID string
 	TokenData       []int64
+	CacheNamespace  string
 }
 
 // Clone implements plugins.StateData.
@@ -69,6 +70,7 @@ func (s *DecodeRoutingState) Clone() plugins.StateData {
 		WorkerID:        s.WorkerID,
 		DpRank:          s.DpRank,
 		PrefillWorkerID: s.PrefillWorkerID,
+		CacheNamespace:  s.CacheNamespace,
 	}
 	if s.TokenData != nil {
 		clone.TokenData = make([]int64, len(s.TokenData))
@@ -181,9 +183,10 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	// Store routing state for PreRequest bookkeeping
 	if req.RequestId != "" {
 		routingState := &DecodeRoutingState{
-			WorkerID:  workerIDStr,
-			DpRank:    result.DpRank,
-			TokenData: result.TokenData,
+			WorkerID:       workerIDStr,
+			DpRank:         result.DpRank,
+			TokenData:      result.TokenData,
+			CacheNamespace: result.CacheNamespace,
 		}
 		s.pluginState.Write(req.RequestId, plugins.StateKey(decodeStateKey), routingState)
 	}
@@ -222,7 +225,13 @@ func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.In
 		return
 	}
 
-	if addErr := dynscorer.CallAddRequest(request.RequestId, state.TokenData, workerIDUint, state.DpRank); addErr != nil {
+	if addErr := dynscorer.CallAddRequest(
+		request.RequestId,
+		state.TokenData,
+		workerIDUint,
+		state.DpRank,
+		state.CacheNamespace,
+	); addErr != nil {
 		logger.V(logutil.DEFAULT).Error(addErr, "DynDecodeScorer PreRequest: failed to add request",
 			"requestID", request.RequestId)
 		return
@@ -232,6 +241,7 @@ func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.In
 		"requestID", request.RequestId,
 		"workerID", state.WorkerID,
 		"dpRank", state.DpRank,
+		"hasCacheNamespace", state.CacheNamespace != "",
 		"tokenCount", len(state.TokenData))
 }
 

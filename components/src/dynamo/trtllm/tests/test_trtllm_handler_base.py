@@ -731,3 +731,25 @@ class TestHealthCheckPriority:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
+
+    @pytest.mark.asyncio
+    async def test_routing_cache_salt_forwarded_to_generate_async(self):
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {"temperature": 0.7},
+            "routing": {"cache_salt": "tenant-a"},
+        }
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert len(chunks) > 0
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["cache_salt"] == "tenant-a"

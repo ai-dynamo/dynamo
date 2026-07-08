@@ -493,8 +493,9 @@ type DynamoGraphDeploymentRequestSpec struct {
 	AutoApply *bool `json:"autoApply,omitempty"`
 }
 
-// ParetoConfig represents a single Pareto-optimal deployment configuration
-// discovered during profiling.
+// ParetoConfig is retained for compatibility with status objects produced by
+// older profiler releases.
+// Deprecated: The profiler no longer generates Pareto configurations.
 type ParetoConfig struct {
 	// Config is the full deployment configuration for this Pareto point.
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -504,8 +505,8 @@ type ParetoConfig struct {
 
 // ProfilingResultsStatus contains the output of the profiling process.
 type ProfilingResultsStatus struct {
-	// Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.
-	// Each entry represents a different cost/performance trade-off.
+	// Pareto is retained for compatibility with existing status objects.
+	// Deprecated: The controller no longer populates this field.
 	// +optional
 	Pareto []ParetoConfig `json:"pareto,omitempty"`
 
@@ -555,8 +556,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
-	// ProfilingResults contains the output of the profiling process including
-	// Pareto-optimal configurations and the selected deployment configuration.
+	// ProfilingResults contains the selected deployment configuration produced by profiling.
+	// Deprecated compatibility fields may remain on objects created by older releases.
 	// +optional
 	ProfilingResults *ProfilingResultsStatus `json:"profilingResults,omitempty"`
 

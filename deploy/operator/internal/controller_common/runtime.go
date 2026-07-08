@@ -26,6 +26,8 @@ type RuntimeConfig struct {
 	LWSEnabled bool
 	// KaiSchedulerEnabled is the resolved Kai-scheduler availability (config override merged with auto-detection)
 	KaiSchedulerEnabled bool
+	// VolcanoSchedulerEnabled indicates whether Dynamo should inject Volcano scheduler settings into Grove PodCliqueSets
+	VolcanoSchedulerEnabled bool
 	// DRAEnabled indicates whether Dynamic Resource Allocation (resource.k8s.io/v1) is available
 	DRAEnabled bool
 	// IstioEnabled is the resolved Istio DestinationRule reconciliation state

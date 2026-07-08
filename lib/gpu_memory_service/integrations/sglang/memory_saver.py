@@ -27,8 +27,8 @@ from gpu_memory_service.client.torch.allocator import (
     gms_use_mem_pool,
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path
-from gpu_memory_service.integrations.common.utils import GMS_TAGS, finalize_gms_write
+from gpu_memory_service.common.utils import GMS_TAGS, get_socket_path
+from gpu_memory_service.integrations.common.utils import finalize_gms_write
 
 logger = logging.getLogger(__name__)
 

@@ -4,6 +4,9 @@
 mod agent_context;
 pub mod config;
 mod integration;
+mod otel_sink;
+pub mod payload;
+pub(crate) mod payload_stream;
 mod record;
 mod replay;
 pub mod sink;
@@ -24,7 +27,10 @@ pub(crate) use agent_context::{
     record_completion_finish_reason_metadata, record_llm_metric_tokens, request_metrics,
     request_metrics_from_agent_state, start_request_trace_tool_event_ingest,
 };
-pub use config::{RequestTracePolicy, is_enabled, policy};
+pub use config::{
+    RequestTraceFileFormat, RequestTracePolicy, RequestTraceRecordKind, RequestTraceSinkKind,
+    is_enabled, policy,
+};
 pub(crate) use integration::{
     build_request_end_trace_state, finish_reason_metadata_handle, wrap_chat_request_end_stream,
     wrap_completion_request_end_stream,
@@ -33,8 +39,8 @@ pub(crate) use record::{publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
 pub use types::{
     ChoiceFinishReasonMetadata, FinishReasonMetadata, RequestReplayMetrics,
-    RequestTraceEventSource, RequestTraceEventType, RequestTraceMetrics, RequestTraceRecord,
-    RequestTraceSchema, RequestTraceToolEvent, RequestTraceToolEventIngress,
+    RequestTraceEventSource, RequestTraceEventType, RequestTraceMetrics, RequestTracePayload,
+    RequestTraceRecord, RequestTraceSchema, RequestTraceToolEvent, RequestTraceToolEventIngress,
     RequestTraceToolStatus, RequestTraceWorkerInfo, ToolCallMetadata,
 };
 
@@ -46,10 +52,16 @@ pub(crate) const X_REQUEST_ID_CONTEXT_KEY: &str = "request_trace.x_request_id";
 pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow::Result<()> {
     let policy = policy();
     if !policy.enabled {
+        config::mark_capture_inactive();
         return Ok(());
     }
 
-    if policy.tool_events_zmq_endpoint.is_some() && policy.sinks.is_empty() {
+    config::mark_capture_inactive();
+
+    if policy.tool_events_zmq_endpoint.is_some()
+        && policy.emit_tool_records()
+        && policy.sinks.is_empty()
+    {
         tracing::warn!(
             tool_events_zmq_endpoint = ?policy.tool_events_zmq_endpoint,
             "request trace tool events are enabled but no local trace sinks are configured; set DYN_REQUEST_TRACE_SINKS to write local trace records"
@@ -58,9 +70,12 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
 
     BUS.init(policy.capacity);
     sink::spawn_workers_from_env(shutdown).await?;
+    config::mark_capture_active();
     tracing::info!(
         capacity = policy.capacity,
-        sinks = ?policy.sinks,
+        sinks = ?policy.sink_names(),
+        file_format = policy.file_format.as_str(),
+        records = ?policy.record_names(),
         "Request trace initialized"
     );
     Ok(())
@@ -71,7 +86,7 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
     local_model: &LocalModel,
 ) -> anyhow::Result<()> {
     let policy = policy();
-    if !policy.enabled {
+    if !policy.enabled || !policy.emit_tool_records() {
         return Ok(());
     }
 
@@ -90,4 +105,9 @@ pub fn publish(record: RequestTraceRecord) {
 
 pub fn subscribe() -> tokio::sync::broadcast::Receiver<RequestTraceRecord> {
     BUS.subscribe()
+}
+
+#[cfg(test)]
+pub(crate) fn init_bus_for_test(capacity: usize) {
+    BUS.init(capacity);
 }

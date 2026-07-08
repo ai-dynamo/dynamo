@@ -18,10 +18,14 @@ use crate::protocols::*;
 #[async_trait]
 pub trait SharedKvCache: Send + Sync {
     /// Query which blocks exist in the shared cache for the given token sequence.
+    ///
+    /// `cache_namespace` must be honored by implementations to avoid scoring
+    /// shared-cache hits across isolated cache namespaces.
     async fn check_blocks(
         &self,
         tokens: &[u32],
         block_size: u32,
+        cache_namespace: Option<&str>,
     ) -> Result<SharedCacheHits, KvRouterError>;
 }
 
@@ -72,6 +76,7 @@ pub trait KvIndexerInterface {
     ///
     /// * `tokens` - A vector of `u32` tokens.
     /// * `lora_name` - Optional LoRA adapter name to include in block hash computation.
+    /// * `cache_namespace` - Optional cache namespace to include in block hash computation.
     ///
     /// ### Returns
     ///
@@ -80,6 +85,7 @@ pub trait KvIndexerInterface {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
         is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError>;
 

@@ -110,12 +110,6 @@ pub async fn run_input(
         tracing::warn!(error = %e, "Request trace tool event ingest initialization failed; continuing without request trace tool events");
     }
 
-    // Initialize audit bus + sink workers (off hot path; fan-out supported).
-    // Soft-fail like trace: a failed audit sink should not bring the server down.
-    if let Err(e) = crate::audit::init_from_env_with_shutdown(drt.child_token()).await {
-        tracing::warn!(error = %e, "Audit initialization failed; continuing without audit sink");
-    }
-
     match in_opt {
         Input::Http => {
             http::run(drt, engine_config).await?;

@@ -95,7 +95,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
 
         # Load tokenizer to convert image token string to integer ID
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model, trust_remote_code=True
+            self.model, trust_remote_code=config.server_args.trust_remote_code
         )
 
         # Get image/video token strings and resolve them to integer IDs
