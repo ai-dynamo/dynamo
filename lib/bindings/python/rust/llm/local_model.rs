@@ -179,9 +179,19 @@ impl ModelRuntimeConfig {
         self.inner.stable_routing_id = stable_routing_id;
     }
 
+    #[setter]
+    fn set_max_gpu_lora_count(&mut self, max_gpu_lora_count: Option<u32>) {
+        self.inner.max_gpu_lora_count = max_gpu_lora_count;
+    }
+
     #[getter]
     fn get_stable_routing_id(&self) -> Option<String> {
         self.inner.stable_routing_id.clone()
+    }
+
+    #[getter]
+    fn get_max_gpu_lora_count(&self) -> Option<u32> {
+        self.inner.max_gpu_lora_count
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {

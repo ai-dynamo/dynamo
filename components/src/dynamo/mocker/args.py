@@ -418,6 +418,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Number of mocker workers to launch in the same process (default: 1). "
         "All workers share the same tokio runtime and thread pool.",
     )
+    parser.add_argument(
+        "--max-gpu-lora-count",
+        type=positive_int,
+        default=None,
+        help="Advertised resident LoRA slot capacity per mocker worker.",
+    )
+    parser.add_argument(
+        "--initial-lora-placement",
+        type=Path,
+        default=None,
+        help="JSON file with one initial loaded-adapter list per in-process worker. "
+        "Requires --max-gpu-lora-count and aggregated mode.",
+    )
 
     # Reasoning token output
     parser.add_argument(
@@ -699,6 +712,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
     validate_worker_type_args(args)
+
+    if args.initial_lora_placement is not None and args.disaggregation_mode != "agg":
+        raise ValueError(
+            "--initial-lora-placement currently supports aggregated mode only"
+        )
 
     # Validate num_workers
     if args.num_workers < 1:

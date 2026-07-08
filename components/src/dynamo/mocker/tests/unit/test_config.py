@@ -74,6 +74,7 @@ def make_args(**overrides):
         "model_path": None,
         "is_prefill_worker": False,
         "is_decode_worker": False,
+        "max_gpu_lora_count": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -233,6 +234,78 @@ def test_runtime_config_disables_local_indexer_for_decode_worker():
 
     assert engine_args.enable_local_indexer is True
     assert runtime_config.enable_local_indexer is False
+
+
+def test_build_runtime_config_advertises_lora_capacity():
+    engine_args = CONFIG.build_mocker_engine_args(make_args())
+
+    _, runtime_config = CONFIG.build_runtime_config(engine_args, max_gpu_lora_count=4)
+
+    assert runtime_config.max_gpu_lora_count == 4
+
+
+def test_mocker_cli_accepts_positive_lora_capacity():
+    args = parse_args(["--max-gpu-lora-count", "4"])
+
+    assert args.max_gpu_lora_count == 4
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_mocker_cli_rejects_non_positive_lora_capacity(value):
+    with pytest.raises(SystemExit):
+        parse_args(["--max-gpu-lora-count", value])
+
+
+def test_load_initial_lora_placement_accepts_bounded_replicas(tmp_path):
+    placement_path = tmp_path / "placement.json"
+    placement_path.write_text(
+        json.dumps(
+            {
+                "workers": [
+                    ["adapter-a", "adapter-shared"],
+                    ["adapter-b", "adapter-shared"],
+                ]
+            }
+        )
+    )
+
+    placement = CONFIG.load_initial_lora_placement(
+        placement_path, num_workers=2, max_gpu_lora_count=2
+    )
+
+    assert placement == [
+        ["adapter-a", "adapter-shared"],
+        ["adapter-b", "adapter-shared"],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"workers": [[]]}, "exactly 2 worker"),
+        ({"workers": [["adapter-a", "adapter-b", "adapter-c"], []]}, "capacity"),
+        ({"workers": [["adapter-a", "adapter-a"], []]}, "duplicate"),
+        ({"workers": [[""], []]}, "non-empty"),
+    ],
+)
+def test_load_initial_lora_placement_rejects_invalid_input(tmp_path, payload, message):
+    placement_path = tmp_path / "placement.json"
+    placement_path.write_text(json.dumps(payload))
+
+    with pytest.raises(ValueError, match=message):
+        CONFIG.load_initial_lora_placement(
+            placement_path, num_workers=2, max_gpu_lora_count=2
+        )
+
+
+def test_load_initial_lora_placement_requires_capacity(tmp_path):
+    placement_path = tmp_path / "placement.json"
+    placement_path.write_text(json.dumps({"workers": [[], []]}))
+
+    with pytest.raises(ValueError, match="max-gpu-lora-count"):
+        CONFIG.load_initial_lora_placement(
+            placement_path, num_workers=2, max_gpu_lora_count=None
+        )
 
 
 def test_entrypoint_args_accept_typed_mocker_engine_args():

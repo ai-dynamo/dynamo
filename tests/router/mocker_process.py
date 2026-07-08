@@ -121,6 +121,12 @@ def _build_mocker_command(
                 str(mocker_args["response_replay_trace_path"]),
             ]
         )
+    if "max_gpu_lora_count" in mocker_args:
+        command.extend(["--max-gpu-lora-count", str(mocker_args["max_gpu_lora_count"])])
+    if "initial_lora_placement" in mocker_args:
+        command.extend(
+            ["--initial-lora-placement", str(mocker_args["initial_lora_placement"])]
+        )
 
     return command
 

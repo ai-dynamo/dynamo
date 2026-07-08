@@ -16,13 +16,24 @@ import uvloop
 os.environ.setdefault("DYN_COMPUTE_THREADS", "0")
 
 from dynamo.common.utils.runtime import create_runtime
-from dynamo.llm import EngineType, EntrypointArgs, fetch_model, make_engine, run_input
+from dynamo.llm import (
+    EngineType,
+    EntrypointArgs,
+    ModelInput,
+    ModelType,
+    WorkerType,
+    fetch_model,
+    make_engine,
+    register_model,
+    run_input,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import parse_args, resolve_planner_profile_data
 from .config import (
     apply_worker_engine_args_overrides,
     build_runtime_config,
+    load_initial_lora_placement,
     load_mocker_engine_args,
 )
 from .utils.kv_cache import compute_kv_bytes_per_token
@@ -95,7 +106,14 @@ async def worker():
         logger.info(
             f"Launching {args.num_workers} mocker worker(s) with isolated DistributedRuntime instances"
         )
-        await launch_workers(args, engine_args)
+        initial_lora_placement = load_initial_lora_placement(
+            args.initial_lora_placement,
+            num_workers=args.num_workers,
+            max_gpu_lora_count=args.max_gpu_lora_count,
+        )
+        if any(initial_lora_placement) and not args.model_path:
+            raise ValueError("initial LoRA placement requires --model-path")
+        await launch_workers(args, engine_args, initial_lora_placement)
     finally:
         if profile_data_result is not None:
             del profile_data_result  # Triggers tmpdir cleanup via __del__
@@ -123,7 +141,36 @@ def compute_stagger_delay(num_workers: int, stagger_delay: float) -> float:
         return 0.2
 
 
-async def launch_workers(args: argparse.Namespace, base_engine_args):
+async def register_initial_loras(
+    runtime,
+    *,
+    endpoint_path: str,
+    base_model_path: str,
+    lora_names: list[str],
+    max_gpu_lora_count: int,
+) -> None:
+    """Publish synthetic loaded-adapter cards for one mocker worker."""
+    endpoint = runtime.endpoint(endpoint_path)
+    for lora_name in lora_names:
+        await register_model(
+            model_input=ModelInput.Tokens,
+            model_type=ModelType.Chat,
+            endpoint=endpoint,
+            model_path=base_model_path,
+            lora_name=lora_name,
+            base_model_path=base_model_path,
+            worker_type=WorkerType.Aggregated,
+            ignore_weights=True,
+            max_gpu_lora_count=max_gpu_lora_count,
+        )
+        logger.info("Registered initial mocker LoRA %s", lora_name)
+
+
+async def launch_workers(
+    args: argparse.Namespace,
+    base_engine_args,
+    initial_lora_placement: list[list[str]],
+):
     """Launch mocker worker(s) with isolated DistributedRuntime instances.
 
     Each worker gets its own DistributedRuntime, which means:
@@ -196,7 +243,10 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         else:
             worker_engine_args = base_engine_args
 
-        kv_cache_block_size, runtime_config = build_runtime_config(worker_engine_args)
+        kv_cache_block_size, runtime_config = build_runtime_config(
+            worker_engine_args,
+            max_gpu_lora_count=args.max_gpu_lora_count,
+        )
 
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(
@@ -214,6 +264,16 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
 
         # Create the engine with this worker's isolated runtime
         engine_config = await make_engine(runtime, entrypoint_args)
+
+        worker_loras = initial_lora_placement[worker_id]
+        if worker_loras:
+            await register_initial_loras(
+                runtime,
+                endpoint_path=args.endpoint,
+                base_model_path=args.model_path,
+                lora_names=worker_loras,
+                max_gpu_lora_count=args.max_gpu_lora_count,
+            )
 
         # run_input returns a Rust Future (not a Python coroutine)
         future = run_input(runtime, args.endpoint, engine_config)

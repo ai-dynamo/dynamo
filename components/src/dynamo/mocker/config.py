@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import socket
+from pathlib import Path
 
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
@@ -347,8 +348,69 @@ def apply_worker_engine_args_overrides(
     )
 
 
+def load_initial_lora_placement(
+    path: Path | None,
+    *,
+    num_workers: int,
+    max_gpu_lora_count: int | None,
+) -> list[list[str]]:
+    """Load and validate deterministic initial mocker LoRA residency."""
+    if path is None:
+        return [[] for _ in range(num_workers)]
+    if max_gpu_lora_count is None:
+        raise ValueError("--initial-lora-placement requires --max-gpu-lora-count")
+
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"failed to read initial LoRA placement {path}: {error}"
+        ) from error
+
+    workers = raw.get("workers") if isinstance(raw, dict) else None
+    if not isinstance(workers, list):
+        raise ValueError(
+            "initial LoRA placement must be an object with a 'workers' list"
+        )
+    if len(workers) != num_workers:
+        raise ValueError(
+            f"initial LoRA placement must contain exactly {num_workers} worker entries, "
+            f"got {len(workers)}"
+        )
+
+    placement: list[list[str]] = []
+    for worker_index, loras in enumerate(workers):
+        if not isinstance(loras, list):
+            raise ValueError(f"worker {worker_index} placement must be a list")
+        if len(loras) > max_gpu_lora_count:
+            raise ValueError(
+                f"worker {worker_index} placement has {len(loras)} adapters, exceeding "
+                f"capacity {max_gpu_lora_count}"
+            )
+        if any(not isinstance(name, str) or not name.strip() for name in loras):
+            raise ValueError(
+                f"worker {worker_index} adapter names must be non-empty strings"
+            )
+        if len(set(loras)) != len(loras):
+            raise ValueError(
+                f"worker {worker_index} placement contains a duplicate adapter"
+            )
+        placement.append(list(loras))
+
+    distinct_loras = {name for worker_loras in placement for name in worker_loras}
+    total_capacity = num_workers * max_gpu_lora_count
+    if len(distinct_loras) > total_capacity:
+        raise ValueError(
+            f"initial placement has {len(distinct_loras)} distinct adapters, exceeding "
+            f"total capacity {total_capacity}"
+        )
+    return placement
+
+
 def build_runtime_config(
     engine_args: MockEngineArgs,
+    *,
+    max_gpu_lora_count: int | None = None,
 ) -> tuple[int, ModelRuntimeConfig]:
     rc = ModelRuntimeConfig()
     rc.context_length = engine_args.max_model_len or 0
@@ -363,6 +425,7 @@ def build_runtime_config(
         engine_args.enable_local_indexer and not engine_args.is_decode()
     )
     rc.data_parallel_size = engine_args.dp_size
+    rc.max_gpu_lora_count = max_gpu_lora_count
     rc.set_engine_specific("output_replay_consumer", "true")
 
     bootstrap_port = engine_args.bootstrap_port

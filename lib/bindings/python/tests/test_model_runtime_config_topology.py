@@ -55,3 +55,17 @@ def test_model_runtime_config_topology_domains_setter_is_atomic():
         runtime_config.topology_domains = {"rack": "rack-22", 1: "us-west-2a"}
 
     assert runtime_config.topology_domains == {"zone": "us-east-1a"}
+
+
+@pytest.mark.unit
+@pytest.mark.none
+@pytest.mark.gpu_0
+@pytest.mark.pre_merge
+def test_model_runtime_config_lora_capacity_round_trip():
+    runtime_config = ModelRuntimeConfig()
+
+    assert runtime_config.max_gpu_lora_count is None
+    runtime_config.max_gpu_lora_count = 4
+    assert runtime_config.max_gpu_lora_count == 4
+    runtime_config.max_gpu_lora_count = None
+    assert runtime_config.max_gpu_lora_count is None

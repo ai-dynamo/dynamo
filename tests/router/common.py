@@ -143,6 +143,136 @@ async def _assert_overlap_scores(
 ########################################################
 
 
+def _lora_worker_id(frontend_port: int, lora_name: str) -> int:
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/chat/completions",
+        json={
+            "model": lora_name,
+            "messages": [{"role": "user", "content": "test"}],
+            "stream": False,
+            "max_tokens": 1,
+            "nvext": {"extra_fields": ["worker_id"]},
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()["nvext"]["worker_id"]["decode_worker_id"]
+
+
+def _test_lora_loaded_worker_fallback(
+    *,
+    engine_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    lora_names: tuple[str, str],
+    request_plane: str,
+) -> None:
+    """Synthetic adapter cards route each LoRA to its known-loaded worker."""
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        request_plane=request_plane,
+        router_mode="random",
+        min_initial_workers=engine_workers.num_workers,
+    ):
+        deadline = time.monotonic() + 60
+        expected_models = set(lora_names)
+        while True:
+            models_response = requests.get(
+                f"http://localhost:{frontend_port}/v1/models", timeout=10
+            )
+            models_response.raise_for_status()
+            models = {item["id"] for item in models_response.json()["data"]}
+            if expected_models <= models:
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"LoRA models did not appear; observed {sorted(models)}"
+                )
+            time.sleep(0.25)
+
+        worker_ids = {
+            lora_name: {_lora_worker_id(frontend_port, lora_name) for _ in range(3)}
+            for lora_name in lora_names
+        }
+        assert all(len(ids) == 1 for ids in worker_ids.values())
+        assert worker_ids[lora_names[0]].isdisjoint(worker_ids[lora_names[1]])
+
+
+def _test_lora_equal_demand_allocation(
+    *,
+    engine_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    lora_names: tuple[str, str],
+    request_plane: str,
+) -> None:
+    """Two equal-demand LoRAs consume two distinct capacity-one worker slots."""
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        request_plane=request_plane,
+        router_mode="random",
+        min_initial_workers=engine_workers.num_workers,
+    ):
+        deadline = time.monotonic() + 60
+        while True:
+            models_response = requests.get(
+                f"http://localhost:{frontend_port}/v1/models", timeout=10
+            )
+            models_response.raise_for_status()
+            models = {item["id"] for item in models_response.json()["data"]}
+            if set(lora_names) <= models:
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"LoRA models did not appear; observed {sorted(models)}"
+                )
+            time.sleep(0.25)
+
+        # Equal warm-up demand makes both adapters active with one replica each when L=N*K=2.
+        for _ in range(3):
+            for lora_name in lora_names:
+                _lora_worker_id(frontend_port, lora_name)
+
+        deadline = time.monotonic() + 15
+        while True:
+            metrics_response = requests.get(
+                f"http://localhost:{frontend_port}/metrics", timeout=10
+            )
+            metrics_response.raise_for_status()
+            metrics = metrics_response.text
+            active = all(
+                f'dynamo_frontend_lora_is_active{{lora="{name}"}} 1' in metrics
+                for name in lora_names
+            )
+            one_replica = all(
+                f'dynamo_frontend_lora_replica_factor{{lora="{name}"}} 1' in metrics
+                for name in lora_names
+            )
+            if active and one_replica:
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "LoRA controller did not converge to two active one-replica adapters"
+                )
+            time.sleep(0.25)
+
+        worker_ids = {
+            name: {_lora_worker_id(frontend_port, name) for _ in range(3)}
+            for name in lora_names
+        }
+        assert all(len(ids) == 1 for ids in worker_ids.values())
+        assert worker_ids[lora_names[0]].isdisjoint(worker_ids[lora_names[1]])
+        assert "dynamo_frontend_lora_overflow_count 0" in metrics
+
+
 def _test_router_basic(
     engine_workers,
     block_size: int,

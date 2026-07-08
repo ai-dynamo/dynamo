@@ -9,6 +9,7 @@
 # @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
 #
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -23,6 +24,8 @@ from tests.router.common import (
     _test_disagg_direct_mode,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
+    _test_lora_equal_demand_allocation,
+    _test_lora_loaded_worker_fallback,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
@@ -165,6 +168,92 @@ COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
     "stream": True,
     "max_tokens": 1,
 }
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_mocker_lora_loaded_worker_fallback(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    tmp_path,
+    monkeypatch,
+):
+    """Synthetic adapter cards route to their known-loaded mocker worker."""
+    placement_path = tmp_path / "lora-placement.json"
+    placement_path.write_text(
+        json.dumps({"workers": [["mock-lora-a"], ["mock-lora-b"]]})
+    )
+    monkeypatch.setenv("DYN_LORA_ENABLED", "true")
+    monkeypatch.setenv("DYN_LORA_ALLOCATION_ENABLED", "false")
+
+    with MockerProcess(
+        request,
+        mocker_args={
+            "speedup_ratio": 1000.0,
+            "block_size": BLOCK_SIZE,
+            "max_gpu_lora_count": 1,
+            "initial_lora_placement": placement_path,
+        },
+        num_mockers=2,
+        request_plane=request_plane,
+    ) as mockers:
+        frontend_port = allocate_frontend_ports(request, 1)[0]
+        _test_lora_loaded_worker_fallback(
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=frontend_port,
+            lora_names=("mock-lora-a", "mock-lora-b"),
+            request_plane=request_plane,
+        )
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("algorithm", ["hrw", "min_cost_flow"])
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_mocker_lora_equal_demand_allocation(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    algorithm,
+    tmp_path,
+    monkeypatch,
+):
+    """Bounded L=N*K placement converges for both production allocators."""
+    placement_path = tmp_path / "lora-placement.json"
+    placement_path.write_text(
+        json.dumps({"workers": [["mock-lora-a"], ["mock-lora-b"]]})
+    )
+    monkeypatch.setenv("DYN_LORA_ENABLED", "true")
+    monkeypatch.setenv("DYN_LORA_ALLOCATION_ENABLED", "true")
+    monkeypatch.setenv("DYN_LORA_ALLOCATION_ALGORITHM", algorithm)
+    monkeypatch.setenv("DYN_LORA_ALLOCATION_TIMESTEP_SECS", "1")
+    monkeypatch.setenv("DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS", "0")
+    monkeypatch.setenv("DYN_LORA_ALLOCATION_PREDICTOR_TYPE", "none")
+
+    with MockerProcess(
+        request,
+        mocker_args={
+            "speedup_ratio": 1000.0,
+            "block_size": BLOCK_SIZE,
+            "max_gpu_lora_count": 1,
+            "initial_lora_placement": placement_path,
+        },
+        num_mockers=2,
+        request_plane=request_plane,
+    ) as mockers:
+        frontend_port = allocate_frontend_ports(request, 1)[0]
+        _test_lora_equal_demand_allocation(
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=frontend_port,
+            lora_names=("mock-lora-a", "mock-lora-b"),
+            request_plane=request_plane,
+        )
 
 
 def _require_router_aic() -> dict[str, Any]:
