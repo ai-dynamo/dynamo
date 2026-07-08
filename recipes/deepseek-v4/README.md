@@ -135,6 +135,11 @@ host-staging (~20× slower, but still functional)**, while *unsetting* `UCX_NET_
 constructs. With no RDMA fabric at all, fall back to TCP: `NCCL_IB_DISABLE=1`, `NCCL_NET=Socket`, and drop the
 `rdma/ib` resource requests.
 
+The B200 disaggregated recipes request **`rdma/shared_ib: "1"`** (a shared-IB resource that exposes **all** of
+the node's RDMA NICs to the pod) so the map can reliably pick each rank's affine NIC even when the cluster's
+device plugin would otherwise inject a non-affine set. On a cluster without a shared-IB resource, request the
+affine NICs directly instead (e.g. `rdma/ib: "N"`).
+
 Regenerate the map on a target node:
 
 ```bash

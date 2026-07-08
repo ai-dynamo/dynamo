@@ -149,10 +149,10 @@ spec:
           resources:
             requests:
               nvidia.com/gpu: "8"
-              rdma/ib: "8"
+              rdma/shared_ib: "1"
             limits:
               nvidia.com/gpu: "8"
-              rdma/ib: "8"
+              rdma/shared_ib: "1"
         imagePullSecrets:
         - name: nvcr-pull
         schedulerName: default-scheduler
@@ -277,10 +277,10 @@ spec:
           resources:
             requests:
               nvidia.com/gpu: "8"
-              rdma/ib: "8"
+              rdma/shared_ib: "1"
             limits:
               nvidia.com/gpu: "8"
-              rdma/ib: "8"
+              rdma/shared_ib: "1"
         imagePullSecrets:
         - name: nvcr-pull
         schedulerName: default-scheduler
