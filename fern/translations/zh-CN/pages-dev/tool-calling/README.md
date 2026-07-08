@@ -111,4 +111,4 @@ Dynamo 会从模型输出中解析出工具调用，并在响应中以兼容 Ope
 
 ## 可选：结构化标签（structural tags）
 
-你可以启用 **xgrammar 结构化标签**，让引导式解码在 token 粒度上匹配解析器的工具调用格式。参阅 [Structural tag (guided decoding for tool calls)](https://github.com/ai-dynamo/dynamo/blob/993237e5d47ad5a0ced18b65084829989e88f5ac/docs/tool-calling/structural-tag.md)。
+你可以启用 **xgrammar 结构化标签**，让引导式解码在 token 粒度上匹配解析器的工具调用格式。参阅 [Structural tag (guided decoding for tool calls)](https://github.com/ai-dynamo/dynamo/blob/5e9b28059b36d5bdcbea1885f0173aaf4c24f072/docs/tool-calling/structural-tag.md)。
