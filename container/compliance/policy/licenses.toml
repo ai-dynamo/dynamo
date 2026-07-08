@@ -794,6 +794,18 @@ reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
+name = "cpp-14"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "cpp-14-aarch64-linux-gnu"
+allow = ["GPL-2.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
 name = "dash"
 allow = ["GPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
@@ -844,6 +856,18 @@ reason = "Mere aggregation; system component"
 type = "dpkg"
 name = "gcc-13-base"
 allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-14"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "gcc-14-aarch64-linux-gnu"
+allow = ["GPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -915,6 +939,12 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libgcc-13-dev"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
+reason = "Mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgcc-14-dev"
 allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
