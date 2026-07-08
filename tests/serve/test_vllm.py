@@ -168,11 +168,10 @@ vllm_configs = {
         script_name="agg_spec_decoding.sh",
         marks=[
             pytest.mark.gpu_1,
-            # Conservative placeholder for an 8B model (weights ~16 GiB fp16 plus
-            # the EAGLE3 draft + KV cache). The launch script pins
-            # --gpu-memory-utilization 0.8, so peak usage tracks the GPU size
-            # rather than this value. TODO: profile the real peak VRAM and tighten.
-            pytest.mark.profiled_vram_gib(20),
+            # No profiled_vram_gib: the base model is gated on HF, so it can't be
+            # profiled locally without a token. Not guessed — runs in the
+            # sequential GPU stage; profile the real peak in a CI env that has
+            # meta-llama access.
             pytest.mark.timeout(900),
             # 8B + gated Llama base model -> nightly only (needs HF_TOKEN + VRAM).
             pytest.mark.pre_merge,
