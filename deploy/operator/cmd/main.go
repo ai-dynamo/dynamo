@@ -179,9 +179,19 @@ func main() {
 
 	var configFile string
 	var operatorVersion string
+	var operatorImage string
+	var operatorImagePullPolicy string
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
+	flag.StringVar(
+		&operatorImage,
+		"operator-image",
+		"",
+		"Operator image used to deliver version-matched helper binaries for DGD overrides",
+	)
+	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
+		"Image pull policy for operator helper init containers")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -193,7 +203,6 @@ func main() {
 		setupLog.Error(nil, "--config flag is required")
 		os.Exit(1)
 	}
-
 	// Load, default, and validate operator configuration
 	operatorCfg, err := LoadAndValidateOperatorConfig(configFile)
 	if err != nil {
@@ -209,6 +218,14 @@ func main() {
 		os.Exit(1)
 	}
 	setupLog.Info("Operator version configured", "version", operatorVersion)
+
+	pullPolicy := corev1.PullPolicy(operatorImagePullPolicy)
+	switch pullPolicy {
+	case corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+	default:
+		setupLog.Error(nil, "operator-image-pull-policy is invalid", "provided", operatorImagePullPolicy)
+		os.Exit(1)
+	}
 
 	// Initialize runtime config (will be populated after detection)
 	runtimeConfig := &commonController.RuntimeConfig{}
@@ -439,6 +456,23 @@ func main() {
 		runtimeConfig.LWSEnabled = false
 	}
 
+	switch {
+	case operatorCfg.Orchestrators.VolcanoScheduler.Enabled == nil:
+		runtimeConfig.VolcanoSchedulerEnabled = false
+	case *operatorCfg.Orchestrators.VolcanoScheduler.Enabled:
+		if !volcanoDetected {
+			setupLog.Error(nil,
+				"Volcano scheduler integration is explicitly enabled in config but "+
+					"the Volcano API group was not detected in the cluster",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.VolcanoSchedulerEnabled = true
+	default:
+		setupLog.Info("Volcano scheduler integration is explicitly disabled via config override")
+		runtimeConfig.VolcanoSchedulerEnabled = false
+	}
+
 	// Detect Kai-scheduler availability using discovery client
 	setupLog.Info("Detecting Kai-scheduler availability...")
 	kaiSchedulerDetected := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
@@ -502,6 +536,7 @@ func main() {
 		"grove", runtimeConfig.GroveEnabled,
 		"lws", runtimeConfig.LWSEnabled,
 		"volcano", volcanoDetected,
+		"volcano-scheduler", runtimeConfig.VolcanoSchedulerEnabled,
 		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
 		"dra", runtimeConfig.DRAEnabled,
 		"istio", runtimeConfig.IstioEnabled,
@@ -608,6 +643,7 @@ func main() {
 	if err := registerControllers(
 		mgr, operatorCfg, runtimeConfig,
 		dockerSecretRetriever, sshKeyManager,
+		operatorImage, pullPolicy,
 	); err != nil {
 		setupLog.Error(err, "failed to register controllers")
 		os.Exit(1)
@@ -667,6 +703,8 @@ func registerControllers(
 	runtimeConfig *commonController.RuntimeConfig,
 	dockerSecretRetriever *secrets.DockerSecretIndexer,
 	sshKeyManager *secret.SSHKeyManager,
+	operatorImage string,
+	operatorPullPolicy corev1.PullPolicy,
 ) error {
 	if err := (&controller.DynamoComponentDeploymentReconciler{
 		Client:                mgr.GetClient(),
@@ -710,14 +748,16 @@ func registerControllers(
 	}
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:            mgr.GetClient(),
-		APIReader:         mgr.GetAPIReader(),
-		Recorder:          mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		Config:            operatorCfg,
-		RuntimeConfig:     runtimeConfig,
-		GPUDiscoveryCache: gpu.NewGPUDiscoveryCache(),
-		GPUDiscovery:      gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
-		RBACManager:       rbacManager,
+		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
+		Recorder:                mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Config:                  operatorCfg,
+		RuntimeConfig:           runtimeConfig,
+		GPUDiscoveryCache:       gpu.NewGPUDiscoveryCache(),
+		GPUDiscovery:            gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
+		OperatorImage:           operatorImage,
+		OperatorImagePullPolicy: operatorPullPolicy,
+		RBACManager:             rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
 	}

@@ -298,6 +298,13 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.total_kv_blocks
     }
 
+    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
+        self.runtime_data
+            .get("native_offloading_capacity")?
+            .get("total_tokens")?
+            .as_u64()
+    }
+
     fn taints(&self) -> &HashSet<String> {
         &self.taints
     }
@@ -644,6 +651,21 @@ mod tests {
         assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
         let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
+    }
+
+    #[test]
+    fn native_offloading_capacity_is_backend_neutral() {
+        use dynamo_kv_router::WorkerConfigLike;
+
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .set_engine_specific(
+                "native_offloading_capacity",
+                serde_json::json!({"total_tokens": 300}),
+            )
+            .unwrap();
+
+        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
     }
 
     #[test]
