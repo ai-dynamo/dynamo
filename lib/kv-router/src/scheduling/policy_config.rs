@@ -326,7 +326,6 @@ fn resolve_profile(
     let mut names = HashSet::with_capacity(profile.policy_classes.len());
     let mut classes = Vec::with_capacity(profile.policy_classes.len());
     let mut bindings = Vec::with_capacity(profile.policy_classes.len());
-    let mut has_queue_admission = false;
     for raw in profile.policy_classes {
         let resolved = resolve_policy_class(raw, &resolved_buckets.indices, location)?;
         if !names.insert(resolved.config.name.clone()) {
@@ -334,14 +333,6 @@ fn resolve_profile(
                 "{location} contains duplicate policy class {:?}",
                 resolved.config.name
             )));
-        }
-        if resolved.config.queue_admission.is_some() {
-            if has_queue_admission {
-                return Err(RouterPolicyConfigError::Validation(format!(
-                    "{location} must contain at most one capacity-reserving queue_admission class"
-                )));
-            }
-            has_queue_admission = true;
         }
         classes.push(resolved.config);
         bindings.push(resolved.binding);
@@ -463,11 +454,8 @@ fn resolve_policy_class(
             raw.name
         )));
     }
-    if raw.queue_admission.is_some() && raw.queue_policy != RouterQueuePolicy::Fcfs {
-        return Err(RouterPolicyConfigError::Validation(format!(
-            "{location} policy class {:?} queue_admission requires queue_policy fcfs",
-            raw.name
-        )));
+    if let Some(admission) = &raw.queue_admission {
+        validate_identifier(&admission.strategy, "queue admission strategy", location)?;
     }
     if raw
         .prefill_busy_threshold_frac
@@ -705,7 +693,7 @@ models:
     }
 
     #[test]
-    fn accepts_session_aware_admission_with_fcfs() {
+    fn accepts_generic_queue_admission_config() {
         let config = RouterPolicyConfig::from_yaml(
             r#"
 default_policy_family: standard
@@ -718,9 +706,10 @@ policy_classes:
     cache_bucket: all
     quantum: 1
   - name: agents
-    queue_policy: fcfs
+    queue_policy: wspt
     queue_admission:
       type: session_aware
+      pause_threshold: 0.7
     quantum: 1
 "#,
         )
@@ -728,10 +717,9 @@ policy_classes:
 
         let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
         let agents = profile.class(profile.resolve_class_index(Some("agents"), 0));
-        assert!(matches!(
-            agents.queue_admission,
-            Some(QueueAdmissionConfig::SessionAware {})
-        ));
+        let admission = agents.queue_admission.as_ref().unwrap();
+        assert_eq!(admission.strategy, "session_aware");
+        assert_eq!(admission.options["pause_threshold"], 0.7);
     }
 
     #[test]
@@ -741,27 +729,9 @@ policy_classes:
     }
 
     #[test]
-    fn rejects_duplicate_or_invalid_queue_admission() {
-        for (yaml, expected) in [
-            (
-                r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: agents
-    policy_family: standard
-    cache_bucket: all
-    queue_policy: wspt
-    queue_admission:
-      type: session_aware
-    quantum: 1
-"#,
-                "queue_admission requires queue_policy fcfs",
-            ),
-            (
-                r#"
+    fn accepts_multiple_queue_admission_classes() {
+        RouterPolicyConfig::from_yaml(
+            r#"
 default_policy_family: standard
 uncached_isl_buckets:
   - min_tokens: 0
@@ -780,10 +750,14 @@ policy_classes:
       type: session_aware
     quantum: 1
 "#,
-                "at most one capacity-reserving queue_admission class",
-            ),
-            (
-                r#"
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_queue_admission_strategy_name() {
+        let error = RouterPolicyConfig::from_yaml(
+            r#"
 default_policy_family: standard
 uncached_isl_buckets:
   - min_tokens: 0
@@ -793,16 +767,17 @@ policy_classes:
     policy_family: standard
     cache_bucket: all
     queue_admission:
-      type: session_aware
-      pause_threshold: 0.7
+      type: ""
     quantum: 1
 "#,
-                "unknown field",
-            ),
-        ] {
-            let error = RouterPolicyConfig::from_yaml(yaml).unwrap_err();
-            assert!(error.to_string().contains(expected), "{error}");
-        }
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("queue admission strategy name \"\" must match"),
+            "{error}"
+        );
     }
 
     #[test]
