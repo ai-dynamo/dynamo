@@ -72,13 +72,15 @@ def init_vmm(device_type: VMMDeviceType) -> None:
 def _detect_device_type() -> VMMDeviceType:
     """Auto-detect the available accelerator device type at runtime.
 
-    Priority: CUDA > Other Device > fallback to CUDA (will fail at actual device use).
+    Priority: CUDA > XPU > fallback to CUDA (will fail at actual device use).
     """
     try:
         import torch
 
         if torch.cuda.is_available():
             return VMMDeviceType.CUDA
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return VMMDeviceType.XPU
     except Exception:
         pass
     return VMMDeviceType.CUDA
