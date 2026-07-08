@@ -4,9 +4,11 @@
 """Unit tests for MM kwargs transfer (NIXL sender/receiver + SHM sender/receiver)."""
 
 import pickle
+from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
@@ -22,6 +24,16 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@dataclass
+class _TestElement:
+    data: torch.Tensor
+    field: object
+
+
+class _TestItem(dict):
+    pass
 
 
 def _make_feature(data=None, mm_hash="hash_default"):
@@ -190,6 +202,64 @@ class TestMmKwargsShmTransfer:
             restored = pickle.loads(items[i])
             assert restored["name"] == f"image_{i}"
             assert len(restored["values"]) == (i + 1) * 100
+
+        await sender.cleanup(handles)
+
+    @pytest.mark.asyncio
+    async def test_compacts_shared_tensor_storage_before_pickling(self):
+        """Each item should serialize only its tensor view, not the full batch."""
+        batch = torch.arange(2048, dtype=torch.float32).reshape(2, 1024)
+        items = [
+            _TestItem({"pixels": _TestElement(batch[index], "batched")})
+            for index in range(2)
+        ]
+        features = [
+            _make_feature(data=item, mm_hash=f"hash_{index}")
+            for index, item in enumerate(items)
+        ]
+
+        sender = MmKwargsShmSender()
+        extra_update, handles = await sender.prepare(features, modality="image")
+
+        assert extra_update is not None
+        metadata = MmKwargsShmTransferMetadata.model_validate(
+            extra_update["mm_kwargs_shm"]
+        )
+        serialized_bytes = sum(item.size for item in metadata.items)
+        uncompact_bytes = sum(len(pickle.dumps(item)) for item in items)
+        logical_bytes = sum(item["pixels"].data.nbytes for item in items)
+        assert serialized_bytes < uncompact_bytes
+        assert serialized_bytes < logical_bytes * 2
+
+        receiver = MmKwargsShmReceiver()
+        results = await receiver.receive(metadata)
+        restored = [
+            pickle.loads(payload) for payload in results["__pickled_kwargs_item__"]
+        ]
+        for restored_item, original_item in zip(restored, items):
+            assert torch.equal(
+                restored_item["pixels"].data,
+                original_item["pixels"].data,
+            )
+            assert restored_item["pixels"].field == "batched"
+
+        await sender.cleanup(handles)
+
+    @pytest.mark.asyncio
+    async def test_does_not_copy_already_compact_tensor_storage(self):
+        tensor = torch.arange(1024, dtype=torch.float32)
+        item = _TestItem({"pixels": _TestElement(tensor, "batched")})
+        sender = MmKwargsShmSender()
+
+        extra_update, handles = await sender.prepare(
+            [_make_feature(data=item)], modality="image"
+        )
+
+        assert extra_update is not None
+        metadata = MmKwargsShmTransferMetadata.model_validate(
+            extra_update["mm_kwargs_shm"]
+        )
+        assert metadata.items[0].size == len(pickle.dumps(item))
 
         await sender.cleanup(handles)
 
