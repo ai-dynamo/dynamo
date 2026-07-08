@@ -239,7 +239,7 @@ impl LoraLoadSchedule {
             // Ramp down: linearly decrease from peak_load to 0
             let ramp_down_tick = relative_tick - self.ramp_up - self.steady;
             let progress = 1.0 - ((ramp_down_tick + 1) as f64 / self.ramp_down as f64);
-            ((progress * self.peak_load as f64).ceil() as usize).max(0)
+            (progress * self.peak_load as f64).ceil() as usize
         }
     }
 }
