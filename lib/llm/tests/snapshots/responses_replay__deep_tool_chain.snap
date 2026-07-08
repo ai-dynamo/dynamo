@@ -10,14 +10,27 @@ expression: redacted_events(&text)
       "sequence_number": 0,
       "response": {
         "background": false,
+        "billing": null,
+        "conversation": null,
         "created_at": 1000000000,
+        "completed_at": null,
+        "error": null,
         "id": "[ID]",
+        "incomplete_details": null,
+        "instructions": null,
         "max_output_tokens": 256,
+        "max_tool_calls": null,
         "metadata": {},
         "model": "harness-model",
         "object": "response",
         "output": [],
         "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "prompt": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": null,
+        "reasoning": null,
+        "safety_identifier": null,
         "service_tier": "auto",
         "status": "in_progress",
         "temperature": 1.0,
@@ -71,19 +84,6 @@ expression: redacted_events(&text)
         "top_logprobs": 0,
         "top_p": 1.0,
         "truncation": "disabled",
-        "billing": null,
-        "completed_at": null,
-        "conversation": null,
-        "error": null,
-        "incomplete_details": null,
-        "instructions": null,
-        "max_tool_calls": null,
-        "previous_response_id": null,
-        "prompt": null,
-        "prompt_cache_key": null,
-        "prompt_cache_retention": null,
-        "reasoning": null,
-        "safety_identifier": null,
         "usage": null,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
@@ -98,14 +98,27 @@ expression: redacted_events(&text)
       "sequence_number": 1,
       "response": {
         "background": false,
+        "billing": null,
+        "conversation": null,
         "created_at": 1000000000,
+        "completed_at": null,
+        "error": null,
         "id": "[ID]",
+        "incomplete_details": null,
+        "instructions": null,
         "max_output_tokens": 256,
+        "max_tool_calls": null,
         "metadata": {},
         "model": "harness-model",
         "object": "response",
         "output": [],
         "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "prompt": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": null,
+        "reasoning": null,
+        "safety_identifier": null,
         "service_tier": "auto",
         "status": "in_progress",
         "temperature": 1.0,
@@ -159,19 +172,6 @@ expression: redacted_events(&text)
         "top_logprobs": 0,
         "top_p": 1.0,
         "truncation": "disabled",
-        "billing": null,
-        "completed_at": null,
-        "conversation": null,
-        "error": null,
-        "incomplete_details": null,
-        "instructions": null,
-        "max_tool_calls": null,
-        "previous_response_id": null,
-        "prompt": null,
-        "prompt_cache_key": null,
-        "prompt_cache_retention": null,
-        "reasoning": null,
-        "safety_identifier": null,
         "usage": null,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
@@ -206,37 +206,10 @@ expression: redacted_events(&text)
     }
   },
   {
-    "event": "response.function_call_arguments.done",
-    "data": {
-      "type": "response.function_call_arguments.done",
-      "name": "ls",
-      "sequence_number": 4,
-      "item_id": "[ID]",
-      "output_index": 0,
-      "arguments": ""
-    }
-  },
-  {
-    "event": "response.output_item.done",
-    "data": {
-      "type": "response.output_item.done",
-      "sequence_number": 5,
-      "output_index": 0,
-      "item": {
-        "type": "function_call",
-        "arguments": "",
-        "call_id": "call_deep0",
-        "name": "ls",
-        "id": "[ID]",
-        "status": "completed"
-      }
-    }
-  },
-  {
     "event": "response.function_call_arguments.delta",
     "data": {
       "type": "response.function_call_arguments.delta",
-      "sequence_number": 6,
+      "sequence_number": 4,
       "item_id": "[ID]",
       "output_index": 0,
       "delta": "{\"path\":\"/src\"}"
@@ -246,7 +219,7 @@ expression: redacted_events(&text)
     "event": "response.output_item.added",
     "data": {
       "type": "response.output_item.added",
-      "sequence_number": 7,
+      "sequence_number": 5,
       "output_index": 1,
       "item": {
         "type": "function_call",
@@ -262,44 +235,17 @@ expression: redacted_events(&text)
     "event": "response.function_call_arguments.delta",
     "data": {
       "type": "response.function_call_arguments.delta",
-      "sequence_number": 8,
+      "sequence_number": 6,
       "item_id": "[ID]",
       "output_index": 1,
       "delta": "{\"pat"
     }
   },
   {
-    "event": "response.function_call_arguments.done",
-    "data": {
-      "type": "response.function_call_arguments.done",
-      "name": "grep",
-      "sequence_number": 9,
-      "item_id": "[ID]",
-      "output_index": 1,
-      "arguments": "{\"pat"
-    }
-  },
-  {
-    "event": "response.output_item.done",
-    "data": {
-      "type": "response.output_item.done",
-      "sequence_number": 10,
-      "output_index": 1,
-      "item": {
-        "type": "function_call",
-        "arguments": "{\"pat",
-        "call_id": "call_deep1",
-        "name": "grep",
-        "id": "[ID]",
-        "status": "completed"
-      }
-    }
-  },
-  {
     "event": "response.function_call_arguments.delta",
     "data": {
       "type": "response.function_call_arguments.delta",
-      "sequence_number": 11,
+      "sequence_number": 7,
       "item_id": "[ID]",
       "output_index": 1,
       "delta": "tern\":\"TODO\"}"
@@ -309,7 +255,7 @@ expression: redacted_events(&text)
     "event": "response.output_item.added",
     "data": {
       "type": "response.output_item.added",
-      "sequence_number": 12,
+      "sequence_number": 8,
       "output_index": 2,
       "item": {
         "type": "function_call",
@@ -325,10 +271,64 @@ expression: redacted_events(&text)
     "event": "response.function_call_arguments.delta",
     "data": {
       "type": "response.function_call_arguments.delta",
-      "sequence_number": 13,
+      "sequence_number": 9,
       "item_id": "[ID]",
       "output_index": 2,
       "delta": "{\"branch\":\"main\"}"
+    }
+  },
+  {
+    "event": "response.function_call_arguments.done",
+    "data": {
+      "type": "response.function_call_arguments.done",
+      "name": "ls",
+      "sequence_number": 10,
+      "item_id": "[ID]",
+      "output_index": 0,
+      "arguments": "{\"path\":\"/src\"}"
+    }
+  },
+  {
+    "event": "response.output_item.done",
+    "data": {
+      "type": "response.output_item.done",
+      "sequence_number": 11,
+      "output_index": 0,
+      "item": {
+        "type": "function_call",
+        "arguments": "{\"path\":\"/src\"}",
+        "call_id": "call_deep0",
+        "name": "ls",
+        "id": "[ID]",
+        "status": "completed"
+      }
+    }
+  },
+  {
+    "event": "response.function_call_arguments.done",
+    "data": {
+      "type": "response.function_call_arguments.done",
+      "name": "grep",
+      "sequence_number": 12,
+      "item_id": "[ID]",
+      "output_index": 1,
+      "arguments": "{\"pattern\":\"TODO\"}"
+    }
+  },
+  {
+    "event": "response.output_item.done",
+    "data": {
+      "type": "response.output_item.done",
+      "sequence_number": 13,
+      "output_index": 1,
+      "item": {
+        "type": "function_call",
+        "arguments": "{\"pattern\":\"TODO\"}",
+        "call_id": "call_deep1",
+        "name": "grep",
+        "id": "[ID]",
+        "status": "completed"
+      }
     }
   },
   {
@@ -365,10 +365,16 @@ expression: redacted_events(&text)
       "sequence_number": 16,
       "response": {
         "background": false,
+        "billing": null,
+        "conversation": null,
         "created_at": 1000000000,
         "completed_at": 1000000000,
+        "error": null,
         "id": "[ID]",
+        "incomplete_details": null,
+        "instructions": null,
         "max_output_tokens": 256,
+        "max_tool_calls": null,
         "metadata": {},
         "model": "harness-model",
         "object": "response",
@@ -399,6 +405,12 @@ expression: redacted_events(&text)
           }
         ],
         "parallel_tool_calls": true,
+        "previous_response_id": null,
+        "prompt": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": null,
+        "reasoning": null,
+        "safety_identifier": null,
         "service_tier": "auto",
         "status": "completed",
         "temperature": 1.0,
@@ -463,18 +475,6 @@ expression: redacted_events(&text)
           },
           "total_tokens": 95
         },
-        "billing": null,
-        "conversation": null,
-        "error": null,
-        "incomplete_details": null,
-        "instructions": null,
-        "max_tool_calls": null,
-        "previous_response_id": null,
-        "prompt": null,
-        "prompt_cache_key": null,
-        "prompt_cache_retention": null,
-        "reasoning": null,
-        "safety_identifier": null,
         "presence_penalty": 0.0,
         "frequency_penalty": 0.0,
         "store": false
