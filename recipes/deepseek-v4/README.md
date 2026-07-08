@@ -135,10 +135,21 @@ host-staging (~20× slower, but still functional)**, while *unsetting* `UCX_NET_
 constructs. With no RDMA fabric at all, fall back to TCP: `NCCL_IB_DISABLE=1`, `NCCL_NET=Socket`, and drop the
 `rdma/ib` resource requests.
 
-The B200 disaggregated recipes request **`rdma/shared_ib: "1"`** (a shared-IB resource that exposes **all** of
-the node's RDMA NICs to the pod) so the map can reliably pick each rank's affine NIC even when the cluster's
-device plugin would otherwise inject a non-affine set. On a cluster without a shared-IB resource, request the
-affine NICs directly instead (e.g. `rdma/ib: "N"`).
+**`rdma/ib` vs `rdma/shared_ib` is cluster-plugin-dependent, not GPU-dependent** — which RDMA resource to
+request depends on your cluster's RDMA device plugin:
+- **`rdma/ib: "N"`** (N exclusive devices) is clean and NIC-isolated but relies on the plugin injecting the
+  pod's *affine* NICs. The **H200 disaggregated** recipes ship this (validated where affine injection works).
+- **`rdma/shared_ib: "1"`** exposes **all** of the node's NICs to the pod, so the per-rank map can always find
+  each rank's affine NIC even when the plugin would inject a non-affine set. The **B200 disaggregated** recipes
+  ship this (validated on a cluster where affine injection had drifted). Both pair with the same
+  `VLLM_GPU_NIC_PCIE_MAPPING`; pick whichever your cluster's plugin exposes.
+
+Caveat for `shared_ib`: because it exposes **all** NICs, a **wrong or stale map fails silently**. Under
+exclusive `rdma/ib`, a map that points a rank at a NIC not in the pod hard-fails (`createBackend` errors);
+under `shared_ib` that NIC is present, so the rank quietly opens a **non-affine** NIC and GDR degrades to a
+cross-socket path with **no error**. So **derive the map from the pod's actual `/sys/class/infiniband` at
+deploy time and verify the per-rank NIC selection in the worker log** rather than trusting a hard-coded map.
+(Shared NICs are also not bandwidth-isolated from co-tenant pods — a throughput, not a correctness, concern.)
 
 Regenerate the map on a target node:
 
