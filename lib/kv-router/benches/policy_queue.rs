@@ -48,7 +48,7 @@ policy_classes:
 fn exact_queue(
     lanes: usize,
     requests: usize,
-    blocked_modulus: Option<usize>,
+    is_dispatchable: impl Fn(usize) -> bool,
 ) -> PolicyQueue<BenchRequest> {
     let mut queue = PolicyQueue::new(profile());
     for request_index in 0..requests {
@@ -63,8 +63,7 @@ fn exact_queue(
                 0,
                 WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
                 BenchRequest {
-                    dispatchable: blocked_modulus
-                        .is_none_or(|modulus| !lane.is_multiple_of(modulus)),
+                    dispatchable: is_dispatchable(lane),
                 },
             )
             .unwrap();
@@ -104,11 +103,11 @@ fn drain(mut queue: PolicyQueue<BenchRequest>) -> usize {
 
 fn bench_pop_once(c: &mut Criterion) {
     let mut group = c.benchmark_group("policy_queue/pop_once_exact");
-    for lanes in [1, 8, 32, 128, 512, 1024] {
+    for lanes in [1, 8, 32, 128, 512, 1024, 10_000] {
         group.bench_with_input(BenchmarkId::from_parameter(lanes), &lanes, |b, &lanes| {
-            b.iter_batched(
-                || exact_queue(lanes, lanes, Some(2)),
-                |mut queue| {
+            b.iter_batched_ref(
+                || exact_queue(lanes, lanes, |lane| !lane.is_multiple_of(2)),
+                |queue| {
                     black_box(queue.pop_next(|_, _, request| request.dispatchable));
                 },
                 BatchSize::LargeInput,
@@ -125,7 +124,7 @@ fn bench_drain_fixed_requests(c: &mut Criterion) {
     for lanes in [1, 8, 32, 128, 512] {
         group.bench_with_input(BenchmarkId::from_parameter(lanes), &lanes, |b, &lanes| {
             b.iter_batched(
-                || exact_queue(lanes, REQUESTS, None),
+                || exact_queue(lanes, REQUESTS, |_| true),
                 |queue| assert_eq!(black_box(drain(queue)), REQUESTS),
                 BatchSize::LargeInput,
             );
@@ -140,11 +139,62 @@ fn bench_drain_one_per_lane(c: &mut Criterion) {
         group.throughput(Throughput::Elements(lanes as u64));
         group.bench_with_input(BenchmarkId::from_parameter(lanes), &lanes, |b, &lanes| {
             b.iter_batched(
-                || exact_queue(lanes, lanes, None),
+                || exact_queue(lanes, lanes, |_| true),
                 |queue| assert_eq!(black_box(drain(queue)), lanes),
                 BatchSize::LargeInput,
             );
         });
+    }
+    group.finish();
+}
+
+fn bench_build_exact_lanes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("policy_queue/build_one_per_exact_lane");
+    for lanes in [128, 1024, 10_000] {
+        group.throughput(Throughput::Elements(lanes as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(lanes), &lanes, |b, &lanes| {
+            b.iter(|| black_box(exact_queue(lanes, lanes, |_| true)));
+        });
+    }
+    group.finish();
+}
+
+fn all(_: usize) -> bool {
+    true
+}
+
+fn odd(lane: usize) -> bool {
+    !lane.is_multiple_of(2)
+}
+
+fn every_tenth(lane: usize) -> bool {
+    lane.is_multiple_of(10)
+}
+
+fn none(_: usize) -> bool {
+    false
+}
+
+fn bench_blocked_fraction(c: &mut Criterion) {
+    const LANES: usize = 10_000;
+    let mut group = c.benchmark_group("policy_queue/drain_10000_exact_blocked");
+    for (blocked, predicate, expected) in [
+        ("0_percent", all as fn(usize) -> bool, LANES),
+        ("50_percent", odd as fn(usize) -> bool, LANES / 2),
+        ("90_percent", every_tenth as fn(usize) -> bool, LANES / 10),
+        ("100_percent", none as fn(usize) -> bool, 0),
+    ] {
+        group.bench_with_input(
+            BenchmarkId::new(blocked, LANES),
+            &predicate,
+            |b, &predicate| {
+                b.iter_batched(
+                    || exact_queue(LANES, LANES, predicate),
+                    |queue| assert_eq!(black_box(drain(queue)), expected),
+                    BatchSize::LargeInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -175,6 +225,6 @@ criterion_group! {
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3))
         .noise_threshold(0.03);
-    targets = bench_pop_once, bench_drain_fixed_requests, bench_drain_one_per_lane, bench_drain_shared
+    targets = bench_pop_once, bench_drain_fixed_requests, bench_drain_one_per_lane, bench_build_exact_lanes, bench_blocked_fraction, bench_drain_shared
 }
 criterion_main!(benches);
