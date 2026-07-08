@@ -60,7 +60,8 @@ PolicyClassQueue("agents")
 - `ready_by_worker` is sparse. A worker/rank heap is created only while exact-placement requests exist for it and removed when empty.
 - A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. `WorkerWithDpRank` is only the exact-placement lane key; the actor and selector retain worker knowledge.
 - Every heap uses the class's configured priority ordering. `BinaryHeap::peek()` reads its highest-priority root in O(1); push and pop are O(log n).
-- To produce one dispatch candidate, peek the root of `pending` and every worker heap, ignore roots that are not currently dispatchable, compare the remaining roots, and pop from the winning heap. Never scan deeper into a heap.
+- `PolicyClassQueue::next_dispatchable` produces one dispatch candidate by peeking the root of `pending` and every worker heap, ignoring roots that are not currently dispatchable, and comparing the remaining roots. Never scan deeper into a heap.
+- `round_cursor` marks where the next quantum-granting DRR pass begins. `carry_class` lets one class spend residual deficit before that pass; it is revalidated through `next_dispatchable` and never grants another quantum when the carried candidate is blocked or too expensive.
 - Worker lanes contain head-of-line blocking to one exact worker. A blocked Worker 7 root cannot hide a ready Worker 9 root or an unpinned root.
 
 ## Guardrails

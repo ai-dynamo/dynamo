@@ -157,8 +157,8 @@ impl<T> PolicyClassQueue<T> {
             .chain(self.ready_by_worker.values().flat_map(|ready| ready.iter()))
     }
 
-    fn push_ready(&mut self, intent: WorkerPlacement, entry: PolicyQueueEntry<T>) {
-        match intent {
+    fn push_ready(&mut self, placement: WorkerPlacement, entry: PolicyQueueEntry<T>) {
+        match placement {
             WorkerPlacement::Any => self.pending.push(entry),
             WorkerPlacement::Exact(worker) => {
                 self.ready_by_worker.entry(worker).or_default().push(entry);
@@ -166,7 +166,7 @@ impl<T> PolicyClassQueue<T> {
         }
     }
 
-    fn candidate(
+    fn next_dispatchable(
         &self,
         class_index: usize,
         is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
@@ -190,8 +190,8 @@ impl<T> PolicyClassQueue<T> {
         })
     }
 
-    fn pop(&mut self, intent: WorkerPlacement) -> PolicyQueueEntry<T> {
-        match intent {
+    fn pop_lane(&mut self, placement: WorkerPlacement) -> PolicyQueueEntry<T> {
+        match placement {
             WorkerPlacement::Any => self.pending.pop().expect("policy class front vanished"),
             WorkerPlacement::Exact(worker) => {
                 let ready = self
@@ -206,20 +206,12 @@ impl<T> PolicyClassQueue<T> {
             }
         }
     }
-
-    fn best_ready_cost(&self) -> Option<usize> {
-        self.pending
-            .peek()
-            .into_iter()
-            .chain(self.ready_by_worker.values().filter_map(BinaryHeap::peek))
-            .max()
-            .map(|entry| entry.snapshot.scheduling_cost_tokens)
-    }
 }
 
 pub struct PolicyQueue<T> {
     classes: Vec<PolicyClassQueue<T>>,
-    next_class: usize,
+    round_cursor: usize,
+    carry_class: Option<usize>,
     next_enqueue_seq: u64,
     pending_count: usize,
     candidates: Vec<Option<DispatchCandidate>>,
@@ -241,7 +233,8 @@ impl<T> PolicyQueue<T> {
                     deficit: 0,
                 })
                 .collect(),
-            next_class: 0,
+            round_cursor: 0,
+            carry_class: None,
             next_enqueue_seq: 0,
             pending_count: 0,
             candidates: vec![None; class_count],
@@ -339,17 +332,38 @@ impl<T> PolicyQueue<T> {
         mut is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
     ) -> Option<PolicyQueueEntry<T>> {
         if self.pending_count == 0 {
+            self.carry_class = None;
             return None;
         }
 
         let class_count = self.classes.len();
         self.candidates.fill(None);
+        let carried_class = self.carry_class.take();
+        if let Some(class_index) = carried_class {
+            let class = &mut self.classes[class_index];
+            let candidate = class.next_dispatchable(class_index, &mut is_dispatchable);
+            if let Some(candidate) = candidate
+                && candidate.cost <= class.deficit
+            {
+                return Some(self.pop_candidate(class_index, candidate));
+            }
+            self.candidates[class_index] = candidate;
+            if class.is_empty() {
+                class.deficit = 0;
+            }
+        }
+
         for offset in 0..class_count {
             // Rotate the starting point across calls so class vector order
             // cannot become a permanent scheduling preference.
-            let class_index = (self.next_class + offset) % class_count;
+            let class_index = (self.round_cursor + offset) % class_count;
             let class = &mut self.classes[class_index];
-            let Some(candidate) = class.candidate(class_index, &mut is_dispatchable) else {
+            let candidate = if carried_class == Some(class_index) {
+                self.candidates[class_index]
+            } else {
+                class.next_dispatchable(class_index, &mut is_dispatchable)
+            };
+            let Some(candidate) = candidate else {
                 if class.is_empty() {
                     class.deficit = 0;
                 }
@@ -359,12 +373,12 @@ impl<T> PolicyQueue<T> {
             if candidate.cost <= class.deficit {
                 // Quantum is granted per ring round, not per request. Spend
                 // carried credit before granting this class another quantum.
-                return Some(self.pop_class(class_index, candidate.placement));
+                return Some(self.pop_candidate(class_index, candidate));
             }
             class.deficit = class.deficit.saturating_add(class.config.quantum);
             if candidate.cost <= class.deficit {
                 // The normal single-round visit made this head affordable.
-                return Some(self.pop_class(class_index, candidate.placement));
+                return Some(self.pop_candidate(class_index, candidate));
             }
         }
 
@@ -397,12 +411,12 @@ impl<T> PolicyQueue<T> {
         }
 
         for offset in 0..class_count {
-            let class_index = (self.next_class + offset) % class_count;
+            let class_index = (self.round_cursor + offset) % class_count;
             let class = &self.classes[class_index];
             if let Some(candidate) = self.candidates[class_index]
                 && candidate.cost <= class.deficit
             {
-                return Some(self.pop_class(class_index, candidate.placement));
+                return Some(self.pop_candidate(class_index, candidate));
             }
         }
 
@@ -418,27 +432,23 @@ impl<T> PolicyQueue<T> {
         })
     }
 
-    fn pop_class(&mut self, class_index: usize, intent: WorkerPlacement) -> PolicyQueueEntry<T> {
+    fn pop_candidate(
+        &mut self,
+        class_index: usize,
+        candidate: DispatchCandidate,
+    ) -> PolicyQueueEntry<T> {
+        self.round_cursor = (class_index + 1) % self.classes.len();
         let class = &mut self.classes[class_index];
-        let entry = class.pop(intent);
+        let entry = class.pop_lane(candidate.placement);
         class.deficit = class
             .deficit
             .saturating_sub(entry.snapshot.scheduling_cost_tokens);
         subtract_stats(&mut class.stats, entry.snapshot);
         self.pending_count -= 1;
-        // Empty classes discard stale credit. A class that can already afford
-        // its next head keeps the cursor and spends its weighted burst;
-        // otherwise the next call starts at the following class.
         if class.is_empty() {
             class.deficit = 0;
-            self.next_class = (class_index + 1) % self.classes.len();
-        } else if class
-            .best_ready_cost()
-            .is_some_and(|cost| cost <= class.deficit)
-        {
-            self.next_class = class_index;
         } else {
-            self.next_class = (class_index + 1) % self.classes.len();
+            self.carry_class = (class.deficit > 0).then_some(class_index);
         }
         entry
     }
@@ -998,6 +1008,88 @@ policy_classes:
         let slow = queue.pop_next(|class, _, _| class == 0).unwrap();
         assert_eq!(slow.into_payload(), "slow");
         assert_eq!(queue.classes[1].deficit, blocked_deficit);
+    }
+
+    #[test]
+    fn drr_carry_uses_next_dispatchable_lane() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_family: agents
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: agents
+    policy_family: agents
+    cache_bucket: all
+    quantum: 10
+  - name: batch
+    policy_family: batch
+    cache_bucket: all
+    quantum: 1
+"#,
+        ));
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(5, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "agents-first",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Exact(WorkerWithDpRank::new(1, 0)),
+                "agents-blocked",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(10, 0),
+                2.0,
+                0.0,
+                0,
+                WorkerPlacement::Exact(WorkerWithDpRank::new(2, 0)),
+                "agents-ready",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                1,
+                2,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "batch",
+            )
+            .unwrap();
+
+        let is_dispatchable =
+            |_: usize, _: &PolicyClassConfig, payload: &&str| *payload != "agents-blocked";
+        assert_eq!(
+            queue.pop_next(is_dispatchable).unwrap().into_payload(),
+            "agents-first"
+        );
+        assert_eq!(queue.classes[0].deficit, 5);
+        assert_eq!(
+            queue.pop_next(is_dispatchable).unwrap().into_payload(),
+            "batch"
+        );
+        assert_eq!(queue.classes[0].deficit, 5);
     }
 
     #[test]
