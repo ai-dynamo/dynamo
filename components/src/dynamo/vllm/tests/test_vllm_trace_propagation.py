@@ -18,6 +18,9 @@ from dynamo.common.constants import DisaggregationMode
 # resolution errors (e.g., missing libcuda.so.1 on CPU-only test runners).
 try:
     from dynamo.vllm.llm_engine import VllmLLMEngine
+    from dynamo.vllm.multimodal_utils.request_processor import (
+        VllmMultimodalRequestProcessor,
+    )
 except ImportError:
     pytest.skip("vllm backend not available", allow_module_level=True)
 
@@ -59,6 +62,10 @@ def _make_engine(engine_client) -> VllmLLMEngine:
     engine._model_max_len = 1024
     engine.disaggregation_mode = DisaggregationMode.AGGREGATED
     engine.enable_rl = False
+    engine._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model="test-model",
+        enable_multimodal=False,
+    )
     # `_dp_range=None` bypasses the router's DP-rank resolution branch.
     engine._dp_range = None
     return engine
