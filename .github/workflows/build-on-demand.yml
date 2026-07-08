@@ -84,6 +84,12 @@ jobs:
     outputs:
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
       sanitized_ref_name: ${{ steps.sanitize-ref.outputs.sanitized_ref_name }}
+      vllm_base_index_digest: ${{ steps.vllm-overlay-tuple.outputs.vllm_base_index_digest }}
+      vllm_amd64_digest: ${{ steps.vllm-overlay-tuple.outputs.vllm_amd64_digest }}
+      vllm_base_commit: ${{ steps.vllm-overlay-tuple.outputs.vllm_base_commit }}
+      vllm_head: ${{ steps.vllm-overlay-tuple.outputs.vllm_head }}
+      vllm_overlay_files: ${{ steps.vllm-overlay-tuple.outputs.vllm_overlay_files }}
+      vllm_baseline_sbom: ${{ steps.vllm-overlay-tuple.outputs.vllm_baseline_sbom }}
     steps:
       - name: Export builder name
         id: export-builder-name
@@ -95,6 +101,23 @@ jobs:
         run: |
           sanitized=$(echo "${{ github.ref_name }}" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/^-//;s/-$//' | cut -c1-128)
           echo "sanitized_ref_name=${sanitized}" >> $GITHUB_OUTPUT
+      - name: Checkout tuple validator
+        if: inputs.vllm_install_mode == 'python-overlay'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Select exact vLLM overlay tuple
+        if: inputs.vllm_install_mode == 'python-overlay'
+        id: vllm-overlay-tuple
+        shell: bash
+        env:
+          VLLM_RUNTIME_BASE_IMAGE: ${{ inputs.vllm_runtime_base_image }}
+          VLLM_GIT_URL: ${{ inputs.vllm_git_url }}
+          VLLM_GIT_REF: ${{ inputs.vllm_git_ref }}
+          VLLM_GIT_SHA: ${{ inputs.vllm_git_sha }}
+          FLASHINFER_GIT_URL: ${{ inputs.flashinfer_git_url }}
+          FLASHINFER_GIT_REF: ${{ inputs.flashinfer_git_ref }}
+          FLASHINFER_GIT_SHA: ${{ inputs.flashinfer_git_sha }}
+        run: |
+          container/deps/vllm/install_nightly_overlay.sh select >> "$GITHUB_OUTPUT"
 
   # ============================================================================
   # FRAMEWORK PIPELINES (build-only)
@@ -121,7 +144,13 @@ jobs:
         VLLM_GIT_SHA=${{ inputs.vllm_git_sha }}
         VLLM_INSTALL_MODE=${{ inputs.vllm_install_mode }}
         VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}
-        BASELINE_SBOM_FILE=${{ inputs.vllm_install_mode == 'python-overlay' && 'vllm-openai@184914ac' || 'cuda@2ab6381d' }}
+        VLLM_EXPECTED_BASE_INDEX_DIGEST=${{ needs.init.outputs.vllm_base_index_digest }}
+        VLLM_EXPECTED_AMD64_DIGEST=${{ needs.init.outputs.vllm_amd64_digest }}
+        VLLM_EXPECTED_BASE_COMMIT=${{ needs.init.outputs.vllm_base_commit }}
+        VLLM_EXPECTED_VLLM_HEAD=${{ needs.init.outputs.vllm_head }}
+        VLLM_EXPECTED_OVERLAY_FILES=${{ needs.init.outputs.vllm_overlay_files }}
+        VLLM_EXPECTED_BASELINE_SBOM=${{ needs.init.outputs.vllm_baseline_sbom }}
+        BASELINE_SBOM_FILE=${{ inputs.vllm_install_mode == 'python-overlay' && needs.init.outputs.vllm_baseline_sbom || 'cuda@2ab6381d' }}
     secrets: inherit
 
   snapshot-agent:

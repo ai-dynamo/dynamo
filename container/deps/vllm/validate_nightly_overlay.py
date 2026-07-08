@@ -14,16 +14,60 @@ import sys
 from pathlib import Path
 from typing import Any
 
-EXPECTED_BASE_COMMIT = "69715823df89b11ee684b84066390cbb9092d5c1"
-EXPECTED_VLLM_HEAD = "17355f6f668857d9b85e0e7714529b42757e0730"
 EXPECTED_FLASHINFER_SHA = "330cc8e1a09f59c1241084459f3df3204b9b8327"
-EXPECTED_AMD64_DIGEST = (
-    "sha256:1fd4323d0aafe8d92b4a4b568ad33661ecaf3bfc7f40860c95d09fed4e6ccd58"
-)
 BASELINE_PATH = Path("/opt/dynamo/nightly-base-provenance.json")
 OVERLAY_PROVENANCE_PATH = Path("/opt/dynamo/vllm-overlay-provenance.txt")
 SOURCE_PROVENANCE_PATH = Path("/opt/dynamo/source-provenance.txt")
 FLASHINFER_SHA_PATH = Path("/opt/dynamo/flashinfer-source-sha.txt")
+
+ALLOWED_TUPLES = {
+    "current-697158": {
+        "vllm_runtime_base_image": (
+            "vllm/vllm-openai@sha256:"
+            "184914ac7c32e4aa7789bb686bfaa0817dd56dbdc8ee05fc0ec671aa0b1792f0"
+        ),
+        "vllm_runtime_base_index_digest": (
+            "sha256:" "184914ac7c32e4aa7789bb686bfaa0817dd56dbdc8ee05fc0ec671aa0b1792f0"
+        ),
+        "vllm_runtime_amd64_digest": (
+            "sha256:" "1fd4323d0aafe8d92b4a4b568ad33661ecaf3bfc7f40860c95d09fed4e6ccd58"
+        ),
+        "vllm_base_commit": "69715823df89b11ee684b84066390cbb9092d5c1",
+        "vllm_git_url": "https://github.com/galletas1712/vllm.git",
+        "vllm_git_ref": "schwinns/exp-cuda-zero-page-234",
+        "vllm_source_sha": "17355f6f668857d9b85e0e7714529b42757e0730",
+        "vllm_overlay_files": "13",
+        "compliance_baseline_sbom": "vllm-openai@184914ac",
+        "flashinfer_git_url": "https://github.com/galletas1712/flashinfer.git",
+        "flashinfer_git_ref": "schwinns/checkpoint-collectives-integration",
+        "flashinfer_source_sha": EXPECTED_FLASHINFER_SHA,
+        "flashinfer_source_version": "0.6.14",
+    },
+    "crossover-93d8": {
+        "vllm_runtime_base_image": (
+            "vllm/vllm-openai@sha256:"
+            "5da1eb79b49d3edb3b3601a116273f019adb7cab403e86790f61130f8596810a"
+        ),
+        "vllm_runtime_base_index_digest": (
+            "sha256:" "7c5a10e9a8b3c8642f4d0463a41215176c0dd834b4f0967287c7e3e517cf1be9"
+        ),
+        "vllm_runtime_amd64_digest": (
+            "sha256:" "5da1eb79b49d3edb3b3601a116273f019adb7cab403e86790f61130f8596810a"
+        ),
+        "vllm_base_commit": "93d8f834dd8acf33eb0e2a75b2711b628cb6e226",
+        "vllm_git_url": "https://github.com/galletas1712/vllm.git",
+        "vllm_git_ref": (
+            "schwinns/exp-93d8-current-overlay-zero-regression-20260708t082747z"
+        ),
+        "vllm_source_sha": "7e48076f13710677c223daf6e4e1af039c0f016e",
+        "vllm_overlay_files": "13",
+        "compliance_baseline_sbom": "vllm-openai@7c5a10e9",
+        "flashinfer_git_url": "https://github.com/galletas1712/flashinfer.git",
+        "flashinfer_git_ref": "schwinns/checkpoint-collectives-integration",
+        "flashinfer_source_sha": EXPECTED_FLASHINFER_SHA,
+        "flashinfer_source_version": "0.6.14",
+    },
+}
 
 OVERLAY_PATHS = (
     "vllm/distributed/device_communicators/all2all.py",
@@ -138,6 +182,26 @@ def parse_source_provenance(path: Path) -> dict[str, str]:
     )
 
 
+def verify_source_provenance(source: dict[str, str]) -> None:
+    tuple_name = source.get("vllm_overlay_tuple", "")
+    expected = ALLOWED_TUPLES.get(tuple_name)
+    if expected is None:
+        raise RuntimeError(f"Unknown vLLM overlay tuple: {source}")
+    actual = source.copy()
+    actual["vllm_runtime_base_image"] = actual.get(
+        "vllm_runtime_base_image", ""
+    ).removeprefix("docker.io/")
+    mismatches = {
+        key: (actual.get(key), value)
+        for key, value in expected.items()
+        if actual.get(key) != value
+    }
+    if source.get("install_mode") != "python-overlay" or mismatches:
+        raise RuntimeError(
+            f"Unexpected vLLM overlay provenance for {tuple_name}: {mismatches}"
+        )
+
+
 def verify_overlay_files(package_dir: Path) -> None:
     provenance = {}
     for line in OVERLAY_PROVENANCE_PATH.read_text().splitlines():
@@ -191,6 +255,16 @@ assert config.model_config.sleep_mode_backend == GMS_BACKEND_NAME
 
 
 def capture() -> None:
+    expected_base_commit = os.environ.get("VLLM_EXPECTED_BASE_COMMIT")
+    if (
+        not expected_base_commit
+        or os.environ.get("VLLM_BUILD_COMMIT") != expected_base_commit
+    ):
+        raise RuntimeError(
+            "The upstream vLLM build commit does not match the selected tuple: "
+            f"build={os.environ.get('VLLM_BUILD_COMMIT')}, "
+            f"expected={expected_base_commit}"
+        )
     assert_no_shim()
     BASELINE_PATH.write_text(
         json.dumps(capture_state(), indent=2, sort_keys=True) + "\n"
@@ -203,12 +277,7 @@ def validate() -> None:
     if current != baseline:
         raise RuntimeError("Nightly native vLLM/Torch/NCCL stack changed")
     source = parse_source_provenance(SOURCE_PROVENANCE_PATH)
-    if source.get("vllm_base_commit") != EXPECTED_BASE_COMMIT:
-        raise RuntimeError(f"Unexpected vLLM base provenance: {source}")
-    if source.get("vllm_source_sha") != EXPECTED_VLLM_HEAD:
-        raise RuntimeError(f"Unexpected vLLM head provenance: {source}")
-    if source.get("vllm_runtime_amd64_digest") != EXPECTED_AMD64_DIGEST:
-        raise RuntimeError(f"Unexpected vLLM amd64 provenance: {source}")
+    verify_source_provenance(source)
     verify_overlay_files(Path(current["vllm"]["package"]))
     verify_flashinfer()
     assert_no_shim()

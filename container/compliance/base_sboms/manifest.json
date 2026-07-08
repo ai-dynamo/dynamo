@@ -99,6 +99,17 @@
       "from_image": "vllm/vllm-openai",
       "from_tag": "nightly-69715823df89b11ee684b84066390cbb9092d5c1",
       "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:7c5a10e9a8b3c8642f4d0463a41215176c0dd834b4f0967287c7e3e517cf1be9",
+      "baseline_image": "vllm/vllm-openai",
+      "baseline_sbom": "vllm-openai@7c5a10e9-amd64.cdx.json",
+      "baseline_tag": "nightly-93d8f834dd8acf33eb0e2a75b2711b628cb6e226",
+      "capture_note": "Exact immutable external base for the old-base crossover; linux/amd64 manifest sha256:5da1eb79b49d3edb3b3601a116273f019adb7cab403e86790f61130f8596810a; captured with Syft 1.43.0",
+      "from_digest": "sha256:7c5a10e9a8b3c8642f4d0463a41215176c0dd834b4f0967287c7e3e517cf1be9",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "nightly-93d8f834dd8acf33eb0e2a75b2711b628cb6e226",
+      "platform": "linux/amd64"
     }
   ],
   "entry_schema": {
