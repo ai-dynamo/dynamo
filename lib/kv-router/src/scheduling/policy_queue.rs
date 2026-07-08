@@ -307,30 +307,7 @@ impl<T> PolicyQueue<T> {
         arrival_offset_secs: f64,
         priority_jump: f64,
         strict_priority: u32,
-        payload: T,
-    ) -> Result<(), (QueueRejection, T)> {
-        self.enqueue_ready(
-            class_index,
-            worker_count,
-            snapshot,
-            arrival_offset_secs,
-            priority_jump,
-            strict_priority,
-            WorkerPlacement::Any,
-            payload,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn enqueue_ready(
-        &mut self,
-        class_index: usize,
-        worker_count: usize,
-        snapshot: QueueSnapshot,
-        arrival_offset_secs: f64,
-        priority_jump: f64,
-        strict_priority: u32,
-        intent: WorkerPlacement,
+        placement: WorkerPlacement,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
@@ -350,7 +327,7 @@ impl<T> PolicyQueue<T> {
         );
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
-        class.push_ready(intent, entry);
+        class.push_ready(placement, entry);
         self.pending_count += 1;
         Ok(())
     }
@@ -592,13 +569,40 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(0, 2, QueueSnapshot::new(8, 4), 0.0, 0.0, 0, "first")
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(8, 4),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "first",
+            )
             .unwrap();
         queue
-            .enqueue(0, 2, QueueSnapshot::new(100, 100), 1.0, 0.0, 0, "overshoot")
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(100, 100),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "overshoot",
+            )
             .unwrap();
         let (rejection, payload) = queue
-            .enqueue(0, 2, QueueSnapshot::new(1, 0), 2.0, 0.0, 0, "rejected")
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                2.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "rejected",
+            )
             .unwrap_err();
         assert_eq!(payload, "rejected");
         assert_eq!(rejection.limit_kind, QueueLimitKind::Requests);
@@ -624,10 +628,28 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(0, 1, QueueSnapshot::new(8, 4), 0.0, 0.0, 0, "keep")
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(8, 4),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "keep",
+            )
             .unwrap();
         queue
-            .enqueue(0, 1, QueueSnapshot::new(16, 6), 1.0, 0.0, 0, "remove")
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(16, 6),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "remove",
+            )
             .unwrap();
 
         queue.retain(|payload| *payload != "remove");
@@ -647,7 +669,7 @@ policy_classes:
         let mut queue = PolicyQueue::new(admission_profile());
         for (worker, payload) in [(1, "blocked"), (2, "ready")] {
             queue
-                .enqueue_ready(
+                .enqueue(
                     0,
                     2,
                     QueueSnapshot::new(1, 0),
@@ -699,10 +721,28 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(0, 2, QueueSnapshot::new(11, 0), 0.0, 0.0, 0, "raw-queued")
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(11, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "raw-queued",
+            )
             .unwrap();
         let (raw_rejection, _) = queue
-            .enqueue(0, 1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "raw-rejected")
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "raw-rejected",
+            )
             .unwrap_err();
         assert_eq!(raw_rejection.limit_kind, QueueLimitKind::RawIslTokens);
         assert_eq!(raw_rejection.current, 11);
@@ -717,6 +757,7 @@ policy_classes:
                 2.0,
                 0.0,
                 0,
+                WorkerPlacement::Any,
                 "raw-after-growth",
             )
             .unwrap();
@@ -728,6 +769,7 @@ policy_classes:
                 3.0,
                 0.0,
                 0,
+                WorkerPlacement::Any,
                 "raw-at-grown-cap",
             )
             .unwrap_err();
@@ -735,7 +777,16 @@ policy_classes:
         assert_eq!(grown_rejection.limit, 20);
 
         queue
-            .enqueue(1, 2, QueueSnapshot::new(8, 6), 0.0, 0.0, 0, "cached-queued")
+            .enqueue(
+                1,
+                2,
+                QueueSnapshot::new(8, 6),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "cached-queued",
+            )
             .unwrap();
         let (cached_rejection, _) = queue
             .enqueue(
@@ -745,6 +796,7 @@ policy_classes:
                 1.0,
                 0.0,
                 0,
+                WorkerPlacement::Any,
                 "cached-rejected",
             )
             .unwrap_err();
@@ -753,13 +805,31 @@ policy_classes:
         assert_eq!(cached_rejection.limit, 5);
 
         let (zero_rejection, _) = queue
-            .enqueue(2, 4, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "zero")
+            .enqueue(
+                2,
+                4,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "zero",
+            )
             .unwrap_err();
         assert_eq!(zero_rejection.limit_kind, QueueLimitKind::Requests);
         assert_eq!(zero_rejection.limit, 0);
 
         let (no_workers_rejection, _) = queue
-            .enqueue(3, 0, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "no-workers")
+            .enqueue(
+                3,
+                0,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "no-workers",
+            )
             .unwrap_err();
         assert_eq!(no_workers_rejection.current, 0);
         assert_eq!(no_workers_rejection.limit, 0);
@@ -783,7 +853,16 @@ policy_classes:
             usize::MAX
         )));
         queue
-            .enqueue(0, 2, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "queued")
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "queued",
+            )
             .unwrap();
     }
 
@@ -809,16 +888,52 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(0, 1, QueueSnapshot::new(50, 0), 0.0, 0.0, 0, "fcfs-long")
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(50, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "fcfs-long",
+            )
             .unwrap();
         queue
-            .enqueue(0, 1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "fcfs-short")
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "fcfs-short",
+            )
             .unwrap();
         queue
-            .enqueue(1, 1, QueueSnapshot::new(50, 0), 0.0, 0.0, 0, "wspt-long")
+            .enqueue(
+                1,
+                1,
+                QueueSnapshot::new(50, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "wspt-long",
+            )
             .unwrap();
         queue
-            .enqueue(1, 1, QueueSnapshot::new(1, 0), 1.0, 0.0, 0, "wspt-short")
+            .enqueue(
+                1,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "wspt-short",
+            )
             .unwrap();
 
         let first = queue.pop_next(|_, _, _| true).unwrap();
@@ -848,10 +963,28 @@ policy_classes:
         ));
         for index in 0..6 {
             queue
-                .enqueue(0, 1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "slow")
+                .enqueue(
+                    0,
+                    1,
+                    QueueSnapshot::new(1, 0),
+                    index as f64,
+                    0.0,
+                    0,
+                    WorkerPlacement::Any,
+                    "slow",
+                )
                 .unwrap();
             queue
-                .enqueue(1, 1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "fast")
+                .enqueue(
+                    1,
+                    1,
+                    QueueSnapshot::new(1, 0),
+                    index as f64,
+                    0.0,
+                    0,
+                    WorkerPlacement::Any,
+                    "fast",
+                )
                 .unwrap();
         }
 
@@ -888,7 +1021,16 @@ policy_classes:
         ));
         for index in 0..20 {
             queue
-                .enqueue(0, 1, QueueSnapshot::new(1, 0), index as f64, 0.0, 0, "one")
+                .enqueue(
+                    0,
+                    1,
+                    QueueSnapshot::new(1, 0),
+                    index as f64,
+                    0.0,
+                    0,
+                    WorkerPlacement::Any,
+                    "one",
+                )
                 .unwrap();
         }
         for index in 0..60 {
@@ -900,6 +1042,7 @@ policy_classes:
                     index as f64,
                     0.0,
                     0,
+                    WorkerPlacement::Any,
                     "three",
                 )
                 .unwrap();
@@ -933,10 +1076,28 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(0, 1, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, "first")
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(100, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "first",
+            )
             .unwrap();
         queue
-            .enqueue(1, 1, QueueSnapshot::new(100, 0), 0.0, 0.0, 0, "second")
+            .enqueue(
+                1,
+                1,
+                QueueSnapshot::new(100, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "second",
+            )
             .unwrap();
 
         for _ in 0..10_000 {
@@ -966,10 +1127,28 @@ policy_classes:
 "#,
         ));
         queue
-            .enqueue(0, 1, QueueSnapshot::new(101, 0), 0.0, 0.0, 0, "large")
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(101, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "large",
+            )
             .unwrap();
         queue
-            .enqueue(1, 1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, "blocked")
+            .enqueue(
+                1,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "blocked",
+            )
             .unwrap();
 
         let popped = queue

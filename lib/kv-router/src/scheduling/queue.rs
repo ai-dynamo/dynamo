@@ -526,7 +526,7 @@ impl<
             block_hashes,
         };
         let worker_count = self.workers_with_configs.borrow().len();
-        if let Err((rejection, queued)) = self.pending.enqueue_ready(
+        if let Err((rejection, queued)) = self.pending.enqueue(
             class_index,
             worker_count,
             snapshot,
