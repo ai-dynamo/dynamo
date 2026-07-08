@@ -181,7 +181,7 @@ sglang_configs = {
                 13.0
             ),  # parity with sglang disaggregated (disagg_same_gpu) configs
             pytest.mark.timeout(470),  # parity with sglang disaggregated configs
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
