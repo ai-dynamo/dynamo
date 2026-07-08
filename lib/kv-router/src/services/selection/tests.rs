@@ -616,6 +616,370 @@ async fn explicit_reservation_rejects_unschedulable_worker() {
     assert_eq!(reserve_response.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn cached_reservation_books_from_select() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    // `select` records the chosen worker + normalized prompt under selection_id.
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"sel-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+    let selected = response_json(select_response).await;
+    assert_eq!(selected["effective_prefill_tokens"], 4);
+
+    // `create_reservation` replays by selection_id and books under its own
+    // reservation_id: no worker_id, no token_ids.
+    let reserve_response = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"sel-1","reservation_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(reserve_response.status(), StatusCode::CREATED);
+    let reservation = response_json(reserve_response).await;
+    assert_eq!(reservation["reservation_id"], "req-1");
+    assert_eq!(reservation["worker_id"], selected["worker_id"]);
+    assert_eq!(reservation["dp_rank"], selected["dp_rank"]);
+
+    // The booking actually landed: potential prefill load reflects the prompt.
+    let loads_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads_response).await;
+    assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 4);
+
+    // Lifecycle endpoints work for a cache-booked reservation.
+    let prefill_response = post(app.clone(), "/reservations/req-1/prefill_complete", "{}").await;
+    assert_eq!(prefill_response.status(), StatusCode::OK);
+
+    // The cached entry is single-use: a second replay finds nothing.
+    let replay = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"sel-1","reservation_id":"req-1b"}"#,
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cached_reservation_needs_prior_select() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let response = post(
+        app,
+        "/reservations",
+        r#"{"selection_id":"never-selected","reservation_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        response_json(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("no pending selection")
+    );
+}
+
+#[tokio::test]
+async fn reservation_needs_selection_id_or_worker_id() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let response = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","reservation_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        response_json(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("selection_id")
+    );
+}
+
+#[tokio::test]
+async fn cached_reservation_ignores_request_overrides() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // The replay is pure: request-side token hints are ignored in favor of
+    // the values captured by `select`.
+    let response = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1","effective_prefill_tokens":5,"expected_output_tokens":99}"#,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let loads_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads_response).await;
+    assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 4);
+}
+
+#[tokio::test]
+async fn cached_reservation_needs_matching_model() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // A different model is a plain miss...
+    let mismatch = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"other","selection_id":"req-1","reservation_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(mismatch.status(), StatusCode::NOT_FOUND);
+
+    // ...and does not consume the entry: the matching model still books.
+    let matched = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(matched.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn failed_cached_booking_is_retryable() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // The only worker goes away before the booking.
+    let deleted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/workers/1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(deleted.status().is_success());
+
+    // The booking fails with the real error, not a missing-selection 404...
+    let failed = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // ...and preserves the pending selection: once a worker is back, the same
+    // minimal call books without re-sending the prompt.
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let retried = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(retried.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn explicit_reservation_discards_cached_entry() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // An explicit booking (worker_id wins even with selection_id present)
+    // supersedes the cached selection...
+    let explicit = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1","worker_id":1,"sequence_hashes":[1],"isl_tokens":4}"#,
+    )
+    .await;
+    assert_eq!(explicit.status(), StatusCode::CREATED);
+
+    // ...and discards it: a later replay cannot book stale state.
+    let replay = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1b"}"#,
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+
+    // Without selection_id, an explicit booking discards by reservation_id.
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-2","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+    let explicit = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","reservation_id":"req-2","worker_id":1,"sequence_hashes":[1],"isl_tokens":4}"#,
+    )
+    .await;
+    assert_eq!(explicit.status(), StatusCode::CREATED);
+    let replay = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-2","reservation_id":"req-2b"}"#,
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cached_booking_honors_prefill_tracking() {
+    let config = crate::config::KvRouterConfig {
+        router_track_prefill_tokens: false,
+        ..test_config()
+    };
+    let service = Arc::new(SelectionService::new_local_for_test(config, 1));
+    let app = create_router(Arc::new(AppState { service }));
+
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    let reserve_response = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(reserve_response.status(), StatusCode::CREATED);
+
+    // With tracking disabled, the cached booking adds no prefill load,
+    // matching explicit and select-booked reservations under this config.
+    let loads_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads_response).await;
+    assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 0);
+
+    // A select-time override is captured and replayed: this booking tracks
+    // prefill load despite the config default.
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-2","token_ids":[1,2,3,4],"router_config_override":{"track_prefill_tokens":true}}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+    let reserve_response = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-2","reservation_id":"req-2"}"#,
+    )
+    .await;
+    assert_eq!(reserve_response.status(), StatusCode::CREATED);
+
+    let loads_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let loads = response_json(loads_response).await;
+    assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 4);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn selector_replica_sync_propagates_request_lifecycle() {
     let port_a = reserve_tcp_port();
