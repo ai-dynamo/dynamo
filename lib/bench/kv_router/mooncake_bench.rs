@@ -226,6 +226,9 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
     if !args.common.sweep && args.benchmark_runs != 1 {
         anyhow::bail!("repetitions must use fresh processes; invoke one trial per process");
     }
+    if args.common.mooncake_trace_path.is_none() {
+        return Ok(());
+    }
 
     for name in indexer_names(args) {
         let config = if args.compare.is_empty() {
