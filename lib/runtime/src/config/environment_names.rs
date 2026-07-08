@@ -532,6 +532,11 @@ pub mod llm {
         /// First-frame ZMQ topic filter override for harness tool events.
         pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
             "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
+
+        /// Comma/whitespace-separated allowlist of HTTP request header names to
+        /// record in request payload records. Unset/empty captures none.
+        pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
+            "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
     }
 }
 
@@ -823,6 +828,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
             llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,

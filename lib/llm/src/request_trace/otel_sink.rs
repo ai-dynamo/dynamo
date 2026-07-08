@@ -196,6 +196,7 @@ fn marker_payload(
     if let Some(payload) = marker.payload.as_mut() {
         payload.request = None;
         payload.response = None;
+        payload.http_request_headers = None;
         payload.payload_complete = false;
         payload.payload_drop_reason = Some(reason.clone());
     }
@@ -353,6 +354,7 @@ mod tests {
                 model: "test-model".to_string(),
                 request: Some(Arc::new(request)),
                 response: None,
+                http_request_headers: None,
                 payload_complete: true,
                 payload_drop_reason: None,
             }),

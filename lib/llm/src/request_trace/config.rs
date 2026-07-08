@@ -91,6 +91,7 @@ pub struct RequestTracePolicy {
     pub file_roll_lines: Option<u64>,
     pub nats_subject: String,
     pub otel_max_payload_bytes: usize,
+    pub http_header_capture_list: Vec<String>,
     pub tool_events_zmq_endpoint: Option<String>,
     pub tool_events_zmq_topic: Option<String>,
 }
@@ -184,6 +185,16 @@ fn load_from_env() -> RequestTracePolicy {
     ])
     .filter(|value| *value > 0)
     .unwrap_or(DEFAULT_OTEL_MAX_PAYLOAD_BYTES);
+    let http_header_capture_list =
+        std::env::var(env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST)
+            .ok()
+            .map(|raw| {
+                raw.split(|c: char| c == ',' || c.is_whitespace())
+                    .map(|name| name.trim().to_ascii_lowercase())
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
     let tool_events_zmq_endpoint =
         std::env::var(env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT)
             .ok()
@@ -210,6 +221,7 @@ fn load_from_env() -> RequestTracePolicy {
         file_roll_lines,
         nats_subject,
         otel_max_payload_bytes,
+        http_header_capture_list,
         tool_events_zmq_endpoint,
         tool_events_zmq_topic,
     }
@@ -409,6 +421,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+        env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
         env_audit::DYN_AUDIT_SINKS,
         env_audit::DYN_AUDIT_FORCE_LOGGING,
         env_audit::DYN_AUDIT_CAPACITY,

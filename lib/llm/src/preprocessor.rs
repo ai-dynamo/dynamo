@@ -3039,7 +3039,20 @@ impl
         // The handle snapshots the pristine request and its arrival time here;
         // the single payload record is published once at stream completion
         // (or with an empty response on cancel/timeout), off the request path.
-        let payload_handle = crate::request_trace::payload::create_handle(&request, &request_id);
+        let payload_http_headers = if crate::request_trace::is_enabled() {
+            context
+                .get::<std::collections::BTreeMap<String, String>>(
+                    crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
+                )
+                .ok()
+        } else {
+            None
+        };
+        let payload_handle = crate::request_trace::payload::create_handle(
+            &request,
+            &request_id,
+            payload_http_headers,
+        );
 
         // For non-streaming requests (stream=false), enable usage by default
         // This ensures compliance with OpenAI API spec where non-streaming responses

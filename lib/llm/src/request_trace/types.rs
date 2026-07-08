@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,9 @@ pub struct RequestTracePayload {
     pub request: Option<Arc<NvCreateChatCompletionRequest>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<Arc<NvCreateChatCompletionResponse>>,
+    /// Allowlisted HTTP request headers (`DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_request_headers: Option<Arc<BTreeMap<String, String>>>,
     pub payload_complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_drop_reason: Option<String>,
@@ -384,6 +388,7 @@ mod tests {
                 model: "test-model".to_string(),
                 request: Some(Arc::new(request)),
                 response: Some(Arc::new(response)),
+                http_request_headers: None,
                 payload_complete: true,
                 payload_drop_reason: None,
             }),
