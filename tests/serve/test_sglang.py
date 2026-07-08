@@ -783,6 +783,37 @@ sglang_configs = {
             ),
         ],
     ),
+    "diffusion_llada": SGLangConfig(
+        # Diffusion language model (LLaDA2.0): text generation via iterative
+        # refinement rather than autoregressive decoding. Unlike the t2i/t2v
+        # diffusion configs above (image/video generation), this serves plain
+        # text through /v1/chat/completions, so it uses a chat payload.
+        name="diffusion_llada",
+        directory=sglang_dir,
+        script_name="diffusion_llada.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            # TODO: profile actual VRAM peak (e.g. tests/utils/profile_pytest.py)
+            # and tighten this. Conservative placeholder until then.
+            pytest.mark.profiled_vram_gib(24.0),
+            pytest.mark.timeout(360),
+            pytest.mark.nightly,
+        ],
+        model="inclusionAI/LLaDA2.0-mini-preview",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            # Diffusion text output is non-deterministic; accept any non-empty
+            # response (empty expected_response) and just exercise the path.
+            chat_payload(
+                "What is the capital of France? Answer in one sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=128,
+                temperature=0.0,
+            ),
+        ],
+    ),
     "anthropic_messages": SGLangConfig(
         name="anthropic_messages",
         directory=sglang_dir,
