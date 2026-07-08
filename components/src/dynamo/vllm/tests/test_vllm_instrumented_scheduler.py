@@ -912,11 +912,7 @@ def test_prefill_batch_grid_crosses_with_isl_and_kv_reads_within_limits():
         ),
         (
             {"batch_granularity": 3},
-            {
-                "scheduler_config": SimpleNamespace(
-                    long_prefill_token_threshold=8
-                )
-            },
+            {"scheduler_config": SimpleNamespace(long_prefill_token_threshold=8)},
             (40, 16),
             [1, 3, 5],
         ),

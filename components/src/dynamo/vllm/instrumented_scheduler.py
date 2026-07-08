@@ -85,8 +85,8 @@ import os
 import queue
 import threading
 import time
-from collections.abc import Sequence
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from itertools import count
 from typing import TYPE_CHECKING, Literal
@@ -768,18 +768,12 @@ class InstrumentedScheduler(AsyncScheduler):
             computed_after_schedule = kv_read_tokens + scheduled_tokens
             if computed_after_schedule < last_cache_position:
                 scheduled_tokens = scheduled_tokens // block_size * block_size
-            elif (
-                kv_read_tokens
-                < last_cache_position
-                < computed_after_schedule
-            ):
+            elif kv_read_tokens < last_cache_position < computed_after_schedule:
                 scheduled_tokens = last_cache_position - kv_read_tokens
 
         return scheduled_tokens
 
-    def _bench_prefill_blocks_per_req(
-        self, isl: int, kv_read_tokens: int
-    ) -> int:
+    def _bench_prefill_blocks_per_req(self, isl: int, kv_read_tokens: int) -> int:
         tokens_with_lookahead = isl + getattr(self, "num_lookahead_tokens", 0)
         coordinator = getattr(
             getattr(self, "kv_cache_manager", None), "coordinator", None
@@ -792,9 +786,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 continue
 
             blocks = math.ceil(tokens_with_lookahead / block_size)
-            admission_cap = getattr(
-                manager, "_max_admission_blocks_per_request", None
-            )
+            admission_cap = getattr(manager, "_max_admission_blocks_per_request", None)
             if isinstance(admission_cap, int) and admission_cap > 0:
                 # Sliding-window and chunked-local managers recycle old blocks
                 # and expose their peak per-request reservation through this
