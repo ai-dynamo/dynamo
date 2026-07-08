@@ -7,7 +7,7 @@ subtitle: Export Dynamo request traces, tool-call metadata, and Perfetto timelin
 
 Agent tracing records what Dynamo measured for each eligible LLM request. When a request carries [session identity](session-ids.md), trace rows include the session fields so you can join LLM requests, inferred tool calls, optional harness tool spans, and Perfetto slices. Recording session identity does not enable sticky sessions or session-aware routing.
 
-Tracing is best-effort profiling data, not an audit log. Dynamo does not store tool-call arguments in request traces. Use audit sinks when you need request or response payloads.
+Dynamo does not store tool-call arguments in request traces. Include `request_payload` in `DYN_REQUEST_TRACE_RECORDS` when you need request or response payloads.
 
 ## Enable Output
 
@@ -17,20 +17,20 @@ The fast path is one environment variable:
 export DYN_REQUEST_TRACE=1
 ```
 
-That selects `jsonl_gz` output at `/tmp/dynamo-request-trace.*.jsonl.gz`. Tool-call understanding works immediately from `request_end` finish metadata: no harness tooling required. The optional ZMQ tool-event ingress is opt-in; see [Tool Call Observability](#tool-call-observability).
+That selects gzip-compressed JSONL file output at `/tmp/dynamo-request-trace.*.jsonl.gz`. Tool-call understanding works immediately from `request_end` finish metadata: no harness tooling required. The optional ZMQ tool-event ingress is opt-in; see [Tool Call Observability](#tool-call-observability).
 
 To relocate captures, set an output path:
 
 ```bash
 export DYN_REQUEST_TRACE=1
-export DYN_REQUEST_TRACE_OUTPUT_PATH=/mnt/captures/run-42/request-trace
+export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 ```
 
 `DYN_REQUEST_TRACE` is the only trace switch. The same request trace stream contains compact replay rows when no session identity is present and enriched agent rows when it is. All request trace variables are documented in [Request Replay Tracing](../observability/request-tracing.md).
 
 ## Dynamo `request_end` Record
 
-Dynamo emits `request_end` after the response stream finishes or is dropped. The record carries session identity, `output_tokens`, and autodetected `finish_reason_metadata` such as tool-call names and finish reasons. `request_id` correlates with audit rows. The `replay` block lets DynoSim load the original request trace directly when Dynamo can represent the request as one replay request. Tool-call metadata is IDs and names only; arguments are intentionally not stored.
+Dynamo emits `request_end` after the response stream finishes or is dropped. The record carries session identity, `output_tokens`, and autodetected `finish_reason_metadata` such as tool-call names and finish reasons. `request_id` correlates with `request_payload` rows when payload logging is enabled. The `replay` block lets DynoSim load the original request trace directly when Dynamo can represent the request as one replay request. Tool-call metadata is IDs and names only; arguments are intentionally not stored.
 
 <details>
 <summary>Full <code>request_end</code> record</summary>
@@ -127,25 +127,26 @@ Optional top-level key: `parent_session_id`. Optional `tool` keys: `output_token
 
 </details>
 
-## Audit Payloads
+## Request Payloads
 
-Request traces do not save input or output payloads by default. To view payloads, enable Dynamo audit sinks next to request tracing.
+Request traces do not save input or output payloads unless payload logging is
+enabled. To include chat-completion payload rows in the same request trace
+stream, select both `request_end` and `request_payload` records with
+`DYN_REQUEST_TRACE_RECORDS=request_end,request_payload`.
 
 ```bash
-export DYN_REQUEST_TRACE=1
-export DYN_REQUEST_TRACE_SINKS=jsonl_gz
-export DYN_REQUEST_TRACE_OUTPUT_PATH=/tmp/dynamo-trace
-export DYN_AUDIT_SINKS=jsonl_gz
-export DYN_AUDIT_OUTPUT_PATH=/tmp/dynamo-audit
-export DYN_AUDIT_FORCE_LOGGING=true
+export DYN_REQUEST_TRACE_RECORDS=request_end,request_payload
+export DYN_REQUEST_TRACE_SINKS=file
+export DYN_REQUEST_TRACE_FILE_PATH=/tmp/dynamo-trace
+export DYN_REQUEST_TRACE_FILE_FORMAT=jsonl_gz
 ```
 
-After the run, correlate trace and audit records by request ID:
+After the run, split metadata and payload rows by `event_type`:
 
 ```bash
-gzip -cd /tmp/dynamo-audit.*.jsonl.gz | jq -c '.event' > /tmp/audit.jsonl
 gzip -cd /tmp/dynamo-trace.*.jsonl.gz | jq -c '.event // .' > /tmp/trace.jsonl
-jq -s 'group_by(.request_id // .request.request_id)' /tmp/audit.jsonl /tmp/trace.jsonl
+jq -c 'select(.event_type == "request_end")' /tmp/trace.jsonl > /tmp/request-end.jsonl
+jq -c 'select(.event_type == "request_payload")' /tmp/trace.jsonl > /tmp/request-payload.jsonl
 ```
 
 Each JSONL line wraps the record:
@@ -157,7 +158,8 @@ Each JSONL line wraps the record:
 }
 ```
 
-`timestamp` is sink-relative elapsed time in milliseconds. Use `event.event_time_unix_ms` for wall-clock ordering.
+`timestamp` is sink-relative elapsed time in milliseconds. Use
+`event.event_time_unix_ms` for wall-clock ordering.
 
 ## View Traces in Perfetto
 
@@ -165,8 +167,8 @@ Convert request trace JSONL files into a [Perfetto](https://ui.perfetto.dev/) tr
 
 ```bash
 uv run --no-project python benchmarks/request_trace/convert_to_perfetto.py \
-  "${DYN_REQUEST_TRACE_OUTPUT_PATH}".*.jsonl.gz \
-  --output "${DYN_REQUEST_TRACE_OUTPUT_PATH}.perfetto.json"
+  "${DYN_REQUEST_TRACE_FILE_PATH}".*.jsonl.gz \
+  --output "${DYN_REQUEST_TRACE_FILE_PATH}.perfetto.json"
 ```
 
 Open the output in [Perfetto UI](https://ui.perfetto.dev/). The default view shows the normal request stack for LLM requests, backend stages, and tool spans when present.

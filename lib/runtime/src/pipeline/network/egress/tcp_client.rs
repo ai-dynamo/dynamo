@@ -531,16 +531,9 @@ impl TcpConnection {
                     total_batch_size += count as u64;
 
                     if last_report.elapsed() >= Duration::from_secs(5) {
-                        let avg_batch = if batch_count > 0 {
-                            total_batch_size / batch_count
-                        } else {
-                            0
-                        };
-                        let avg_write_ns = if batch_count > 0 {
-                            total_batch_write_ns / batch_count
-                        } else {
-                            0
-                        };
+                        let avg_batch = total_batch_size.checked_div(batch_count).unwrap_or(0);
+                        let avg_write_ns =
+                            total_batch_write_ns.checked_div(batch_count).unwrap_or(0);
                         tracing::info!(
                             batches = batch_count,
                             avg_batch_size = avg_batch,
