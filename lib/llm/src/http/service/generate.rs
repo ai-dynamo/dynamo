@@ -579,6 +579,7 @@ mod tests {
             atomic::{AtomicBool, Ordering},
         },
         task::{Context as TaskContext, Poll},
+        time::Duration,
     };
 
     use super::service_v2::{HttpService, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV};
@@ -703,12 +704,15 @@ mod tests {
             &self,
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-            let stream = futures::stream::iter([
+            let first = futures::stream::once(async {
                 Annotated::from_data(LLMEngineOutput {
                     token_ids: vec![10],
                     index: Some(0),
                     ..Default::default()
-                }),
+                })
+            });
+            let second = futures::stream::once(async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
                 Annotated::from_data(LLMEngineOutput {
                     token_ids: vec![11],
                     index: Some(0),
@@ -724,8 +728,9 @@ mod tests {
                         completion_tokens_details: None,
                     }),
                     ..Default::default()
-                }),
-            ]);
+                })
+            });
+            let stream = first.chain(second);
             Ok(ResponseStream::new(Box::pin(stream), request.context()))
         }
     }
@@ -1127,6 +1132,27 @@ mod tests {
             .unwrap_or_else(|| panic!("missing {name} series with labels {labels:?}"))
     }
 
+    fn histogram_sample_count_or_zero(
+        families: &[prometheus::proto::MetricFamily],
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> u64 {
+        families
+            .iter()
+            .find(|family| family.name() == name)
+            .and_then(|family| {
+                family.get_metric().iter().find(|metric| {
+                    labels.iter().all(|(expected_name, expected_value)| {
+                        metric.get_label().iter().any(|label| {
+                            label.name() == *expected_name && label.value() == *expected_value
+                        })
+                    })
+                })
+            })
+            .map(|metric| metric.get_histogram().get_sample_count())
+            .unwrap_or(0)
+    }
+
     fn assert_cancelled_dispatch_metrics(state: &service_v2::State) {
         let metric_model = state.manager().metric_model_for("test-model");
         let metrics = state.metrics_clone();
@@ -1140,6 +1166,33 @@ mod tests {
                 &ErrorType::Cancelled,
             ),
             1
+        );
+
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let families = registry.gather();
+        let model_labels = [("model", metric_model)];
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_queued_requests", &model_labels,)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_time_to_first_token_seconds",
+                &model_labels,
+            ),
+            0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            ),
+            0
         );
     }
 
@@ -1266,6 +1319,52 @@ mod tests {
 
         assert_eq!(response.status().as_u16(), 499);
         assert_cancelled_dispatch_metrics(state.as_ref());
+    }
+
+    #[tokio::test]
+    async fn zero_token_success_drains_queue_without_output_metrics() {
+        let (response, state) =
+            dispatch_terminal_finish_reason(crate::protocols::common::FinishReason::Stop).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Success,
+                &ErrorType::None,
+            ),
+            1
+        );
+
+        let registry = prometheus::Registry::new();
+        state.metrics_clone().register(&registry).unwrap();
+        let families = registry.gather();
+        let model_labels = [("model", metric_model)];
+        assert_eq!(
+            metric_value(&families, "dynamo_frontend_queued_requests", &model_labels,)
+                .get_gauge()
+                .value(),
+            0.0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_time_to_first_token_seconds",
+                &model_labels,
+            ),
+            0
+        );
+        assert_eq!(
+            histogram_sample_count_or_zero(
+                &families,
+                "dynamo_frontend_output_sequence_tokens",
+                &model_labels,
+            ),
+            0
+        );
     }
 
     #[tokio::test]
