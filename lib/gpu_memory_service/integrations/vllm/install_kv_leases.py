@@ -79,8 +79,55 @@ def _fallback_preferred_candidate_limit(num_blocks: int) -> int:
     return max(num_blocks, min(max(num_blocks * 4, 256), 4096))
 
 
+def install_gms_engine_core_sleep() -> bool:
+    """Install the no-clear sleep utility in this EngineCore process.
+
+    Multi-process/TP vLLM spawns EngineCoreProc without importing GMSWorker, so
+    this must run from the scheduler-process bootstrap as well as the worker
+    import path.
+    """
+    try:
+        from concurrent.futures import Future
+
+        from vllm.v1.engine.core import EngineCore
+    except Exception:
+        logger.debug("[GMS] EngineCore sleep utility patch skipped", exc_info=True)
+        return False
+
+    if hasattr(EngineCore, "gms_sleep_no_clear"):
+        return False
+
+    def gms_sleep_no_clear(self, level: int = 1, mode: str = "abort"):
+        pause_future = self.pause_scheduler(mode=mode, clear_cache=False)
+        if level < 1:
+            return pause_future
+
+        model_executor = self.model_executor
+        if pause_future is None:
+            model_executor.sleep(level)
+            return None
+
+        future = Future()
+
+        def pause_complete(completed):
+            try:
+                completed.result()
+                future.set_result(model_executor.sleep(level))
+            except Exception as exc:  # noqa: BLE001
+                future.set_exception(exc)
+
+        logger.info("[GMS] Waiting for in-flight requests before no-clear sleep")
+        pause_future.add_done_callback(pause_complete)
+        return future
+
+    EngineCore.gms_sleep_no_clear = gms_sleep_no_clear
+    logger.info("[GMS] Installed EngineCore.gms_sleep_no_clear utility")
+    return True
+
+
 def _install_engine_core_process_hooks() -> None:
-    """Install scheduler-process GMS KV hooks before BlockPool creation."""
+    """Install scheduler-process GMS hooks before EngineCore construction."""
+    install_gms_engine_core_sleep()
     try:
         install()
     except Exception:  # noqa: BLE001

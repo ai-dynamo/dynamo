@@ -131,6 +131,7 @@ async def _prepare_non_leader_failover(
         owner,
         runtime,
         backend_name="sglang",
+        tags=["kv_cache"],
         promotion_warmup=None,
     )
     if not failover_activation.enabled:
@@ -291,6 +292,10 @@ async def init_decode(
             handler,
             runtime,
             backend_name="sglang",
+            # GMS weights are immutable, shared, and already coexist mapped in
+            # primary and shadow during prewarm.  Quiesce only the private KV
+            # namespace so promotion does not remap weights on the hot path.
+            tags=["kv_cache"],
             promotion_warmup=None if shadow_prewarmed else promotion_warmup,
         )
         failover_activation.attach_to(handler)

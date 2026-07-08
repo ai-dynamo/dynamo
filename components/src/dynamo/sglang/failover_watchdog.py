@@ -89,6 +89,17 @@ def _terminate_pid(pid: int) -> None:
         logger.warning("[GMS failover] cannot SIGKILL SGLang child pid=%s", pid)
 
 
+def _request_owner_shutdown() -> None:
+    """Close the failed request plane after its ownership handoff is complete.
+
+    The TP children are already fenced, so graceful draining cannot complete;
+    SIGTERM would add the normal five-second grace period and then wait on
+    handlers whose engine no longer exists.  This kills only the Dynamo/SGLang
+    engine process.  The GMS sidecars continue owning weights and KV memory.
+    """
+    os.kill(os.getpid(), signal.SIGKILL)
+
+
 def _child_pids(engine: Any) -> list[int]:
     get_all_child_pids = getattr(engine, "get_all_child_pids", None)
     if callable(get_all_child_pids):
@@ -210,6 +221,12 @@ class SGLangGmsFailoverChildWatchdog:
                 self._trigger_failure(
                     f"SGLang subprocess watchdog detected child failure name={failed[0]}"
                 )
+                # The GMS watchdog already fenced every child, unregistered the
+                # endpoint, released ownership, and requested shutdown.  Do not
+                # call SGLang's original failure path: it sends SIGQUIT, whose
+                # crash-diagnostics handler intentionally sleeps for five seconds
+                # before closing the request-plane stream.
+                return True
             return check_processes()
 
         setattr(watchdog, "_check_processes", patched_check_processes)
@@ -264,6 +281,10 @@ class SGLangGmsFailoverChildWatchdog:
         shutdown_event = getattr(self._target, "shutdown_event", None)
         if shutdown_event is not None:
             shutdown_event.set()
+        logger.info(
+            "[GMS failover] sglang controlled handoff complete; closing request plane"
+        )
+        _request_owner_shutdown()
 
 
 def maybe_start_gms_failover_child_watchdog(
