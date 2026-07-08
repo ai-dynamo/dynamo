@@ -1,0 +1,107 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-flash-agg-h200-agentic
+spec:
+  backendFramework: vllm
+  pvcs:
+  - name: model-cache
+    create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
+          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+          workingDir: /workspace
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            DYN_ROUTER_MODE=kv python3 -m dynamo.frontend --trust-remote-code
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      replicas: 1
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /model-cache
+      resources:
+        requests:
+          gpu: "4"
+        limits:
+          gpu: "4"
+      extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-H200
+        mainContainer:
+          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
+          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_CACHE
+            value: /model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_SKIP_P2P_CHECK
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            python3 -m dynamo.vllm \
+              --model deepseek-ai/DeepSeek-V4-Flash \
+              --served-model-name deepseek-ai/DeepSeek-V4-Flash \
+              --trust-remote-code \
+              --kv-cache-dtype fp8 \
+              --block-size 256 \
+              --data-parallel-size 4 \
+              --tensor-parallel-size 1 \
+              --enable-expert-parallel \
+              --max-num-seqs 64 \
+              --tokenizer-mode deepseek_v4 \
+              --dyn-tool-call-parser deepseek_v4 \
+              --dyn-reasoning-parser deepseek_v4 \
+              --speculative-config '{
+                  "method": "mtp",
+                  "num_speculative_tokens": 1
+                }' \
+              --attention-backend FLASHINFER_MLA \
+              --compilation-config '{
+                  "cudagraph_mode": "FULL_AND_PIECEWISE",
+                  "custom_ops": [
+                    "all"
+                  ],
+                  "cudagraph_capture_sizes": [
+                    1,
+                    2,
+                    4,
+                    8,
+                    11,
+                    12,
+                    13,
+                    16,
+                    20,
+                    24,
+                    32,
+                    40,
+                    48,
+                    56,
+                    64
+                  ],
+                  "max_cudagraph_capture_size": 64
+                }'

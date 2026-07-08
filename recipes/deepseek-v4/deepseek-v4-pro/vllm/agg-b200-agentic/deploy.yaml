@@ -1,0 +1,118 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-pro-agg-b200-agentic
+spec:
+  backendFramework: vllm
+  pvcs:
+  - name: model-cache
+    create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
+          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+          workingDir: /workspace
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            python3 -m dynamo.frontend \
+              --discovery-backend etcd \
+              --request-plane tcp \
+              --event-plane zmq \
+              --router-mode kv \
+              --router-kv-events \
+              --kv-cache-block-size 256 \
+              --router-reset-states \
+              --http-host 0.0.0.0 \
+              --http-port 8000
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /model-cache
+      resources:
+        requests:
+          gpu: "8"
+        limits:
+          gpu: "8"
+      extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        mainContainer:
+          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
+          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_CACHE
+            value: /model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_SKIP_P2P_CHECK
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: "1"
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            python3 -m dynamo.vllm \
+              --discovery-backend etcd \
+              --request-plane tcp \
+              --event-plane zmq \
+              --model nvidia/DeepSeek-V4-Pro-NVFP4 \
+              --served-model-name nvidia/DeepSeek-V4-Pro-NVFP4 \
+              --trust-remote-code \
+              --kv-cache-dtype fp8 \
+              --block-size 256 \
+              --tensor-parallel-size 8 \
+              --gpu-memory-utilization 0.9348 \
+              --max-model-len 1048576 \
+              --tokenizer-mode deepseek_v4 \
+              --dyn-reasoning-parser deepseek_v4 \
+              --dyn-tool-call-parser deepseek_v4 \
+              --reasoning-config '{
+                  "reasoning_start_str": "<think>",
+                  "reasoning_end_str": "</think>"
+                }' \
+              --attention-config '{
+                  "use_fp4_indexer_cache": true
+                }' \
+              --compilation-config '{
+                  "cudagraph_mode": "FULL_AND_PIECEWISE",
+                  "custom_ops": [
+                    "all"
+                  ]
+                }' \
+              --moe-backend flashinfer_trtllm \
+              --kv-events-config '{
+                  "publisher": "zmq",
+                  "topic": "kv-events",
+                  "endpoint": "tcp://*:5571",
+                  "enable_kv_cache_events": true
+                }' \
+              --enable-expert-parallel \
+              --enable-prefix-caching \
+              --enable-chunked-prefill \
+              --no-scheduler-reserve-full-isl \
+              --speculative-config '{
+                  "method": "mtp",
+                  "num_speculative_tokens": 2
+                }'

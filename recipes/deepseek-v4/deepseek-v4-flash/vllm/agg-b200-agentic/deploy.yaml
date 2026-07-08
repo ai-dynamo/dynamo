@@ -1,0 +1,105 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-flash-agg-b200-agentic
+spec:
+  backendFramework: vllm
+  pvcs:
+  - name: model-cache
+    create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
+          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+          workingDir: /workspace
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            DYN_ROUTER_MODE=kv python3 -m dynamo.frontend --trust-remote-code
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      envFromSecret: hf-token-secret
+      replicas: 1
+      volumeMounts:
+      - name: model-cache
+        mountPoint: /model-cache
+      resources:
+        requests:
+          gpu: "4"
+        limits:
+          gpu: "4"
+      extraPodSpec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        mainContainer:
+          # TODO(post-PR): swap for the Dynamo CI deepseek-v4 vllm-runtime tag once built.
+          image: nvcr.io/nvstaging/nim/sungsooh:dsv4-dynamo-vllm-cu130-v0240-dynmain-4a8c55b3-nopatch-20260702
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_CACHE
+            value: /model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_SKIP_P2P_CHECK
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            python3 -m dynamo.vllm \
+              --model nvidia/DeepSeek-V4-Flash-NVFP4 \
+              --served-model-name nvidia/DeepSeek-V4-Flash-NVFP4 \
+              --trust-remote-code \
+              --tensor-parallel-size 4 \
+              --kv-cache-dtype fp8 \
+              --block-size 256 \
+              --max-num-seqs 64 \
+              --max-num-batched-tokens 16384 \
+              --no-scheduler-reserve-full-isl \
+              --gpu-memory-utilization 0.92 \
+              --max-model-len 1048576 \
+              --compilation-config '{
+                  "cudagraph_mode": "FULL_AND_PIECEWISE",
+                  "custom_ops": [
+                    "all"
+                  ],
+                  "cudagraph_capture_sizes": [
+                    1,
+                    2,
+                    4,
+                    8,
+                    16,
+                    32,
+                    40,
+                    48,
+                    52,
+                    56,
+                    60,
+                    64
+                  ],
+                  "max_cudagraph_capture_size": 64
+                }' \
+              --attention-config '{
+                  "use_fp4_indexer_cache": true
+                }' \
+              --moe-backend flashinfer_trtllm \
+              --tokenizer-mode deepseek_v4 \
+              --dyn-tool-call-parser deepseek_v4 \
+              --dyn-reasoning-parser deepseek_v4

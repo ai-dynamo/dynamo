@@ -22,8 +22,6 @@ spec:
             - secretRef:
                 name: hf-token-secret
           env:
-            - name: MODEL_NAME
-              value: deepseek-ai/DeepSeek-V4-Pro
             - name: HF_HOME
               value: /model-store
             # Uses up to 64 GB RAM for XET buffers; set "0" on low-memory nodes (8 GB cap): https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
@@ -33,7 +31,9 @@ spec:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub==1.11.0
-              hf download $MODEL_NAME
+              # Remove the download that does not apply to your SKU:
+              hf download nvidia/DeepSeek-V4-Pro-NVFP4   # B200 recipes (NVFP4)
+              hf download deepseek-ai/DeepSeek-V4-Pro     # H200 recipes (public)
           resources:
             requests:
               cpu: "2"
