@@ -377,11 +377,12 @@ other selected record types.
 - When requests are cancelled or fail, the record is
   still emitted with `payload.response` omitted, so those cases remain
   inspectable. A hard process crash before emission can lose a record.
-- When `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` is set, the record carries
-  the allowlisted HTTP request headers in `payload.http_request_headers`
-  (case-insensitive; omitted when no listed header is present). Headers not on
-  the allowlist are never captured, so sensitive headers such as
-  `authorization` cannot leak into any sink.
+- When `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` is set, allowlisted headers
+  are included only in `event_type=request_payload` records as
+  `payload.http_request_headers` (case-insensitive; omitted when no listed
+  header is present); other record types do not include HTTP headers. These
+  payload records are emitted to every configured sink. Captured values are
+  unredacted, so avoid allowlisting credential-bearing headers.
 - Each `otel` sink record maps to one OTLP `LogRecord`: scope
   `dynamo.request_trace`, body `request_payload`, with attributes `schema`,
   `event_type`, `rid`, `endpoint`, `model`, `streaming`, `payload_complete`,

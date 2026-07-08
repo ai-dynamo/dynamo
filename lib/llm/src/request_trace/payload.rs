@@ -14,17 +14,22 @@ use crate::protocols::openai::chat_completions::{
 /// Context key for the allowlisted headers captured at the HTTP layer.
 pub const HTTP_HEADERS_CONTEXT_KEY: &str = "request_trace.http.request.headers";
 
+/// True when payload records are being captured and a header allowlist is set.
+pub(crate) fn http_header_capture_active() -> bool {
+    if !super::config::capture_enabled() {
+        return false;
+    }
+    let policy = super::policy();
+    policy.emit_request_payload_records() && !policy.http_header_capture_list.is_empty()
+}
+
 /// Collect the allowlisted request headers (case-insensitive, comma-joined on
 /// repeats). `None` unless payload capture is active and the allowlist is non-empty.
 pub fn capture_http_headers(headers: &HeaderMap) -> Option<BTreeMap<String, String>> {
-    if !super::config::capture_enabled() {
+    if !http_header_capture_active() {
         return None;
     }
-    let policy = super::policy();
-    if !policy.emit_request_payload_records() {
-        return None;
-    }
-    capture_http_headers_with_list(headers, &policy.http_header_capture_list)
+    capture_http_headers_with_list(headers, &super::policy().http_header_capture_list)
 }
 
 fn capture_http_headers_with_list(

@@ -3039,12 +3039,13 @@ impl
         // The handle snapshots the pristine request and its arrival time here;
         // the single payload record is published once at stream completion
         // (or with an empty response on cancel/timeout), off the request path.
-        let payload_http_headers = if crate::request_trace::is_enabled() {
+        let payload_http_headers = if crate::request_trace::payload::http_header_capture_active() {
             context
-                .get::<std::collections::BTreeMap<String, String>>(
+                .get_optional::<std::collections::BTreeMap<String, String>>(
                     crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
                 )
                 .ok()
+                .flatten()
         } else {
             None
         };

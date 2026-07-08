@@ -509,6 +509,32 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn http_header_capture_list_parses_lowercases_and_defaults_empty() {
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+                    " X-Request-Id, NVCF-Function-Id\tx-tenant ,, ",
+                ),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(
+                    policy.http_header_capture_list,
+                    vec!["x-request-id", "nvcf-function-id", "x-tenant"]
+                );
+            },
+        );
+
+        with_request_trace_env(&[(env_request_trace::DYN_REQUEST_TRACE, "1")], || {
+            let policy = load_from_env();
+            assert!(policy.http_header_capture_list.is_empty());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn empty_record_selector_disables_trace_even_with_sink() {
         with_request_trace_env(
             &[
