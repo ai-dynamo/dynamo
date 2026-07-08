@@ -62,34 +62,72 @@ No action is required for most upgrades — the operator's built-in cert-control
 
 If you need multiple operator instances (e.g., for multi-tenancy), use namespace-scoped deployment:
 
+> **Version and ownership requirement:** Running all operators at the same
+> version is strongly recommended. Exactly one installation in the cluster may
+> enable API ownership. If versions differ, the owner must be one and only one
+> installation running the newest version—even when multiple installations run
+> that newest version. Admission-affecting settings, such as Grove enablement,
+> must also be compatible across installations because the owner defaults and
+> validates resources for every namespace.
+
 ```yaml
-# values.yaml
+# API owner values.yaml
 dynamo-operator:
   namespaceRestriction:
     enabled: true
     targetNamespace: "my-tenant-namespace"  # Optional, defaults to release namespace
+  apiOwnership:
+    enabled: true
+  upgradeCRD: true
 ```
+
+Every other namespaced installation must disable both ownership and CRD
+upgrades:
+
+```yaml
+# API non-owner values.yaml
+dynamo-operator:
+  namespaceRestriction:
+    enabled: true
+  apiOwnership:
+    enabled: false
+  upgradeCRD: false
+```
+
+The owner serves cluster-wide conversion and admission and owns their service
+references and CA bundles. With `upgradeCRD: false`, it still owns conversion
+and admission while CRD schemas are managed externally. Because Helm processes
+the chart's `crds/` directory independently of values, install non-owners with
+`--skip-crds` or use an owner-controlled CRD installation path. An owner using
+`upgradeCRD: false` must also use `--skip-crds` on its initial installation if
+Helm must not bootstrap missing CRDs.
+
+Ownership transfer is manual: install the replacement as a non-owner, disable
+ownership on the current owner, and then enable it on the replacement. There is
+no automatic failover, and admission or conversion can be briefly unavailable
+during the transfer.
 
 ### Validation and Safety
 
-The chart includes built-in validation to prevent all operator conflicts:
+The chart includes validation and a fixed cluster-scoped owner marker:
 
-- **Automatic Detection**: Scans for existing operators (both cluster-wide and namespace-restricted) during installation
+- **Single API Owner**: Only one Helm release can own the fixed API-owner ClusterRole
+- **Flag Consistency**: Rejects `upgradeCRD: true` when API ownership is disabled
 - **Prevents Multiple Cluster-Wide**: Installation will fail if another cluster-wide operator exists
 - **Prevents Mixed Deployments (Type 1)**: Installation will fail if trying to install namespace-restricted operator when cluster-wide exists
 - **Prevents Mixed Deployments (Type 2)**: Installation will fail if trying to install cluster-wide operator when namespace-restricted operators exist
-- **Safe Defaults**: Leader election uses shared ID for proper coordination
+- **Human Version Choice**: Helm cannot determine which image is newest; selecting exactly one owner among the newest-version installations is an administrator responsibility
 
 #### 🚫 **Blocked Conflict Scenarios**
 
 | Existing Operator | New Operator | Status | Reason |
 |-------------------|--------------|---------|--------|
 | None | Cluster-wide | ✅ **Allowed** | No conflicts |
-| None | Namespace-restricted | ✅ **Allowed** | No conflicts |
+| None | Namespace-restricted | ✅ **Allowed** | This installation must be the API owner |
 | Cluster-wide | Cluster-wide | ❌ **Blocked** | Multiple cluster managers |
 | Cluster-wide | Namespace-restricted | ❌ **Blocked** | Cluster-wide already manages target namespace |
 | Namespace-restricted | Cluster-wide | ❌ **Blocked** | Would conflict with existing namespace operators |
-| Namespace-restricted A | Namespace-restricted B (diff ns) | ✅ **Allowed** | Different scopes |
+| Namespace-restricted A | Namespace-restricted B (diff ns) | ✅ **Allowed** | Different scopes; exactly one installation owns the cluster API |
 
 ## 🔧 Configuration
 
@@ -115,7 +153,9 @@ The chart includes built-in validation to prevent all operator conflicts:
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
-| dynamo-operator.upgradeCRD | bool | `true` | Whether to manage CRDs via a pre-install/pre-upgrade hook Job. The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply. |
+| dynamo-operator.apiOwnership | object | `{"enabled":true}` | Cluster-wide Dynamo API ownership settings. |
+| dynamo-operator.apiOwnership.enabled | bool | `true` | Whether this installation owns cluster-wide Dynamo API machinery. Exactly one installation per cluster may enable this. Running all parallel operators at the same version is strongly recommended; if versions differ, exactly one installation at the newest version must be the owner. Admission-affecting settings must also be compatible across installations. |
+| dynamo-operator.upgradeCRD | bool | `true` | Whether the API owner applies bundled CRDs via the operator init container. Requires apiOwnership.enabled=true. Helm's special CRD installation must be disabled separately when this installation must not bootstrap missing CRDs. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port" |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
@@ -167,7 +207,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.failurePolicy | string | `"Fail"` | Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees. |
 | dynamo-operator.webhook.podCheckpointRestoreFailurePolicy | string | `"Ignore"` | Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods. |
 | dynamo-operator.webhook.timeoutSeconds | int | `10` | Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy. |
-| dynamo-operator.webhook.namespaceSelector | object | `{}` | Custom namespace selector for webhook validation. Use this to include or exclude specific namespaces from webhook validation. For CLUSTER-WIDE operators, you can exclude namespaces managed by namespace-restricted operators by using: matchExpressions: [{ key: "dynamo-operator", operator: "NotIn", values: ["namespace-restricted"] }]. For NAMESPACE-RESTRICTED operators, leave empty as it will be auto-configured to match only the operator's namespace. |
+| dynamo-operator.webhook.namespaceSelector | object | `{}` | Must remain empty. The API owner's admission webhooks are cluster-wide so they stay aligned with the cluster-wide CRD schema and conversion implementation. |
 | dynamo-operator.webhook.certManager.enabled | bool | `false` | Whether to use cert-manager for automatic certificate management. Requires cert-manager to be installed in the cluster. When enabled, cert-manager will provision and rotate certificates instead of the operator's built-in cert-controller. |
 | dynamo-operator.webhook.certManager.certificate.duration | string | `"8760h"` | Certificate duration for webhook certificates managed by cert-manager (e.g., "8760h" for 1 year). cert-manager will automatically renew the certificate before it expires. |
 | dynamo-operator.webhook.certManager.certificate.renewBefore | string | `"360h"` | Time before certificate expiration to trigger renewal (e.g., "360h" for 15 days). cert-manager will attempt to renew the certificate when this threshold is reached. |

@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+{{- if .Values.apiOwnership.enabled }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
@@ -26,6 +27,7 @@ metadata:
     app.kubernetes.io/component: webhook
     app.kubernetes.io/created-by: dynamo-operator
     app.kubernetes.io/part-of: dynamo-operator
+    nvidia.com/dynamo-api-owner: "true"
     nvidia.com/dynamo-operator-namespace: {{ .Release.Namespace }}
   {{- include "dynamo-operator.labels" . | nindent 4 }}
   {{- if .Values.webhook.certManager.enabled }}
@@ -47,14 +49,6 @@ webhooks:
       path: /validate-nvidia-com-v1alpha1-dynamocomponentdeployment
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: vdynamocomponentdeployment.kb.io
-  {{- if .Values.webhook.namespaceSelector }}
-  namespaceSelector:
-    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
-  {{- else if .Values.namespaceRestriction.enabled }}
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
-  {{- end }}
   rules:
   - apiGroups:
     - nvidia.com
@@ -81,14 +75,6 @@ webhooks:
       path: /validate/nvidia.com/v1beta1/dynamographdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: vdynamographdeployment.kb.io
-  {{- if .Values.webhook.namespaceSelector }}
-  namespaceSelector:
-    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
-  {{- else if .Values.namespaceRestriction.enabled }}
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
-  {{- end }}
   rules:
   - apiGroups:
     - nvidia.com
@@ -115,14 +101,6 @@ webhooks:
       path: /validate-nvidia-com-v1alpha1-dynamocheckpoint
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: vdynamocheckpoint.kb.io
-  {{- if .Values.webhook.namespaceSelector }}
-  namespaceSelector:
-    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
-  {{- else if .Values.namespaceRestriction.enabled }}
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
-  {{- end }}
   rules:
   - apiGroups:
     - nvidia.com
@@ -149,14 +127,6 @@ webhooks:
       path: /validate-nvidia-com-v1alpha1-dynamomodel
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: vdynamomodel.kb.io
-  {{- if .Values.webhook.namespaceSelector }}
-  namespaceSelector:
-    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
-  {{- else if .Values.namespaceRestriction.enabled }}
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
-  {{- end }}
   rules:
   - apiGroups:
     - nvidia.com
@@ -183,14 +153,6 @@ webhooks:
       path: /validate-nvidia-com-v1beta1-dynamographdeploymentrequest
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: vdynamographdeploymentrequest.kb.io
-  {{- if .Values.webhook.namespaceSelector }}
-  namespaceSelector:
-    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
-  {{- else if .Values.namespaceRestriction.enabled }}
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
-  {{- end }}
   rules:
   - apiGroups:
     - nvidia.com
@@ -216,6 +178,7 @@ metadata:
     app.kubernetes.io/component: webhook
     app.kubernetes.io/created-by: dynamo-operator
     app.kubernetes.io/part-of: dynamo-operator
+    nvidia.com/dynamo-api-owner: "true"
     nvidia.com/dynamo-operator-namespace: {{ .Release.Namespace }}
   {{- include "dynamo-operator.labels" . | nindent 4 }}
   {{- if .Values.webhook.certManager.enabled }}
@@ -237,14 +200,6 @@ webhooks:
       path: /mutate/nvidia.com/v1beta1/dynamographdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: mdynamographdeployment.kb.io
-  {{- if .Values.webhook.namespaceSelector }}
-  namespaceSelector:
-    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
-  {{- else if .Values.namespaceRestriction.enabled }}
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
-  {{- end }}
   rules:
   - apiGroups:
     - nvidia.com
@@ -272,14 +227,6 @@ webhooks:
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   matchPolicy: Exact
   name: mdynamocomponentdeploymentv1beta1.kb.io
-  {{- if .Values.webhook.namespaceSelector }}
-  namespaceSelector:
-    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
-  {{- else if .Values.namespaceRestriction.enabled }}
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
-  {{- end }}
   rules:
   - apiGroups:
     - nvidia.com
@@ -306,14 +253,6 @@ webhooks:
       path: /mutate-nvidia-com-v1beta1-dynamographdeploymentrequest
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: mdynamographdeploymentrequestv1beta1.kb.io
-  {{- if .Values.webhook.namespaceSelector }}
-  namespaceSelector:
-    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
-  {{- else if .Values.namespaceRestriction.enabled }}
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
-  {{- end }}
   rules:
   - apiGroups:
     - nvidia.com
@@ -340,14 +279,6 @@ webhooks:
       path: /mutate-core-v1-pod-checkpoint-restore
   failurePolicy: {{ .Values.webhook.podCheckpointRestoreFailurePolicy | default "Ignore" }}
   name: mpodcheckpointrestore.kb.io
-  {{- if .Values.webhook.namespaceSelector }}
-  namespaceSelector:
-    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
-  {{- else if .Values.namespaceRestriction.enabled }}
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
-  {{- end }}
   rules:
   - apiGroups:
     - ""
@@ -361,3 +292,4 @@ webhooks:
     - pods
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+{{- end }}

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 {{/* Validate installation to prevent conflicts */}}
+{{- include "dynamo-operator.validateAPIOwnership" . -}}
 {{- include "dynamo-operator.validateClusterWideInstallation" . -}}
 {{- include "dynamo-operator.validateConfiguration" . -}}
 {{- include "dynamo-operator.validateDiscoveryBackend" . -}}
@@ -64,7 +65,7 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.upgradeCRD }}
+      {{- if and .Values.apiOwnership.enabled .Values.upgradeCRD }}
       initContainers:
       - name: crd-apply
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}
@@ -81,6 +82,7 @@ spec:
       - args:
         - --config=/etc/dynamo-operator/config.yaml
         - --operator-version={{ .Chart.AppVersion }}
+        - --api-owner={{ .Values.apiOwnership.enabled }}
         command:
         - /manager
         env:

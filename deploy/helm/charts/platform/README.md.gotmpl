@@ -62,34 +62,72 @@ No action is required for most upgrades — the operator's built-in cert-control
 
 If you need multiple operator instances (e.g., for multi-tenancy), use namespace-scoped deployment:
 
+> **Version and ownership requirement:** Running all operators at the same
+> version is strongly recommended. Exactly one installation in the cluster may
+> enable API ownership. If versions differ, the owner must be one and only one
+> installation running the newest version—even when multiple installations run
+> that newest version. Admission-affecting settings, such as Grove enablement,
+> must also be compatible across installations because the owner defaults and
+> validates resources for every namespace.
+
 ```yaml
-# values.yaml
+# API owner values.yaml
 dynamo-operator:
   namespaceRestriction:
     enabled: true
     targetNamespace: "my-tenant-namespace"  # Optional, defaults to release namespace
+  apiOwnership:
+    enabled: true
+  upgradeCRD: true
 ```
+
+Every other namespaced installation must disable both ownership and CRD
+upgrades:
+
+```yaml
+# API non-owner values.yaml
+dynamo-operator:
+  namespaceRestriction:
+    enabled: true
+  apiOwnership:
+    enabled: false
+  upgradeCRD: false
+```
+
+The owner serves cluster-wide conversion and admission and owns their service
+references and CA bundles. With `upgradeCRD: false`, it still owns conversion
+and admission while CRD schemas are managed externally. Because Helm processes
+the chart's `crds/` directory independently of values, install non-owners with
+`--skip-crds` or use an owner-controlled CRD installation path. An owner using
+`upgradeCRD: false` must also use `--skip-crds` on its initial installation if
+Helm must not bootstrap missing CRDs.
+
+Ownership transfer is manual: install the replacement as a non-owner, disable
+ownership on the current owner, and then enable it on the replacement. There is
+no automatic failover, and admission or conversion can be briefly unavailable
+during the transfer.
 
 ### Validation and Safety
 
-The chart includes built-in validation to prevent all operator conflicts:
+The chart includes validation and a fixed cluster-scoped owner marker:
 
-- **Automatic Detection**: Scans for existing operators (both cluster-wide and namespace-restricted) during installation
+- **Single API Owner**: Only one Helm release can own the fixed API-owner ClusterRole
+- **Flag Consistency**: Rejects `upgradeCRD: true` when API ownership is disabled
 - **Prevents Multiple Cluster-Wide**: Installation will fail if another cluster-wide operator exists
 - **Prevents Mixed Deployments (Type 1)**: Installation will fail if trying to install namespace-restricted operator when cluster-wide exists
 - **Prevents Mixed Deployments (Type 2)**: Installation will fail if trying to install cluster-wide operator when namespace-restricted operators exist
-- **Safe Defaults**: Leader election uses shared ID for proper coordination
+- **Human Version Choice**: Helm cannot determine which image is newest; selecting exactly one owner among the newest-version installations is an administrator responsibility
 
 #### 🚫 **Blocked Conflict Scenarios**
 
 | Existing Operator | New Operator | Status | Reason |
 |-------------------|--------------|---------|--------|
 | None | Cluster-wide | ✅ **Allowed** | No conflicts |
-| None | Namespace-restricted | ✅ **Allowed** | No conflicts |
+| None | Namespace-restricted | ✅ **Allowed** | This installation must be the API owner |
 | Cluster-wide | Cluster-wide | ❌ **Blocked** | Multiple cluster managers |
 | Cluster-wide | Namespace-restricted | ❌ **Blocked** | Cluster-wide already manages target namespace |
 | Namespace-restricted | Cluster-wide | ❌ **Blocked** | Would conflict with existing namespace operators |
-| Namespace-restricted A | Namespace-restricted B (diff ns) | ✅ **Allowed** | Different scopes |
+| Namespace-restricted A | Namespace-restricted B (diff ns) | ✅ **Allowed** | Different scopes; exactly one installation owns the cluster API |
 
 ## 🔧 Configuration
 

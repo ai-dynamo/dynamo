@@ -291,7 +291,7 @@ func TestInjectIntoValidatingWebhooks(t *testing.T) {
 	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "test-validating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
+			Labels: map[string]string{partOfLabel: partOfValue, apiOwnerLabel: "true", operatorNamespaceLabel: testNamespace},
 		},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{
 			{
@@ -361,11 +361,43 @@ func TestInjectIntoValidatingWebhooks_SkipsNonMatchingLabels(t *testing.T) {
 	}
 }
 
+func TestInjectIntoValidatingWebhooks_SkipsNonOwner(t *testing.T) {
+	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "non-owner-validating",
+			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
+		},
+		Webhooks: []admissionregistrationv1.ValidatingWebhook{
+			{
+				Name:                    "test.webhook.io",
+				ClientConfig:            admissionregistrationv1.WebhookClientConfig{},
+				SideEffects:             ptr.To(admissionregistrationv1.SideEffectClassNone),
+				AdmissionReviewVersions: []string{"v1"},
+			},
+		},
+	}
+
+	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc), &configv1alpha1.OperatorConfiguration{})
+	ctx := context.Background()
+
+	if err := injector.injectIntoValidatingWebhooks(ctx, []byte("test-ca")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &admissionregistrationv1.ValidatingWebhookConfiguration{}
+	if err := injector.client.Get(ctx, types.NamespacedName{Name: wc.Name}, updated); err != nil {
+		t.Fatalf("failed to get webhook config: %v", err)
+	}
+	if updated.Webhooks[0].ClientConfig.CABundle != nil {
+		t.Error("non-owner webhook config should not be patched")
+	}
+}
+
 func TestInjectIntoValidatingWebhooks_SkipsDifferentNamespace(t *testing.T) {
 	wc := &admissionregistrationv1.ValidatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "other-ns-validating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: "other-ns"},
+			Labels: map[string]string{partOfLabel: partOfValue, apiOwnerLabel: "true", operatorNamespaceLabel: "other-ns"},
 		},
 		Webhooks: []admissionregistrationv1.ValidatingWebhook{
 			{
@@ -404,7 +436,7 @@ func TestInjectIntoMutatingWebhooks(t *testing.T) {
 	wc := &admissionregistrationv1.MutatingWebhookConfiguration{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "test-mutating",
-			Labels: map[string]string{partOfLabel: partOfValue, operatorNamespaceLabel: testNamespace},
+			Labels: map[string]string{partOfLabel: partOfValue, apiOwnerLabel: "true", operatorNamespaceLabel: testNamespace},
 		},
 		Webhooks: []admissionregistrationv1.MutatingWebhook{
 			{
@@ -479,7 +511,7 @@ func newDGDConversionCRD() *apiextensionsv1.CustomResourceDefinition {
 	)
 }
 
-func TestInjectCRDConversionCA_ReadsCABundleAndPatchesOnlyCABundle(t *testing.T) {
+func TestConfigureCRDConversionWebhook_ConfiguresOwnerServiceAndPreservesPath(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: testNamespace,
@@ -495,10 +527,11 @@ func TestInjectCRDConversionCA_ReadsCABundleAndPatchesOnlyCABundle(t *testing.T)
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	cfg.Server.Webhook.SecretName = testSecretName
+	cfg.Server.Webhook.ServiceName = testServiceName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(secret, crd), cfg)
 	ctx := context.Background()
 
-	if err := injector.InjectCRDConversionCA(ctx); err != nil {
+	if err := injector.ConfigureCRDConversionWebhook(ctx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -513,14 +546,14 @@ func TestInjectCRDConversionCA_ReadsCABundleAndPatchesOnlyCABundle(t *testing.T)
 	if updated.Spec.Conversion.Strategy != apiextensionsv1.WebhookConverter {
 		t.Errorf("expected Webhook strategy, got %s", updated.Spec.Conversion.Strategy)
 	}
-	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Name != testManifestServiceName {
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Name != testServiceName {
 		t.Errorf("expected service name %s, got %s",
-			testManifestServiceName,
+			testServiceName,
 			updated.Spec.Conversion.Webhook.ClientConfig.Service.Name)
 	}
-	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace != testManifestNamespace {
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace != testNamespace {
 		t.Errorf("expected service namespace %s, got %s",
-			testManifestNamespace,
+			testNamespace,
 			updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace)
 	}
 	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Path == nil ||
@@ -533,26 +566,26 @@ func TestInjectCRDConversionCA_ReadsCABundleAndPatchesOnlyCABundle(t *testing.T)
 	}
 }
 
-func TestEnsureCRDConversionCA_ErrorsWhenConversionMissing(t *testing.T) {
+func TestEnsureCRDConversionWebhook_ErrorsWhenConversionMissing(t *testing.T) {
 	crd := newDGDConversionCRD()
 	crd.Spec.Conversion = nil
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
 
-	if err := injector.ensureCRDConversionCA(context.Background(), []byte("test-ca")); err == nil {
+	if err := injector.ensureCRDConversionWebhook(context.Background(), []byte("test-ca")); err == nil {
 		t.Fatal("expected error when conversion webhook is missing")
 	}
 }
 
-func TestInjectCRDConversionCA_WaitsWhenSecretNotFound(t *testing.T) {
+func TestConfigureCRDConversionWebhook_WaitsWhenSecretNotFound(t *testing.T) {
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	cfg.Server.Webhook.SecretName = testSecretName
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
 
-	err := injector.InjectCRDConversionCA(ctx)
+	err := injector.ConfigureCRDConversionWebhook(ctx)
 	if err == nil {
 		t.Fatal("expected context timeout while waiting for missing secret")
 	}
@@ -561,12 +594,12 @@ func TestInjectCRDConversionCA_WaitsWhenSecretNotFound(t *testing.T) {
 	}
 }
 
-func TestEnsureCRDConversionCA_SkipsWhenCRDNotFound(t *testing.T) {
+func TestEnsureCRDConversionWebhook_SkipsWhenCRDNotFound(t *testing.T) {
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	ctx := context.Background()
 
-	if err := injector.ensureCRDConversionCA(ctx, []byte("test-ca")); err != nil {
+	if err := injector.ensureCRDConversionWebhook(ctx, []byte("test-ca")); err != nil {
 		t.Fatalf("expected no error when CRD not found, got: %v", err)
 	}
 }

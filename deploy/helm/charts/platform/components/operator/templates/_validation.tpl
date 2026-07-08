@@ -13,15 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{/*
-Validation to prevent operator conflicts
-With the namespace scope marker lease mechanism, cluster-wide and namespace-restricted
-operators can now coexist safely. The cluster-wide operator automatically excludes
-namespaces that have namespace-restricted operators.
+{{/* Validate the explicit, cluster-wide API ownership contract. */}}
+{{- define "dynamo-operator.validateAPIOwnership" -}}
+{{- if and .Values.upgradeCRD (not .Values.apiOwnership.enabled) -}}
+  {{- fail "VALIDATION ERROR: upgradeCRD=true requires apiOwnership.enabled=true. A non-owner must not install or update cluster-wide CRD schemas." -}}
+{{- end -}}
 
-This validation only prevents:
-1. Multiple cluster-wide operators (would compete for the same resources)
-*/}}
+{{- if and (not .Values.namespaceRestriction.enabled) (not .Values.apiOwnership.enabled) -}}
+  {{- fail "VALIDATION ERROR: A cluster-wide operator must set apiOwnership.enabled=true. API non-owners are supported only for namespace-restricted installations." -}}
+{{- end -}}
+
+{{- if not (empty .Values.webhook.namespaceSelector) -}}
+  {{- fail "VALIDATION ERROR: webhook.namespaceSelector must be empty. The single API owner must serve admission cluster-wide so it stays aligned with the cluster-wide CRD schema and conversion implementation." -}}
+{{- end -}}
+
+{{- if .Values.apiOwnership.enabled -}}
+  {{- $ownerRoleName := include "dynamo-operator.apiOwnerRoleName" . -}}
+  {{- $existingOwner := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" $ownerRoleName -}}
+  {{- if $existingOwner -}}
+    {{- $annotations := $existingOwner.metadata.annotations | default dict -}}
+    {{- $existingRelease := index $annotations "meta.helm.sh/release-name" | default "unknown" -}}
+    {{- $existingNamespace := index $annotations "meta.helm.sh/release-namespace" | default "unknown" -}}
+    {{- if or (ne $existingRelease .Release.Name) (ne $existingNamespace .Release.Namespace) -}}
+      {{- fail (printf "VALIDATION ERROR: API ownership is already held by Helm release '%s' in namespace '%s' (ClusterRole: %s). Exactly one operator installation in the cluster may set apiOwnership.enabled=true. Running parallel operators at the same version is strongly recommended. If versions differ, the owner must be one and only one installation running the newest version." $existingRelease $existingNamespace $ownerRoleName) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Validation to prevent overlapping cluster-wide reconciliation. */}}
 {{- define "dynamo-operator.validateClusterWideInstallation" -}}
 {{- $currentReleaseName := .Release.Name -}}
 
@@ -66,18 +86,15 @@ This validation only prevents:
 {{- end -}}
 
 {{- if $foundExistingClusterWideOperator -}}
-  {{/* Only prevent multiple cluster-wide operators, not namespace-restricted */}}
-  {{- if not .Values.namespaceRestriction.enabled -}}
-    {{- $uninstallCmd := printf "helm uninstall %s" $existingOperatorRelease -}}
-    {{- if $existingOperatorNamespace -}}
-      {{- $uninstallCmd = printf "helm uninstall %s -n %s" $existingOperatorRelease $existingOperatorNamespace -}}
-    {{- end -}}
+  {{- $uninstallCmd := printf "helm uninstall %s" $existingOperatorRelease -}}
+  {{- if $existingOperatorNamespace -}}
+    {{- $uninstallCmd = printf "helm uninstall %s -n %s" $existingOperatorRelease $existingOperatorNamespace -}}
+  {{- end -}}
 
-    {{- if $existingOperatorNamespace -}}
-      {{- fail (printf "VALIDATION ERROR: Found existing cluster-wide Dynamo operator from release '%s' in namespace '%s' (ClusterRole: %s). Only one cluster-wide Dynamo operator should be deployed per cluster. Either:\n1. Use the existing cluster-wide operator (no need to install another), or\n2. Uninstall the existing cluster-wide operator first: %s\n\nNote: You can install namespace-restricted operators alongside the cluster-wide operator using: --set namespaceRestriction.enabled=true" $existingOperatorRelease $existingOperatorNamespace $existingOperatorRoleName $uninstallCmd) -}}
-    {{- else -}}
-      {{- fail (printf "VALIDATION ERROR: Found existing cluster-wide Dynamo operator from release '%s' (ClusterRole: %s). Only one cluster-wide Dynamo operator should be deployed per cluster. Either:\n1. Use the existing cluster-wide operator (no need to install another), or\n2. Uninstall the existing cluster-wide operator first: %s\n\nNote: You can install namespace-restricted operators alongside the cluster-wide operator using: --set namespaceRestriction.enabled=true" $existingOperatorRelease $existingOperatorRoleName $uninstallCmd) -}}
-    {{- end -}}
+  {{- if $existingOperatorNamespace -}}
+    {{- fail (printf "VALIDATION ERROR: Found existing cluster-wide Dynamo operator from release '%s' in namespace '%s' (ClusterRole: %s). Cluster-wide and namespace-restricted operators must not be mixed because the cluster-wide reconcilers do not exclude namespaces managed by other operators. Uninstall the existing cluster-wide operator first: %s" $existingOperatorRelease $existingOperatorNamespace $existingOperatorRoleName $uninstallCmd) -}}
+  {{- else -}}
+    {{- fail (printf "VALIDATION ERROR: Found existing cluster-wide Dynamo operator from release '%s' (ClusterRole: %s). Cluster-wide and namespace-restricted operators must not be mixed because the cluster-wide reconcilers do not exclude namespaces managed by other operators. Uninstall the existing cluster-wide operator first: %s" $existingOperatorRelease $existingOperatorRoleName $uninstallCmd) -}}
   {{- end -}}
 {{- end -}}
 

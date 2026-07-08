@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: API ownership deployment
+templates:
+  - charts/dynamo-operator/templates/deployment.yaml
+  - charts/dynamo-operator/templates/operator-config.yaml
+tests:
+  - it: enables API ownership and CRD upgrades by default
+    template: charts/dynamo-operator/templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --api-owner=true
+        documentSelector:
+          path: kind
+          value: Deployment
+      - exists:
+          path: spec.template.spec.initContainers
+        documentSelector:
+          path: kind
+          value: Deployment
+
+  - it: disables cluster API mutation for a namespaced non-owner
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.apiOwnership.enabled: false
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --api-owner=false
+        documentSelector:
+          path: kind
+          value: Deployment
+      - notExists:
+          path: spec.template.spec.initContainers
+        documentSelector:
+          path: kind
+          value: Deployment
+
+  - it: keeps API ownership when CRD schemas are externally managed
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --api-owner=true
+        documentSelector:
+          path: kind
+          value: Deployment
+      - notExists:
+          path: spec.template.spec.initContainers
+        documentSelector:
+          path: kind
+          value: Deployment
+
+  - it: rejects CRD upgrades by a non-owner
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.apiOwnership.enabled: false
+      dynamo-operator.upgradeCRD: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "upgradeCRD=true requires apiOwnership.enabled=true"
+
+  - it: rejects a cluster-wide API non-owner
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.apiOwnership.enabled: false
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - failedTemplate:
+          errorPattern: "A cluster-wide operator must set apiOwnership.enabled=true"
+
+  - it: rejects namespace-scoped admission
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.webhook.namespaceSelector.matchLabels.tenant: selected
+    asserts:
+      - failedTemplate:
+          errorPattern: "webhook.namespaceSelector must be empty"

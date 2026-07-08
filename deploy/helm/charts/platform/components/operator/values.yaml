@@ -16,9 +16,22 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# Whether to apply CRDs via an init container on the operator Deployment.
-# Uses server-side apply with the bundled /crd-apply binary.
-# Set to false if CRDs are managed externally (e.g., via GitOps or a separate pipeline).
+# -- Cluster-wide Dynamo API ownership settings.
+apiOwnership:
+  # -- Whether this installation owns the cluster-wide Dynamo API machinery: CRD
+  # conversion, admission webhooks, service references, CA bundles, and the RBAC
+  # needed to manage them. Exactly one operator installation in a cluster may set
+  # this to true. When multiple operators run, using the same operator version for
+  # all installations is strongly recommended. If versions differ, exactly one
+  # installation running the newest version must be the API owner. Admission-
+  # affecting settings must also be compatible across installations.
+  enabled: true
+
+# -- Whether the API owner applies bundled CRDs via an init container on the
+# operator Deployment. Uses server-side apply with the bundled /crd-apply
+# binary. Set to false if schemas are managed externally. This cannot be true
+# when apiOwnership.enabled is false. Helm's special CRD installation must be
+# disabled separately when this installation must not bootstrap missing CRDs.
 upgradeCRD: true
 
 featureGates:
@@ -218,17 +231,8 @@ webhook:
   # Timeout for webhook calls (in seconds)
   timeoutSeconds: 10
 
-  # Namespace selector for webhooks
-  # Use this to exclude certain namespaces from validation
-  #
-  # For CLUSTER-WIDE operators: Exclude namespaces with namespace-restricted operators
-  # namespaceSelector:
-  #   matchExpressions:
-  #   - key: dynamo-operator
-  #     operator: NotIn
-  #     values: ["namespace-restricted"]
-  #
-  # For NAMESPACE-RESTRICTED operators: Leave empty (auto-configured)
+  # Must remain empty. The API owner's admission webhooks are cluster-wide so
+  # they remain aligned with the cluster-wide CRD schema and conversion.
   namespaceSelector: {}
 
   # cert-manager integration (optional, alternative to built-in cert-controller)

@@ -179,9 +179,12 @@ func main() {
 
 	var configFile string
 	var operatorVersion string
+	var apiOwner bool
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
+	flag.BoolVar(&apiOwner, "api-owner", true,
+		"Own cluster-wide CRD conversion, admission, and CA configuration")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -631,7 +634,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := registerWebhookHandlers(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
+	if err := registerWebhookHandlers(mgr, directClient, operatorCfg, runtimeConfig, operatorVersion); err != nil {
 		setupLog.Error(err, "failed to register webhooks")
 		os.Exit(1)
 	}
@@ -639,25 +642,29 @@ func main() {
 	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS
 	// secrets before this point. Auto mode can therefore patch admission and
 	// conversion CAs immediately; manual mode waits for externally provided
-	// ca.crt and only patches conversion, leaving admission CA management
-	// out-of-band.
-	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
-	if err != nil {
-		setupLog.Error(err, "unable to create CA bundle injector")
-		os.Exit(1)
-	}
-	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-		if err := caInjector.InjectAll(mainCtx); err != nil {
-			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
+	// ca.crt and configures the conversion service and CA, leaving admission CA
+	// management out-of-band.
+	if apiOwner {
+		caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
+		if err != nil {
+			setupLog.Error(err, "unable to create CA bundle injector")
 			os.Exit(1)
+		}
+		if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
+			if err := caInjector.InjectAll(mainCtx); err != nil {
+				setupLog.Error(err, "failed to configure cluster-wide API webhooks")
+				os.Exit(1)
+			}
+		} else {
+			// Manual mode gets webhook CA material out-of-band. Missing ca.crt
+			// blocks startup instead of running with unauthenticated conversion.
+			if err := caInjector.ConfigureCRDConversionWebhook(mainCtx); err != nil {
+				setupLog.Error(err, "failed to configure CRD conversion webhook")
+				os.Exit(1)
+			}
 		}
 	} else {
-		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
-		// blocks startup instead of running with unauthenticated conversion.
-		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
-			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
-			os.Exit(1)
-		}
+		setupLog.Info("API ownership disabled; skipping cluster-wide CRD and admission configuration")
 	}
 
 	// mgr.Start reads tls.crt and tls.key from the projected Secret volume
@@ -793,6 +800,7 @@ func registerControllers(
 
 func registerWebhookHandlers(
 	mgr ctrl.Manager,
+	webhookClient client.Client,
 	operatorCfg *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
 	operatorVersion string,
@@ -891,7 +899,9 @@ func registerWebhookHandlers(
 
 	setupLog.Info("Registering mutation webhooks")
 
-	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(mgr.GetClient(), operatorCfg)
+	// The API owner's admission is cluster-wide even when its controller cache
+	// is namespace-restricted, so webhook reads must bypass that cache.
+	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(webhookClient, operatorCfg)
 	if err := podCheckpointRestoreMutator.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register Pod checkpoint restore mutating webhook: %w", err)
 	}

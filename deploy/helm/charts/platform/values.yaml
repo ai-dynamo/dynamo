@@ -64,8 +64,12 @@ dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 
-  # -- Whether to manage CRDs via a pre-install/pre-upgrade hook Job.
-  # The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply.
+  # -- Cluster-wide Dynamo API ownership settings.
+  apiOwnership:
+    # -- Whether this installation owns cluster-wide Dynamo API machinery. Exactly one installation per cluster may enable this. Running all parallel operators at the same version is strongly recommended; if versions differ, exactly one installation at the newest version must be the owner. Admission-affecting settings must also be compatible across installations.
+    enabled: true
+
+  # -- Whether the API owner applies bundled CRDs via the operator init container. Requires apiOwnership.enabled=true. Helm's special CRD installation must be disabled separately when this installation must not bootstrap missing CRDs.
   upgradeCRD: true
 
   # Environment variables to pass to operator Deployment.
@@ -236,8 +240,7 @@ dynamo-operator:
     # -- Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy.
     timeoutSeconds: 10
 
-    # Namespace selector for webhook scope control
-    # -- Custom namespace selector for webhook validation. Use this to include or exclude specific namespaces from webhook validation. For CLUSTER-WIDE operators, you can exclude namespaces managed by namespace-restricted operators by using: matchExpressions: [{ key: "dynamo-operator", operator: "NotIn", values: ["namespace-restricted"] }]. For NAMESPACE-RESTRICTED operators, leave empty as it will be auto-configured to match only the operator's namespace.
+    # -- Must remain empty. The API owner's admission webhooks are cluster-wide so they stay aligned with the cluster-wide CRD schema and conversion implementation.
     namespaceSelector: {}
 
     # cert-manager integration for automated certificate lifecycle management

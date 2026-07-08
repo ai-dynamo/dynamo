@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: API ownership RBAC
+templates:
+  - charts/dynamo-operator/templates/webhook-rbac.yaml
+tests:
+  - it: gives the owner the fixed cluster-scoped ownership role
+    asserts:
+      - hasDocuments:
+          count: 4
+      - equal:
+          path: metadata.name
+          value: dynamo-operator-api-owner
+        documentIndex: 2
+      - equal:
+          path: metadata.labels["nvidia.com/dynamo-api-owner"]
+          value: "true"
+        documentIndex: 2
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamocheckpoints
+            verbs:
+              - get
+        documentIndex: 2
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - apps
+            resources:
+              - daemonsets
+            verbs:
+              - get
+              - list
+        documentIndex: 2
+
+  - it: withholds cluster-scoped API RBAC from a non-owner
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.apiOwnership.enabled: false
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - hasDocuments:
+          count: 2

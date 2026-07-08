@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: API ownership webhooks
+templates:
+  - charts/dynamo-operator/templates/webhook-configuration.yaml
+tests:
+  - it: renders admission configurations only for the owner
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.labels["nvidia.com/dynamo-api-owner"]
+          value: "true"
+        documentIndex: 0
+      - equal:
+          path: metadata.labels["nvidia.com/dynamo-api-owner"]
+          value: "true"
+        documentIndex: 1
+
+  - it: does not render admission configurations for a non-owner
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.apiOwnership.enabled: false
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: makes namespaced owner admission cluster-wide
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+    asserts:
+      - notExists:
+          path: webhooks[0].namespaceSelector
+        documentIndex: 0
+      - notExists:
+          path: webhooks[0].namespaceSelector
+        documentIndex: 1

@@ -142,6 +142,15 @@ Returns: Error if invalid or missing auth, empty string if valid
 {{- end -}}
 
 {{/*
+The fixed cluster-scoped API owner role doubles as the single-owner marker.
+Keeping the name independent of a Helm release makes concurrent ownership a
+Kubernetes resource conflict instead of a last-writer-wins race.
+*/}}
+{{- define "dynamo-operator.apiOwnerRoleName" -}}
+dynamo-operator-api-owner
+{{- end -}}
+
+{{/*
 Retrieve components docker registry secret name
 */}}
 {{- define "dynamo-operator.componentsDockerRegistrySecretName" -}}
