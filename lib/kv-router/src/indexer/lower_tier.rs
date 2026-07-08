@@ -533,10 +533,12 @@ impl SyncIndexer for LowerTierIndexer {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker(worker_id) => {
+                WorkerTask::RemoveWorker { worker_id, .. } => {
                     self.remove_worker(&mut worker_blocks, worker_id);
                 }
-                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                WorkerTask::RemoveWorkerDpRank {
+                    worker_id, dp_rank, ..
+                } => {
                     self.remove_worker_dp_rank(&mut worker_blocks, worker_id, dp_rank);
                 }
                 WorkerTask::DumpEvents(sender) => {

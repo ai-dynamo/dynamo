@@ -17,7 +17,7 @@ spec:
         # Setup
         ulimit -n 1048576
         ulimit -u 65536
-        apt update && apt install tmux wget curl jq -y
+        apt update && apt install tmux wget curl jq build-essential -y
 
         # Install benchmarking tool
         pip install aiperf==0.10.0

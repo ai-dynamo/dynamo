@@ -146,6 +146,8 @@ Observability:
   `telemetry.engine_trace_kwargs(context)`
 
 Request handling:
+- vLLM image and video inference in aggregated deployments. See
+  [vLLM Multimodal](../features/multimodal/multimodal-vllm.md).
 - Guided decoding — wired per-engine on the request side with
   engine-specific coverage. vLLM (`StructuredOutputsParams`) and
   TRT-LLM (`GuidedDecodingParams`) cover JSON schema / regex / grammar
@@ -166,7 +168,7 @@ Request handling:
 |---------|----------------|
 | Logprob response wire | Legacy handlers extract logprobs onto response chunks (vLLM `_extract_logprobs`, SGLang `_extract_logprobs` in `decode_handler`, TRT-LLM `_extract_logprobs` in `handler_base`); the unified `generate()` loops do not populate `log_probs` / `top_logprobs` / `cum_log_probs` on `GenerateChunk`. vLLM's `build_sampling_params` still passes `output_options.logprobs` to the engine on the unified path, so the engine computes them, but the values are dropped before they reach the chunk. SGLang and TRT-LLM unified `generate()` do not read `output_options.logprobs` at all. |
 | Text-in-text-out mode | Unified hardcodes `ModelInput.Tokens`; no engine-side tokenization or chat templating path |
-| Multimodal | Images / video / embeddings, NIXL embedding transfer, separate encode workers, `ENCODE` disaggregation role |
+| Multimodal parity | vLLM supports aggregated image and video inference, including frontend decoding/transfer and the CPU embedding cache. P/D multimodal execution, separate encode workers, and SGLang/TRT-LLM execution remain unavailable through unified engines. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
@@ -497,6 +499,58 @@ async def cleanup(self) -> None:
         await self._engine.shutdown()
         self._engine = None
 ```
+
+#### Python: Metrics and Prometheus (optional)
+
+Unified backends have two metrics surfaces.
+
+Use `register_prometheus(metrics)` to bridge vendor-prefixed Prometheus
+families into the worker's `/metrics` output. The framework owns the
+`metrics` handle; do not retain it after the method returns.
+
+```python
+from dynamo.common.backend.metrics import register_global_registry
+
+async def register_prometheus(self, metrics):
+    register_global_registry(metrics, engine_prefix="vllm:")
+```
+
+Use `component_metrics_dp_ranks()` plus
+`attach_snapshot_publisher(publisher)` when the engine can push per-rank
+`ComponentSnapshot` values for `dynamo_component_*` gauges and the
+router's `kv_used_blocks` signal:
+
+```python
+from dynamo.common.backend.publisher import ComponentSnapshot
+
+def component_metrics_dp_ranks(self):
+    return [0]
+
+def attach_snapshot_publisher(self, publisher):
+    self._snapshot_publisher = publisher
+
+def _on_stats(self, used_blocks, total_blocks):
+    self._snapshot_publisher.publish(
+        0,
+        ComponentSnapshot(
+            kv_used_blocks=used_blocks,
+            kv_total_blocks=total_blocks,
+            gpu_cache_usage=used_blocks / total_blocks if total_blocks else 0.0,
+            dp_rank=0,
+        ),
+    )
+```
+
+Keep the rank list stable for the engine lifetime. `Worker` invokes
+`attach_snapshot_publisher()` only when the rank list is non-empty and
+`WorkerConfig.enable_kv_routing` is enabled. `register_prometheus()` still
+runs when `enable_kv_routing=False`.
+
+Use the in-tree backends as references: vLLM pushes snapshots from its
+stat logger and bridges `vllm:` / `lmcache:` metrics, SGLang pushes
+leader-node scheduler snapshots and bridges `sglang:` when
+`--enable-metrics` is set, and TRT-LLM pushes snapshots from its stats
+poll thread while bridging `trtllm_` metrics.
 
 #### Python: KV event publishing (optional)
 
@@ -1038,7 +1092,7 @@ inside `dynamo-runtime`:
 
    ```toml
    [toolchain]
-   channel = "1.93.1"
+   channel = "1.96.1"
    ```
 
    Older toolchains fail with `feature edition2024 is required`.

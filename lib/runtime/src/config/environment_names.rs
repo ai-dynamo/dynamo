@@ -307,13 +307,14 @@ pub mod llm {
     pub const DYN_ENABLE_ANTHROPIC_API: &str = "DYN_ENABLE_ANTHROPIC_API";
 
     /// Master switch for the `nvext` extension protocol on the frontend.
-    /// Default `true`. Falsy values (`0` / `false` / `no` / `off`,
-    /// case-insensitive) cause the frontend to drop `request.nvext` at
-    /// handler entry, ignore the routing-override headers
-    /// (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`,
-    /// `x-dynamo-dp-rank`, `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
+    /// The protocol is **enabled by default**; this variable disables it.
+    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) cause
+    /// the frontend to drop `request.nvext` at handler entry, ignore the
+    /// routing-override headers (`x-dynamo-worker-instance-id`,
+    /// `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
+    /// `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
     /// `extra_fields` opt-in.
-    pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
+    pub const DYN_DISABLE_FRONTEND_NVEXT: &str = "DYN_DISABLE_FRONTEND_NVEXT";
 
     /// Ignore unknown OpenAI frontend request fields. Unknown fields are dropped,
     /// not handled; known pass-through fields remain type-validated.
@@ -321,10 +322,11 @@ pub mod llm {
         "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
 
     /// Master switch for the frontend's HTTP admin API surface.
-    /// Default `true`. Falsy values prevent registration of `GET` /
-    /// `POST /busy_threshold`. Inference, metrics, models, health, and
-    /// liveness routes are unaffected.
-    pub const DYN_ENABLE_FRONTEND_ADMIN_API: &str = "DYN_ENABLE_FRONTEND_ADMIN_API";
+    /// The admin API is **enabled by default**; this variable disables it.
+    /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) prevent
+    /// registration of `GET` / `POST /busy_threshold`. Inference, metrics,
+    /// models, health, and liveness routes are unaffected.
+    pub const DYN_DISABLE_FRONTEND_ADMIN_API: &str = "DYN_DISABLE_FRONTEND_ADMIN_API";
 
     /// Strip the Claude Code billing preamble (`x-anthropic-billing-header: ...`)
     /// from the system prompt before forwarding to the target model. The preamble
@@ -396,71 +398,130 @@ pub mod llm {
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
 
-    /// Audit sink configuration
-    pub mod audit {
-        /// Audit sink selection. Comma-separated values: `stderr`, `nats`,
-        /// `jsonl`, `jsonl_gz`. Setting any non-empty value enables audit
-        /// recording.
-        pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
+    /// Forward-pass-metrics trace configuration.
+    pub mod fpm_trace {
+        /// Master switch. Truthy values persist locally produced FPM events.
+        pub const DYN_FPM_TRACE: &str = "DYN_FPM_TRACE";
 
-        /// Force audit emission even when the request `store` flag is `false`.
-        pub const DYN_AUDIT_FORCE_LOGGING: &str = "DYN_AUDIT_FORCE_LOGGING";
+        /// Local gzip JSONL segment prefix. A sanitized producer id is appended
+        /// before the segment index so multiple producers do not share files.
+        pub const DYN_FPM_OUTPUT_PATH: &str = "DYN_FPM_OUTPUT_PATH";
 
-        /// In-process audit bus capacity.
-        pub const DYN_AUDIT_CAPACITY: &str = "DYN_AUDIT_CAPACITY";
+        /// Capture mode: `sampled` (latest event per DP rank each interval) or
+        /// `full` (every event reaching the producer-side trace tap).
+        pub const DYN_FPM_MODE: &str = "DYN_FPM_MODE";
 
-        /// NATS subject the JetStream audit sink publishes to.
-        pub const DYN_AUDIT_NATS_SUBJECT: &str = "DYN_AUDIT_NATS_SUBJECT";
+        /// Sampling interval in milliseconds when `DYN_FPM_MODE=sampled`.
+        pub const DYN_FPM_SAMPLE_INTERVAL_MS: &str = "DYN_FPM_SAMPLE_INTERVAL_MS";
 
-        /// Local output path for audit records.
-        ///
-        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is
-        /// the segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
-        pub const DYN_AUDIT_OUTPUT_PATH: &str = "DYN_AUDIT_OUTPUT_PATH";
+        /// Rotating gzip JSONL threshold in uncompressed bytes.
+        pub const DYN_FPM_JSONL_GZ_ROLL_BYTES: &str = "DYN_FPM_JSONL_GZ_ROLL_BYTES";
 
-        /// JSONL audit sink buffer size in bytes.
-        pub const DYN_AUDIT_JSONL_BUFFER_BYTES: &str = "DYN_AUDIT_JSONL_BUFFER_BYTES";
-
-        /// JSONL audit sink periodic flush interval in milliseconds.
-        pub const DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS: &str = "DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS";
-
-        /// Rotating gzip JSONL audit sink roll threshold in uncompressed bytes.
-        pub const DYN_AUDIT_JSONL_GZ_ROLL_BYTES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_BYTES";
-
-        /// Rotating gzip JSONL audit sink roll threshold in record lines.
-        pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
+        /// Maximum number of gzip JSONL segments retained per producer,
+        /// including the active segment.
+        pub const DYN_FPM_MAX_SEGMENTS: &str = "DYN_FPM_MAX_SEGMENTS";
     }
 
-    /// Per-request replay trace configuration
+    /// Deprecated audit payload logging aliases. Prefer `llm::request_trace`.
+    pub mod audit {
+        /// Deprecated alias for `DYN_REQUEST_TRACE_SINKS`. Legacy values
+        /// `jsonl` and `jsonl_gz` map to the request trace `file` sink.
+        pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
+
+        /// Deprecated migration shim for `DYN_REQUEST_TRACE_RECORDS=request_payload`.
+        pub const DYN_AUDIT_FORCE_LOGGING: &str = "DYN_AUDIT_FORCE_LOGGING";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_CAPACITY`.
+        pub const DYN_AUDIT_CAPACITY: &str = "DYN_AUDIT_CAPACITY";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_NATS_SUBJECT`.
+        pub const DYN_AUDIT_NATS_SUBJECT: &str = "DYN_AUDIT_NATS_SUBJECT";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_PATH`.
+        pub const DYN_AUDIT_OUTPUT_PATH: &str = "DYN_AUDIT_OUTPUT_PATH";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES`.
+        pub const DYN_AUDIT_JSONL_BUFFER_BYTES: &str = "DYN_AUDIT_JSONL_BUFFER_BYTES";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS`.
+        pub const DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS: &str = "DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_ROLL_BYTES`.
+        pub const DYN_AUDIT_JSONL_GZ_ROLL_BYTES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_BYTES";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_ROLL_LINES`.
+        pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES`.
+        pub const DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES: &str = "DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES";
+    }
+
+    /// Request trace and request payload logging configuration.
     pub mod request_trace {
-        /// Master switch. Truthy enables per-request replay tracing.
+        /// Master switch. Truthy enables request trace emission.
         pub const DYN_REQUEST_TRACE: &str = "DYN_REQUEST_TRACE";
 
-        /// Request trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
+        /// Request trace sink selection. Comma-separated values: `file`, `stderr`, `nats`, `otel`.
+        ///
+        /// Legacy values map as follows: `jsonl` => `file` with `jsonl` format,
+        /// `jsonl_gz` => `file` with `jsonl_gz` format, `stderr` => `stderr`,
+        /// `nats` => `nats`, and `otel` => `otel`.
         pub const DYN_REQUEST_TRACE_SINKS: &str = "DYN_REQUEST_TRACE_SINKS";
 
-        /// Local output path for request trace records.
+        /// Local output path for request trace file records.
         ///
-        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
-        /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        /// With `DYN_REQUEST_TRACE_FILE_FORMAT=jsonl`, this is the literal JSONL
+        /// path. With `jsonl_gz`, this is the segment prefix used to derive
+        /// `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_REQUEST_TRACE_FILE_PATH: &str = "DYN_REQUEST_TRACE_FILE_PATH";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_PATH`.
         pub const DYN_REQUEST_TRACE_OUTPUT_PATH: &str = "DYN_REQUEST_TRACE_OUTPUT_PATH";
+
+        /// Request trace file record format. Supported values: `jsonl`, `jsonl_gz`.
+        pub const DYN_REQUEST_TRACE_FILE_FORMAT: &str = "DYN_REQUEST_TRACE_FILE_FORMAT";
 
         /// In-process trace bus capacity.
         pub const DYN_REQUEST_TRACE_CAPACITY: &str = "DYN_REQUEST_TRACE_CAPACITY";
 
-        /// JSONL sink buffer size in bytes.
+        /// Request trace record selection. Comma-separated values: `request_end`,
+        /// `request_payload`, `tool`.
+        pub const DYN_REQUEST_TRACE_RECORDS: &str = "DYN_REQUEST_TRACE_RECORDS";
+
+        /// NATS subject the request trace sink publishes to.
+        pub const DYN_REQUEST_TRACE_NATS_SUBJECT: &str = "DYN_REQUEST_TRACE_NATS_SUBJECT";
+
+        /// Maximum serialized OTEL payload bytes. Oversized request payload
+        /// records emit an incomplete marker payload instead of the full request/response.
+        pub const DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES: &str =
+            "DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES";
+
+        /// Request trace file sink buffer size in bytes.
+        pub const DYN_REQUEST_TRACE_FILE_BUFFER_BYTES: &str = "DYN_REQUEST_TRACE_FILE_BUFFER_BYTES";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES`.
         pub const DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES: &str =
             "DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES";
 
-        /// JSONL sink periodic flush interval in milliseconds.
+        /// Request trace file sink periodic flush interval in milliseconds.
+        pub const DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS: &str =
+            "DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS`.
         pub const DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
             "DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS";
 
-        /// Rotating gzip JSONL sink roll threshold in uncompressed bytes.
+        /// Gzip file sink roll threshold in uncompressed bytes.
+        pub const DYN_REQUEST_TRACE_FILE_ROLL_BYTES: &str = "DYN_REQUEST_TRACE_FILE_ROLL_BYTES";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_ROLL_BYTES`.
         pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES: &str =
             "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES";
 
-        /// Rotating gzip JSONL sink roll threshold in record lines.
+        /// Gzip file sink roll threshold in record lines.
+        pub const DYN_REQUEST_TRACE_FILE_ROLL_LINES: &str = "DYN_REQUEST_TRACE_FILE_ROLL_LINES";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_ROLL_LINES`.
         pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES: &str =
             "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES";
 
@@ -717,9 +778,9 @@ mod tests {
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
-            llm::DYN_ENABLE_FRONTEND_NVEXT,
+            llm::DYN_DISABLE_FRONTEND_NVEXT,
             llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
-            llm::DYN_ENABLE_FRONTEND_ADMIN_API,
+            llm::DYN_DISABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
@@ -745,14 +806,24 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE,
             llm::request_trace::DYN_REQUEST_TRACE_SINKS,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_PATH,
             llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
             llm::request_trace::DYN_REQUEST_TRACE_CAPACITY,
+            llm::request_trace::DYN_REQUEST_TRACE_RECORDS,
+            llm::request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
+            llm::request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_ROLL_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
@@ -823,6 +894,7 @@ mod tests {
 
         // OpenTelemetry vars should start with OTEL_
         assert!(logging::otlp::OTEL_EXPORT_ENABLED.starts_with("OTEL_"));
+        assert!(logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT.starts_with("OTEL_"));
         assert!(logging::otlp::OTEL_SERVICE_NAME.starts_with("OTEL_"));
     }
 }

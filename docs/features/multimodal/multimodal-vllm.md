@@ -51,9 +51,17 @@ cd $DYNAMO_HOME/examples/backends/vllm
 # GPU deployment
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct
 
+# Unified backend
+bash launch/agg_multimodal.sh --unified --model Qwen/Qwen3-VL-2B-Instruct
+
 # XPU deployment
 bash launch/xpu/agg_multimodal_xpu.sh --model Qwen/Qwen3-VL-2B-Instruct
 ```
+
+The unified entry point supports HTTP, data-URL, and decoded image/video input
+in aggregated mode and forwards model processor options such as
+`mm_processor_kwargs`. Separate Encode workers and multimodal P/D remain on the
+legacy entry point until their follow-up changes land.
 
 **Image request:**
 
@@ -113,6 +121,30 @@ curl http://localhost:8000/v1/chat/completions \
       "stream": false
     }' | jq
 ```
+
+### Unified Frontend Processing
+
+The unified worker advertises frontend image-decoding support when
+`--frontend-decoding` is enabled. The Python vLLM frontend can also pre-render
+processor inputs and transfer them to an aggregated worker over shared memory
+or NIXL:
+
+```bash
+# Same-node shared-memory transfer
+DYN_CHAT_PROCESSOR=vllm DYNAMO_MM_TRANSFER=shm \
+  bash launch/agg_multimodal.sh --unified \
+  --model Qwen/Qwen3-VL-2B-Instruct
+
+# NIXL transfer
+DYN_CHAT_PROCESSOR=vllm DYNAMO_MM_TRANSFER=nixl \
+  bash launch/agg_multimodal.sh --unified \
+  --model Qwen/Qwen3-VL-2B-Instruct
+```
+
+The frontend includes the original media references when transfer preparation
+is unavailable or partial. Fully transferred requests omit those references to
+avoid duplicating large inline data URIs in the backend payload. A receiver-side
+failure after a full transfer does not currently have a raw-media fallback.
 
 ### E/PD Serving (Encode + PD)
 
@@ -238,11 +270,14 @@ flowchart LR
 
 ```bash
 bash examples/backends/vllm/launch/agg_multimodal.sh \
+    --unified \
     --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
     --multimodal-embedding-cache-capacity-gb 10
 ```
 
-`dynamo.vllm` automatically configures `ec_both` mode with the `DynamoMultimodalEmbeddingCacheConnector` when the capacity is > 0.
+Both `dynamo.vllm` and the unified vLLM entry point automatically configure
+`ec_both` mode with the `DynamoMultimodalEmbeddingCacheConnector` when the
+capacity is greater than zero.
 
 **Launch with `vllm serve` (standalone, no Dynamo):**
 

@@ -13,6 +13,7 @@ from tests.utils.payloads import (
     ChatPayloadWithLogprobs,
     CompletionPayload,
     CompletionPayloadWithLogprobs,
+    ElasticEPScalePayload,
     EmbeddingPayload,
     GuidedDecodingChatPayload,
     ImagesPayload,
@@ -766,4 +767,28 @@ def anthropic_messages_stream_payload_default(
         expected_log=expected_log or [],
         expected_response=expected_response
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def elastic_ep_scale_payload(
+    new_data_parallel_size: int,
+    content: str = TEXT_PROMPT,
+    max_tokens: int = 64,
+    expected_response: Optional[List[str]] = None,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    timeout: int = 300,
+) -> ElasticEPScalePayload:
+    """Scale the live data-parallel size, then verify a chat still completes."""
+    return ElasticEPScalePayload(
+        body={
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        new_data_parallel_size=new_data_parallel_size,
+        system_port=system_port,
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+        timeout=timeout,
     )

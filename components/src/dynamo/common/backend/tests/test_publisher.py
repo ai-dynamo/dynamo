@@ -85,6 +85,233 @@ async def test_register_prometheus_default_is_noop():
     assert await _MinimalEngine().register_prometheus(metrics=object()) is None
 
 
+def test_vllm_stat_logger_pushes_component_snapshot_to_publisher():
+    mod = pytest.importorskip(
+        "dynamo.vllm.llm_engine", reason="vLLM backend dependencies not installed"
+    )
+
+    published: list[tuple[int, ComponentSnapshot]] = []
+    publisher = SimpleNamespace(
+        publish=lambda rank, snap: published.append((rank, snap))
+    )
+    factory = mod._UnifiedStatLoggerFactory()
+    factory.snapshot_publisher = publisher
+    factory.num_gpu_blocks = 100
+    logger = factory(vllm_config=object(), dp_rank=3)
+
+    logger.record(
+        SimpleNamespace(
+            kv_cache_usage=0.25,
+            prefix_cache_stats=SimpleNamespace(hits=3, queries=4),
+        ),
+        iteration_stats=None,
+    )
+
+    assert len(published) == 1
+    rank, snapshot = published[0]
+    assert rank == 3
+    assert snapshot == ComponentSnapshot(
+        kv_used_blocks=25,
+        kv_total_blocks=100,
+        gpu_cache_usage=0.25,
+        kv_cache_hit_rate=0.75,
+        dp_rank=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_vllm_metrics_hooks_cover_dp_ranks_and_prometheus(monkeypatch):
+    mod = pytest.importorskip(
+        "dynamo.vllm.llm_engine", reason="vLLM backend dependencies not installed"
+    )
+
+    calls: list[tuple[object, dict]] = []
+    monkeypatch.setattr(
+        mod,
+        "register_global_registry",
+        lambda metrics, **kwargs: calls.append((metrics, kwargs)),
+    )
+
+    engine = mod.VllmLLMEngine.__new__(mod.VllmLLMEngine)
+    engine._dp_range = (2, 3)
+    engine._stat_logger_factory = mod._UnifiedStatLoggerFactory()
+    engine.engine_args = SimpleNamespace(disable_log_stats=False)
+
+    assert engine.component_metrics_dp_ranks() == [2, 3, 4]
+
+    publisher = object()
+    engine.attach_snapshot_publisher(publisher)
+    assert engine._stat_logger_factory.snapshot_publisher is publisher
+
+    metrics = object()
+    await engine.register_prometheus(metrics)
+    assert calls == [
+        (
+            metrics,
+            {
+                "engine_prefix": "vllm:",
+                "multiproc_only_prefixes": ["lmcache:"],
+            },
+        )
+    ]
+
+    engine.engine_args.disable_log_stats = True
+    calls.clear()
+    await engine.register_prometheus(metrics)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_sglang_metrics_hooks_are_leader_only_and_register_prometheus(
+    monkeypatch,
+):
+    mod = pytest.importorskip(
+        "dynamo.sglang.llm_engine", reason="SGLang backend dependencies not installed"
+    )
+    prometheus_client = pytest.importorskip("prometheus_client")
+    from prometheus_client import multiprocess as prometheus_multiprocess
+
+    class FakeRegistry:
+        pass
+
+    collector_registries: list[FakeRegistry] = []
+    register_calls: list[tuple[object, object, list[str]]] = []
+
+    monkeypatch.setattr(prometheus_client, "CollectorRegistry", FakeRegistry)
+    monkeypatch.setattr(
+        prometheus_multiprocess,
+        "MultiProcessCollector",
+        lambda registry: collector_registries.append(registry),
+    )
+
+    from dynamo.common.backend import metrics as metrics_mod
+
+    monkeypatch.setattr(
+        metrics_mod,
+        "register_engine_registry",
+        lambda metrics, registry, prefix_filters: register_calls.append(
+            (metrics, registry, prefix_filters)
+        ),
+    )
+
+    engine = mod.SglangLLMEngine.__new__(mod.SglangLLMEngine)
+    engine.server_args = SimpleNamespace(
+        dp_size=8,
+        enable_dp_attention=True,
+        nnodes=2,
+        node_rank=0,
+        enable_metrics=True,
+    )
+
+    assert engine.component_metrics_dp_ranks() == [0, 1, 2, 3]
+
+    publisher = object()
+    engine.attach_snapshot_publisher(publisher)
+    assert engine._snapshot_publisher is publisher
+
+    metrics = object()
+    await engine.register_prometheus(metrics)
+    assert len(collector_registries) == 1
+    assert register_calls == [(metrics, collector_registries[0], ["sglang:"])]
+
+    engine.server_args.node_rank = 1
+    assert engine.component_metrics_dp_ranks() == []
+
+    engine.server_args.enable_metrics = False
+    collector_registries.clear()
+    register_calls.clear()
+    await engine.register_prometheus(metrics)
+    assert collector_registries == []
+    assert register_calls == []
+
+
+@pytest.mark.asyncio
+async def test_trtllm_metrics_hooks_cover_attention_dp_and_prometheus(monkeypatch):
+    mod = pytest.importorskip(
+        "dynamo.trtllm.llm_engine",
+        reason="TensorRT-LLM backend dependencies not installed",
+    )
+
+    calls: list[tuple[object, dict]] = []
+    monkeypatch.setattr(
+        mod,
+        "register_global_registry",
+        lambda metrics, **kwargs: calls.append((metrics, kwargs)),
+    )
+
+    engine = mod.TrtllmLLMEngine.__new__(mod.TrtllmLLMEngine)
+    engine._attention_dp_size = 3
+    engine._snapshot_publisher = None
+
+    assert engine.component_metrics_dp_ranks() == [0, 1, 2]
+
+    publisher = object()
+    engine.attach_snapshot_publisher(publisher)
+    assert engine._snapshot_publisher is publisher
+
+    metrics = object()
+    await engine.register_prometheus(metrics)
+    assert calls == [(metrics, {"engine_prefix": "trtllm_"})]
+
+
+def test_trtllm_metrics_poll_loop_publishes_component_snapshots():
+    mod = pytest.importorskip(
+        "dynamo.trtllm.llm_engine",
+        reason="TensorRT-LLM backend dependencies not installed",
+    )
+
+    published: list[tuple[int, ComponentSnapshot]] = []
+    iteration_stats: list[dict] = []
+
+    class FakeLlm:
+        def get_stats(self, timeout):
+            engine._publish_stop.set()
+            return [
+                {
+                    "attentionDpRank": 2,
+                    "kvCacheStats": {
+                        "usedNumBlocks": 5,
+                        "maxNumBlocks": 10,
+                        "cacheHitRate": 0.4,
+                    },
+                }
+            ]
+
+    engine = mod.TrtllmLLMEngine.__new__(mod.TrtllmLLMEngine)
+    engine._engine = SimpleNamespace(llm=FakeLlm())
+    engine._publish_stop = mod.threading.Event()
+    engine._snapshot_publisher = SimpleNamespace(
+        publish=lambda rank, snap: published.append((rank, snap))
+    )
+    engine._additional_metrics = None
+    engine._log_iteration_stats = iteration_stats.append
+
+    engine._metrics_poll_loop()
+
+    assert published == [
+        (
+            2,
+            ComponentSnapshot(
+                kv_used_blocks=5,
+                kv_total_blocks=10,
+                gpu_cache_usage=0.5,
+                kv_cache_hit_rate=0.4,
+                dp_rank=2,
+            ),
+        )
+    ]
+    assert iteration_stats == [
+        {
+            "attentionDpRank": 2,
+            "kvCacheStats": {
+                "usedNumBlocks": 5,
+                "maxNumBlocks": 10,
+                "cacheHitRate": 0.4,
+            },
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_vllm_kv_event_sources_return_one_zmq_source_per_dp_rank(monkeypatch):
     mod = pytest.importorskip(
