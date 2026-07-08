@@ -797,7 +797,7 @@ sglang_configs = {
             # and tighten this. Conservative placeholder until then.
             pytest.mark.profiled_vram_gib(24.0),
             pytest.mark.timeout(360),
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
         ],
         model="inclusionAI/LLaDA2.0-mini-preview",
         env={},
