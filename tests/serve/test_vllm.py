@@ -178,6 +178,28 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    # Launch-script smoke test: verifies the vLLM KVBM example
+    # (examples/backends/vllm/launch/agg_kvbm.sh) boots and serves. Complementary
+    # to the functional offload/onboard checks in tests/kvbm_integration/test_kvbm.py.
+    "aggregated_kvbm": VLLMConfig(
+        name="aggregated_kvbm",
+        directory=vllm_dir,
+        script_name="agg_kvbm.sh",
+        marks=[
+            pytest.mark.kvbm,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(3.8),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
+            pytest.mark.timeout(410),
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=2, backend="vllm"),
+        ],
+    ),
     "elastic_ep_unified": VLLMConfig(
         name="elastic_ep_unified",
         directory=vllm_dir,
