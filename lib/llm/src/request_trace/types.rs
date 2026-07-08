@@ -446,7 +446,10 @@ mod tests {
             .as_ref()
             .and_then(|payload| payload.http_request_headers.as_ref())
             .expect("headers survive deserialization");
-        assert_eq!(headers.get("x-request-id").map(String::as_str), Some("abc-123"));
+        assert_eq!(
+            headers.get("x-request-id").map(String::as_str),
+            Some("abc-123")
+        );
 
         let mut bare = record;
         if let Some(payload) = bare.payload.as_mut() {
