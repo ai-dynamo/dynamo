@@ -284,7 +284,7 @@ async fn route_approx_tokens(
 
 async fn request_scores(index: &dyn KvIndexerInterface, tokens: &[u32]) -> OverlapScores {
     index
-        .find_matches_for_request(tokens, None, None)
+        .find_matches_for_request(tokens, None, None, None)
         .await
         .unwrap()
 }
@@ -834,7 +834,7 @@ mod interface_tests {
 
         let tokens: Vec<u32> = (1..=96).collect();
         let scores = index
-            .find_matches_for_request(&tokens, None, None)
+            .find_matches_for_request(&tokens, None, None, None)
             .await
             .unwrap();
         assert!(scores.scores.is_empty());
@@ -856,7 +856,7 @@ mod interface_tests {
         flush_and_settle(index.as_ref()).await;
 
         let scores = index
-            .find_matches_for_request(&tokens, None, None)
+            .find_matches_for_request(&tokens, None, None, None)
             .await
             .unwrap();
         assert_eq!(scores.scores.get(&WorkerWithDpRank::new(0, 0)), Some(&3));
@@ -1533,6 +1533,110 @@ mod lora_tests {
         assert_eq!(scores_b.scores.len(), 1);
         assert!(scores_b.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
         assert!(!scores_b.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
+    }
+
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_different_cache_namespaces_do_not_conflict(variant: &str) {
+        let index = make_indexer(variant);
+        let kv_block_size: u32 = 32;
+
+        let tokens: Vec<u32> = (0..kv_block_size * 2).collect();
+
+        let hashes_a = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                cache_namespace: Some("tenant-a"),
+                ..Default::default()
+            },
+        );
+        let hashes_b = compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size,
+            BlockHashOptions {
+                cache_namespace: Some("tenant-b"),
+                ..Default::default()
+            },
+        );
+
+        assert_ne!(
+            hashes_a, hashes_b,
+            "Different cache namespaces must produce different hashes"
+        );
+
+        let seq_a = compute_seq_hash_for_block(&hashes_a);
+        let seq_b = compute_seq_hash_for_block(&hashes_b);
+
+        index
+            .apply_event(router_event(
+                0,
+                0,
+                0,
+                KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: stored_blocks_with_sequence_hashes(&hashes_a, &seq_a),
+                }),
+            ))
+            .await;
+
+        index
+            .apply_event(router_event(
+                1,
+                0,
+                0,
+                KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: stored_blocks_with_sequence_hashes(&hashes_b, &seq_b),
+                }),
+            ))
+            .await;
+
+        flush_and_settle(index.as_ref()).await;
+
+        let scores_a = index.find_matches(hashes_a.clone()).await.unwrap();
+        assert_eq!(scores_a.scores.len(), 1);
+        assert!(scores_a.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
+        assert!(!scores_a.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+
+        let scores_b = index.find_matches(hashes_b.clone()).await.unwrap();
+        assert_eq!(scores_b.scores.len(), 1);
+        assert!(scores_b.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+        assert!(!scores_b.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
+
+        let request_scores_a = index
+            .find_matches_for_request(&tokens, None, Some("tenant-a"), None)
+            .await
+            .unwrap();
+        assert_eq!(request_scores_a.scores.len(), 1);
+        assert!(
+            request_scores_a
+                .scores
+                .contains_key(&WorkerWithDpRank::new(0, 0))
+        );
+        assert!(
+            !request_scores_a
+                .scores
+                .contains_key(&WorkerWithDpRank::new(1, 0))
+        );
+
+        let request_scores_b = index
+            .find_matches_for_request(&tokens, None, Some("tenant-b"), None)
+            .await
+            .unwrap();
+        assert_eq!(request_scores_b.scores.len(), 1);
+        assert!(
+            request_scores_b
+                .scores
+                .contains_key(&WorkerWithDpRank::new(1, 0))
+        );
+        assert!(
+            !request_scores_b
+                .scores
+                .contains_key(&WorkerWithDpRank::new(0, 0))
+        );
     }
 }
 
