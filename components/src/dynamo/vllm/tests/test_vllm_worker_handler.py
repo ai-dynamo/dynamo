@@ -1662,6 +1662,84 @@ class TestRLAdminRouteHardening:
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
 
     @pytest.mark.asyncio
+    async def test_init_weights_update_group_succeeds_within_timeout(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+
+        resp = await handler.init_weights_update_group(
+            {
+                "engine_rpc": "init_weight_transfer_engine",
+                "init_info": {"master_address": "trainer", "master_port": 29500},
+            }
+        )
+
+        assert resp == {
+            "status": "ok",
+            "message": "Weight update group initialized",
+        }
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "init_weight_transfer_engine",
+            kwargs={
+                "init_info": {
+                    "master_address": "trainer",
+                    "master_port": 29500,
+                }
+            },
+        )
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_timeout_exits_worker(self, monkeypatch):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+
+        rpc_cancelled = asyncio.Event()
+
+        async def blocked_rpc(*_args, **_kwargs):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                rpc_cancelled.set()
+                raise
+
+        handler.engine_client.collective_rpc = AsyncMock(side_effect=blocked_rpc)
+        monkeypatch.setattr(mod, "_RL_INIT_WEIGHTS_UPDATE_GROUP_TIMEOUT_S", 0.01)
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        with pytest.raises(SystemExit) as exc_info:
+            await handler.init_weights_update_group(
+                {"engine_rpc": "init_weight_transfer_engine"}
+            )
+
+        assert exc_info.value.code == 1
+        assert rpc_cancelled.is_set()
+        handler.runtime.shutdown.assert_called_once_with()
+        exit_mock.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_returns_ordinary_errors(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=RuntimeError("init failed")
+        )
+
+        resp = await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        assert resp == {"status": "error", "message": "init failed"}
+        handler.runtime.shutdown.assert_not_called()
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
     async def test_abort_request_surfaces_deferred_abort_failure(self):
         handler = _make_handler()
         handler.engine_client = MagicMock()
