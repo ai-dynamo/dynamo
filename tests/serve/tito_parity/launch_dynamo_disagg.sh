@@ -24,7 +24,11 @@ export DYN_REQUEST_PLANE=tcp
 # path requires the convolution state dimension to be leading on both workers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
-python -m dynamo.frontend &
+FRONTEND_ARGS=()
+if [[ -n "${DYN_TITO_ROUTER_MODE:-}" ]]; then
+    FRONTEND_ARGS+=(--router-mode "$DYN_TITO_ROUTER_MODE")
+fi
+python -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 
 # Load decode first. Co-resident large models otherwise contend for GPU memory
 # during initialization and can make the second worker fail its free-memory
