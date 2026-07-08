@@ -52,6 +52,33 @@ fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
     let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(unset_labels);
 }
 
+/// Seed zero-valued load gauges for a discovered worker/dp_rank.
+fn seed_worker_load_metrics(worker_id: u64, dp_rank: u32, worker_type: &str) {
+    WORKER_LOAD_METRICS.observe(worker_id, dp_rank, worker_type, 0, 0);
+}
+
+/// Update load gauges from a mode-independent ActiveLoad event.
+fn update_worker_load_metrics(active_load: &ActiveLoad, worker_type: &str) {
+    let worker_id_str = active_load.worker_id.to_string();
+    let dp_rank_str = active_load.dp_rank.to_string();
+    let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
+    let metrics = &*WORKER_LOAD_METRICS;
+
+    if let Some(active_blocks) = active_load.active_decode_blocks {
+        metrics
+            .active_decode_blocks
+            .with_label_values(labels)
+            .set(active_blocks as i64);
+    }
+
+    if let Some(active_tokens) = active_load.active_prefill_tokens {
+        metrics
+            .active_prefill_tokens
+            .with_label_values(labels)
+            .set(active_tokens as i64);
+    }
+}
+
 /// Default value for `max_num_batched_tokens` when the runtime config does not
 /// report it. Set high enough that the frac-based overload check (which multiplies
 /// this value by the threshold fraction) can never fire with realistic loads.
@@ -536,6 +563,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
             let mut known_worker_dp_ranks: HashMap<u64, std::collections::HashSet<u32>> =
                 HashMap::new();
+            let mut known_worker_types: HashMap<u64, &'static str> = HashMap::new();
 
             loop {
                 // Create a future that either reads from kv_metrics or pends forever if unavailable
@@ -572,6 +600,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 // Clean up metrics for both worker types since we don't know which type this worker was
                                 cleanup_worker_metrics(*worker_id, &dp_ranks_vec, WORKER_TYPE_DECODE);
                                 cleanup_worker_metrics(*worker_id, &dp_ranks_vec, WORKER_TYPE_PREFILL);
+                                known_worker_types.remove(worker_id);
                                 tracing::debug!(
                                     "Removed Prometheus metrics for worker {}",
                                     worker_id
@@ -586,6 +615,12 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         // This ensures we track workers from MDCs even if they don't publish ActiveLoad
                         for (lease_id, runtime_config) in runtime_configs.iter() {
                             let mut state = worker_load_states.entry(*lease_id).or_default();
+                            let worker_type = if known_prefill_workers.contains(lease_id) {
+                                WORKER_TYPE_PREFILL
+                            } else {
+                                WORKER_TYPE_DECODE
+                            };
+                            known_worker_types.insert(*lease_id, worker_type);
 
                             let dp_start = runtime_config.data_parallel_start_rank;
                             let dp_end = dp_start + runtime_config.data_parallel_size;
@@ -593,7 +628,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             // Track dp_ranks for this worker (for cleanup when worker disappears)
                             let dp_ranks_set = known_worker_dp_ranks.entry(*lease_id).or_default();
                             for dp_rank in dp_start..dp_end {
-                                dp_ranks_set.insert(dp_rank);
+                                if dp_ranks_set.insert(dp_rank) {
+                                    seed_worker_load_metrics(*lease_id, dp_rank, worker_type);
+                                }
                             }
 
                             // Populate total_blocks for all dp_ranks (they share the same total)
@@ -612,9 +649,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         }
                     }
 
-                    // Handle KV metrics updates (ActiveLoad) - only if subscriber is available
-                    // Note: Prometheus gauges are updated directly by sequence.rs (router's own bookkeeping)
-                    // This branch only updates WorkerLoadState for overload detection thresholds.
+                    // Handle KV metrics updates (ActiveLoad) - only if subscriber is available.
+                    // ActiveLoad is mode-independent, so populate per-worker Prometheus gauges
+                    // here instead of relying only on KV-router sequence bookkeeping.
                     kv_event = kv_event_future => {
                         let Some(event_result) = kv_event else {
                             tracing::debug!("KV metrics stream closed");
@@ -628,12 +665,17 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                         let worker_id = active_load.worker_id;
                         let dp_rank = active_load.dp_rank;
+                        let worker_type = known_worker_types
+                            .get(&worker_id)
+                            .copied()
+                            .unwrap_or(WORKER_TYPE_DECODE);
 
                         // Track known worker/dp_rank combinations for cleanup
                         known_worker_dp_ranks
                             .entry(worker_id)
                             .or_default()
                             .insert(dp_rank);
+                        update_worker_load_metrics(&active_load, worker_type);
 
                         // Snapshot thresholds once per event — rare writes (HTTP endpoint)
                         // mean RwLock contention is effectively zero.
@@ -720,6 +762,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             }
                         }
 
+                        for worker_id in &current_instances {
+                            known_worker_types.insert(*worker_id, WORKER_TYPE_DECODE);
+                        }
                         known_decode_workers = current_instances;
                     }
 
@@ -769,6 +814,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             }
                         }
 
+                        for worker_id in &current_instances {
+                            known_worker_types.insert(*worker_id, WORKER_TYPE_PREFILL);
+                        }
                         known_prefill_workers = current_instances;
                     }
 
@@ -778,6 +826,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         if let Some(ref prefill_client) = *guard {
                             let rx = prefill_client.instance_avail_watcher();
                             known_prefill_workers = rx.borrow().iter().copied().collect();
+                            for worker_id in &known_prefill_workers {
+                                known_worker_types.insert(*worker_id, WORKER_TYPE_PREFILL);
+                            }
                             prefill_instances_rx = Some(rx);
                             tracing::info!(
                                 "KvWorkerMonitor: prefill endpoint watcher activated, tracking {} workers",
@@ -797,8 +848,102 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoadThresholdConfig, WorkerLoadState};
+    use super::{
+        LoadThresholdConfig, WorkerLoadState, cleanup_worker_metrics, seed_worker_load_metrics,
+        update_worker_load_metrics,
+    };
+    use crate::discovery::WORKER_TYPE_DECODE;
+    use crate::kv_router::metrics::WORKER_LOAD_METRICS;
     use dynamo_kv_router::protocols::ActiveLoad;
+
+    #[test]
+    fn seed_worker_load_metrics_creates_zero_series() {
+        let worker_id = 63_001;
+        cleanup_worker_metrics(worker_id, &[0], WORKER_TYPE_DECODE);
+
+        seed_worker_load_metrics(worker_id, 0, WORKER_TYPE_DECODE);
+
+        let worker_id_str = worker_id.to_string();
+        let labels = &[worker_id_str.as_str(), "0", WORKER_TYPE_DECODE];
+        assert_eq!(
+            WORKER_LOAD_METRICS
+                .active_decode_blocks
+                .with_label_values(labels)
+                .get(),
+            0
+        );
+        assert_eq!(
+            WORKER_LOAD_METRICS
+                .active_prefill_tokens
+                .with_label_values(labels)
+                .get(),
+            0
+        );
+
+        cleanup_worker_metrics(worker_id, &[0], WORKER_TYPE_DECODE);
+    }
+
+    #[test]
+    fn update_worker_load_metrics_updates_present_active_load_fields() {
+        let worker_id = 63_002;
+        cleanup_worker_metrics(worker_id, &[1], WORKER_TYPE_DECODE);
+        seed_worker_load_metrics(worker_id, 1, WORKER_TYPE_DECODE);
+
+        update_worker_load_metrics(
+            &ActiveLoad {
+                worker_id,
+                dp_rank: 1,
+                active_decode_blocks: Some(42),
+                active_prefill_tokens: Some(100),
+                kv_used_blocks: None,
+            },
+            WORKER_TYPE_DECODE,
+        );
+
+        let worker_id_str = worker_id.to_string();
+        let labels = &[worker_id_str.as_str(), "1", WORKER_TYPE_DECODE];
+        assert_eq!(
+            WORKER_LOAD_METRICS
+                .active_decode_blocks
+                .with_label_values(labels)
+                .get(),
+            42
+        );
+        assert_eq!(
+            WORKER_LOAD_METRICS
+                .active_prefill_tokens
+                .with_label_values(labels)
+                .get(),
+            100
+        );
+
+        update_worker_load_metrics(
+            &ActiveLoad {
+                worker_id,
+                dp_rank: 1,
+                active_decode_blocks: None,
+                active_prefill_tokens: Some(7),
+                kv_used_blocks: None,
+            },
+            WORKER_TYPE_DECODE,
+        );
+        assert_eq!(
+            WORKER_LOAD_METRICS
+                .active_decode_blocks
+                .with_label_values(labels)
+                .get(),
+            42
+        );
+        assert_eq!(
+            WORKER_LOAD_METRICS
+                .active_prefill_tokens
+                .with_label_values(labels)
+                .get(),
+            7
+        );
+
+        cleanup_worker_metrics(worker_id, &[1], WORKER_TYPE_DECODE);
+    }
 
     #[test]
     fn load_threshold_config_default_is_not_configured() {
