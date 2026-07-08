@@ -25,7 +25,10 @@ fn test_export_csv() {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/lora_sim_csv");
     fs::create_dir_all(&out_dir).expect("create output dir");
 
-    // Fixed cluster: N=8 backends, K=4 slots → 32 total slots
+    // Fixed cluster: N=8 backends, K=4 resident LoRA slots → 32 total slots. Replica sets are
+    // controller route targets; under pressure they can exceed resident capacity and trigger lazy
+    // backend cache swaps. The exported churn is therefore routing-target churn, not observed GPU
+    // cache load/unload operations.
     let num_backends: usize = 8;
     let slots_per_backend: usize = 4;
     let total_slots = num_backends * slots_per_backend; // 32
@@ -33,7 +36,6 @@ fn test_export_csv() {
     let mut all_runs: Vec<(&str, SimConfig, Vec<LoraLoadSchedule>)> = Vec::new();
 
     // ── 1. Zipf + Poisson scenario: 100 LoRAs, power-law popularity, Poisson arrivals.
-    // avg_total_load = 40 → keeps slot utilization well under 100% on 32 slots.
     // Zipf s=1.0 means top LoRA gets ~19% of traffic, top-5 get ~45%.
     let zipf_total_loras: usize = 100;
     let zipf_s: f64 = 1.0;
@@ -51,7 +53,6 @@ fn test_export_csv() {
         steady_ticks: 0,
         ramp_down_ticks: 0,
         max_load_per_lora: 0,
-        scale_down_cooldown_ticks: 2,
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
@@ -86,7 +87,6 @@ fn test_export_csv() {
         steady_ticks: 0,
         ramp_down_ticks: 0,
         max_load_per_lora: 0,
-        scale_down_cooldown_ticks: 2,
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
@@ -122,7 +122,6 @@ fn test_export_csv() {
         steady_ticks: 0,
         ramp_down_ticks: 0,
         max_load_per_lora: 0,
-        scale_down_cooldown_ticks: 2,
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
@@ -160,7 +159,6 @@ fn test_export_csv() {
         steady_ticks: 0,
         ramp_down_ticks: 0,
         max_load_per_lora: 0,
-        scale_down_cooldown_ticks: 2,
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
@@ -311,14 +309,14 @@ fn test_export_csv() {
         .unwrap();
         writeln!(
             f,
-            "total_loads,{},{},{}",
-            hrw.total_loads, random.total_loads, mcf.total_loads
+            "route_target_additions,{},{},{}",
+            hrw.total_target_additions, random.total_target_additions, mcf.total_target_additions
         )
         .unwrap();
         writeln!(
             f,
-            "total_unloads,{},{},{}",
-            hrw.total_unloads, random.total_unloads, mcf.total_unloads
+            "route_target_removals,{},{},{}",
+            hrw.total_target_removals, random.total_target_removals, mcf.total_target_removals
         )
         .unwrap();
         writeln!(
@@ -361,6 +359,12 @@ fn test_export_csv() {
         writeln!(f, "loras_used,{}", schedules.len()).unwrap();
         writeln!(f, "lifetime_mean,{}", config.lifetime_mean).unwrap();
         writeln!(f, "lifetime_stddev,{:.1}", config.lifetime_stddev).unwrap();
+        writeln!(
+            f,
+            "scale_down_cooldown_ticks,{}",
+            COMPARISON_SCALE_DOWN_COOLDOWN_TICKS
+        )
+        .unwrap();
         writeln!(f, "seed,{}", config.seed).unwrap();
         if *name == "hot_lora_poisson" {
             writeln!(f, "load_model,zipf_poisson").unwrap();

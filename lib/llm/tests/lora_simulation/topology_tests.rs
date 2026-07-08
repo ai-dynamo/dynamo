@@ -73,59 +73,17 @@ fn test_simulation_worker_addition() {
         let workers: Vec<WorkerWithDpRank> = (0..num_workers)
             .map(|i| WorkerWithDpRank::new(i as u64, 0))
             .collect();
-        let total_slots = num_workers * slots_per_worker;
-        let total_load = num_loras * load_per_lora;
         let mut rng = RandomAllocator::new(42);
-
-        let mut worker_slot_usage: HashMap<WorkerWithDpRank, (usize, usize)> = workers
-            .iter()
-            .map(|&w| (w, (0, slots_per_worker)))
+        let active_loads: Vec<_> = (0..num_loras)
+            .map(|i| (format!("lora-{i}"), load_per_lora))
             .collect();
-
-        // Allocate before
-        let mut before: AllocationSnapshot = HashMap::new();
-        for i in 0..num_loras {
-            let name = format!("lora-{}", i);
-            let fraction = load_per_lora as f64 / total_load as f64;
-            let desired = (fraction * total_slots as f64)
-                .ceil()
-                .max(1.0)
-                .min(workers.len() as f64) as usize;
-            let set = rng.compute_replica_set(&name, &workers, desired, &worker_slot_usage);
-            for w in &set {
-                if let Some((used, _)) = worker_slot_usage.get_mut(w) {
-                    *used += 1;
-                }
-            }
-            before.insert(name, set);
-        }
+        let before = compute_random_snapshot(&mut rng, &active_loads, &workers, slots_per_worker);
 
         // Add new worker
         let mut new_workers = workers.clone();
         new_workers.push(WorkerWithDpRank::new(num_workers as u64, 0));
-        let new_total_slots = (num_workers + 1) * slots_per_worker;
-        let mut new_slot_usage: HashMap<WorkerWithDpRank, (usize, usize)> = new_workers
-            .iter()
-            .map(|&w| (w, (0, slots_per_worker)))
-            .collect();
-
-        // Reallocate after
-        let mut after: AllocationSnapshot = HashMap::new();
-        for i in 0..num_loras {
-            let name = format!("lora-{}", i);
-            let fraction = load_per_lora as f64 / total_load as f64;
-            let desired = (fraction * new_total_slots as f64)
-                .ceil()
-                .max(1.0)
-                .min(new_workers.len() as f64) as usize;
-            let set = rng.compute_replica_set(&name, &new_workers, desired, &new_slot_usage);
-            for w in &set {
-                if let Some((used, _)) = new_slot_usage.get_mut(w) {
-                    *used += 1;
-                }
-            }
-            after.insert(name, set);
-        }
+        let after =
+            compute_random_snapshot(&mut rng, &active_loads, &new_workers, slots_per_worker);
 
         let (loads, unloads) = compute_churn(&before, &after);
         (loads, unloads)
@@ -205,11 +163,11 @@ fn test_simulation_worker_addition() {
     println!("  {:->12}  {:->8}  {:->8}  {:->8}", "", "", "", "");
     println!(
         "  {:>12}  {:>8}  {:>8}  {:>8}",
-        "Loads", hrw_churn.0, random_churn.0, mcf_churn.0
+        "Target Adds", hrw_churn.0, random_churn.0, mcf_churn.0
     );
     println!(
         "  {:>12}  {:>8}  {:>8}  {:>8}",
-        "Unloads", hrw_churn.1, random_churn.1, mcf_churn.1
+        "Target Removes", hrw_churn.1, random_churn.1, mcf_churn.1
     );
     println!(
         "  {:>12}  {:>8}  {:>8}  {:>8}",
@@ -311,32 +269,11 @@ fn test_simulation_worker_removal() {
         let workers: Vec<WorkerWithDpRank> = (0..num_workers)
             .map(|i| WorkerWithDpRank::new(i as u64, 0))
             .collect();
-        let total_slots = num_workers * slots_per_worker;
-        let total_load = num_loras * load_per_lora;
         let mut rng = RandomAllocator::new(42);
-
-        let mut worker_slot_usage: HashMap<WorkerWithDpRank, (usize, usize)> = workers
-            .iter()
-            .map(|&w| (w, (0, slots_per_worker)))
+        let active_loads: Vec<_> = (0..num_loras)
+            .map(|i| (format!("lora-{i}"), load_per_lora))
             .collect();
-
-        // Allocate before
-        let mut before: AllocationSnapshot = HashMap::new();
-        for i in 0..num_loras {
-            let name = format!("lora-{}", i);
-            let fraction = load_per_lora as f64 / total_load as f64;
-            let desired = (fraction * total_slots as f64)
-                .ceil()
-                .max(1.0)
-                .min(workers.len() as f64) as usize;
-            let set = rng.compute_replica_set(&name, &workers, desired, &worker_slot_usage);
-            for w in &set {
-                if let Some((used, _)) = worker_slot_usage.get_mut(w) {
-                    *used += 1;
-                }
-            }
-            before.insert(name, set);
-        }
+        let before = compute_random_snapshot(&mut rng, &active_loads, &workers, slots_per_worker);
 
         // Remove worker — allocate on reduced set
         let remaining_workers: Vec<WorkerWithDpRank> = workers
@@ -344,28 +281,12 @@ fn test_simulation_worker_removal() {
             .filter(|w| w.worker_id != removed_worker_id)
             .copied()
             .collect();
-        let new_total_slots = remaining_workers.len() * slots_per_worker;
-        let mut new_slot_usage: HashMap<WorkerWithDpRank, (usize, usize)> = remaining_workers
-            .iter()
-            .map(|&w| (w, (0, slots_per_worker)))
-            .collect();
-
-        let mut after: AllocationSnapshot = HashMap::new();
-        for i in 0..num_loras {
-            let name = format!("lora-{}", i);
-            let fraction = load_per_lora as f64 / total_load as f64;
-            let desired = (fraction * new_total_slots as f64)
-                .ceil()
-                .max(1.0)
-                .min(remaining_workers.len() as f64) as usize;
-            let set = rng.compute_replica_set(&name, &remaining_workers, desired, &new_slot_usage);
-            for w in &set {
-                if let Some((used, _)) = new_slot_usage.get_mut(w) {
-                    *used += 1;
-                }
-            }
-            after.insert(name, set);
-        }
+        let after = compute_random_snapshot(
+            &mut rng,
+            &active_loads,
+            &remaining_workers,
+            slots_per_worker,
+        );
 
         compute_churn(&before, &after)
     };
@@ -455,11 +376,11 @@ fn test_simulation_worker_removal() {
     println!("  {:->12}  {:->8}  {:->8}  {:->8}", "", "", "", "");
     println!(
         "  {:>12}  {:>8}  {:>8}  {:>8}",
-        "Loads", hrw_churn.0, random_churn.0, mcf_churn.0
+        "Target Adds", hrw_churn.0, random_churn.0, mcf_churn.0
     );
     println!(
         "  {:>12}  {:>8}  {:>8}  {:>8}",
-        "Unloads", hrw_churn.1, random_churn.1, mcf_churn.1
+        "Target Removes", hrw_churn.1, random_churn.1, mcf_churn.1
     );
     println!(
         "  {:>12}  {:>8}  {:>8}  {:>8}",

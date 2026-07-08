@@ -40,6 +40,159 @@ fn test_random_allocator_does_not_overbook_full_workers() {
 }
 
 #[test]
+fn test_random_baseline_matches_controller_replica_budget() {
+    // Three equally loaded LoRAs share four slots. The controller's normalized budget is
+    // [2, 1, 1]. Independently applying ceil(load / total_load * slots) would instead request
+    // [2, 2, 2], greedily starve the last LoRA, and compare different demand models.
+    let config = SimConfig {
+        num_backends: 4,
+        slots_per_backend: 1,
+        total_loras: 3,
+        concurrent_loras: 3,
+        total_ticks: 1,
+        ..Default::default()
+    };
+    let schedules: Vec<LoraLoadSchedule> = (0..3)
+        .map(|index| LoraLoadSchedule {
+            lora_name: format!("lora-{index:03}"),
+            active_window: (0, 1),
+            peak_load: 1,
+            ramp_up: 0,
+            steady: 0,
+            ramp_down: 0,
+            per_tick_loads: Some(vec![1]),
+        })
+        .collect();
+
+    let hrw = run_hrw_simulation(&config, &schedules);
+    let random = run_random_simulation(&config, &schedules);
+    let mcf = run_mcf_simulation(&config, &schedules);
+
+    assert_eq!(random.per_tick_replica_dist, hrw.per_tick_replica_dist);
+    assert_eq!(random.per_tick_replica_dist, mcf.per_tick_replica_dist);
+    assert_eq!(random.per_tick_replica_dist[0].get(&1), Some(&2));
+    assert_eq!(random.per_tick_replica_dist[0].get(&2), Some(&1));
+    assert!(!random.per_tick_replica_dist[0].contains_key(&0));
+}
+
+#[test]
+fn test_random_baseline_matches_overflow_routability() {
+    // Three active LoRAs share only two resident slots. All controllers still retain one route
+    // target per LoRA: two budgeted targets plus one soft-overflow fallback target.
+    let config = SimConfig {
+        num_backends: 2,
+        slots_per_backend: 1,
+        total_loras: 3,
+        concurrent_loras: 3,
+        total_ticks: 1,
+        ..Default::default()
+    };
+    let schedules: Vec<LoraLoadSchedule> = (0..3)
+        .map(|index| LoraLoadSchedule {
+            lora_name: format!("lora-{index:03}"),
+            active_window: (0, 1),
+            peak_load: 1,
+            ramp_up: 0,
+            steady: 0,
+            ramp_down: 0,
+            per_tick_loads: Some(vec![1]),
+        })
+        .collect();
+
+    let hrw = run_hrw_simulation(&config, &schedules);
+    let random = run_random_simulation(&config, &schedules);
+    let mcf = run_mcf_simulation(&config, &schedules);
+
+    assert_eq!(random.per_tick_replica_dist, hrw.per_tick_replica_dist);
+    assert_eq!(random.per_tick_replica_dist, mcf.per_tick_replica_dist);
+    assert_eq!(random.per_tick_replica_dist[0].get(&1), Some(&3));
+}
+
+#[test]
+fn test_mcf_simulation_is_repeatable() {
+    let config = SimConfig {
+        num_backends: 8,
+        slots_per_backend: 4,
+        total_loras: 40,
+        concurrent_loras: 0,
+        total_ticks: 80,
+        ramp_ticks: 0,
+        steady_ticks: 0,
+        ramp_down_ticks: 0,
+        max_load_per_lora: 0,
+        lifetime_mean: 0,
+        lifetime_stddev: 0.0,
+        seed: 42,
+    };
+    let schedules =
+        generate_zipf_poisson_schedules(config.total_loras, config.total_ticks, 1.0, 40.0, 42);
+    let expected = run_mcf_simulation(&config, &schedules);
+
+    for iteration in 1..=10 {
+        let actual = run_mcf_simulation(&config, &schedules);
+        assert_eq!(
+            actual.per_tick_churn, expected.per_tick_churn,
+            "MCF routing-target churn changed on identical run {iteration}"
+        );
+        assert_eq!(
+            actual.per_tick_replica_dist, expected.per_tick_replica_dist,
+            "MCF replica distribution changed on identical run {iteration}"
+        );
+    }
+}
+
+#[test]
+fn test_simulation_lora_pool_fits_resident_slots() {
+    // L=32 equals N×K=32, so the active LoRA count can never exceed resident adapter capacity.
+    // Replica factors may still produce more routing targets than resident slots; those are soft
+    // route hints and are measured as routing-target churn rather than physical cache operations.
+    let config = SimConfig {
+        num_backends: 8,
+        slots_per_backend: 4,
+        total_loras: 32,
+        concurrent_loras: 0,
+        total_ticks: 200,
+        ramp_ticks: 0,
+        steady_ticks: 0,
+        ramp_down_ticks: 0,
+        max_load_per_lora: 0,
+        lifetime_mean: 0,
+        lifetime_stddev: 0.0,
+        seed: 42,
+    };
+    let schedules =
+        generate_zipf_poisson_schedules(config.total_loras, config.total_ticks, 1.0, 40.0, 42);
+
+    assert_eq!(schedules.len(), config.total_loras);
+    assert!(config.total_loras <= config.num_backends * config.slots_per_backend);
+    let max_active = (0..config.total_ticks)
+        .map(|tick| {
+            schedules
+                .iter()
+                .filter(|schedule| schedule.load_at_tick(tick) > 0)
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(max_active <= config.num_backends * config.slots_per_backend);
+
+    let hrw = run_hrw_simulation(&config, &schedules);
+    let random = run_random_simulation(&config, &schedules);
+    let mcf = run_mcf_simulation(&config, &schedules);
+
+    println!(
+        "LoRA pool fits slots: L={}, max_active={}, N×K={}",
+        schedules.len(),
+        max_active,
+        config.num_backends * config.slots_per_backend
+    );
+    print_comparison(&hrw, &random, &mcf);
+
+    assert!(hrw.total_churn <= random.total_churn);
+    assert!(mcf.total_churn <= random.total_churn);
+}
+
+#[test]
 fn test_simulation_small_cluster() {
     // Small cluster: 4 backends, 2 slots each, 6 LoRAs, 3 concurrent
     let config = SimConfig {
@@ -52,7 +205,6 @@ fn test_simulation_small_cluster() {
         steady_ticks: 8,
         ramp_down_ticks: 3,
         max_load_per_lora: 10,
-        scale_down_cooldown_ticks: 2,
         ..Default::default()
     };
 
@@ -132,7 +284,6 @@ fn test_simulation_large_cluster() {
         steady_ticks: 15,
         ramp_down_ticks: 5,
         max_load_per_lora: 30,
-        scale_down_cooldown_ticks: 2,
         ..Default::default()
     };
 
@@ -172,7 +323,6 @@ fn test_simulation_steady_state_zero_churn() {
         steady_ticks: 20,
         ramp_down_ticks: 2,
         max_load_per_lora: 10,
-        scale_down_cooldown_ticks: 2,
         ..Default::default()
     };
 
@@ -282,7 +432,6 @@ fn test_simulation_hrw_stability_across_seeds() {
             steady_ticks: 10,
             ramp_down_ticks: 3,
             max_load_per_lora: 15,
-            scale_down_cooldown_ticks: 2,
             seed: seed as u64 * 100 + 7,
             ..Default::default()
         };
@@ -358,7 +507,6 @@ fn test_simulation_load_pattern_visualization() {
         steady_ticks: 6,
         ramp_down_ticks: 3,
         max_load_per_lora: 10,
-        scale_down_cooldown_ticks: 2,
         ..Default::default()
     };
 
