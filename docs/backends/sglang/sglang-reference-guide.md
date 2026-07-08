@@ -29,7 +29,7 @@ Dynamo SGLang uses SGLang's native argument parser -- all SGLang engine argument
 
 ### Dynamo-Specific Arguments
 
-These arguments are added by Dynamo on top of SGLang's native arguments.
+These arguments are added by Dynamo on top of SGLang's native arguments. For the complete field-by-field reference of every Dynamo SGLang flag, default, and environment variable, see [SGLang Configuration](sglang-config-reference.mdx).
 
 | Argument | Env Var | Default | Description |
 |----------|---------|---------|-------------|
@@ -73,7 +73,7 @@ When a client disconnects, Dynamo automatically cancels the in-flight request ac
 
 <Warning>Cancellation during remote prefill in disaggregated mode is not currently supported.</Warning>
 
-For details on the cancellation architecture, see [Request Cancellation](../../fault-tolerance/request-cancellation.md).
+For details on the cancellation architecture, see [Request Cancellation](../../design-docs/request-cancellation.md).
 
 ## Graceful Shutdown
 

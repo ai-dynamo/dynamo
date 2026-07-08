@@ -1,10 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Request Cancellation
+title: Request Cancellation Architecture
 ---
 
 This document describes how Dynamo implements request cancellation to cancel in-flight requests between Dynamo workers. Request cancellation allows in-flight requests to terminate early, saving computational resources that would otherwise be spent on responses that are no longer needed.
+
+This is an internals reference covering the cancellation architecture, the `AsyncEngineContext` trait, and its Python bindings. For the Prometheus metrics that track cancellations, see the [Metrics Catalog](../reference/observability/metrics-catalog.mdx#cancellation-and-rejection).
 
 ## How Cancellation Works
 
@@ -32,57 +34,9 @@ Cancellation propagates through multi-tier request chains via linked `AsyncEngin
 
 ## Metrics
 
-Dynamo exposes Prometheus metrics to monitor request cancellations at both the frontend and runtime layers.
+Dynamo exposes Prometheus metrics to monitor request cancellations at both the frontend (`dynamo_frontend_model_cancellation_total`) and runtime (`dynamo_component_cancellation_total`) layers. For the full field catalog — types, labels, and example output — see [Cancellation and rejection](../reference/observability/metrics-catalog.mdx#cancellation-and-rejection) in the Metrics Catalog.
 
-### Frontend Metric
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `dynamo_frontend_model_cancellation_total` | Counter | Total number of request cancellations detected by the frontend |
-
-#### Labels
-
-| Label | Description | Example Values |
-|-------|-------------|----------------|
-| `model` | The model name from the request | `Qwen/Qwen3-0.6B` |
-| `endpoint` | The API endpoint that received the request | `completions`, `chat_completions`, `embeddings`, `images`, `videos`, `audios`, `responses`, `anthropic_messages`, `tensor` |
-| `request_type` | Whether the request was unary or streaming | `unary`, `stream` |
-
-**Endpoint:** Available on the frontend HTTP service at `/metrics`.
-
-### Runtime Metric
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `dynamo_component_cancellation_total` | Counter | Total number of requests cancelled by the work handler |
-
-This metric uses Dynamo's auto-injected component labels:
-
-| Label | Description | Example Values |
-|-------|-------------|----------------|
-| `dynamo_namespace` | The Dynamo namespace | `dynamo` |
-| `dynamo_component` | The component that handled the request | `backend`, `prefill`, `decode` |
-| `dynamo_endpoint` | The endpoint within the component | `generate` |
-
-The counter uses deduplication logic to ensure that each cancelled request is only counted once, even if both a control message and a socket close are detected for the same request.
-
-Note that this metric records cancellation signals received by the worker, not whether the request was actually aborted at the engine level. It is up to the worker's engine implementation to observe the cancellation (e.g., by checking `is_stopped()`) and terminate processing accordingly.
-
-**Endpoint:** Available on the worker system metrics port at `/metrics` (typically port 9100).
-
-### Example Metrics Output
-
-Frontend metrics (from `/metrics` on the frontend HTTP service):
-```text
-dynamo_frontend_model_cancellation_total{endpoint="chat_completions",model="Qwen/Qwen3-0.6B",request_type="stream"} 5
-dynamo_frontend_model_cancellation_total{endpoint="chat_completions",model="Qwen/Qwen3-0.6B",request_type="unary"} 1
-dynamo_frontend_model_cancellation_total{endpoint="completions",model="Qwen/Qwen3-0.6B",request_type="stream"} 2
-```
-
-Runtime metrics (from `/metrics` on the worker system port):
-```text
-dynamo_component_cancellation_total{dynamo_component="backend",dynamo_endpoint="generate",dynamo_namespace="dynamo"} 8
-```
+Note that the runtime metric records cancellation signals received by the worker, not whether the request was actually aborted at the engine level. It is up to the worker's engine implementation to observe the cancellation (e.g., by checking `is_stopped()`) and terminate processing accordingly.
 
 ## AsyncEngineContext Trait
 

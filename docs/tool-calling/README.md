@@ -18,11 +18,11 @@ Tool calling is controlled using the `tool_choice` and `tools` request
 parameters.
 
 This page covers parser names for the default Dynamo-native path. If Dynamo
-does not list a parser for your model, see
-[Parser Engine Fallback](engine-fallback.md). For how
+does not list a parser for your model, use
+[engine fallback](introduction.mdx#engine-fallback). For how
 `--dyn-tool-call-parser` combines with `--dyn-chat-processor` and
-`--dyn-reasoning-parser` (and which combinations are invalid), see
-[Parser Configuration](parser-configuration.md).
+`--dyn-reasoning-parser` (and which combinations are invalid), see the
+[Introduction](introduction.mdx).
 
 ## Prerequisites
 
@@ -43,7 +43,7 @@ The flag is a worker `args:` entry — `dynamo.vllm`, `dynamo.sglang`, or `dynam
 The table below lists the currently supported tool call parsers in Dynamo's registry. The
 **Upstream name** column shows where the vLLM or SGLang parser name differs
 from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [Parser Engine Fallback](engine-fallback.md)). A blank upstream
+(see [engine fallback](introduction.mdx#engine-fallback)). A blank upstream
 column means the same name works everywhere. `Dynamo-only` means no upstream
 parser exists for this format.
 

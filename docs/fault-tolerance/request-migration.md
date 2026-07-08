@@ -2,175 +2,93 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Migration
+subtitle: Keep in-flight generations alive across worker failures by retrying them on a healthy worker.
 ---
 
 <p align="left">
   <a href="./request-migration.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
 </p>
 
-This document describes how Dynamo implements request migration to handle worker failures gracefully during LLM text generation. Request migration allows in-progress requests to continue on different workers when the original worker becomes unavailable, providing fault tolerance and improved user experience.
+When a worker fails mid-generation, Dynamo can migrate the in-progress request to a healthy worker and continue from the exact point of failure — no tokens lost or duplicated, and no interruption visible to the client. Migration is configured once on the **Frontend** and applies globally to every model it serves.
 
-## Overview
+Migration is **off by default** (`--migration-limit 0`). The steps below turn it on, optionally bound its memory use, and verify it is working.
 
-Request migration is implemented through a Migration operator that sits in the LLM processing pipeline between the Backend operator and the service backend. When a worker fails during request processing, the migration system preserves the partial generation state and recreates the request on a new worker to continue from where the previous worker left off.
+> **How it works:** the Migrator's position in the pipeline, token-state accumulation, and the two failure scenarios it handles are documented in [Request Migration Architecture](../design-docs/request-migration.md).
 
-## Architecture Components
+<Steps toc={true} tocDepth={2}>
 
-### Migrator
+<Step title="Enable migration on the Frontend">
 
-The migration system is integrated into the LLM processing pipeline between the frontend preprocessing and the actual service backends. This positioning allows it to intercept all communication flows and manage failure scenarios transparently.
+Set `--migration-limit N` — the maximum number of times a single request may be migrated to another worker. Configure it on the **Frontend** component, either as an `args:` entry or via the `DYN_MIGRATION_LIMIT` environment variable in `env:`:
 
-Key responsibilities:
-- Intercepts all requests and responses flowing through the pipeline
-- Detects worker failure scenarios through error pattern matching
-- Manages retry logic with configurable migration limits
-- Tracks partial response state for seamless continuation
-
-### Migration Limit Configuration
-
-The migration limit is configured at the **frontend** level and applies globally to all models served by that frontend. This parameter specifies the maximum number of times a request can be migrated to another worker:
-
-- Default behavior: no migration allowed (migration_limit=0)
-- Set via `--migration-limit` in the Frontend `args:`, or `DYN_MIGRATION_LIMIT` in the Frontend `env:` (see [Graceful Shutdown](graceful-shutdown.md#2-enable-request-migration) for the DGD snippet)
-- Applies to all models served by the frontend
-
-### Max Sequence Length Configuration
-
-The max sequence length setting controls how long the migration system will cache token state for a request. Once the total sequence length (prompt + generated tokens) exceeds this limit, migration is disabled for that request and token tracking stops:
-
-- Default behavior: no limit (`--migration-max-seq-len` unset)
-- Set via `--migration-max-seq-len` flag or `DYN_MIGRATION_MAX_SEQ_LEN` environment variable on the frontend
-- Prevents unbounded memory growth from caching long sequences
-- Boundary: exactly at the limit is still migratable; only strictly exceeding it disables migration
-- The check runs both at request initialization (prompt length) and during generation (prompt + output tokens)
-
-## Token State Tracking and Request Migration
-
-The core of the migration system is the ability to preserve and continue partial generations through token state management. This ensures that when a worker fails mid-generation, the new worker can seamlessly continue from the exact point of failure.
-
-### Token Accumulation Process
-
-When a request is being processed and responses are flowing back from a worker, the migration system tracks every token that has been successfully generated:
-
-1. **Initial Request State**: The system starts with the original preprocessed request containing the initial prompt tokens.
-
-2. **Response Tracking**: As each response arrives from the worker, the migration system extracts the newly generated tokens and appends them to the request's token sequence. This creates accumulates all tokens that have been generated.
-
-3. **Token Count Management**: The system also updates the remaining token budget to reflect the number of tokens already generated, ensuring that the total generation stays within the originally requested limits.
-
-### Migration Trigger Scenarios
-
-The migration system handles two distinct failure scenarios:
-
-#### 1. New Request Migration (Initial Connection Failure)
-
-**Scenario**: Worker is unreachable when creating the initial connection.
-
-**Error Pattern**: Communication system reports chosen worker instance is unavailable.
-
-**Migration Process**:
-- Detects connection failure during initial stream setup
-- Decrements migration retry count
-- Attempts to create a new stream with the original request
-- No partial state to preserve since generation hasn't started
-
-#### 2. Ongoing Request Migration (Mid-Stream Disconnection)
-
-**Scenario**: Connection lost during active generation after partial responses have been received.
-
-**Error Pattern**: Stream termination detected before generation completion.
-
-**Migration Process**:
-
-1. **Failure Detection**: The system detects the stream disconnection through error monitoring.
-
-2. **State Preservation**: At this point, the request's token sequence contains both the original prompt tokens and all successfully generated tokens from the failed worker.
-
-3. **New Stream Creation**: A fresh stream is created with the accumulated request state, ensuring the new worker has complete context.
-
-4. **Continuation**: The new worker receives the request with the full token context and continues generation from the exact point where the previous worker left off.
-
-### Seamless Token Flow and Request State Evolution
-
-From the client's perspective, the token stream appears continuous and uninterrupted. The client receives tokens from the first worker until failure occurs, then seamlessly continues receiving tokens from the backup worker without any indication of the underlying migration.
-
-The request state evolves dynamically during processing. Initially, the request contains only the original prompt tokens. As generation proceeds, each successfully generated token is appended to the request's token sequence, creating a growing record of the complete conversation context.
-
-When a migration occurs, this accumulated state is transferred to the new worker, which uses it to reconstruct the complete context. The new worker then continues generation as if it had been processing the request from the beginning, but starting from the current position in the sequence.
-
-The migration is transparent because:
-1. No tokens are lost or duplicated during the transition
-2. The new worker has complete context via the accumulated token sequence
-3. Generation continues from the exact failure point
-4. Response streaming maintains consistent format and timing
-
-This token accumulation mechanism ensures that migrations are truly seamless, preserving all computational work and maintaining generation quality across worker transitions.
-
-## Benefits
-
-1. **Fault Tolerance**: System continues operating during individual worker failures
-2. **Resource Efficiency**: Partial generations are preserved rather than restarted
-3. **Seamless User Experience**: Users experience no interruption during worker failures
-4. **Configurable Behavior**: Migration limits allow tuning based on deployment requirements
-5. **No Token Loss**: Complete preservation of generation state across migrations
-
-## Design Considerations
-
-The migration system is designed with several important architectural considerations:
-
-**Multi-Model Support**: Since a frontend may serve multiple models simultaneously, the migration limit is configured at the frontend level and applies uniformly to all models, simplifying operational management.
-
-**State Management**: The system carefully tracks not only token sequences but also metadata such as remaining token budgets, stop conditions, and sampling parameters to ensure complete state preservation.
-
-**Error Handling**: The migration system distinguishes between different types of failures and applies appropriate recovery strategies for each scenario.
-
-## Monitoring and Metrics
-
-The migration system exposes Prometheus metrics to monitor migration activity. These metrics are available on the frontend's `/metrics` endpoint (default port 8000):
-
-- `dynamo_frontend_model_migration_total`: Counter tracking the total number of request migrations
-  - Labels:
-    - `model`: The model name being served
-    - `migration_type`: Either `new_request` (initial connection failure) or `ongoing_request` (mid-stream disconnection)
-- `dynamo_frontend_model_migration_max_seq_len_exceeded_total`: Counter tracking the number of times migration was disabled because the sequence length exceeded the configured `--migration-max-seq-len`
-  - Labels:
-    - `model`: The model name being served
-
-**Example metrics output:**
-```text
-dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 3
-dynamo_frontend_model_migration_total{migration_type="new_request",model="Qwen/Qwen3-0.6B"} 1
-dynamo_frontend_model_migration_max_seq_len_exceeded_total{model="Qwen/Qwen3-0.6B"} 2
+```yaml
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          env:
+          - name: DYN_MIGRATION_LIMIT
+            value: "3"                 # allow up to 3 migration attempts
 ```
 
-These metrics can be used to:
-- Monitor worker reliability and failure patterns
-- Alert on excessive migration rates indicating infrastructure issues
-- Track the effectiveness of fault tolerance mechanisms
-- Monitor how often `--migration-max-seq-len` is being reached, which may indicate the limit needs adjustment
+The limit applies to all models served by this frontend. A value of `0` (the default) disables migration. Start with `3` — enough to survive transient worker loss without retrying indefinitely.
 
-For more information on Dynamo metrics, see the [Metrics documentation](../observability/metrics.md).
+</Step>
+
+<Step title="Bound memory for long sequences">
+
+Optional. Migration caches token state for each in-flight request so it can be replayed on a new worker. For very long sequences this cache grows, so you can cap it with `--migration-max-seq-len` (or `DYN_MIGRATION_MAX_SEQ_LEN`) on the Frontend:
+
+```yaml
+          env:
+          - name: DYN_MIGRATION_MAX_SEQ_LEN
+            value: "32000"
+```
+
+Once a request's total sequence length (prompt + generated tokens) **strictly exceeds** this limit, migration is disabled for that request and token tracking stops. Exactly at the limit is still migratable. The check runs both at request start (prompt length) and during generation. Leave it unset for no limit.
+
+</Step>
+
+<Step title="Verify migrations">
+
+Migration counters are exposed on the Frontend's `/metrics` endpoint (default port 8000). Port-forward the Frontend and scrape for the migration counter:
+
+```bash
+kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}
+curl -s localhost:8000/metrics | grep dynamo_frontend_model_migration
+```
+
+- `dynamo_frontend_model_migration_total` — total migrations, labeled by `model` and `migration_type` (`new_request` vs `ongoing_request`).
+- `dynamo_frontend_model_migration_max_seq_len_exceeded_total` — times migration was disabled because a request exceeded `--migration-max-seq-len`.
+
+A rising `max_seq_len_exceeded` counter means your limit may be too low for the workload. For full field definitions and labels, see [Migration](../reference/observability/metrics-catalog.mdx#migration) in the Metrics Catalog.
+
+</Step>
+
+</Steps>
 
 ## Known Limitations
 
+Migration is silently skipped for two request types even when `--migration-limit` is greater than 0. Know these before relying on it:
+
 ### Multiple Choices (`n > 1`)
 
-Request migration is **not supported** for OpenAI-compatible requests that ask for multiple generated choices with `n > 1`. Dynamo disables migration for those requests, even when `--migration-limit` is greater than 0.
-
-**Why:** Multi-choice generation maintains separate per-choice output state. Migrating a partially completed request would need to transfer the generated token state, remaining token budget, finish state, and decoder state for each choice independently. The current migration path preserves a single continuation state, so retrying an interleaved `n > 1` request could duplicate or drop choice-specific output.
-
-This limitation does not affect normal single-choice requests where `n` is omitted or set to 1.
+Request migration is **not supported** for OpenAI-compatible requests that ask for multiple generated choices with `n > 1`. Multi-choice generation maintains separate per-choice output state; the current migration path preserves a single continuation state, so retrying an interleaved `n > 1` request could duplicate or drop choice-specific output. This does not affect normal single-choice requests where `n` is omitted or set to 1.
 
 ### Guided Decoding (Structured Output)
 
-Request migration is **not supported** for requests that use guided decoding (structured output / JSON schema). When a worker fails mid-stream during a guided-decoding request, the error is propagated to the client instead of attempting migration.
+Request migration is **not supported** for requests that use guided decoding (structured output / JSON schema). When a worker fails mid-stream, the error is propagated to the client instead of migrating. Inference backends initialize the guided-decoding finite state machine (FSM) fresh for every request and advance it only on newly-generated tokens; a migrated worker replays prior tokens as context but starts the FSM from the schema root, and that mismatch produces corrupted output (typically duplicated or nested JSON). This applies equally to all backends (vLLM, SGLang, TRT-LLM).
 
-**Why:** Inference backends initialize the guided-decoding finite state machine (FSM) fresh for every new request and only advance it on newly-generated tokens, not on context/prompt tokens. When a partially-completed request is migrated to a new worker, the new worker replays the already-generated tokens as context but starts the FSM from the schema root. This mismatch between the token state and FSM state produces corrupted output — typically duplicated or nested JSON.
+## Benefits
 
-This limitation applies equally to all backends (vLLM, SGLang, TRT-LLM).
+Migration preserves partial generations rather than restarting them, so individual worker failures become transparent to clients — the system continues operating with no token loss and no visible interruption, tunable per deployment via the migration limit.
 
-**Future path:** Supporting migration for guided-decoding requests would require serializing and restoring the FSM state across workers, or replaying prior output tokens through the FSM on the new worker. This is tracked as a future enhancement.
+## Related Documentation
 
-## Operational Impact
-
-Request migration fundamentally changes how the system handles failures, moving from a "fail-fast" approach to a "graceful degradation" model. This architectural shift enables higher availability and better resource utilization while maintaining the same external API contract for clients.
+- [Request Migration Architecture](../design-docs/request-migration.md) - Pipeline position, token-state tracking, and failure scenarios
+- [Graceful Shutdown](graceful-shutdown.md) - Draining in-flight requests on planned shutdown
+- [Metrics Catalog](../reference/observability/metrics-catalog.mdx#migration) - Migration metrics

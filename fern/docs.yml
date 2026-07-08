@@ -193,6 +193,17 @@ redirects:
     destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
   - source: "/dynamo/integrations/sglang-hicache"
     destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
+  # Fault Tolerance: internals/testing pages moved from Use Cases into the
+  # Knowledge Base > Design Documents section. Cancellation and testing are no
+  # longer user-facing Use Cases pages.
+  - source: "/dynamo/dev/fault-tolerance/request-cancellation"
+    destination: "/dynamo/dev/design-docs/request-cancellation"
+  - source: "/dynamo/fault-tolerance/request-cancellation"
+    destination: "/dynamo/dev/design-docs/request-cancellation"
+  - source: "/dynamo/dev/fault-tolerance/testing"
+    destination: "/dynamo/dev/design-docs/fault-tolerance-testing"
+  - source: "/dynamo/fault-tolerance/testing"
+    destination: "/dynamo/dev/design-docs/fault-tolerance-testing"
   # Digest moved from /blog to /digest
   - source: "/dynamo/dev/blog/:slug*"
     destination: "/dynamo/dev/digest/:slug*"

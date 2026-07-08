@@ -5,6 +5,13 @@ title: Reference Guide
 subtitle: Features, configuration, and operational details for the TensorRT-LLM backend
 ---
 
+## Argument Reference
+
+The TensorRT-LLM backend accepts Dynamo-specific arguments (model loading, parallelism, batch limits, KV cache, disaggregation, and the experimental diffusion pipeline) plus the cross-cutting Dynamo runtime flags. For the complete field-by-field reference of every flag, default, and environment variable, see:
+
+- [TensorRT-LLM Configuration](trtllm-config-reference.mdx) — the `DYN_TRTLLM_*` backend flags.
+- [Runtime Configuration](../../reference/runtime-config-reference.mdx) — the `DYN_*` flags shared by every backend.
+
 ## Building a Custom Container
 
 The Dynamo TensorRT-LLM image layers Dynamo on top of the upstream `nvcr.io/nvidia/tensorrt-llm/release` container — it does not build TensorRT-LLM from source. To rebuild it locally, pin a different upstream TRT-LLM tag, or plug in a TRT-LLM image you built from source, see the [Building a Custom Container](./trtllm-building-custom-container.md) guide.
@@ -33,7 +40,7 @@ When a user cancels a request (e.g., by disconnecting from the frontend), the re
 | **Aggregated** | ✅ | ✅ |
 | **Disaggregated** | ✅ | ✅ |
 
-For more details, see the [Request Cancellation Architecture](../../fault-tolerance/request-cancellation.md) documentation.
+For more details, see the [Request Cancellation Architecture](../../design-docs/request-cancellation.md) documentation.
 
 ## Multiple Choices (`n`)
 

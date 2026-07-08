@@ -218,18 +218,12 @@ navigation:
           - section: Tool Calling & Reasoning
             slug: parsing
             contents:
-              - page: Overview
-                path: tool-calling/parsing.md
+              - page: Introduction
+                path: tool-calling/introduction.mdx
               - page: Tool Call Parsing
                 path: tool-calling/README.md
               - page: Reasoning Parsing
                 path: reasoning/README.md
-              - page: Parser Engine Fallback
-                path: tool-calling/engine-fallback.md
-              - page: Parser Configuration
-                path: tool-calling/parser-configuration.md
-              - page: Tool Calling Probe Snapshot (1.2)
-                path: tool-calling/release-1.2-probe-snapshot.md
               - page: Troubleshooting Tool Calls
                 path: tool-calling/troubleshooting.md
           - page: Fastokens Tokenizer
@@ -242,14 +236,10 @@ navigation:
                 path: fault-tolerance/README.md
               - page: Request Migration
                 path: fault-tolerance/request-migration.md
-              - page: Request Cancellation
-                path: fault-tolerance/request-cancellation.md
               - page: Request Rejection
                 path: fault-tolerance/request-rejection.md
               - page: Graceful Shutdown
                 path: fault-tolerance/graceful-shutdown.md
-              - page: Testing
-                path: fault-tolerance/testing.md
           - section: Inference Simulation (DynoSim)
             slug: dynosim
             contents:
@@ -391,6 +381,8 @@ navigation:
                     path: components/router/router-operations.md
                   - page: Router Examples
                     path: components/router/router-examples.md
+                  - page: Global Router Configuration
+                    path: components/router/global-router-config-reference.mdx
                   - page: Standalone Indexer
                     path: components/router/standalone-indexer.md
                   - page: Standalone Slot Tracker
@@ -531,6 +523,8 @@ navigation:
                 path: design-docs/disagg-serving.md
               - page: Distributed Runtime
                 path: design-docs/distributed-runtime.md
+              - page: Mocker Engine Architecture
+                path: design-docs/mocker-architecture.md
               - section: Communication Planes
                 collapsed: true
                 contents:
@@ -540,6 +534,19 @@ navigation:
                     path: design-docs/request-plane.md
                   - page: Event Plane
                     path: design-docs/event-plane.md
+              - section: Fault Tolerance
+                collapsed: true
+                contents:
+                  - page: Request Migration Architecture
+                    path: design-docs/request-migration.md
+                  - page: Request Cancellation Architecture
+                    path: design-docs/request-cancellation.md
+                  - page: Request Rejection Architecture
+                    path: design-docs/request-rejection.md
+                  - page: Graceful Shutdown Architecture
+                    path: design-docs/graceful-shutdown.md
+                  - page: Fault Tolerance Testing
+                    path: design-docs/fault-tolerance-testing.md
       - section: Advanced Customizations
         icon: sliders
         contents:
@@ -650,14 +657,25 @@ navigation:
             path: kubernetes/dcd-reference.mdx
           - page: Full API Reference
             path: kubernetes/api-reference-fern.mdx
+
+      # ==================== Component Configuration ====================
+      - section: Component Configuration
+        icon: sliders
+        contents:
+          - page: Runtime Configuration
+            path: reference/runtime-config-reference.mdx
           - page: Planner Configuration
             path: components/planner/planner-config-reference.mdx
-      # # ==================== Component Configuration ====================
-      # - section: Component Configuration
-      #   icon: sliders
-      #   contents:
-      #     - page: Planner Configuration
-      #       path: components/planner/planner-config-reference.mdx
+          - page: Mocker CLI Reference
+            path: components/mocker/mocker-cli-reference.mdx
+          - page: Global Router Configuration
+            path: components/router/global-router-config-reference.mdx
+          - page: vLLM Configuration
+            path: backends/vllm/vllm-config-reference.mdx
+          - page: SGLang Configuration
+            path: backends/sglang/sglang-config-reference.mdx
+          - page: TensorRT-LLM Configuration
+            path: backends/trtllm/trtllm-config-reference.mdx
 
       # ==================== Observability ====================
       - section: Observability
@@ -700,6 +718,17 @@ navigation:
             path: api/nixl-connect/operation-status.mdx
           - page: RDMA Metadata
             path: api/nixl-connect/rdma-metadata.mdx
+
+      # ==================== Hidden Pages (Reference) ====================
+      # Accessible via direct URL but not shown in the main navigation.
+      - section: Additional Resources
+        hidden: true
+        contents:
+          - page: Tool Calling Probe Snapshot (1.2)
+            path: reference/release-1.2-probe-snapshot.md
+          # -- Kubernetes (hidden sub-pages) --
+          - page: API Reference (K8s)
+            path: kubernetes/api-reference.md
 
   - tab: blog
     layout:
@@ -778,27 +807,4 @@ navigation:
                 path: templates/infrastructure-readme.md
               - page: Integration README
                 path: templates/integration-readme.md
-
-  # - tab: reference
-  #   layout:
-  #     # ==================== Reference ====================
-  #     # Support Matrix + Feature Matrix consolidated into getting-started/compatibility.md
-  #     - section: Reference
-  #       contents:
-  #         - page: DGD Reference
-  #           path: kubernetes/dgd-reference.mdx
-  #         - page: DGDR Reference
-  #           path: kubernetes/dgdr-reference.mdx
-  #         - page: DCD Reference
-  #           path: kubernetes/dcd-reference.mdx 
-  #         - page: Glossary
-  #           path: reference/glossary.md
-
-      # ==================== Hidden Pages (Reference) ====================
-      - section: Additional Resources
-        hidden: true
-        contents:
-          # -- Kubernetes (hidden sub-pages) --
-          - page: API Reference (K8s)
-            path: kubernetes/api-reference.md
   

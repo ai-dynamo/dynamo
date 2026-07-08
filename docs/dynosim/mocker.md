@@ -8,6 +8,8 @@ Mocker is the live simulated engine in DynoSim. It runs as a Dynamo backend, reg
 
 The mocker core is implemented in Rust and models the scheduling, memory management, and timing behavior of production engines. It can use polynomial timing, profile-derived timing, or AIC-backed timing. AIC predicts prefill/decode duration; Mocker still owns the scheduler, KV cache lifecycle, prefix-cache behavior, and request execution model.
 
+This page covers running the live worker. For the flag reference, see the [Mocker CLI Reference](../components/mocker/mocker-cli-reference.mdx); for the engine internals, see [Mocker Engine Architecture](../design-docs/mocker-architecture.md); for offline, GPU-free batch simulation, see [DynoSim Runs](runs.md) and [DynoSim Sweeps](sweeps.md).
+
 ## Overview
 
 The mocker simulates:
@@ -116,172 +118,11 @@ python -m dynamo.mocker \
     --num-workers 4
 ```
 
-## CLI Arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--model-path` | Required | HuggingFace model ID or local path for tokenizer |
-| `--endpoint` | Auto-derived | Dynamo endpoint string. Defaults are namespace-dependent, and prefill workers use a different default endpoint than aggregated/decode workers |
-| `--model-name` | Derived from model-path | Model name for API responses |
-| `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
-| `--block-size` | 64 (`vllm`) / engine-specific | Tokens per KV cache block. For `sglang`, if omitted, the effective page/block size defaults to 1 or to `--sglang-page-size` when provided |
-| `--max-num-seqs` | 256 | Maximum concurrent sequences |
-| `--max-num-batched-tokens` | 8192 | Maximum tokens per batch |
-| `--enable-prefix-caching` | True | Enable prefix caching |
-| `--no-enable-prefix-caching` | - | Disable prefix caching |
-| `--enable-chunked-prefill` | True | Enable chunked prefill |
-| `--no-enable-chunked-prefill` | - | Disable chunked prefill |
-| `--preemption-mode` | `lifo` | Decode eviction policy under memory pressure: `lifo` (vLLM v1 style) or `fifo` |
-| `--speedup-ratio` | 1.0 | Timing speedup factor |
-| `--decode-speedup-ratio` | 1.0 | Decode-only speedup multiplier (e.g. for Eagle speculation) |
-| `--data-parallel-size` | 1 | Number of DP replicas |
-| `--startup-time` | None | Simulated startup delay (seconds) |
-| `--planner-profile-data` | None | Path to either a mocker-format `.npz` file or a profiler results directory |
-| `--num-workers` | 1 | Workers per process |
-| `--reasoning` | None | JSON config for emitting reasoning token spans, with `start_thinking_token_id`, `end_thinking_token_id`, and `thinking_ratio` |
-| `--engine-type` | `vllm` | Engine simulation type: `vllm` or `sglang` |
-| `--sglang-schedule-policy` | `fifo` / `fcfs` | SGLang scheduling policy: `fifo`/`fcfs` (default) or `lpm` (longest prefix match) |
-| `--sglang-page-size` | 1 | SGLang radix-cache page size in tokens. Also becomes the effective block size when `--engine-type sglang` and `--block-size` is omitted |
-| `--sglang-max-prefill-tokens` | 16384 | SGLang max prefill-token budget per batch |
-| `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
-| `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
-| `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
-| `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Opt-in only: default mocker and DynoSim run paths do not use AIC. Requires `aiconfigurator` installed and usable AIC systems/perf data for the requested `system/backend/version` tuple |
-| `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
-| `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
-| `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
-| `--aic-moe-tp-size` | None | MoE tensor parallel size for AIC latency prediction. Required by some MoE models |
-| `--aic-moe-ep-size` | None | MoE expert parallel size for AIC latency prediction. Required by some MoE models |
-| `--aic-attention-dp-size` | None | Attention data parallel size for AIC latency prediction. Required by some MoE models |
-| `--extra-engine-args` | None | Path to a JSON file with mocker configuration; overrides individual CLI arguments |
-| `--stagger-delay` | -1 (auto) | Delay between worker launches (seconds). 0 disables, -1 enables auto mode |
-| `--disaggregation-mode` | `agg` | Worker mode: `agg` (aggregated), `prefill`, or `decode` |
-| `--durable-kv-events` | False | Deprecated JetStream KV-event mode; prefer the local indexer / event-plane subscriber path |
-| `--zmq-kv-events-ports` | None | Comma-separated ZMQ PUB base ports for KV event publishing, one per worker |
-| `--zmq-replay-ports` | None | Comma-separated ZMQ ROUTER base ports for gap recovery, one per worker |
-| `--bootstrap-ports` | None | Comma-separated rendezvous base ports, one per worker in disaggregated mode |
-| `--kv-transfer-bandwidth` | 64.0 | KV cache transfer bandwidth in GB/s. Set to 0 to disable |
-| `--kv-cache-dtype` | auto | KV cache dtype for bytes-per-token computation |
-| `--kv-bytes-per-token` | Auto-computed | KV cache bytes per token (override auto-computation) |
-| `--discovery-backend` | Env-driven (`etcd`) | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` |
-| `--request-plane` | Env-driven (`tcp`) | Request transport: `nats`, `tcp` |
-| `--event-plane` | Env-driven (`nats`) | Event transport: `nats` or `zmq` |
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DYN_MOCKER_KV_CACHE_TRACE` | off | Set to `1` or `true` to log structured KV cache allocation and eviction traces |
-
 > **Note:** For local scale tests and router benchmarks, prefer `--num-workers` over launching many separate mocker processes. All workers share one tokio runtime and thread pool, which is both lighter weight and closer to how the test harnesses exercise the mocker.
 
-## DynoSim Runs
+## CLI Reference
 
-Mocker also powers DynoSim runs through the dedicated `python -m dynamo.replay` CLI, which exposes
-`offline|online`, `round_robin|kv_router`, `arrival_speedup_ratio`, closed-loop concurrency
-admission, synthetic workload generation, and offline disaggregated prefill/decode simulation directly:
-
-The DynoSim CLI defaults to `--replay-mode offline` and `--router-mode round_robin`. Aggregated
-runs use `--extra-engine-args`. Offline disaggregated runs instead use
-`--prefill-engine-args` plus `--decode-engine-args`, together with
-`--num-prefill-workers` and `--num-decode-workers`.
-
-```bash
-python -m dynamo.replay /path/to/mooncake_trace.jsonl \
-    --num-workers 4 \
-    --replay-mode offline \
-    --router-mode kv_router \
-    --arrival-speedup-ratio 5 \
-    --trace-block-size 512 \
-    --extra-engine-args '{"block_size":64}' \
-    --router-config '{"router_queue_policy":"fcfs"}' \
-    --report-json /tmp/dynosim-report.json
-```
-
-The same CLI also supports synthetic workloads without a trace file:
-
-```bash
-python -m dynamo.replay \
-    --input-tokens 5000 \
-    --output-tokens 500 \
-    --request-count 1000 \
-    --arrival-interval-ms 1.0 \
-    --num-workers 1 \
-    --replay-mode offline \
-    --replay-concurrency 100 \
-    --extra-engine-args '{"block_size":512}' \
-    --report-json /tmp/dynosim-report.json
-```
-
-Synthetic workloads also support shared-prefix and multi-turn tests:
-
-```bash
-python -m dynamo.replay \
-    --input-tokens 5000 \
-    --output-tokens 500 \
-    --request-count 200 \
-    --turns-per-session 3 \
-    --shared-prefix-ratio 0.5 \
-    --num-prefix-groups 8 \
-    --inter-turn-delay-ms 250 \
-    --replay-mode offline \
-    --replay-concurrency 32 \
-    --extra-engine-args '{"block_size":512}' \
-    --report-json /tmp/dynosim-report.json
-```
-
-For trace files, DynoSim also understands multi-turn sessions when records share `session_id`. The
-first turn uses `timestamp`/`created_time`; later turns can use `delay` or `delay_ms`:
-
-```json
-{"session_id":"session-a","timestamp":1000,"input_length":2048,"output_length":128,"hash_ids":[1,2,3,4]}
-{"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
-```
-
-For trace-file runs, `--trace-block-size` controls how many tokens each `hash_id` represents in
-the dataset, while engine `block_size` still controls the simulated engine and router hashing. Public
-Mooncake/toolagent traces use `--trace-block-size 512`; engine `block_size` can still stay at `64`
-to match the live runtime configuration.
-
-The standalone DynoSim CLI prints an AIPerf-style summary table to stdout and writes the full
-report JSON to disk.
-
-Timing semantics:
-
-- trace mode honors first-turn timestamps and inter-turn delays
-- concurrency mode ignores first-turn timestamps but still enforces inter-turn delays
-- in concurrency mode, TTFT is measured from actual dispatch under the in-flight cap
-
-For full usage, constraints, and benchmarking guidance, see [DynoSim Runs](runs.md).
-
-DynoSim runs support aggregated `vllm` and `sglang` engine configs. Internally the simulator uses canonical
-`block_size`; for `sglang`, `sglang.page_size` is still accepted as a compatibility alias as long
-as it matches `block_size` when both are provided.
-
-Offline DynoSim runs also support disaggregated `kv_router` mode. In that mode:
-
-- `--prefill-engine-args` must describe a prefill worker
-- `--decode-engine-args` must describe a decode worker
-- `--router-mode` must be `kv_router`
-- only offline mode is supported
-
-Example:
-
-```bash
-python -m dynamo.replay \
-    --input-tokens 4096 \
-    --output-tokens 256 \
-    --request-count 100 \
-    --replay-mode offline \
-    --router-mode kv_router \
-    --replay-concurrency 32 \
-    --num-prefill-workers 2 \
-    --num-decode-workers 6 \
-    --prefill-engine-args '{"worker_type":"prefill","block_size":512}' \
-    --decode-engine-args '{"worker_type":"decode","block_size":512}' \
-    --router-config '{"router_queue_policy":"wspt"}' \
-    --report-json /tmp/dynosim-report.json
-```
+For the complete list of command-line flags — model and KV cache settings, scheduling, timing, disaggregation, AIC, and transport — see the [Mocker CLI Reference](../components/mocker/mocker-cli-reference.mdx). To load a full configuration from a file instead of individual flags, pass `--extra-engine-args` pointing at a JSON file.
 
 ## Performance Modeling Setup
 
@@ -304,6 +145,13 @@ python -m dynamo.mocker \
     --speedup-ratio 1.0
 ```
 
+The profile results directory should contain:
+
+- `selected_prefill_interpolation/raw_data.npz`
+- `selected_decode_interpolation/raw_data.npz`
+
+To generate profile data for your own model and hardware, run the profiler and then point `--planner-profile-data` at the resulting output directory.
+
 ### AIC Performance Model
 
 To use the AIC SDK for latency prediction:
@@ -323,77 +171,19 @@ The AIC model automatically uses `--model-path` and `--engine-type` to select th
 Important notes:
 
 - AIC is opt-in. If you do not pass `--aic-perf-model`, `python -m dynamo.mocker` does not use AIC.
-- `python -m dynamo.replay` has two separate AIC surfaces:
-  - engine timing AIC through `--extra-engine-args` / staged engine JSON
-  - router-side prefill-load AIC through top-level `--aic-*` flags plus `router_prefill_load_model="aic"` in `--router-config`
-- The Python AIC session bridge is now shared with the live KV router path via the internal `dynamo._internal.aic` module. Mocker CLI behavior is unchanged; this just removes duplicate AIC session code.
 - **Pure-Rust callback.** When AIC is enabled, the mocker builds an `aiconfigurator_core::AicEngine` once at startup and answers per-step prefill/decode latency predictions from Rust with no GIL on the hot path (this is what lets predictions scale across threads in the live/concurrent path). It requires a build with the `aic-forward-pass` feature (release wheels enable it). There is no Python fallback: if the Rust engine cannot be built for the requested model/system/backend, mocker fails fast with a clear error rather than silently degrading to the slower GIL-bound Python op-walk. (`aiconfigurator`'s `compile_engine` covers every supported config, so a build failure indicates a real problem — missing perf data or an unsupported config.)
-- `aiconfigurator` must be able to load the requested performance database for the selected `system/backend/version`. If the SDK is installed but the backing systems data is missing or unreadable, mocker now fails fast at startup with a clear error instead of failing later on first request.
+- `aiconfigurator` must be able to load the requested performance database for the selected `system/backend/version`. If the SDK is installed but the backing systems data is missing or unreadable, mocker fails fast at startup with a clear error instead of failing later on first request.
 - In development environments, this may require pointing Python at a source checkout of `aiconfigurator` with real Git LFS payloads materialized in its `systems/` directory.
 
-This mocker AIC path is separate from the router-side prefill-load estimator. Live router,
-frontend, and DynoSim runs all use `router_prefill_load_model="aic"` plus top-level `--aic-*` flags for
-oldest-prefill prompt-load decay. DynoSim still uses engine-args AIC separately when you want the
-mocked worker timing model itself to come from AIC.
+This mocker AIC path configures the simulated worker's own timing model. It is separate from the router-side prefill-load estimator and from the engine-timing AIC surface used by DynoSim runs; for those, see [DynoSim Runs](runs.md).
 
-For aggregated DynoSim runs, engine timing AIC still comes from `--extra-engine-args`:
-
-```bash
-python -m dynamo.replay /path/to/trace.jsonl \
-    --extra-engine-args '{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1}'
-```
-
-For offline disaggregated DynoSim runs, pass the staged engine configs instead:
-
-```bash
-python -m dynamo.replay /path/to/trace.jsonl \
-    --replay-mode offline \
-    --router-mode kv_router \
-    --prefill-engine-args '{"worker_type":"prefill","aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1,"block_size":512}' \
-    --decode-engine-args '{"worker_type":"decode","aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1,"block_size":512}' \
-    --num-prefill-workers 2 \
-    --num-decode-workers 6
-```
-
-The `aic_backend` field enables the AIC perf model and should match `engine_type` (`"vllm"` or `"sglang"`). The `aic_model_path` field is the equivalent of `--model-path` in `dynamo.mocker`.
-
-DynoSim router-side AIC prompt-load modeling is configured separately with top-level flags:
-
-```bash
-python -m dynamo.replay /path/to/trace.jsonl \
-    --replay-mode offline \
-    --router-mode kv_router \
-    --num-workers 4 \
-    --trace-block-size 512 \
-    --extra-engine-args '{"block_size":64}' \
-    --router-config '{"router_track_prefill_tokens":true,"router_prefill_load_model":"aic"}' \
-    --aic-backend vllm \
-    --aic-system h200_sxm \
-    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
-    --aic-tp-size 1
-```
-
-For MoE models that require AIC MoE parallelism, pass the same fields on the router-side AIC surface.
-For Kimi-style TP-only MoE simulation, use `--aic-moe-tp-size` equal to `--aic-tp-size`,
-`--aic-moe-ep-size 1`, and `--aic-attention-dp-size 1`.
-
-For offline disaggregated DynoSim runs, the same top-level `--aic-*` flags drive the prefill-stage router only;
-the decode-stage router keeps prompt tracking disabled.
-
-Example `--reasoning` configuration:
+Example `--reasoning` configuration for emitting reasoning token spans:
 
 ```bash
 python -m dynamo.mocker \
     --model-path Qwen/Qwen3-0.6B \
     --reasoning '{"start_thinking_token_id":123,"end_thinking_token_id":456,"thinking_ratio":0.6}'
 ```
-
-The profile results directory should contain:
-
-- `selected_prefill_interpolation/raw_data.npz`
-- `selected_decode_interpolation/raw_data.npz`
-
-To generate profile data for your own model and hardware, run the profiler and then point `--planner-profile-data` at the resulting output directory.
 
 ## Event Transport and Router Testing
 
@@ -422,104 +212,13 @@ kubectl apply -f examples/backends/mocker/deploy/agg.yaml
 kubectl apply -f examples/backends/mocker/deploy/disagg.yaml
 ```
 
+## DynoSim Runs and Sweeps
+
+The mocker also powers offline, GPU-free batch simulation through the `python -m dynamo.replay` CLI. Use [DynoSim Runs](runs.md) to drive one trace or synthetic workload through a simulated configuration and get an AIPerf-style report, and [DynoSim Sweeps](sweeps.md) to search many candidate topologies and router settings against SLA and GPU-budget constraints. Both reuse the same mocker engine and accept these engine settings as JSON through `--extra-engine-args` rather than as individual CLI flags.
+
 ## Architecture
 
-The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the DynoSim run harness on top of multiple engine cores; see [DynoSim Runs](runs.md) for the component-level diagram and for offline internals under [`lib/mocker/src/replay/offline/`](../../lib/mocker/src/replay/offline/README.md).
-
-### Scheduler
-
-The mocker now has two scheduler shapes rather than one generic queue model:
-
-- **vLLM mocker** uses an upstream-style `waiting + running` scheduler. Each request tracks
-  computed tokens, the scheduler spends one token budget across the running set first, and decode
-  pressure triggers inline preemption of running requests.
-- **SGLang mocker** uses a cache-aware waiting/running scheduler around a radix-style prefix cache.
-  It batches prefill work with decode-state awareness and handles pressure primarily through decode
-  retraction while preserving cached prefixes.
-
-Both schedulers simulate continuous batching, prefix reuse, chunked prefill, memory pressure, and
-decode token emission while publishing metrics about current resource utilization.
-
-When resources become constrained, the mocker simulates the engine's real recovery path:
-- vLLM-style decode preemption and recompute
-- SGLang-style decode retraction plus prefix-preserving cache updates
-
-### KV Block Manager
-
-The mocker's KV block manager is now built on [`kvbm-logical::BlockManager<G1>`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-logical), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
-
-Blocks still conceptually live in one of two pools:
-
-- **Active** — blocks currently held by at least one sequence. Partial (still-filling) blocks are held as `MutableBlock<G1>`; full blocks are held as `ImmutableBlock<G1>` clones (the clone vec length is the mocker's refcount, one per `Use`).
-- **Inactive** — blocks no longer referenced by any sequence but kept for prefix-cache reuse. Handled entirely by kvbm-logical's inactive pool; the mocker never tracks them manually.
-
-The lifecycle is RAII: dropping the last `ImmutableBlock` clone transitions the block from active to inactive (kvbm-logical's `reset` pool), with no explicit `deref`/`evict` bookkeeping on the mocker side. When a sequence completes or is preempted, the mocker simply drops its handles; kvbm-logical recovers the capacity.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Active : allocate + stage + register
-    Active --> Inactive : last handle dropped (RAII)
-    Inactive --> Active : match_blocks(PLH) reuse
-    Inactive --> Freed : evicted by backend
-    Active --> Freed : explicit Removed (Destroy)
-    Freed --> [*]
-
-    state Active {
-        [*] --> Partial : MutableBlock<G1>
-        Partial --> Full : promote (PLH / SequenceHash)
-        [*] --> Full : ImmutableBlock<G1> clones
-    }
-```
-
-Three `Use` outcomes are tracked for KV-event emission: `ActiveHit` (bump refcount on an already-pinned block), `InactiveHit` (reactivate via `match_blocks(plh)`), and `NewStore` (fresh allocation). Only `NewStore` emits a `Stored` KV event — the router radix tree already knows about the other two and only forgets on explicit `Removed`.
-
-### Eviction Backends
-
-The kvbm-logical inactive pool selects eviction victims via one of three backends, exposed as `MockerEvictionBackend` in [`lib/mocker/src/common/protocols.rs`](../../lib/mocker/src/common/protocols.rs):
-
-- **`Lineage`** (default) — parent-chain aware: evicts leaf blocks first, preserving shared prefix chains. Subsumes the preemption-priority behavior the old hand-rolled `LRUEvictor::push_front` used to provide.
-- **`Lru`** — plain recency-based LRU.
-- **`MultiLru`** — 4-tier frequency-aware LRU built on a TinyLFU tracker.
-
-All three give the same "suffix blocks evicted before shared prefixes" outcome that the old evictor was designed to produce; `Lineage` does it structurally (via the block parent chain) rather than via monotonic counters.
-
-### Sequence Tracking
-
-Each active request is tracked as a sequence, managing its token blocks and generation state. As tokens are generated, the sequence tracks which blocks are partial (`MutableBlock<G1>`, still being filled) versus full (`ImmutableBlock<G1>`, complete and hashable for prefix caching). When a partial block fills up, it gets "promoted" to a full block with a content-based `SequenceHash` (or collapses onto an existing registered handle if the PLH is already present), enabling future cache hits from requests with matching prefixes.
-
-### Performance Model
-
-The mocker supports three timing prediction modes:
-
-**Polynomial Model (Default):** Uses hardcoded polynomial formulas that approximate typical GPU behavior. Prefill time scales quadratically with token count, while decode time depends on the total active KV cache size.
-
-**Interpolated Model:** Loads actual profiling data from an NPZ file containing measured prefill and decode latencies. The mocker interpolates between data points to predict timing for any input size. This enables high-fidelity simulation matching a specific hardware configuration.
-
-**AIC Model (`--aic-perf-model`):** Uses the NVIDIA AI Configurator (AIC) SDK for latency prediction. AIC provides calibrated performance models for specific GPU/model/engine combinations, predicting prefill and decode latency as a function of batch size, sequence length, and prefix cache hits. The model path is automatically derived from `--model-path`, and the engine type from `--engine-type`. This mode is opt-in and requires both the `aiconfigurator` SDK and loadable systems/perf data for the requested tuple.
-
-### Bootstrap Rendezvous (Disaggregated Serving)
-
-For disaggregated prefill/decode deployments, prefill and decode workers coordinate via a simple TCP-based rendezvous protocol. The decode worker connects to the prefill worker's bootstrap port and waits until the prefill phase completes and KV cache is ready. Either side can arrive first—the rendezvous completes when both are ready.
-
-### KV Transfer Latency Simulation
-
-The mocker simulates KV cache transfer time between prefill and decode workers. Before the prefill worker emits its first (and only) token, it sleeps for a duration based on:
-
-- **kv_bytes_per_token** (auto-computed from model config): `num_layers * 2 * num_kv_heads * head_dim * dtype_bytes`. The `dtype_bytes` is determined by `--kv-cache-dtype`: when set to `auto` (default), it uses the model's `dtype` from config; when explicitly set (e.g., `fp8`), it uses the specified dtype instead. It can also be overridden directly with `--kv-bytes-per-token`.
-- **kv_transfer_bandwidth** (default: 64.0 GB/s, inter-node InfiniBand)
-- **Transfer time**: `num_input_tokens * kv_bytes_per_token / bandwidth`
-
-This delay is injected after the scheduler's prefill compute simulation completes, modeling the sequential flow: prefill computation → KV transfer → decode begins. Set `--kv-transfer-bandwidth 0` to disable.
-
-## Integration with Dynamo
-
-### KV Event Publishing
-
-When prefix caching is enabled, the mocker publishes KV cache events to the distributed runtime. These events notify the system when blocks are stored (new content cached) or removed (evicted). This enables the KV-aware router to make intelligent routing decisions based on which workers have which prefixes cached.
-
-### Metrics Publishing
-
-Each scheduler publishes metrics about its current state, including the number of active decode blocks per DP rank. The router uses these metrics for load-aware routing decisions.
+The mocker's engine internals — the vLLM- and SGLang-style schedulers, the kvbm-logical block manager and eviction backends, sequence tracking, the three timing models, and the disaggregated bootstrap and KV-transfer simulation — are documented in [Mocker Engine Architecture](../design-docs/mocker-architecture.md).
 
 ## Testing Scenarios
 
@@ -532,20 +231,6 @@ The mocker is particularly useful for:
 5. **Performance Modeling** - Prototype scheduling policies
 6. **CI/CD** - Fast integration tests without hardware dependencies
 
-## Comparison with Real Engines
-
-| Feature | Real Engine | Mocker |
-|---------|-------------|--------|
-| GPU Required | Yes | No |
-| Block Manager | Paged KV cache | Simulated blocks |
-| Scheduler | Continuous batching | Continuous batching |
-| Prefix Caching | Hash-based | Hash-based |
-| Chunked Prefill | Supported | Supported |
-| Preemption | Recompute/swap | Recompute (simulated) |
-| Timing | Real execution | Model-based |
-| KV Events | Native | Compatible |
-| Data Parallelism | Multi-GPU | Simulated |
-
 ## Next Steps
 
 | Document | Description |
@@ -554,13 +239,3 @@ The mocker is particularly useful for:
 | [Aggregated Mocker Deployment Example](../../examples/backends/mocker/deploy/agg.yaml) | Deploy a mocker-backed aggregated DynamoGraphDeployment on Kubernetes |
 | [Disaggregated Mocker Deployment Example](../../examples/backends/mocker/deploy/disagg.yaml) | Deploy separate prefill and decode mocker workers for disaggregated-serving benchmarks |
 | [Global Planner Mocker Example](../../examples/global_planner/global-planner-mocker-test.yaml) | Advanced multi-pool mocker setup for planner and global-router experiments |
-
-## Feature Gaps (WIP)
-
-> For the broader mocker enhancement roadmap, see [#6383](https://github.com/ai-dynamo/dynamo/issues/6383).
-
-The following features are not yet supported by the mocker:
-
-- **Multi-tier memory** - No support for offloading KV cache to CPU/disk or onboarding back to GPU; potential future integration with KVBM
-- **Multimodal support** - Currently only simulates text token processing; no vision encoder or cross-attention simulation
-- **Native Rust reference counting** - Work in progress to use native Rc/Arc for block reference counting, enabling natural RAII patterns for simpler tracking

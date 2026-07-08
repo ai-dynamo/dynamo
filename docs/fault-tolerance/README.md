@@ -39,7 +39,7 @@ Dynamo supports canceling in-flight requests to free computational resources:
 - Kill signals for immediate termination
 - Hierarchical cancellation propagation through request chains
 
-See [Request Cancellation](request-cancellation.md) for details.
+See [Request Cancellation Architecture](../design-docs/request-cancellation.md) for details.
 
 ### Graceful Shutdown
 
@@ -127,7 +127,7 @@ Dynamo includes a comprehensive testing framework for validating fault tolerance
 - etcd HA failover tests
 - Hardware fault injection (GPU XID, network partitions)
 
-See [Fault Tolerance Testing](testing.md) for details.
+See [Fault Tolerance Testing](../design-docs/fault-tolerance-testing.md) for details.
 
 ## Related Documentation
 

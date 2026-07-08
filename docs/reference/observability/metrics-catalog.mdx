@@ -88,8 +88,28 @@ Emitted by the HTTP frontend at `/metrics` on port 8000 by default. Most carry a
   Time to first token in seconds.
 </ParamField>
 
+### Migration
+
+Counters for [request migration](../../fault-tolerance/request-migration.md), the mechanism that continues in-flight requests on a healthy worker when the original worker fails. See [Request Migration Architecture](../../design-docs/request-migration.md) for the internals.
+
 <ParamField path="dynamo_frontend_model_migration_total" type="counter">
-  Total request migrations due to worker unavailability. Labeled by `model` and `migration_type`.
+  Total request migrations due to worker unavailability. Labeled by `model` and [`migration_type`](metric-labels.mdx#migration_type) (`new_request` for an initial connection failure, `ongoing_request` for a mid-stream disconnection).
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_migration_max_seq_len_exceeded_total" type="counter">
+  Total times migration was disabled for a request because its sequence length exceeded `--migration-max-seq-len`. A rising value may indicate the limit needs adjustment. Labeled by `model`.
+</ParamField>
+
+### Cancellation and rejection
+
+Counters for requests that end early: [cancellations](../../design-docs/request-cancellation.md) (the client or frontend aborts an in-flight request) and [rejections](../../fault-tolerance/request-rejection.md) (the frontend sheds load with HTTP 503 when all workers are busy). The worker-side counterparts are under [Component metrics](#component-metrics).
+
+<ParamField path="dynamo_frontend_model_cancellation_total" type="counter">
+  Total request cancellations detected by the frontend (client disconnect or stream close). Labeled by `model`, `endpoint` (the API route — `chat_completions`, `completions`, `embeddings`, …), and [`request_type`](metric-labels.mdx#request_type) (`unary` or `stream`).
+</ParamField>
+
+<ParamField path="dynamo_frontend_model_rejection_total" type="counter">
+  Total requests rejected because all workers were busy (surfaced to the client as HTTP 503). Incremented when the router returns `ResourceExhausted`. Labeled by `model` and `endpoint` (the API route).
 </ParamField>
 
 ### Per-worker load and timing gauges
@@ -174,6 +194,24 @@ Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, 
 
 <ParamField path="dynamo_component_uptime_seconds" type="gauge">
   DistributedRuntime uptime. Updated before each Prometheus scrape on both the frontend and the system-status server.
+</ParamField>
+
+<ParamField path="dynamo_component_cancellation_total" type="counter">
+  Total requests cancelled by the work handler. Carries the hierarchy labels. Records cancellation *signals* received by the worker, not whether the engine actually aborted — deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../design-docs/request-cancellation.md).
+</ParamField>
+
+The following worker-side gauges and counter appear only when a hard concurrency cap is set with `--engine-request-limit`; see [Worker-Side Request Admission](../../design-docs/request-rejection.md#worker-side-request-admission).
+
+<ParamField path="dynamo_rejection_request_total" type="counter">
+  Cumulative requests rejected because the worker was at capacity (engine in-flight limit and Dynamo queue both full).
+</ParamField>
+
+<ParamField path="dynamo_engine_request" type="gauge">
+  Current requests being handled by the engine.
+</ParamField>
+
+<ParamField path="dynamo_request_queue" type="gauge">
+  Current requests queued in Dynamo, not yet in the engine.
 </ParamField>
 
 Specialized components expose additional families under their own prefix, e.g. `dynamo_preprocessor_*` for preprocessor components.

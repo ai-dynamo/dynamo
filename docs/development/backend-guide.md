@@ -172,4 +172,4 @@ class RequestHandler:
 
 The context parameter is optional - if your generate method doesn't include it in its signature, Dynamo will call your method without the context argument.
 
-For detailed information about request cancellation, including async cancellation monitoring and context propagation patterns, see the [Request Cancellation Architecture](../fault-tolerance/request-cancellation.md) documentation.
+For detailed information about request cancellation, including async cancellation monitoring and context propagation patterns, see the [Request Cancellation Architecture](../design-docs/request-cancellation.md) documentation.

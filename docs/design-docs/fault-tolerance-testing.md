@@ -1,7 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Testing
+title: Fault Tolerance Testing
 ---
 
 This document describes the test infrastructure for validating Dynamo's fault tolerance mechanisms. The testing framework supports request cancellation, migration, etcd HA, and hardware fault injection scenarios.
@@ -490,4 +490,4 @@ watch 'curl -s localhost:8000/metrics | grep -E "(migration|rejection)"'
 - [Request Migration](request-migration.md) - Migration implementation details
 - [Request Cancellation](request-cancellation.md) - Cancellation implementation
 - [Health Checks](../observability/health-checks.md) - Health monitoring
-- [Metrics](../observability/metrics.md) - Available metrics for monitoring
+- [Metrics Catalog](../reference/observability/metrics-catalog.mdx) - Available metrics for monitoring

@@ -125,7 +125,7 @@ pip install -e .
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
 | [**Multimodal Support**](../../features/multimodal/multimodal-sglang.md) | ✅ | Image via EPD, E/PD, E/P/D patterns |
 | [**Diffusion Models**](sglang-diffusion.md) | ✅ | LLM diffusion, image, and video generation |
-| [**Request Cancellation**](../../fault-tolerance/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
+| [**Request Cancellation**](../../design-docs/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**Graceful Shutdown**](../../fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
 | [**Observability**](sglang-observability.md) | ✅ | Metrics, tracing, and Grafana dashboards |
 
@@ -151,7 +151,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 > **Notes:**
 > 1. **Multimodal + KV-Aware Routing**: Not supported. ([Source](../../components/router/README.md))
 > 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source](../../features/multimodal/multimodal-sglang.md))
-> 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source](../../fault-tolerance/request-cancellation.md))
+> 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source](../../design-docs/request-cancellation.md))
 > 4. **Speculative Decoding**: Code hooks exist (`spec_decode_stats` in publisher), but no examples or documentation yet.
 
 ## Quick Start

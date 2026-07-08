@@ -1,0 +1,249 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Runtime Configuration (DynamoRuntimeConfig)
+subtitle: Field reference for the cross-cutting Dynamo runtime CLI flags and environment variables shared by every backend and the frontend.
+---
+
+`DynamoRuntimeConfig` holds the configuration that is **common to every Dynamo process** — the frontend, the standalone router, and all three backend workers (vLLM, SGLang, TRT-LLM) parse this same argument group. Every field, type, default, and choice on this page comes from the [`DynamoRuntimeArgGroup` and `DynamoRuntimeConfig`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/configuration/groups/runtime_args.py) definitions.
+
+<Note>
+  These are the **shared** Dynamo runtime flags. Each backend also has its own backend-specific flags: [vLLM Configuration](../backends/vllm/vllm-config-reference.mdx), [SGLang Configuration](../backends/sglang/sglang-config-reference.mdx), and [TensorRT-LLM Configuration](../backends/trtllm/trtllm-config-reference.mdx). This page covers neither native engine arguments nor backend-specific `DYN_*` prefixed flags — only the flags from `DynamoRuntimeArgGroup`.
+</Note>
+
+## How the config is loaded
+
+Each field is both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — `--dyn-enable-structural-tag` sets it on, `--no-dyn-enable-structural-tag` sets it off.
+
+<Card>
+<Tabs>
+  <Tab title="Kubernetes">
+    Set flags in **any** component container's `args` and environment variables in its `env`, under a service of a [DynamoGraphDeployment](../kubernetes/dgd-reference.mdx) (DGD). To set a `DYN_*` variable across **all** components at once, use the graph-level `spec.envs` field.
+
+    ```yaml
+    spec:
+      # Graph-level: applies to every component in the deployment
+      envs:
+        - name: DYN_ENDPOINT_TYPES
+          value: chat
+
+      services:
+        VllmWorker:
+          extraPodSpec:
+            mainContainer:
+              args:
+                - --dyn-tool-call-parser
+                - llama3_json
+                - --engine-request-limit
+                - "32"
+              env:
+                - name: DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB
+                  value: "4.0"
+    ```
+
+    On Kubernetes, several of these variables are **auto-injected** by the Dynamo operator into every container — see the individual field notes below.
+  </Tab>
+  <Tab title="Local">
+    Pass the flags directly on the command line of any Dynamo component:
+
+    ```bash
+    # Frontend
+    python -m dynamo.frontend \
+        --namespace my-cluster \
+        --discovery-backend etcd \
+        --endpoint-types chat
+
+    # vLLM worker
+    python -m dynamo.vllm \
+        --namespace my-cluster \
+        --model meta-llama/Llama-3.1-8B-Instruct \
+        --dyn-tool-call-parser llama3_json \
+        --exclude-tools-when-tool-choice-none
+
+    # SGLang worker
+    python -m dynamo.sglang \
+        --namespace my-cluster \
+        --model-path Qwen/Qwen3-32B
+    ```
+  </Tab>
+</Tabs>
+</Card>
+
+## Model discovery and namespace
+
+<ParamField path="--namespace" type="string" default="dynamo">
+  Dynamo namespace that scopes service discovery. All components in a deployment must share the same namespace to find each other. If `DYN_NAMESPACE_WORKER_SUFFIX` is also set, `-{suffix}` is automatically appended to the resolved value to support multiple worker pools serving the same model.
+
+  On Kubernetes the operator sets this automatically to `{k8s_namespace}-{dgd_name}`; override only deliberately.
+
+  Environment variable: `DYN_NAMESPACE`
+</ParamField>
+
+<ParamField path="--endpoint" type="string" default="null">
+  Dynamo endpoint string in `dyn://namespace.component.endpoint` format, for example `dyn://dynamo.backend.generate`. When unset, the endpoint address is inferred from the component's registration in the discovery backend.
+
+  Environment variable: `DYN_ENDPOINT`
+</ParamField>
+
+<ParamField path="--endpoint-types" type="string" default="chat,completions">
+  Comma-separated list of OpenAI-compatible endpoint types to enable. Use `completions` alone for models that do not have a chat template. The obsolete alias `--dyn-endpoint-types` is accepted for backward compatibility.
+
+  Environment variable: `DYN_ENDPOINT_TYPES`
+</ParamField>
+
+## Communication planes
+
+<ParamField path="--discovery-backend" type="string" default="etcd">
+  Service discovery backend. `kubernetes` uses the K8s API; `etcd` uses a distributed key-value store (configured via `ETCD_*` env vars such as `ETCD_ENDPOINTS`); `file` uses the local filesystem (path from `DYN_FILE_KV`, defaulting to `$TMPDIR/dynamo_store_kv`); `mem` uses an in-memory store suitable for single-process development. See [Discovery Plane](../design-docs/discovery-plane.md) for design details.
+
+  On Kubernetes the operator sets this automatically to `kubernetes`; override only deliberately.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>kubernetes</Badge> <Badge intent="note" minimal>etcd</Badge> <Badge intent="note" minimal>file</Badge> <Badge intent="note" minimal>mem</Badge></span>
+
+  Environment variable: `DYN_DISCOVERY_BACKEND`
+</ParamField>
+
+<ParamField path="--request-plane" type="string" default="tcp">
+  Transport used to distribute requests from routers to workers. `tcp` provides the lowest latency and is recommended for production. `nats` uses NATS messaging. See [Request Plane](../design-docs/request-plane.md) for design details.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>tcp</Badge> <Badge intent="note" minimal>nats</Badge></span>
+
+  Environment variable: `DYN_REQUEST_PLANE`
+</ParamField>
+
+<ParamField path="--event-plane" type="string" default="null">
+  Event publishing transport. When unset, auto-detected from `--discovery-backend`: `zmq` for `file` or `mem` backends (no external services required), `nats` for `etcd` or `kubernetes`. See [Event Plane](../design-docs/event-plane.md) for design details.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
+
+  Environment variable: `DYN_EVENT_PLANE`
+</ParamField>
+
+<ParamField path="--connector" type="string" default="null">
+  KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. For TRT-LLM, valid options are `nixl`, `lmcache`, `kvbm`, `null`, and `none`.
+
+  Environment variable: `DYN_CONNECTOR`
+</ParamField>
+
+## Parsing
+
+<ParamField path="--dyn-tool-call-parser" type="string" default="null">
+  Tool call parser name for the model. When unset, the backend's default tool call parsing is used. Valid parser names are determined at runtime by the installed `dynamo._core` extension — run `python -m dynamo.vllm --help` to see the available choices on your installation.
+
+  Environment variable: `DYN_TOOL_CALL_PARSER`
+</ParamField>
+
+<ParamField path="--dyn-reasoning-parser" type="string" default="null">
+  Reasoning/chain-of-thought parser name for the model. When unset, no reasoning parsing is performed. Valid parser names are determined at runtime by the installed `dynamo._core` extension — run `python -m dynamo.vllm --help` to see the available choices on your installation.
+
+  Environment variable: `DYN_REASONING_PARSER`
+</ParamField>
+
+<ParamField path="--exclude-tools-when-tool-choice-none" type="boolean" default="true">
+  Exclude tool definitions from the chat template when `tool_choice='none'`. Prevents models from generating unsolicited raw XML tool calls in the content field. This flag controls the Rust-native chat template path; a matching flag in `FrontendArgGroup` controls the Python processor side independently.
+
+  Environment variable: `DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE`
+</ParamField>
+
+<ParamField path="--dyn-enable-structural-tag" type="boolean" default="false">
+  Enable structural tag guided decoding for tool calls. When enabled, configure activation scope and parameter schema strictness with `--dyn-structural-tag-scope` and `--dyn-structural-tag-schema`.
+
+  Environment variable: `DYN_ENABLE_STRUCTURAL_TAG`
+</ParamField>
+
+<ParamField path="--dyn-structural-tag-scope" type="string" default="auto">
+  Controls when structural tags are activated. `auto` activates them for required or named `tool_choice`, or when any tool has `strict=true` or `parallel_tool_calls` is false. `always` additionally activates them for `tool_choice=auto` without those conditions. `tool_choice=none` is unaffected by either setting. Only meaningful when `--dyn-enable-structural-tag` is set.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>always</Badge></span>
+
+  Environment variable: `DYN_STRUCTURAL_TAG_SCOPE`
+</ParamField>
+
+<ParamField path="--dyn-structural-tag-schema" type="string" default="auto">
+  Controls parameter schema strictness inside structural tags. `auto` applies the real parameter schema only to tools with `strict=true`, leaving all other tools syntactically constrained but schema-unconstrained. `strict` applies the real parameter schema to every tool. Only meaningful when `--dyn-enable-structural-tag` is set.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>strict</Badge></span>
+
+  Environment variable: `DYN_STRUCTURAL_TAG_SCHEMA`
+</ParamField>
+
+<ParamField path="--custom-jinja-template" type="string" default="null">
+  Path to a custom Jinja template file to override the model's default chat template. This template takes precedence over any template found in the model repository.
+
+  Environment variable: `DYN_CUSTOM_JINJA_TEMPLATE`
+</ParamField>
+
+## Multimodal and media output
+
+<ParamField path="--multimodal-embedding-cache-capacity-gb" type="number" default="0">
+  Capacity of the multimodal embedding cache in GB. Set to `0` to disable the cache entirely. Increase this for workloads with repeated image or audio inputs to avoid redundant re-encoding.
+
+  Environment variable: `DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB`
+</ParamField>
+
+<ParamField path="--output-modalities" type="string" default="text">
+  Space-separated list of output modalities for omni or diffusion mode, for example `--output-modalities text image`. Defaults to `text` only. Use `image`, `video`, or `audio` when deploying image/video/audio generation models.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>text</Badge> <Badge intent="note" minimal>image</Badge> <Badge intent="note" minimal>video</Badge> <Badge intent="note" minimal>audio</Badge></span>
+
+  Environment variable: `DYN_OUTPUT_MODALITIES`
+</ParamField>
+
+<ParamField path="--media-output-fs-url" type="string" default="file:///tmp/dynamo_media">
+  Filesystem URL for storing generated images and videos. Accepts a local `file://` path or a remote object-storage URL such as `s3://bucket/path`.
+
+  Environment variable: `DYN_MEDIA_OUTPUT_FS_URL`
+</ParamField>
+
+<ParamField path="--media-output-http-url" type="string" default="null">
+  Base HTTP URL for rewriting media file paths in API responses, for example `http://localhost:8000/media`. When unset, raw filesystem paths are returned in the response body.
+
+  Environment variable: `DYN_MEDIA_OUTPUT_HTTP_URL`
+</ParamField>
+
+## Operations
+
+<ParamField path="--dump-config-to" type="string" default="null">
+  Dump the fully resolved configuration to the specified file path at startup. Useful for auditing the effective values after all env-var and CLI overrides have been applied.
+
+  Environment variable: `DYN_DUMP_CONFIG_TO`
+</ParamField>
+
+<ParamField path="--health-check-payload" type="string" default="null">
+  Override the runtime health-check canary payload used by the unified backend's `Worker`. Accepts a JSON object string, for example `'{"token_ids": [1], "stop_conditions": {"max_tokens": 1}}'`, or a file reference prefixed with `@`, for example `@/path/to/payload.json`. Takes precedence over the engine's default `health_check_payload()`. Applies to the unified backend only.
+
+  Environment variable: `DYN_HEALTH_CHECK_PAYLOAD`
+</ParamField>
+
+<ParamField path="--engine-request-limit" type="integer" default="null">
+  Maximum number of requests handled concurrently by the engine (worker-pool semaphore size). Enables worker-side request rejection when set; disabled by default. Must be a positive integer. When set, the Rust runtime reads `DYN_ENGINE_REQUEST_LIMIT` directly. An overflow queue of up to `N+16` requests is maintained internally and is not a user-facing knob.
+
+  Environment variable: `DYN_ENGINE_REQUEST_LIMIT`
+</ParamField>
+
+## Deprecated
+
+These flags are retained for backward compatibility and will be removed in a future release.
+
+<ParamField path="--durable-kv-events" type="boolean" default="false" deprecated={true}>
+  **Deprecated** — Enable durable KV events using NATS JetStream instead of the local indexer. This option will be removed in a future release. The event-plane subscriber (`local_indexer` mode) is now the recommended path and is automatically enabled when this flag is off.
+
+  Environment variable: `DYN_DURABLE_KV_EVENTS`
+</ParamField>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="vLLM Configuration" href="../backends/vllm/vllm-config-reference.mdx" icon="book">
+    Dynamo wrapper flag reference for the vLLM backend (`DYN_VLLM_*`).
+  </Card>
+  <Card title="SGLang Configuration" href="../backends/sglang/sglang-config-reference.mdx" icon="book">
+    Dynamo wrapper flag reference for the SGLang backend (`DYN_SGL_*`).
+  </Card>
+  <Card title="TensorRT-LLM Configuration" href="../backends/trtllm/trtllm-config-reference.mdx" icon="book">
+    Dynamo wrapper flag reference for the TensorRT-LLM backend.
+  </Card>
+  <Card title="Frontend Configuration" href="../components/frontend/configuration.md" icon="gear">
+    Configuration reference for the Dynamo HTTP frontend component.
+  </Card>
+</CardGroup>

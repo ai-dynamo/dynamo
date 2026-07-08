@@ -66,7 +66,7 @@ flowchart TD
     MES --> P
 ```
 
-See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [Live Simulation with Mocker](mocker.md) for engine-core details (scheduler, KV block manager).
+See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [Mocker Engine Architecture](../design-docs/mocker-architecture.md) for engine-core details (scheduler, KV block manager).
 
 ## Quick Start
 

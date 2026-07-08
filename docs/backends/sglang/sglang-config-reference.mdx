@@ -1,0 +1,173 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: SGLang Configuration (DynamoSGLangConfig)
+subtitle: Field reference for the Dynamo-specific CLI flags and environment variables of the SGLang backend wrapper.
+---
+
+`DynamoSGLangConfig` holds the Dynamo-specific configuration for the SGLang backend (`python -m dynamo.sglang`). Every field, type, default, and choice on this page comes from the [`DynamoSGLangArgGroup` and `DynamoSGLangConfig`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/sglang/backend_args.py) definitions. For features and operational details, see the [SGLang Reference Guide](sglang-reference-guide.md).
+
+<Note>
+  These are **only** the Dynamo wrapper flags. The SGLang backend also accepts every native SGLang `ServerArgs` engine argument (`--model-path`, `--tp-size`, `--mem-fraction-static`, and so on) in the same command, plus the cross-cutting [Dynamo Runtime](../../reference/runtime-config-reference.mdx) flags (`--namespace`, `--endpoint`, tool/reasoning parsers). This page covers neither — only the SGLang-specific `DYN_SGL_*` surface.
+</Note>
+
+## How the config is loaded
+
+Each field is both a CLI flag and an environment variable. The CLI flag takes precedence; the environment variable is the fallback. Boolean fields are negatable — `--enable-multimodal` sets it on, `--no-enable-multimodal` sets it off.
+
+<Card>
+<Tabs>
+  <Tab title="Kubernetes">
+    Set flags in the worker container's `args` and environment variables in its `env`, under the SGLang worker service of a [DynamoGraphDeployment](../../kubernetes/dgd-reference.mdx) (DGD). The operator passes both through to the process without validation.
+
+    ```yaml
+    spec:
+      services:
+        SGLangDecodeWorker:
+          extraPodSpec:
+            mainContainer:
+              command:
+                - python3
+                - -m
+                - dynamo.sglang
+              args:
+                - --model-path
+                - Qwen/Qwen3-32B
+                - --enable-multimodal
+              env:
+                - name: DYN_SGL_EMBEDDING_TRANSFER_MODE
+                  value: nixl-read
+    ```
+  </Tab>
+  <Tab title="Local">
+    Pass the flags directly on the command line:
+
+    ```bash
+    python -m dynamo.sglang \
+        --model-path Qwen/Qwen3-32B \
+        --enable-multimodal \
+        --embedding-transfer-mode nixl-read
+    ```
+  </Tab>
+</Tabs>
+</Card>
+
+## Worker role
+
+The SGLang wrapper dispatches to one of several worker roles based on these flags. Set at most one role flag per worker; the default (no role flag) is a standard LLM decode/aggregated worker.
+
+<ParamField path="--enable-multimodal" type="boolean" default="false">
+  Enable multimodal processing. When an explicit `--disaggregation-mode` is provided, this selects the matching Dynamo multimodal EPD (encode/prefill/decode) worker role.
+
+  Environment variable: `DYN_SGL_ENABLE_MULTIMODAL`
+</ParamField>
+
+<ParamField path="--embedding-worker" type="boolean" default="false">
+  Run as an embedding worker component. Also sets SGLang's native `--is-embedding`.
+
+  Environment variable: `DYN_SGL_EMBEDDING_WORKER`
+</ParamField>
+
+<ParamField path="--image-diffusion-worker" type="boolean" default="false">
+  Run as an image diffusion worker for text-to-image generation.
+
+  Environment variable: `DYN_SGL_IMAGE_DIFFUSION_WORKER`
+</ParamField>
+
+<ParamField path="--video-generation-worker" type="boolean" default="false">
+  Run as a video generation worker for text-to-video and image-to-video (T2V/I2V) generation.
+
+  Environment variable: `DYN_SGL_VIDEO_GENERATION_WORKER`
+</ParamField>
+
+<ParamField path="--enable-rl" type="boolean" default="false">
+  Enable reinforcement-learning training support. Registers the `call_tokenizer_manager` engine route for generic `tokenizer_manager` passthrough.
+
+  Environment variable: `DYN_SGL_ENABLE_RL`
+</ParamField>
+
+## Embedding transfer
+
+<ParamField path="--embedding-transfer-mode" type="string" default="nixl-write">
+  Worker embedding transfer mode. `local` keeps embeddings in-process; `nixl-write` and `nixl-read` move them over NIXL RDMA (writer-initiated or reader-initiated).
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>local</Badge> <Badge intent="note" minimal>nixl-write</Badge> <Badge intent="note" minimal>nixl-read</Badge></span>
+
+  Environment variable: `DYN_SGL_EMBEDDING_TRANSFER_MODE`
+</ParamField>
+
+## Disaggregation
+
+<ParamField path="--disagg-config" type="string" default="null">
+  Path to a disaggregation configuration file in YAML format. Must be set together with `--disagg-config-key`.
+
+  Environment variable: `DYN_SGL_DISAGG_CONFIG`
+</ParamField>
+
+<ParamField path="--disagg-config-key" type="string" default="null">
+  Key selecting a section from a nested disaggregation configuration file, for example `prefill` or `decode`. Must be set together with `--disagg-config`.
+
+  Environment variable: `DYN_SGL_DISAGG_CONFIG_KEY`
+</ParamField>
+
+## Multimodal decoding
+
+<ParamField path="--frontend-decoding" type="boolean" default="false">
+  Decode multimodal images in the Rust frontend and transfer the pre-decoded pixels to the backend via NIXL RDMA, bypassing in-engine HTTP fetch and decode. Incompatible with the deprecated EPD multimodal flags (`--multimodal-encode-worker` / `--multimodal-worker`); use it on the default aggregated decode worker instead.
+
+  Environment variable: `DYN_SGL_FRONTEND_DECODING`
+</ParamField>
+
+## Tracing
+
+<ParamField path="--sglang-trace-level" type="integer" default="2">
+  SGLang global trace level, applied when SGLang's `--enable-trace` is set.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>1 — minimal</Badge> <Badge intent="note" minimal>2 — per-request</Badge> <Badge intent="note" minimal>3 — +decode_loop</Badge> <Badge intent="note" minimal>4 — full</Badge></span>
+
+  Environment variable: `SGLANG_TRACE_LEVEL`
+</ParamField>
+
+## Deprecated
+
+These flags are retained for backward compatibility and will be removed in a future release. Each is mapped to its replacement at startup with a deprecation warning.
+
+<ParamField path="--use-sglang-tokenizer" type="boolean" default="false" deprecated={true}>
+  Use SGLang's tokenizer for pre- and post-processing. **Deprecated** — use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support. See [SGLang Chat Processor](sglang-chat-processor.md).
+
+  Environment variable: `DYN_SGL_USE_TOKENIZER`
+</ParamField>
+
+<ParamField path="--multimodal-encode-worker" type="boolean" default="false" deprecated={true}>
+  **Deprecated** — use `--enable-multimodal --disaggregation-mode=encode`. The legacy flag is mapped to those arguments at startup.
+
+  Environment variable: `DYN_SGL_MULTIMODAL_ENCODE_WORKER`
+</ParamField>
+
+<ParamField path="--multimodal-worker" type="boolean" default="false" deprecated={true}>
+  **Deprecated** — use `--enable-multimodal` with `--disaggregation-mode=pd`, `--disaggregation-mode=prefill`, or `--disaggregation-mode=decode`. The legacy flag is mapped to those arguments at startup.
+
+  Environment variable: `DYN_SGL_MULTIMODAL_WORKER`
+</ParamField>
+
+## Validation rules
+
+- `--disagg-config` and `--disagg-config-key` must both be set, or both unset.
+- `--frontend-decoding` cannot be combined with the EPD multimodal topology (`--multimodal-encode-worker` / `--multimodal-worker`).
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="SGLang Reference Guide" href="sglang-reference-guide.md" icon="book">
+    Features, worker roles, and operational details for the SGLang backend.
+  </Card>
+  <Card title="Runtime Configuration" href="../../reference/runtime-config-reference.mdx" icon="gear">
+    Cross-cutting `DYN_*` flags shared by every backend and the frontend.
+  </Card>
+  <Card title="vLLM Configuration" href="../vllm/vllm-config-reference.mdx" icon="book">
+    The equivalent Dynamo flag reference for the vLLM backend.
+  </Card>
+  <Card title="TensorRT-LLM Configuration" href="../trtllm/trtllm-config-reference.mdx" icon="book">
+    The equivalent Dynamo flag reference for the TensorRT-LLM backend.
+  </Card>
+</CardGroup>

@@ -2,191 +2,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Graceful Shutdown
+subtitle: Let workers finish in-flight requests and release resources cleanly when a pod is terminated.
 ---
 
-This document describes how Dynamo components handle shutdown signals to ensure in-flight requests complete successfully and resources are properly cleaned up.
+When Kubernetes terminates a pod (rollout, scale-down, node drain), Dynamo workers stop accepting new requests, keep serving in-flight ones through a grace period, then release engine and connection resources before exiting. This is **on by default** — every component handles `SIGTERM`/`SIGINT` and drains automatically. The steps below tune *how long* it waits and make sure interrupted requests are recovered.
 
-## Overview
+The knobs are three timeouts plus enabling migration. The default flow: endpoints unregister from discovery immediately, workers serve for a short grace period, then endpoints drain (bounded by a timeout) before resources are cleaned up.
 
-Graceful shutdown in Dynamo ensures that:
+> **How it works:** the signal handlers, the `graceful_shutdown()` sequence, per-backend `cleanup()` code, and error-initiated shutdown are documented in [Graceful Shutdown Architecture](../design-docs/graceful-shutdown.md).
 
-1. **Routing stops quickly** - Endpoints are unregistered from discovery first
-2. **In-flight requests can finish** - Workers keep serving during a short grace period
-3. **Endpoints drain** - After the grace period, endpoints are invalidated and optionally wait for in-flight work
-4. **Resources are cleaned up** - Engines, connections, and temporary files are released
-5. **Pods restart cleanly** - Exit codes signal Kubernetes for proper restart behavior
+<Steps toc={true} tocDepth={2}>
 
-## Signal Handling
+<Step title="Set the pod termination grace period">
 
-All Dynamo components handle Unix signals for graceful shutdown:
-
-| Signal | Trigger | Behavior |
-|--------|---------|----------|
-| `SIGTERM` | Kubernetes pod termination | Graceful shutdown initiated |
-| `SIGINT` | Ctrl+C / manual interrupt | Graceful shutdown initiated |
-
-### Implementation
-
-Each component registers signal handlers at startup:
-
-```python
-def signal_handler():
-    asyncio.create_task(graceful_shutdown(runtime, endpoints))
-
-for sig in (signal.SIGTERM, signal.SIGINT):
-    loop.add_signal_handler(sig, signal_handler)
-```
-
-The `graceful_shutdown()` function:
-1. Logs the shutdown signal
-2. Unregisters all endpoints from discovery
-3. Waits for a configurable grace period (`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, default 5s)
-4. Calls `runtime.shutdown()` to invalidate endpoints and stop accepting new requests
-5. Waits for in-flight requests (based on `graceful_shutdown` per endpoint)
-6. Returns to allow cleanup to proceed
-
-The aggregate wait in `runtime.shutdown()` is bounded by
-`DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, which defaults to 900 seconds
-(15 minutes). If endpoint draining exceeds this timeout, Dynamo logs the
-remaining graceful endpoint count and proceeds with runtime teardown.
-
-## Endpoint Draining
-
-After the grace period, `runtime.shutdown()` invalidates endpoints so no new requests are accepted. The behavior for in-flight requests depends on the `graceful_shutdown` parameter when serving the endpoint.
-
-### Configuration
-
-When registering an endpoint, the `graceful_shutdown` parameter controls draining behavior:
-
-```python
-generate_endpoint.serve_endpoint(
-    handler.generate,
-    graceful_shutdown=True,  # Wait for all requests to finish
-    metrics_labels=[("model", model_name)],
-    health_check_payload=health_check_payload,
-)
-```
-
-| `graceful_shutdown` | Behavior |
-|---------------------|----------|
-| `True` | Wait for all in-flight requests to complete, bounded by `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` |
-| `False` | Return immediately without waiting for requests |
-
-### Component-Specific Behavior
-
-| Component | Default Behavior | Rationale |
-|-----------|------------------|-----------|
-| **Frontend** | N/A (HTTP server) | HTTP server handles its own shutdown |
-| **Prefill Workers** | `graceful_shutdown=True` | Prefill operations must complete to avoid wasted computation |
-| **Decode Workers** | `graceful_shutdown=True` | Decode operations should complete to avoid wasted computation |
-| **Router** | `graceful_shutdown=True` | Ensure routing decisions complete |
-
-### Migration Integration
-
-Backend workers always use `graceful_shutdown=True`, meaning they wait for in-flight requests to complete until the engine is stopped. Request migration is configured at the **frontend** level via `--migration-limit`:
-
-- When migration is enabled at the frontend, disconnected streams from failed workers are automatically retried on healthy workers
-- Workers don't need to know about migration configuration - they simply complete their work or signal incomplete streams
-- See [Request Migration Architecture](./request-migration.md) for details on how migration works
-
-## Resource Cleanup
-
-After endpoint draining, components clean up their resources in `finally` blocks:
-
-### vLLM Worker Cleanup
-
-```python
-finally:
-    logger.debug("Cleaning up worker")
-    handler.cleanup()
-```
-
-The handler's `cleanup()` method:
-- Removes temporary directories (LoRA adapters, etc.)
-- Releases engine resources
-
-### SGLang Worker Cleanup
-
-```python
-def cleanup(self) -> None:
-    # Cancel pending consume tasks
-    for task in self._consume_tasks:
-        if not task.done():
-            task.cancel()
-    self._consume_tasks.clear()
-
-    # Shutdown engine
-    self.engine.shutdown()
-```
-
-### TensorRT-LLM Worker Cleanup
-
-```python
-async def cleanup(self):
-    if self._llm:
-        try:
-            self._llm.shutdown()
-        except Exception as e:
-            logging.error(f"Error during cleanup: {e}")
-        finally:
-            self._llm = None
-```
-
-## Error-Initiated Shutdown
-
-Workers can initiate graceful shutdown when fatal errors occur:
-
-### Engine Health Monitoring (vLLM)
-
-The `VllmEngineMonitor` continuously checks engine health:
-
-```python
-async def _check_engine_health(self):
-    while True:
-        try:
-            await self.engine_client.check_health()
-            await asyncio.sleep(HEALTH_CHECK_INTERVAL)  # 2 seconds
-        except EngineDeadError as e:
-            logger.error(f"Health check failed: {e}")
-            self._shutdown_engine()
-            self.runtime.shutdown()
-            os._exit(1)
-```
-
-Configuration:
-- `HEALTH_CHECK_INTERVAL`: 2 seconds between checks
-- `ENGINE_SHUTDOWN_TIMEOUT`: 30 seconds max for engine shutdown
-
-### Fatal Error Handling (TensorRT-LLM)
-
-```python
-async def _initiate_shutdown(self, error: Exception):
-    logging.warning(f"Initiating graceful shutdown due to: {error}")
-
-    try:
-        if self.runtime:
-            self.runtime.shutdown()
-        if self.engine:
-            await self.engine.cleanup()
-    except Exception as cleanup_error:
-        logging.error(f"Error during graceful shutdown: {cleanup_error}")
-    finally:
-        logging.critical("Forcing process exit for restart")
-        os._exit(1)
-```
-
-## Kubernetes Integration
-
-### Pod Termination Flow
-
-1. Kubernetes sends `SIGTERM` to the pod
-2. Dynamo initiates graceful shutdown
-3. Pod has `terminationGracePeriodSeconds` to complete (default: 30s)
-4. If not terminated, Kubernetes sends `SIGKILL`
-
-### Recommended Configuration
-
-For production deployments, configure adequate termination grace period:
+Kubernetes gives a terminating pod `terminationGracePeriodSeconds` to exit before it sends `SIGKILL` (default 30s). Set it to cover your expected request completion time so draining isn't cut short:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -195,28 +24,34 @@ spec:
   services:
     VllmWorker:
       extraPodSpec:
-        terminationGracePeriodSeconds: 60  # Allow time for request draining
+        terminationGracePeriodSeconds: 60  # allow time for request draining
 ```
 
-### Health Check Integration
+Rough guidance:
 
-Kubernetes uses health endpoints to determine pod readiness:
+| Workload | Suggested `terminationGracePeriodSeconds` |
+|----------|-------------------------------------------|
+| Short requests (< 10s) | 30s |
+| Long generation (> 30s) | 120s+ |
 
-- **During shutdown**: Endpoints become unavailable
-- **Readiness probe fails**: Traffic stops routing to the pod
-- **Graceful draining**: Existing requests complete
+</Step>
 
-## Best Practices
+<Step title="Tune the drain windows">
 
-### 1. Set Appropriate Grace Periods
+Two environment variables control Dynamo's internal draining, set on the worker component's `env:`:
 
-Match `terminationGracePeriodSeconds` to your expected request completion time:
-- Short requests (\< 10s): 30s grace period
-- Long generation (> 30s): 120s+ grace period
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` | `5` | How long workers keep serving after endpoints unregister from discovery, before endpoints are invalidated. |
+| `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `900` | Upper bound on waiting for in-flight requests to finish. If draining exceeds this, Dynamo logs the remaining endpoint count and tears down anyway. |
 
-### 2. Enable Request Migration
+The defaults are sound for most deployments. Raise the timeout only if you serve very long generations and want to guarantee they complete; keep it below `terminationGracePeriodSeconds` so Dynamo drains on its own terms before Kubernetes force-kills the pod.
 
-Enable migration on the Frontend so disconnected streams retry on healthy workers. Set `DYN_MIGRATION_LIMIT` in the Frontend `env:` (or `--migration-limit` in its `args:`):
+</Step>
+
+<Step title="Enable migration so drained requests retry">
+
+Draining lets *current* requests finish, but a request interrupted by an unexpected worker loss still needs somewhere to go. Enable [request migration](request-migration.md) on the Frontend so disconnected streams are retried on healthy workers. Set `DYN_MIGRATION_LIMIT` in the Frontend `env:` (or `--migration-limit` in its `args:`):
 
 ```yaml
   - name: Frontend
@@ -232,11 +67,13 @@ Enable migration on the Frontend so disconnected streams retry on healthy worker
             value: "3"                 # allow up to 3 migration attempts
 ```
 
-This allows the frontend to automatically retry disconnected streams on healthy workers.
+Backend workers always drain with `graceful_shutdown=True`; they don't need any migration configuration themselves. See [Request Migration](request-migration.md) for the full walkthrough.
 
-### 3. Monitor Shutdown Metrics
+</Step>
 
-Track shutdown behavior via logs:
+<Step title="Verify graceful shutdown">
+
+Trigger a shutdown (for example `kubectl delete pod <worker-pod>` or a rollout) and watch the worker logs for the shutdown sequence:
 
 ```
 INFO  Received shutdown signal, shutting down DistributedRuntime
@@ -244,22 +81,19 @@ INFO  DistributedRuntime shutdown complete
 DEBUG Cleaning up worker
 ```
 
-### 4. Handle Cleanup Errors
+During shutdown the worker's health endpoints go unavailable, its readiness probe fails, and Kubernetes stops routing new traffic to it while existing requests complete. If a pod is being `SIGKILL`ed before draining finishes, increase `terminationGracePeriodSeconds` (step 1) or lower the drain timeout (step 2).
 
-Ensure cleanup methods handle errors gracefully:
+</Step>
 
-```python
-def cleanup(self):
-    for resource in self.resources:
-        try:
-            resource.cleanup()
-        except Exception as e:
-            logger.warning(f"Cleanup failed: {e}")
-            # Continue with other resources
-```
+</Steps>
+
+## Custom workers
+
+If you author your own worker with the Dynamo SDK, the `graceful_shutdown` parameter on `serve_endpoint()` controls whether that endpoint waits for in-flight requests (`True`) or returns immediately (`False`). Backend workers default to `True`. For the parameter, the shutdown sequence, and per-backend cleanup patterns, see [Graceful Shutdown Architecture](../design-docs/graceful-shutdown.md) and the [Writing Python Workers](../development/backend-guide.md) guide.
 
 ## Related Documentation
 
-- [Request Migration](request-migration.md) - How requests migrate during shutdown
-- [Request Cancellation](request-cancellation.md) - Canceling in-flight requests
+- [Graceful Shutdown Architecture](../design-docs/graceful-shutdown.md) - Signal handling, drain sequence, and resource cleanup internals
+- [Request Migration](request-migration.md) - How interrupted requests migrate to healthy workers
+- [Request Cancellation Architecture](../design-docs/request-cancellation.md) - Canceling in-flight requests
 - [Health Checks](../observability/health-checks.md) - Liveness and readiness probes

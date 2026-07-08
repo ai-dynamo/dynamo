@@ -8,11 +8,11 @@ subtitle: Configure Dynamo's built-in reasoning parsers for models that emit thi
 Some models emit reasoning or thinking content separately from their final response. Dynamo can split that output into `reasoning_content` and normal assistant content by configuring `--dyn-reasoning-parser` on the backend worker.
 
 This page covers parser names for the default Dynamo-native path. If Dynamo
-does not list a parser for your model, see
-[Parser Engine Fallback](../tool-calling/engine-fallback.md). For how
+does not list a parser for your model, use
+[engine fallback](../tool-calling/introduction.mdx#engine-fallback). For how
 `--dyn-reasoning-parser` combines with `--dyn-chat-processor` and
-`--dyn-tool-call-parser` (and which combinations are invalid), see
-[Parser Configuration](../tool-calling/parser-configuration.md).
+`--dyn-tool-call-parser` (and which combinations are invalid), see the
+[Introduction](../tool-calling/introduction.mdx).
 
 ## Prerequisites
 
@@ -30,7 +30,7 @@ The flag is a worker `args:` entry — `dynamo.vllm`, `dynamo.sglang`, or `dynam
 The table below lists the currently supported reasoning parsers in Dynamo's registry. The
 **Upstream name** column shows where the vLLM or SGLang parser name differs
 from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [Parser Engine Fallback](../tool-calling/engine-fallback.md)). A blank upstream
+(see [engine fallback](../tool-calling/introduction.mdx#engine-fallback)). A blank upstream
 column means the same name works everywhere. `Dynamo-only` means no upstream
 parser exists for this format.
 

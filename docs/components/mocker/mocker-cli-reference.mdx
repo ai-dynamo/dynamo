@@ -1,0 +1,266 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Mocker CLI Reference
+subtitle: Command-line flags for the python -m dynamo.mocker simulated worker.
+---
+
+`python -m dynamo.mocker` launches a simulated Dynamo worker that registers with the frontend,
+publishes KV events, and exercises the router and planner paths without a GPU. This page is the flag
+reference. For the deployment workflow and local/Kubernetes launch recipes, see
+[Live Simulation with Mocker](../../dynosim/mocker.md); for the engine internals these flags
+configure, see [Mocker Engine Architecture](../../design-docs/mocker-architecture.md).
+
+The same engine settings apply to [DynoSim Runs](../../dynosim/runs.md): `python -m dynamo.replay`
+reuses the mocker engine and accepts these values as JSON through `--extra-engine-args`,
+`--prefill-engine-args`, and `--decode-engine-args` rather than as individual flags.
+
+## Core and model
+
+<ParamField path="--model-path" type="string" required={true}>
+  HuggingFace model ID or local path for the tokenizer.
+</ParamField>
+
+<ParamField path="--model-name" type="string" default="derived from --model-path">
+  Model name used in API responses.
+</ParamField>
+
+<ParamField path="--endpoint" type="string" default="auto-derived">
+  Dynamo endpoint string. Defaults are namespace-dependent, and prefill workers use a different
+  default endpoint than aggregated or decode workers.
+</ParamField>
+
+<ParamField path="--engine-type" type="string" default="vllm">
+  Engine simulation type.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+</ParamField>
+
+<ParamField path="--extra-engine-args" type="path" default="null">
+  Path to a JSON file with mocker configuration. Overrides individual CLI arguments.
+</ParamField>
+
+## KV cache
+
+<ParamField path="--num-gpu-blocks-override" type="integer" default="16384">
+  Number of KV cache blocks.
+</ParamField>
+
+<ParamField path="--block-size" type="integer" default="64 (vllm) / engine-specific">
+  Tokens per KV cache block. For `sglang`, when omitted, the effective page/block size defaults to 1
+  or to `--sglang-page-size` when provided.
+</ParamField>
+
+<ParamField path="--enable-prefix-caching" type="boolean" default="true">
+  Enable prefix caching. Pass `--no-enable-prefix-caching` to disable.
+</ParamField>
+
+<ParamField path="--kv-cache-dtype" type="string" default="auto">
+  KV cache dtype for the bytes-per-token computation.
+</ParamField>
+
+<ParamField path="--kv-bytes-per-token" type="integer" default="auto-computed">
+  KV cache bytes per token. Overrides the auto-computation.
+</ParamField>
+
+## Scheduling
+
+<ParamField path="--max-num-seqs" type="integer" default="256">
+  Maximum concurrent sequences.
+</ParamField>
+
+<ParamField path="--max-num-batched-tokens" type="integer" default="8192">
+  Maximum tokens per batch.
+</ParamField>
+
+<ParamField path="--enable-chunked-prefill" type="boolean" default="true">
+  Enable chunked prefill. Pass `--no-enable-chunked-prefill` to disable.
+</ParamField>
+
+<ParamField path="--preemption-mode" type="string" default="lifo">
+  Decode eviction policy under memory pressure. `lifo` is vLLM v1 style.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>lifo</Badge> <Badge intent="note" minimal>fifo</Badge></span>
+</ParamField>
+
+## Timing
+
+<ParamField path="--speedup-ratio" type="float" default="1.0">
+  Timing speedup factor applied to simulated prefill and decode durations.
+</ParamField>
+
+<ParamField path="--decode-speedup-ratio" type="float" default="1.0">
+  Decode-only speedup multiplier, for example for Eagle speculation.
+</ParamField>
+
+<ParamField path="--startup-time" type="float" default="null">
+  Simulated startup delay, in seconds.
+</ParamField>
+
+## Data parallelism and workers
+
+<ParamField path="--data-parallel-size" type="integer" default="1">
+  Number of DP replicas.
+</ParamField>
+
+<ParamField path="--num-workers" type="integer" default="1">
+  Workers per process. Prefer this over launching many separate mocker processes: all workers share
+  one tokio runtime and thread pool.
+</ParamField>
+
+<ParamField path="--stagger-delay" type="float" default="-1 (auto)">
+  Delay between worker launches, in seconds. `0` disables; `-1` enables auto mode.
+</ParamField>
+
+## Performance modeling
+
+<ParamField path="--planner-profile-data" type="path" default="null">
+  Path to either a mocker-format `.npz` file or a profiler results directory.
+</ParamField>
+
+<ParamField path="--reasoning" type="JSON string" default="null">
+  JSON config for emitting reasoning token spans, with `start_thinking_token_id`,
+  `end_thinking_token_id`, and `thinking_ratio`.
+</ParamField>
+
+## AIC performance model
+
+Opt-in flags for the NVIDIA AI Configurator (AIC) latency model. Default mocker runs do not use AIC.
+See [Live Simulation with Mocker](../../dynosim/mocker.md#performance-modeling-setup) for setup.
+
+<ParamField path="--aic-perf-model" type="boolean" default="false">
+  Use the AIC SDK for latency prediction instead of the interpolated or polynomial models. Opt-in
+  only: default mocker and DynoSim run paths do not use AIC. Requires `aiconfigurator` installed and
+  usable AIC systems/perf data for the requested `system/backend/version` tuple.
+</ParamField>
+
+<ParamField path="--aic-system" type="string" default="h200_sxm">
+  AIC system name, for example `h200_sxm`. Used with `--aic-perf-model`.
+</ParamField>
+
+<ParamField path="--aic-backend-version" type="string" default="auto">
+  AIC backend engine version, for example `0.12.0` for vLLM. When unset, uses the default version for
+  the backend.
+</ParamField>
+
+<ParamField path="--aic-tp-size" type="integer" default="1">
+  Tensor-parallel size for AIC latency prediction. Affects only AIC performance-model lookups, not
+  mocker scheduling.
+</ParamField>
+
+<ParamField path="--aic-moe-tp-size" type="integer" default="null">
+  Mixture-of-Experts tensor-parallel size for AIC latency prediction. Required by some MoE models.
+</ParamField>
+
+<ParamField path="--aic-moe-ep-size" type="integer" default="null">
+  Mixture-of-Experts expert-parallel size for AIC latency prediction. Required by some MoE models.
+</ParamField>
+
+<ParamField path="--aic-attention-dp-size" type="integer" default="null">
+  Attention data-parallel size for AIC latency prediction. Required by some MoE models.
+</ParamField>
+
+## Disaggregation
+
+<ParamField path="--disaggregation-mode" type="string" default="agg">
+  Worker mode.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>agg</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge></span>
+</ParamField>
+
+<ParamField path="--bootstrap-ports" type="string" default="null">
+  Comma-separated rendezvous base ports, one per worker in disaggregated mode.
+</ParamField>
+
+<ParamField path="--kv-transfer-bandwidth" type="float" default="64.0">
+  KV cache transfer bandwidth in GB/s. Set to `0` to disable.
+</ParamField>
+
+## Event and request transport
+
+<ParamField path="--event-plane" type="string" default="env-driven (nats)">
+  Event transport.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
+</ParamField>
+
+<ParamField path="--request-plane" type="string" default="env-driven (tcp)">
+  Request transport.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>tcp</Badge></span>
+</ParamField>
+
+<ParamField path="--discovery-backend" type="string" default="env-driven (etcd)">
+  Discovery backend.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>kubernetes</Badge> <Badge intent="note" minimal>etcd</Badge> <Badge intent="note" minimal>file</Badge> <Badge intent="note" minimal>mem</Badge></span>
+</ParamField>
+
+<ParamField path="--zmq-kv-events-ports" type="string" default="null">
+  Comma-separated ZMQ PUB base ports for KV event publishing, one per worker.
+</ParamField>
+
+<ParamField path="--zmq-replay-ports" type="string" default="null">
+  Comma-separated ZMQ ROUTER base ports for gap recovery, one per worker.
+</ParamField>
+
+<ParamField path="--durable-kv-events" type="boolean" default="false">
+  Deprecated JetStream KV-event mode. Prefer the local indexer / event-plane subscriber path.
+
+  > [!WARNING]
+  > Deprecated. Do not use for new tests.
+</ParamField>
+
+## SGLang-specific
+
+Apply only when `--engine-type sglang`.
+
+<ParamField path="--sglang-schedule-policy" type="string" default="fifo / fcfs">
+  SGLang scheduling policy. `fifo`/`fcfs` is the default; `lpm` is longest prefix match.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>fifo</Badge> <Badge intent="note" minimal>fcfs</Badge> <Badge intent="note" minimal>lpm</Badge></span>
+</ParamField>
+
+<ParamField path="--sglang-page-size" type="integer" default="1">
+  SGLang radix-cache page size in tokens. Also becomes the effective block size when
+  `--engine-type sglang` and `--block-size` is omitted.
+</ParamField>
+
+<ParamField path="--sglang-max-prefill-tokens" type="integer" default="16384">
+  SGLang max prefill-token budget per batch.
+</ParamField>
+
+<ParamField path="--sglang-chunked-prefill-size" type="integer" default="8192">
+  SGLang chunked-prefill chunk size.
+</ParamField>
+
+<ParamField path="--sglang-clip-max-new-tokens" type="integer" default="4096">
+  SGLang admission-budget cap for max new tokens.
+</ParamField>
+
+<ParamField path="--sglang-schedule-conservativeness" type="float" default="1.0">
+  SGLang schedule conservativeness factor.
+</ParamField>
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DYN_MOCKER_KV_CACHE_TRACE` | off | Set to `1` or `true` to log structured KV cache allocation and eviction traces. |
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Live Simulation with Mocker" icon="server" href="../../dynosim/mocker.md">
+    Deploy and run the mocker worker locally or on Kubernetes.
+  </Card>
+  <Card title="DynoSim Runs" icon="play" href="../../dynosim/runs.md">
+    Run one workload through a simulated configuration with `python -m dynamo.replay`.
+  </Card>
+  <Card title="Mocker Engine Architecture" icon="diagram-project" href="../../design-docs/mocker-architecture.md">
+    Scheduler, KV block manager, eviction, and timing internals.
+  </Card>
+  <Card title="Planner Configuration" icon="sliders" href="../planner/planner-config-reference.mdx">
+    The PlannerConfig field reference for the Dynamo Planner service.
+  </Card>
+</CardGroup>
