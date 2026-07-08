@@ -121,6 +121,7 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+_RL_INIT_WEIGHTS_UPDATE_GROUP_TIMEOUT_S = 30.0
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -1724,11 +1725,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
         async with self._pause_lock:
             try:
-                await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+                await asyncio.wait_for(
+                    self.engine_client.collective_rpc(rpc, kwargs=kwargs),
+                    timeout=_RL_INIT_WEIGHTS_UPDATE_GROUP_TIMEOUT_S,
+                )
                 logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
                 return {"status": "ok", "message": "Weight update group initialized"}
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[RL] init_weights_update_group timed out after %.1f seconds "
+                    "(rpc=%s); terminating the worker because EngineCore may "
+                    "still be blocked",
+                    _RL_INIT_WEIGHTS_UPDATE_GROUP_TIMEOUT_S,
+                    rpc,
+                )
+                logger.warning("Initiating Dynamo Runtime shutdown.")
+                self.runtime.shutdown()
+                os._exit(1)
             except Exception as e:
                 logger.error(f"[RL] init_weights_update_group failed: {e}")
                 return {"status": "error", "message": str(e)}
