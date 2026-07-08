@@ -167,18 +167,8 @@ jobs:
         uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
         with:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
-      - name: Lint and render (production + dev)
-        run: |
-          CHART=deploy/helm/charts/power-agent
-          helm lint "$CHART" --set image.tag=ci-test
-          # Production DaemonSet render (default daemonset.enabled=true).
-          helm template power-agent "$CHART" --set image.tag=ci-test >/dev/null
-          # Dev-pod render: uses dev.image.* and must NOT require the production
-          # image.tag (regression guard for the daemonset-gated validation).
-          helm template power-agent "$CHART" \
-            --set daemonset.enabled=false \
-            --set dev.enabled=true \
-            --set dev.nodeName=ci-node >/dev/null
+      - name: Lint and test Helm chart
+        run: make -C deploy/helm/charts/power-agent lint test
 
   # ============================================================================
   # BUILD JOBS
