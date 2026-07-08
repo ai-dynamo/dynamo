@@ -8,7 +8,9 @@ import sys
 import types
 
 import pytest
+from gpu_memory_service.client import memory_manager
 from gpu_memory_service.client.torch import allocator
+from gpu_memory_service.common.locks import GrantedLockType
 
 
 @pytest.fixture(autouse=True)
@@ -163,3 +165,32 @@ def test_deferred_persistent_pool_uses_shared_ordinal_tags():
         (1024, "kv_pool#0", False),
         (2048, "kv_pool#1", False),
     ]
+
+
+def test_persistent_scratch_promotion_accepts_rw_persistent_grant():
+    manager = object.__new__(memory_manager.GMSClientMemoryManager)
+    manager.tag = "kv_pool"
+    manager._granted_lock_type = GrantedLockType.RW_PERSISTENT
+    manager._mappings = {}
+    manager._scratch_mappings = {
+        0x1000: memory_manager._ScratchMapping(
+            size=4096,
+            aligned_size=4096,
+            va_reserved_size=1 << 20,
+            tag="kv_pool#0",
+        )
+    }
+    state = allocator._TagState(
+        manager=manager,
+        mem_pool=object(),
+        socket_path="/tmp/gms-test.sock",
+        device=0,
+        is_persistent=True,
+        persistent_engine_id="sglang:gpu0:block-pool|bootstrap=1",
+        persistent_defer_physical=True,
+    )
+    allocator._tag_states["kv_pool"] = state
+
+    assert manager.prepare_scratch_for_reallocation() == 1
+    assert not manager._scratch_mappings
+    assert manager._mappings[0x1000].tag == "kv_pool#0"
