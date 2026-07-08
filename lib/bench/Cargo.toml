@@ -70,6 +70,9 @@ dynamo-data-gen = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["bench", "metrics", "shard-metrics"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 dynamo-tokens = { workspace = true }
 minstant = "0.1.7"
