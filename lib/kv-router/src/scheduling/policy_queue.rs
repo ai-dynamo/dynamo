@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 
 use ordered_float::OrderedFloat;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterQueuePolicy;
@@ -143,8 +144,8 @@ struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
     admission: PolicyClassAdmissionController,
     pending: BinaryHeap<PolicyQueueEntry<T>>,
-    held: HashMap<u64, PolicyQueueEntry<T>>,
-    ready_by_worker: HashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
+    held: FxHashMap<u64, PolicyQueueEntry<T>>,
+    ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
     stats: PolicyQueueStats,
     deficit: usize,
 }
@@ -252,8 +253,8 @@ impl<T> PolicyQueue<T> {
                         config,
                         admission,
                         pending: BinaryHeap::new(),
-                        held: HashMap::new(),
-                        ready_by_worker: HashMap::new(),
+                        held: FxHashMap::default(),
+                        ready_by_worker: FxHashMap::default(),
                         stats: PolicyQueueStats::default(),
                         deficit: 0,
                     }
