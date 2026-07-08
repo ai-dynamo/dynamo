@@ -167,7 +167,16 @@ impl SharedKvCache for HicacheSharedKvCache {
         &self,
         tokens: &[u32],
         block_size: u32,
+        cache_namespace: Option<&str>,
     ) -> Result<SharedCacheHits, KvRouterError> {
+        if cache_namespace
+            .filter(|namespace| !namespace.is_empty())
+            .is_some()
+        {
+            tracing::debug!("Skipping SGLang Mooncake HiCache lookup for cache-namespaced request");
+            return Ok(SharedCacheHits::default());
+        }
+
         let Some(config) = self.resolve_mooncake_config() else {
             tracing::debug!("No SGLang Mooncake HiCache runtime config available");
             return Ok(SharedCacheHits::default());
@@ -559,7 +568,7 @@ mod tests {
 
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
         let hits = cache
-            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4)
+            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
             .await
             .unwrap();
 
@@ -567,5 +576,26 @@ mod tests {
         assert_eq!(hits.total_hits, 1);
 
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_blocks_skips_mooncake_for_cache_namespace() {
+        let server = Server::new_async().await;
+        let server_url = Url::parse(&server.url()).unwrap();
+
+        let config = SglangHicacheMooncakeConfig {
+            master_server_address: Some(format!("{}:50051", server_url.host_str().unwrap())),
+            master_metrics_port: server_url.port().unwrap(),
+            ..mooncake_config()
+        };
+
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+        let hits = cache
+            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, Some("tenant-a"))
+            .await
+            .unwrap();
+
+        assert!(hits.ranges.is_empty());
+        assert_eq!(hits.total_hits, 0);
     }
 }

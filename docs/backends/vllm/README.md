@@ -58,7 +58,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
 | [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ | |
-| [**Multimodal Support**](../../features/multimodal/multimodal-vllm.md) | ✅ | Aggregated image/video serving on legacy and unified Python backends |
+| [**Multimodal Support**](../../features/multimodal/multimodal-vllm.md) | ✅ | Aggregated and P/D image/video serving on legacy and unified Python backends; separate Encode workers use the legacy path |
 | [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |
 | **WideEP** | ✅ | Support for DeepEP |
 | **DP Rank Routing** | ✅ | [Hybrid load balancing](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/?h=external+dp#hybrid-load-balancing) via external DP rank control |

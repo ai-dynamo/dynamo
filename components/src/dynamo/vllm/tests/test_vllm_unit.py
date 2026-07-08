@@ -365,6 +365,7 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         namespace="dynamo",
         route_to_encoder=False,
         enable_multimodal=False,
+        frontend_decoding=False,
         multimodal_embedding_cache_capacity_gb=0.0,
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
@@ -1506,4 +1507,4 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
     ]
 
     assert chunks
-    assert captured["prompt"]["cache_salt"] == "tenant-a"
+    assert captured["prompt"]["cache_salt"] == "dynamo-cache-salt:tenant-a"
