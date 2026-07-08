@@ -2491,6 +2491,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.4",
  "chrono",
+ "criterion",
  "dashmap",
  "derive_builder",
  "dynamo-runtime",
