@@ -140,7 +140,7 @@ impl MockEngineParityKind {
 
 #[cfg(feature = "mocker-kvbm-offload")]
 #[derive(Clone)]
-enum DeviceReplayEntryKind {
+enum KvEventReplayEntryKind {
     Request(Vec<LocalBlockHash>),
     Event {
         event: KvCacheEvent,
@@ -150,30 +150,28 @@ enum DeviceReplayEntryKind {
 
 #[cfg(feature = "mocker-kvbm-offload")]
 #[derive(Clone)]
-struct DeviceReplayEntry {
+struct KvEventReplayEntry {
     timestamp_us: u64,
     worker_id: u64,
     kind_rank: u8,
-    kind: DeviceReplayEntryKind,
+    kind: KvEventReplayEntryKind,
 }
 
 #[cfg(feature = "mocker-kvbm-offload")]
-fn collect_device_only_replay_entries(
-    artifacts: &[WorkerReplayArtifacts],
-) -> Vec<DeviceReplayEntry> {
+fn collect_kv_event_replay_entries(artifacts: &[WorkerReplayArtifacts]) -> Vec<KvEventReplayEntry> {
     let mut entries = Vec::new();
     for (worker_id, artifact) in artifacts.iter().enumerate() {
-        entries.extend(artifact.requests.iter().map(|request| DeviceReplayEntry {
+        entries.extend(artifact.requests.iter().map(|request| KvEventReplayEntry {
             timestamp_us: request.timestamp_us,
             worker_id: worker_id as u64,
             kind_rank: 0,
-            kind: DeviceReplayEntryKind::Request(request.replay_hashes.local_block_hashes.clone()),
+            kind: KvEventReplayEntryKind::Request(request.replay_hashes.local_block_hashes.clone()),
         }));
-        entries.extend(artifact.kv_events.iter().map(|event| DeviceReplayEntry {
+        entries.extend(artifact.kv_events.iter().map(|event| KvEventReplayEntry {
             timestamp_us: event.timestamp_us,
             worker_id: worker_id as u64,
             kind_rank: 1,
-            kind: DeviceReplayEntryKind::Event {
+            kind: KvEventReplayEntryKind::Event {
                 event: event.event.clone(),
                 storage_tier: event.storage_tier,
             },
@@ -340,7 +338,7 @@ async fn collect_device_only_overlap_scores(
     artifacts: &[WorkerReplayArtifacts],
 ) -> anyhow::Result<Vec<NormalizedOverlapScores>> {
     let indexer = config.build(BLOCK_SIZE, Arc::new(KvIndexerMetrics::new_unregistered()));
-    let entries = collect_device_only_replay_entries(artifacts);
+    let entries = collect_kv_event_replay_entries(artifacts);
     let mut scores = Vec::new();
     let mut idx = 0;
 
@@ -348,11 +346,11 @@ async fn collect_device_only_overlap_scores(
         let timestamp_us = entries[idx].timestamp_us;
         while idx < entries.len() && entries[idx].timestamp_us == timestamp_us {
             match &entries[idx].kind {
-                DeviceReplayEntryKind::Request(request) => {
+                KvEventReplayEntryKind::Request(request) => {
                     let overlap = indexer.find_matches(request.clone()).await?;
                     scores.push(overlap.scores.into_iter().collect());
                 }
-                DeviceReplayEntryKind::Event {
+                KvEventReplayEntryKind::Event {
                     event,
                     storage_tier,
                 } => {
