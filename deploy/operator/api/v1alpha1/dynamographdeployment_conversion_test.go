@@ -34,6 +34,7 @@ import (
 	"k8s.io/utils/ptr"
 	configv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/eppconfig"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
@@ -1010,7 +1011,7 @@ func TestDGD_RoundTrip_EPPConfigV15(t *testing.T) {
 					ComponentName: "epp",
 					ComponentType: v1beta1.ComponentTypeEPP,
 					EPPConfig: &v1beta1.EPPConfig{
-						Config: &configv1alpha1.EndpointPickerConfig{
+						Config: &eppconfig.EndpointPickerConfig{
 							FeatureGates: configv1alpha1.FeatureGates{"dataLayer", "flowControl"},
 							Plugins: []configv1alpha1.PluginSpec{
 								{Name: "source", Type: "metrics-source"},
@@ -1022,7 +1023,7 @@ func TestDGD_RoundTrip_EPPConfigV15(t *testing.T) {
 							SchedulingProfiles: []configv1alpha1.SchedulingProfile{
 								{Name: "default", Plugins: []configv1alpha1.SchedulingPlugin{{PluginRef: "scorer", Weight: &weight}}},
 							},
-							SaturationDetector: &configv1alpha1.SaturationDetectorConfig{PluginRef: "detector"},
+							SaturationDetector: &eppconfig.SaturationDetectorConfig{PluginRef: "detector"},
 							DataLayer: &configv1alpha1.DataLayerConfig{
 								Sources: []configv1alpha1.DataLayerSource{
 									{PluginRef: "source", Extractors: []configv1alpha1.DataLayerExtractor{{PluginRef: "extractor"}}},
@@ -1030,6 +1031,38 @@ func TestDGD_RoundTrip_EPPConfigV15(t *testing.T) {
 							},
 							FlowControl: &configv1alpha1.FlowControlConfig{MaxRequests: &maxRequests},
 							Parser:      &configv1alpha1.ParserConfig{PluginRef: "parser"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got := roundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestDGD_RoundTrip_DeprecatedSaturationDetector verifies that API conversion
+// preserves the deprecated typed form without normalizing it for GAIE.
+func TestDGD_RoundTrip_DeprecatedSaturationDetector(t *testing.T) {
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "epp-v12", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "epp",
+					ComponentType: v1beta1.ComponentTypeEPP,
+					EPPConfig: &v1beta1.EPPConfig{
+						Config: &eppconfig.EndpointPickerConfig{
+							Plugins:            []configv1alpha1.PluginSpec{},
+							SchedulingProfiles: []configv1alpha1.SchedulingProfile{},
+							SaturationDetector: &eppconfig.SaturationDetectorConfig{
+								QueueDepthThreshold:       7,
+								KVCacheUtilThreshold:      0.9,
+								MetricsStalenessThreshold: metav1.Duration{Duration: 3 * time.Second},
+							},
 						},
 					},
 				},

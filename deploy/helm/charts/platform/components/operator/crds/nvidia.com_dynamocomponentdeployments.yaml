@@ -987,7 +987,8 @@ spec:
                         The operator will marshal this to YAML and create a ConfigMap automatically.
                         Mutually exclusive with ConfigMapRef.
                         One of ConfigMapRef or Config must be specified (no default configuration).
-                        Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
+                        Supports the current GAIE schema and the deprecated saturation detector
+                        threshold fields retained for Dynamo API compatibility.
                       properties:
                         apiVersion:
                           description: |-
@@ -1232,15 +1233,39 @@ spec:
                         saturationDetector:
                           description: |-
                             SaturationDetector specifies which saturation detector plugin to use for both Admission and
-                            Flow Control. If omitted, "utilization-detector" is used by default.
+                            Flow Control. The deprecated threshold fields are normalized to a utilization-detector plugin.
+                            If omitted, "utilization-detector" is used by default.
                           properties:
+                            kvCacheUtilThreshold:
+                              description: |-
+                                KVCacheUtilThreshold defines the KV cache utilization (0.0 to 1.0) above
+                                which a pod is considered to have insufficient capacity.
+                                Deprecated: configure a utilization-detector plugin and use pluginRef.
+                              type: number
+                            metricsStalenessThreshold:
+                              description: |-
+                                MetricsStalenessThreshold defines how old a pod's metrics can be.
+                                If a pod's metrics are older than this, it might be excluded from
+                                "good capacity" considerations or treated as having no capacity for
+                                safety.
+                                Deprecated: configure a utilization-detector plugin and use pluginRef.
+                              type: string
                             pluginRef:
                               description: |-
                                 PluginRef specifies the name of the plugin instance to use for saturation detection.
                                 The reference is to the name of an entry of the Plugins defined in the configuration's Plugins section.
                                 If unspecified, "utilization-detector" is used by default.
                               type: string
+                            queueDepthThreshold:
+                              description: |-
+                                QueueDepthThreshold defines the backend waiting queue size above which a
+                                pod is considered to have insufficient capacity for new requests.
+                                Deprecated: configure a utilization-detector plugin and use pluginRef.
+                              type: integer
                           type: object
+                          x-kubernetes-validations:
+                            - message: pluginRef is mutually exclusive with the deprecated saturation detector threshold fields
+                              rule: '!has(self.pluginRef) || !(has(self.queueDepthThreshold) || has(self.kvCacheUtilThreshold) || has(self.metricsStalenessThreshold))'
                         schedulingProfiles:
                           description: |-
                             SchedulingProfiles is the list of named SchedulingProfiles
@@ -12185,15 +12210,39 @@ spec:
                         saturationDetector:
                           description: |-
                             SaturationDetector specifies which saturation detector plugin to use for both Admission and
-                            Flow Control. If omitted, "utilization-detector" is used by default.
+                            Flow Control. The deprecated threshold fields are normalized to a utilization-detector plugin.
+                            If omitted, "utilization-detector" is used by default.
                           properties:
+                            kvCacheUtilThreshold:
+                              description: |-
+                                KVCacheUtilThreshold defines the KV cache utilization (0.0 to 1.0) above
+                                which a pod is considered to have insufficient capacity.
+                                Deprecated: configure a utilization-detector plugin and use pluginRef.
+                              type: number
+                            metricsStalenessThreshold:
+                              description: |-
+                                MetricsStalenessThreshold defines how old a pod's metrics can be.
+                                If a pod's metrics are older than this, it might be excluded from
+                                "good capacity" considerations or treated as having no capacity for
+                                safety.
+                                Deprecated: configure a utilization-detector plugin and use pluginRef.
+                              type: string
                             pluginRef:
                               description: |-
                                 PluginRef specifies the name of the plugin instance to use for saturation detection.
                                 The reference is to the name of an entry of the Plugins defined in the configuration's Plugins section.
                                 If unspecified, "utilization-detector" is used by default.
                               type: string
+                            queueDepthThreshold:
+                              description: |-
+                                QueueDepthThreshold defines the backend waiting queue size above which a
+                                pod is considered to have insufficient capacity for new requests.
+                                Deprecated: configure a utilization-detector plugin and use pluginRef.
+                              type: integer
                           type: object
+                          x-kubernetes-validations:
+                            - message: pluginRef is mutually exclusive with the deprecated saturation detector threshold fields
+                              rule: '!has(self.pluginRef) || !(has(self.queueDepthThreshold) || has(self.kvCacheUtilThreshold) || has(self.metricsStalenessThreshold))'
                         schedulingProfiles:
                           description: |-
                             SchedulingProfiles is the list of named SchedulingProfiles

@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/eppconfig"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -770,7 +771,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
-					Config: &apixv1alpha1.EndpointPickerConfig{
+					Config: &eppconfig.EndpointPickerConfig{
 						Plugins:            []apixv1alpha1.PluginSpec{},
 						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
 					},
@@ -944,7 +945,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
-					Config: &apixv1alpha1.EndpointPickerConfig{
+					Config: &eppconfig.EndpointPickerConfig{
 						Plugins:            []apixv1alpha1.PluginSpec{},
 						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
 					},

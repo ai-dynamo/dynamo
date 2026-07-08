@@ -18,9 +18,9 @@
 package v1beta1
 
 import (
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/eppconfig"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 // ComponentType identifies the role of a Dynamo component within a graph.
@@ -150,7 +150,7 @@ type EPPConfig struct {
 	// +optional
 	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
-	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
+	Config *eppconfig.EndpointPickerConfig `json:"config,omitempty"`
 }
 
 // GPUMemoryServiceMode selects the GMS deployment topology.
