@@ -299,6 +299,15 @@ class TestValidDgdrSpec:
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
+    def test_b60_gpu_sku_is_accepted(self):
+        """Intel Phase 1 SKU b60 should validate like any other supported GPU SKU."""
+        dgdr = _make_dgdr(
+            hardware=HardwareSpec(gpuSku="b60", totalGpus=3, numGpusPerNode=3)
+        )
+        valid_dgdr_spec(dgdr)
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
     def test_none_workload_gets_default(self):
         """None workload is populated with a default WorkloadSpec."""
         dgdr = _make_dgdr(workload=None)

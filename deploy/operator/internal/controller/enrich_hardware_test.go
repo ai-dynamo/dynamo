@@ -77,6 +77,14 @@ func dcgmPod(name, ip string) *corev1.Pod {
 	}
 }
 
+func xpumdPod(name, ip string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "intel-xpum",
+			Labels: map[string]string{gpupkg.LabelAppKubernetesName: gpupkg.LabelValueXPUMD}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
+	}
+}
+
 func TestGPUDiscoveryEnabledDefaults(t *testing.T) {
 	assert.True(t, (*DynamoGraphDeploymentRequestReconciler)(nil).gpuDiscoveryEnabled())
 	assert.True(t, (&DynamoGraphDeploymentRequestReconciler{}).gpuDiscoveryEnabled())
@@ -278,6 +286,47 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 	}
 }
 
+func TestEnrichHardwareFromDiscovery_B60UsesXPUMD(t *testing.T) {
+	t.Setenv("INTEL_XPU_METRICS_ENDPOINT_TEMPLATE", "")
+
+	r := newFakeReconciler(xpumdPod("xpumd", "10.0.0.2"))
+	r.GPUDiscovery = gpupkg.NewGPUDiscoveryWithScrapers(
+		func(ctx context.Context, endpoint string) (*gpupkg.GPUInfo, error) {
+			t.Fatalf("DCGM scraper should not be called for explicit B60 discovery")
+			return nil, nil
+		},
+		func(ctx context.Context, endpoint string) (*gpupkg.GPUInfo, error) {
+			assert.Contains(t, endpoint, "10.0.0.2:8080")
+			return &gpupkg.GPUInfo{
+				NodeName:    "xpu-node",
+				GPUsPerNode: 3,
+				Model:       "Intel(R) Graphics [0xe211]",
+				VRAMPerGPU:  24480,
+				System:      "b60",
+			}, nil
+		},
+	)
+	r.GPUDiscoveryCache = gpupkg.NewGPUDiscoveryCache()
+
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			Hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU: "b60",
+			},
+		},
+	}
+
+	changed, err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
+
+	require.NoError(t, err)
+	assert.True(t, changed)
+	require.NotNil(t, dgdr.Spec.Hardware)
+	assert.Equal(t, "b60", string(dgdr.Spec.Hardware.GPUSKU))
+	assert.Equal(t, 24480.0, *dgdr.Spec.Hardware.VRAMMB)
+	assert.Equal(t, int32(3), *dgdr.Spec.Hardware.NumGPUsPerNode)
+	assert.Equal(t, int32(3), *dgdr.Spec.Hardware.TotalGPUs)
+}
+
 func TestEnrichHardwareFromDiscovery_WritesOptionalHardwareMetadata(t *testing.T) {
 	r := newFakeReconciler()
 	r.GPUDiscovery = gpupkg.NewGPUDiscovery(nil)
@@ -423,6 +472,94 @@ func TestCreateProfilingJobPersistsDiscoveredHardware(t *testing.T) {
 		Name:      getProfilingJobName(&stored),
 		Namespace: stored.Namespace,
 	}, job))
+}
+
+// TestGetGPUDiscoveryFailureReason_DCGMNotEnabledMatches is a regression guard:
+// GetGPUDiscoveryFailureReason lowercases the error before matching, so matcher
+// substrings must be lowercase. The "DCGM is not enabled in the GPU Operator"
+// case previously used a mixed-case substring that could never match and fell
+// through to "unknown".
+func TestGetGPUDiscoveryFailureReason_DCGMNotEnabledMatches(t *testing.T) {
+	err := fmt.Errorf("DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)")
+	reason := GetGPUDiscoveryFailureReason(err)
+	assert.NotEqual(t, "unknown", reason)
+	assert.Equal(t, "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)", reason)
+}
+
+// TestGetGPUDiscoveryFailureReason_IntelFailuresNotMislabeledAsDCGM verifies
+// that aggregated Intel XPUMD discovery errors — which embed generic substrings
+// like "http get", "list pods", "parse prometheus metrics", and
+// "metrics endpoint ... status" — resolve to Intel-worded reasons rather than
+// the DCGM-worded cases. This guards the ordering of GetGPUDiscoveryFailureReason.
+func TestGetGPUDiscoveryFailureReason_IntelFailuresNotMislabeledAsDCGM(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "intel scrape failure wrapping HTTP GET",
+			err:  fmt.Errorf("failed to scrape any Intel XPUMD exporter pod: %v", []error{fmt.Errorf("pod xpumd (10.0.0.2): %w", fmt.Errorf("HTTP GET %s failed: %w", "http://10.0.0.2:9090/metrics", fmt.Errorf("connection refused")))}),
+			want: "failed to scrape any Intel XPUMD exporter pod (check XPUMD pod status and network connectivity)",
+		},
+		{
+			name: "intel scrape failure wrapping non-200 status",
+			err:  fmt.Errorf("failed to scrape any Intel XPUMD exporter pod: %v", []error{fmt.Errorf("pod xpumd (10.0.0.2): %w", fmt.Errorf("metrics endpoint %s returned status %d", "http://10.0.0.2:9090/metrics", 503))}),
+			want: "failed to scrape any Intel XPUMD exporter pod (check XPUMD pod status and network connectivity)",
+		},
+		{
+			name: "intel scrape failure wrapping parse error",
+			err:  fmt.Errorf("failed to scrape any Intel XPUMD exporter pod: %v", []error{fmt.Errorf("pod xpumd (10.0.0.2): %w", fmt.Errorf("parse prometheus metrics: %w", fmt.Errorf("unexpected token")))}),
+			want: "failed to scrape any Intel XPUMD exporter pod (check XPUMD pod status and network connectivity)",
+		},
+		{
+			name: "intel list failure wrapping list pods",
+			err:  fmt.Errorf("listing Intel XPUMD pods failed: %w", fmt.Errorf("list pods: %w", fmt.Errorf("forbidden"))),
+			want: "failed to list Intel XPUMD exporter pods (RBAC/cluster connectivity issue)",
+		},
+		{
+			name: "intel scrape failure wrapping no xpu devices reports the root cause",
+			err:  fmt.Errorf("failed to scrape any Intel XPUMD exporter pod: %v", []error{fmt.Errorf("pod xpumd (10.0.0.2): %w", fmt.Errorf("no XPU devices detected from XPUMD metrics"))}),
+			want: "no XPU devices detected in XPUMD metrics",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, GetGPUDiscoveryFailureReason(tc.err))
+		})
+	}
+}
+
+// TestGetGPUDiscoveryFailureReason_DCGMUnaffectedByIntelReorder ensures the
+// DCGM/generic reasons are unchanged after the Intel-specific cases were moved
+// ahead of them.
+func TestGetGPUDiscoveryFailureReason_DCGMUnaffectedByIntelReorder(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "dcgm http get",
+			err:  fmt.Errorf("HTTP GET %s failed: %w", "http://10.0.0.3:9400/metrics", fmt.Errorf("connection refused")),
+			want: "failed to reach DCGM metrics endpoint on pod (network/port issue)",
+		},
+		{
+			name: "dcgm list pods",
+			err:  fmt.Errorf("list pods: %w", fmt.Errorf("forbidden")),
+			want: "failed to list DCGM exporter pods (RBAC/cluster connectivity issue)",
+		},
+		{
+			name: "dcgm not enabled",
+			err:  fmt.Errorf("DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)"),
+			want: "DCGM is not enabled in the GPU Operator (check GPU Operator configuration and permissions)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, GetGPUDiscoveryFailureReason(tc.err))
+		})
+	}
 }
 
 func TestCreateProfilingJobWithManualHardwareDoesNotRequireAPIReader(t *testing.T) {

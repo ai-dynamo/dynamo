@@ -19,6 +19,7 @@ package gpu
 import (
 	"context"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -40,6 +41,9 @@ import (
 
 const (
 	defaultDCGMEndpointTemplate = "http://{POD_IP}:9400/metrics"
+	defaultXPUMDMetricsEndpoint = "http://{POD_IP}:8080/metrics"
+	gpuDiscoverySourceDCGM      = "dcgm"
+	gpuDiscoverySourceIntelXPU  = "intel-xpumd"
 	// NVIDIA GPU Feature Discovery (GFD) label keys
 	LabelGPUCount   = "nvidia.com/gpu.count"
 	LabelGPUProduct = "nvidia.com/gpu.product"
@@ -51,6 +55,8 @@ const (
 	LabelValueNvidiaNetworkOperator = "nvidia-network-operator"
 	LabelValueDCGMExporter          = "dcgm-exporter"
 	LabelValueGPUOperator           = "gpu-operator"
+	LabelValueXPUMD                 = "xpumd"
+	LabelValueIntelXPUManager       = "intel-xpumanager"
 	GPUOperatorNamespace            = "gpu-operator"
 	requestTimeout                  = 5 * time.Second
 	dialTimeout                     = 3 * time.Second
@@ -101,6 +107,8 @@ const (
 	tokenMI300  = "MI300"
 	tokenMI250  = "MI250"
 	tokenMI200  = "MI200"
+	tokenB60    = "B60"
+	tokenE211   = "E211"
 	LabelNVLink = "nvlink"
 )
 
@@ -153,6 +161,10 @@ var gpuRules = []gpuRule{
 	{token: tokenMI300, singleSKU: nvidiacomv1beta1.GPUSKUTypeMI300},
 	{token: tokenMI250, singleSKU: nvidiacomv1beta1.GPUSKUTypeMI200},
 	{token: tokenMI200, singleSKU: nvidiacomv1beta1.GPUSKUTypeMI200},
+
+	// Intel
+	{token: tokenB60, singleSKU: nvidiacomv1beta1.GPUSKUTypeB60},
+	{token: tokenE211, singleSKU: nvidiacomv1beta1.GPUSKUTypeB60},
 }
 
 // GPUInfo contains discovered GPU configuration from cluster nodes
@@ -180,21 +192,32 @@ type gpuCacheEntry struct {
 	expiresAt time.Time
 }
 
-// GPUDiscoveryCache caches discovery results keyed by SKU filter.
-// Bounded by the GPUSKUType enum plus empty for unfiltered discovery.
+type gpuCacheKey struct {
+	source string
+	sku    nvidiacomv1beta1.GPUSKUType
+}
+
+// GPUDiscoveryCache caches discovery results keyed by metrics source and SKU filter.
+// Bounded by the metrics source count times the GPUSKUType enum plus empty for unfiltered discovery.
 type GPUDiscoveryCache struct {
 	mu      sync.RWMutex
-	entries map[nvidiacomv1beta1.GPUSKUType]gpuCacheEntry
+	entries map[gpuCacheKey]gpuCacheEntry
 }
 
 type GPUDiscovery struct {
-	Scraper ScrapeMetricsFunc
-	group   singleflight.Group
+	Scraper      ScrapeMetricsFunc
+	IntelScraper ScrapeMetricsFunc
+	group        singleflight.Group
 }
 
 func NewGPUDiscovery(scraper ScrapeMetricsFunc) *GPUDiscovery {
+	return NewGPUDiscoveryWithScrapers(scraper, scraper)
+}
+
+func NewGPUDiscoveryWithScrapers(dcgmScraper, intelScraper ScrapeMetricsFunc) *GPUDiscovery {
 	return &GPUDiscovery{
-		Scraper: scraper,
+		Scraper:      dcgmScraper,
+		IntelScraper: intelScraper,
 	}
 }
 
@@ -205,7 +228,7 @@ func NewGPUDiscovery(scraper ScrapeMetricsFunc) *GPUDiscovery {
 // repeated DCGM scraping during reconciliation loops.
 func NewGPUDiscoveryCache() *GPUDiscoveryCache {
 	return &GPUDiscoveryCache{
-		entries: make(map[nvidiacomv1beta1.GPUSKUType]gpuCacheEntry),
+		entries: make(map[gpuCacheKey]gpuCacheEntry),
 	}
 }
 
@@ -217,8 +240,12 @@ func NewGPUDiscoveryCache() *GPUDiscoveryCache {
 //
 // This method is safe for concurrent use.
 func (c *GPUDiscoveryCache) Get(sku nvidiacomv1beta1.GPUSKUType) (*GPUInfo, bool) {
+	return c.GetForSource(gpuDiscoverySourceDCGM, sku)
+}
+
+func (c *GPUDiscoveryCache) GetForSource(source string, sku nvidiacomv1beta1.GPUSKUType) (*GPUInfo, bool) {
 	c.mu.RLock()
-	e, ok := c.entries[sku]
+	e, ok := c.entries[gpuCacheKey{source: source, sku: sku}]
 	c.mu.RUnlock()
 	if ok && time.Now().Before(e.expiresAt) && e.value != nil {
 		return e.value, true
@@ -233,9 +260,13 @@ func (c *GPUDiscoveryCache) Get(sku nvidiacomv1beta1.GPUSKUType) (*GPUInfo, bool
 //
 // This method is safe for concurrent use.
 func (c *GPUDiscoveryCache) Set(sku nvidiacomv1beta1.GPUSKUType, info *GPUInfo, ttl time.Duration) {
+	c.SetForSource(gpuDiscoverySourceDCGM, sku, info, ttl)
+}
+
+func (c *GPUDiscoveryCache) SetForSource(source string, sku nvidiacomv1beta1.GPUSKUType, info *GPUInfo, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[sku] = gpuCacheEntry{value: info, expiresAt: time.Now().Add(ttl)}
+	c.entries[gpuCacheKey{source: source, sku: sku}] = gpuCacheEntry{value: info, expiresAt: time.Now().Add(ttl)}
 }
 
 // DiscoverGPUsFromDCGM is a convenience wrapper that calls
@@ -284,6 +315,9 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClie
 			return cached, nil
 		}
 	}
+	if g == nil || g.Scraper == nil {
+		return nil, fmt.Errorf("metrics discovery is not configured")
+	}
 
 	resultCh := g.group.DoChan(string(filterSKU), func() (any, error) {
 		if cache != nil {
@@ -320,6 +354,93 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClie
 		}
 		return info, nil
 	}
+}
+
+// DiscoverGPUsFromIntelXPUFiltered discovers Intel XPU information by scraping
+// XPUMD/xpumanager metrics exporter pods. This path is intentionally separate
+// from DCGM discovery so unfiltered NVIDIA discovery behavior stays unchanged.
+func (g *GPUDiscovery) DiscoverGPUsFromIntelXPUFiltered(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
+	logger := log.FromContext(ctx)
+	if cache != nil {
+		if cached, ok := cache.GetForSource(gpuDiscoverySourceIntelXPU, filterSKU); ok {
+			logger.V(1).Info("Intel XPU discovery cache hit", "gpuSku", filterSKU)
+			return cached, nil
+		}
+	}
+	if g == nil || g.IntelScraper == nil {
+		return nil, fmt.Errorf("metrics discovery is not configured")
+	}
+
+	resultCh := g.group.DoChan(gpuDiscoverySourceIntelXPU+":"+string(filterSKU), func() (any, error) {
+		if cache != nil {
+			if cached, ok := cache.GetForSource(gpuDiscoverySourceIntelXPU, filterSKU); ok {
+				logger.V(1).Info("Intel XPU discovery cache hit after waiting for in-flight request", "gpuSku", filterSKU)
+				return cached, nil
+			}
+		}
+
+		info, err := g.discoverGPUsFromIntelXPUFilteredUncached(ctx, k8sClient, filterSKU)
+		if err != nil {
+			return nil, err
+		}
+		if cache != nil {
+			cache.SetForSource(gpuDiscoverySourceIntelXPU, filterSKU, info, 60*time.Second)
+		}
+		return info, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		if result.Shared {
+			logger.V(1).Info("Intel XPU discovery shared in-flight result", "gpuSku", filterSKU)
+		}
+		info, ok := result.Val.(*GPUInfo)
+		if !ok || info == nil {
+			return nil, fmt.Errorf("unexpected GPU discovery result type %T", result.Val)
+		}
+		return info, nil
+	}
+}
+
+// DiscoverGPUHardware is the controller-facing discovery entrypoint. It keeps
+// DCGM as the default metrics source and routes to XPUMD only for explicit B60
+// discovery.
+func DiscoverGPUHardware(
+	ctx context.Context,
+	k8sClient client.Reader,
+	metricsDiscovery *GPUDiscovery,
+	cache *GPUDiscoveryCache,
+	filterSKU nvidiacomv1beta1.GPUSKUType,
+	enableNodeFallback bool,
+) (*GPUInfo, error) {
+	// Route to the appropriate metrics source. Both filtered methods consult
+	// the cache before requiring a configured scraper and tolerate a nil
+	// receiver, so a warm cache is honored even when no scraper is configured.
+	var info *GPUInfo
+	var metricsErr error
+	if filterSKU == nvidiacomv1beta1.GPUSKUTypeB60 {
+		info, metricsErr = metricsDiscovery.DiscoverGPUsFromIntelXPUFiltered(ctx, k8sClient, cache, filterSKU)
+	} else {
+		info, metricsErr = metricsDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, cache, filterSKU)
+	}
+	if metricsErr == nil {
+		return info, nil
+	}
+
+	if !enableNodeFallback {
+		return nil, metricsErr
+	}
+
+	info, err := DiscoverGPUsFiltered(ctx, k8sClient, filterSKU)
+	if err == nil {
+		return info, nil
+	}
+	return nil, fmt.Errorf("metrics discovery failed: %v; node-label discovery failed: %w", metricsErr, err)
 }
 
 func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
@@ -431,6 +552,109 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 
 	return bestNode, nil
 }
+
+func (g *GPUDiscovery) discoverGPUsFromIntelXPUFilteredUncached(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
+	pods, err := listIntelXPUExporterPods(ctx, k8sClient)
+	if err != nil && !strings.Contains(err.Error(), "no Intel XPUMD pods found") {
+		return nil, fmt.Errorf("listing Intel XPUMD pods failed: %w", err)
+	}
+	if len(pods) == 0 {
+		return nil, fmt.Errorf("no Intel XPUMD pods found")
+	}
+
+	type nodeInfo struct {
+		info     *GPUInfo
+		sku      nvidiacomv1beta1.GPUSKUType
+		nodeName string
+	}
+	allNodes := make([]nodeInfo, 0, len(pods))
+	var scrapeErrors []error
+
+	for _, pod := range pods {
+		if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
+			continue
+		}
+		endpoint := buildIntelXPUEndpoint(pod.Status.PodIP)
+		info, err := g.IntelScraper(ctx, endpoint)
+		if err != nil {
+			scrapeErrors = append(scrapeErrors, fmt.Errorf("pod %s (%s): %w", pod.Name, pod.Status.PodIP, err))
+			continue
+		}
+		if info.NodeName == "" {
+			info.NodeName = pod.Spec.NodeName
+		}
+		sku := info.System
+		if sku == "" {
+			sku = InferHardwareSystem(info.Model)
+		}
+		allNodes = append(allNodes, nodeInfo{info: info, sku: sku, nodeName: pod.Spec.NodeName})
+	}
+
+	if len(allNodes) == 0 {
+		if len(scrapeErrors) > 0 {
+			return nil, fmt.Errorf("failed to scrape any Intel XPUMD exporter pod: %v", scrapeErrors)
+		}
+		return nil, fmt.Errorf("no XPU metrics could be parsed from any Intel XPUMD exporter pod")
+	}
+
+	var bestNode *GPUInfo
+	var bestSKU nvidiacomv1beta1.GPUSKUType
+	for _, n := range allNodes {
+		if filterSKU != "" && n.sku != filterSKU {
+			continue
+		}
+		if bestNode == nil ||
+			n.info.GPUsPerNode > bestNode.GPUsPerNode ||
+			(n.info.GPUsPerNode == bestNode.GPUsPerNode &&
+				n.info.VRAMPerGPU > bestNode.VRAMPerGPU) {
+			bestNode = n.info
+			bestSKU = n.sku
+		}
+	}
+
+	if bestNode == nil {
+		if filterSKU != "" {
+			return nil, fmt.Errorf("no GPU nodes matching SKU %q found", filterSKU)
+		}
+		return nil, fmt.Errorf("no XPU metrics could be parsed from any Intel XPUMD exporter pod")
+	}
+
+	nodesWithGPUs := 0
+	var rdmaDetected bool
+	var rdmaType string
+	for _, n := range allNodes {
+		if n.sku != bestSKU {
+			continue
+		}
+		nodesWithGPUs++
+		if !rdmaDetected {
+			rdma, rType := detectRDMAFromNode(ctx, k8sClient, n.nodeName)
+			if rdma {
+				rdmaDetected = true
+				rdmaType = rType
+			}
+		}
+	}
+
+	ib := detectIBPods(ctx, k8sClient)
+	if ib {
+		rdmaType = "infiniband"
+		rdmaDetected = true
+	}
+
+	cloudProvider, err := GetCloudProviderInfo(ctx, k8sClient)
+	if err != nil {
+		cloudProvider = CloudProviderUnknown
+	}
+	bestNode.System = bestSKU
+	bestNode.CloudProvider = cloudProvider
+	bestNode.NodesWithGPUs = nodesWithGPUs
+	bestNode.RDMAEnabled = rdmaDetected
+	bestNode.RDMAType = rdmaType
+
+	return bestNode, nil
+}
+
 func buildDCGMEndpoint(podIP string) string {
 	template := os.Getenv("DCGM_METRICS_ENDPOINT_TEMPLATE")
 	if template == "" {
@@ -438,6 +662,15 @@ func buildDCGMEndpoint(podIP string) string {
 	}
 	return strings.ReplaceAll(template, "{POD_IP}", podIP)
 }
+
+func buildIntelXPUEndpoint(podIP string) string {
+	template := os.Getenv("INTEL_XPU_METRICS_ENDPOINT_TEMPLATE")
+	if template == "" {
+		template = defaultXPUMDMetricsEndpoint
+	}
+	return strings.ReplaceAll(template, "{POD_IP}", podIP)
+}
+
 func listDCGMExporterPods(ctx context.Context, k8sClient client.Reader) ([]corev1.Pod, error) {
 	var result []corev1.Pod
 	seen := make(map[string]struct{})
@@ -469,6 +702,40 @@ func listDCGMExporterPods(ctx context.Context, k8sClient client.Reader) ([]corev
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("no DCGM exporter pods found")
+}
+
+func listIntelXPUExporterPods(ctx context.Context, k8sClient client.Reader) ([]corev1.Pod, error) {
+	var result []corev1.Pod
+	seen := make(map[string]struct{})
+	selectors := []client.MatchingLabels{
+		{LabelApp: LabelValueXPUMD},
+		{LabelApp: LabelValueIntelXPUManager},
+		{LabelAppKubernetesName: LabelValueXPUMD},
+		{LabelAppKubernetesName: LabelValueIntelXPUManager},
+	}
+	var lastErr error
+	for _, selector := range selectors {
+		podList := &corev1.PodList{}
+		err := k8sClient.List(ctx, podList, selector)
+		if err != nil {
+			lastErr = fmt.Errorf("list pods: %w", err)
+			continue
+		}
+		for _, pod := range podList.Items {
+			key := pod.Namespace + "/" + pod.Name
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				result = append(result, pod)
+			}
+		}
+	}
+	if len(result) > 0 {
+		return result, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no Intel XPUMD pods found")
 }
 
 // listGPUOperatorRunningPods lists GPU Operator pods in the given namespace
@@ -537,6 +804,22 @@ func listGPUOperatorRunningPods(ctx context.Context, k8sClient client.Reader) ([
 // This function does not implement retries or fallback logic.
 // Error handling and multi-pod aggregation are managed by the caller.
 func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, error) {
+	metricFamilies, err := scrapeMetricFamilies(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return parseMetrics(ctx, metricFamilies)
+}
+
+func ScrapeIntelMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, error) {
+	metricFamilies, err := scrapeMetricFamilies(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return parseIntelMetrics(ctx, metricFamilies)
+}
+
+func scrapeMetricFamilies(ctx context.Context, endpoint string) (map[string]*dto.MetricFamily, error) {
 	// Set a timeout for the request
 	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
@@ -576,7 +859,169 @@ func ScrapeMetricsEndpoint(ctx context.Context, endpoint string) (*GPUInfo, erro
 	if err != nil {
 		return nil, fmt.Errorf("parse prometheus metrics: %w", err)
 	}
-	return parseMetrics(ctx, metricFamilies)
+	return metricFamilies, nil
+}
+
+func parseIntelMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*GPUInfo, error) {
+	logger := log.FromContext(ctx)
+	infoFamily, ok := getMetricFamily(families, "hw_gpu_info", "hw.gpu.info")
+	if !ok || len(infoFamily.Metric) == 0 {
+		return nil, fmt.Errorf("no XPU devices detected from XPUMD metrics")
+	}
+
+	nodeName := ""
+	model := ""
+	pciDeviceID := ""
+	maxVRAMMiB := 0
+	deviceIDs := make(map[string]struct{})
+	memoryByDevice := map[string]int{}
+	if mf, ok := getMetricFamily(families, "hw_memory_size_bytes", "hw_memory_size", "hw.memory.size"); ok {
+		for _, m := range mf.Metric {
+			deviceIDs := getMetricLabels(m, "device_id", "hw_id", "hw.id", "pci_bdf", "pci.bdf")
+			if len(deviceIDs) == 0 {
+				continue
+			}
+			location := strings.ToLower(strings.TrimSpace(getMetricLabel(m, "hw_memory_location", "hw.memory.location")))
+			if location != "" && location != "device" {
+				continue
+			}
+			value, ok := getMetricFloatValue(m)
+			if !ok {
+				continue
+			}
+			total := int(math.Round(value / (1024 * 1024)))
+			for _, deviceID := range deviceIDs {
+				if total > memoryByDevice[deviceID] {
+					memoryByDevice[deviceID] = total
+				}
+			}
+			if nodeName == "" {
+				nodeName = getMetricLabel(m, "node_name")
+			}
+		}
+	}
+
+	for _, m := range infoFamily.Metric {
+		deviceKeys := getMetricLabels(m, "device_id", "hw_id", "hw.id", "pci_bdf", "pci.bdf")
+		if len(deviceKeys) == 0 {
+			continue
+		}
+		deviceID := deviceKeys[0]
+		deviceIDs[deviceID] = struct{}{}
+		if model == "" {
+			model = getMetricLabel(m, "device_name", "hw_model", "hw.model", "hw_name", "hw.name")
+		}
+		if pciDeviceID == "" {
+			pciDeviceID = getMetricLabel(m, "pci_device_id", "pci.device_id")
+		}
+		if nodeName == "" {
+			nodeName = getMetricLabel(m, "node_name")
+		}
+		for _, key := range deviceKeys {
+			if total, ok := memoryByDevice[key]; ok && total > maxVRAMMiB {
+				maxVRAMMiB = total
+			}
+		}
+	}
+
+	deviceCount := len(deviceIDs)
+	if deviceCount == 0 {
+		return nil, fmt.Errorf("no XPU devices detected from XPUMD metrics")
+	}
+	if maxVRAMMiB <= 0 {
+		return nil, fmt.Errorf("no XPU device memory detected from XPUMD metrics")
+	}
+
+	system := inferIntelHardwareSystem(model, pciDeviceID)
+	logger.Info("Parsed Intel XPU info",
+		"node", nodeName,
+		"gpuCount", deviceCount,
+		"model", model,
+		"pciDeviceID", pciDeviceID,
+		"vramMiB", maxVRAMMiB,
+		"system", system,
+	)
+
+	return &GPUInfo{
+		NodeName:         nodeName,
+		GPUsPerNode:      deviceCount,
+		Model:            model,
+		VRAMPerGPU:       maxVRAMMiB,
+		MIGEnabled:       false,
+		MIGProfiles:      map[string]int{},
+		System:           system,
+		Interconnect:     formFactorPCIe,
+		InterconnectTier: strNone,
+	}, nil
+}
+
+func getMetricFamily(families map[string]*dto.MetricFamily, names ...string) (*dto.MetricFamily, bool) {
+	for _, name := range names {
+		if mf, ok := families[name]; ok {
+			return mf, true
+		}
+	}
+	return nil, false
+}
+
+func getMetricLabel(m *dto.Metric, names ...string) string {
+	for _, name := range names {
+		for _, label := range m.GetLabel() {
+			if label.GetName() == name {
+				return label.GetValue()
+			}
+		}
+	}
+	return ""
+}
+
+func getMetricLabels(m *dto.Metric, names ...string) []string {
+	values := make([]string, 0, len(names))
+	seen := make(map[string]struct{})
+	for _, name := range names {
+		for _, label := range m.GetLabel() {
+			if label.GetName() != name {
+				continue
+			}
+			value := label.GetValue()
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func getMetricFloatValue(m *dto.Metric) (float64, bool) {
+	switch {
+	case m.Gauge != nil:
+		return m.GetGauge().GetValue(), true
+	case m.Counter != nil:
+		return m.GetCounter().GetValue(), true
+	case m.Untyped != nil:
+		return m.GetUntyped().GetValue(), true
+	default:
+		return 0, false
+	}
+}
+
+func inferIntelHardwareSystem(deviceName, pciDeviceID string) nvidiacomv1beta1.GPUSKUType {
+	if sku := InferHardwareSystem(deviceName); sku != "" {
+		return sku
+	}
+	if normalizePCIDeviceID(pciDeviceID) == "e211" {
+		return nvidiacomv1beta1.GPUSKUTypeB60
+	}
+	return ""
+}
+
+func normalizePCIDeviceID(pciDeviceID string) string {
+	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(pciDeviceID)), "0x")
 }
 
 // parseMetrics extracts GPU information and interconnect type for a node from DCGM Prometheus metrics.
