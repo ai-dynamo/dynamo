@@ -11,7 +11,6 @@ import (
 	"time"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
-	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"k8s.io/client-go/kubernetes"
@@ -32,6 +31,7 @@ type CheckpointRequest struct {
 	NodeName           string
 	PodName            string
 	PodNamespace       string
+	PodIP              string
 	Clientset          kubernetes.Interface
 }
 
@@ -49,7 +49,7 @@ type checkpointPhaseTimings struct {
 // The checkpoint directory is staged under tmp/<uuid> during the operation.
 // On success, the previous checkpoint is removed and the staged directory is
 // renamed into place at the base path root.
-func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
+func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest, cfg *types.AgentConfig) error {
 	checkpointStart := time.Now()
 	phaseTimings := checkpointPhaseTimings{}
 	prepareStart := time.Now()
@@ -74,7 +74,7 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 	defer os.RemoveAll(tmpDir)
 
 	// Phase 1: Inspect container state
-	state, err := inspectContainer(ctx, ctrd, log, req)
+	state, err := inspectContainer(ctx, rt, log, req)
 	if err != nil {
 		return err
 	}
@@ -128,9 +128,9 @@ func Checkpoint(ctx context.Context, ctrd *containerd.Client, log logr.Logger, r
 	return nil
 }
 
-func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req CheckpointRequest) (*types.CheckpointContainerSnapshot, error) {
+func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req CheckpointRequest) (*types.CheckpointContainerSnapshot, error) {
 	containerID := req.ContainerID
-	pid, ociSpec, err := snapshotruntime.ResolveContainer(ctx, ctrd, containerID)
+	pid, ociSpec, err := rt.ResolveContainer(ctx, containerID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve container: %w", err)
 	}
@@ -191,17 +191,18 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 	}
 	var gpuUUIDs []string
 	if len(cudaHostPIDs) > 0 {
-		gpuUUIDs, err = cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, req.ContainerName)
+		gpuUUIDs, err = cuda.DiscoverGPUUUIDs(
+			ctx,
+			req.Clientset,
+			req.PodName,
+			req.PodNamespace,
+			req.ContainerName,
+			snapshotruntime.HostProcPath,
+			pid,
+			log,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
-		}
-		if len(gpuUUIDs) == 0 {
-			log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
-			gpuUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, snapshotruntime.HostProcPath, pid)
-			if err != nil {
-				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
-			}
-			log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", gpuUUIDs)
 		}
 	}
 
@@ -235,7 +236,7 @@ func configureCheckpoint(
 	m := types.NewCheckpointManifest(
 		req.CheckpointID,
 		types.NewCRIUDumpManifest(criuOpts, cfg.CRIU),
-		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, state.StdioFDs),
+		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs),
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
 	if len(state.CUDANSPIDs) > 0 {

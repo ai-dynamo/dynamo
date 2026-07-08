@@ -22,6 +22,12 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 from dynamo.vllm.omni.output_formatter import OutputFormatter
+from dynamo.vllm.omni.utils import (
+    build_image_generation_prompt,
+    image_generation_negative_prompt_from_request,
+    image_generation_sampling_overrides,
+    image_generation_size_from_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +46,8 @@ class EngineInputs:
         fps: Frames per second, only meaningful for video requests.
         response_format: Desired response format (e.g. "url" or "b64_json" for
             image requests). None means use the default for the request type.
+        output_format: The output format to use for the response.
+            None means use the default for the request type.
     """
 
     prompt: Union[OmniTextPrompt, Dict[str, Any]]
@@ -48,12 +56,13 @@ class EngineInputs:
     fps: int = 0
     speed: float = 1.0
     response_format: str | None = None
+    output_format: str | None = None
 
 
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
 
-    Handles text-to-text, text-to-image, text-to-video, and text-to-audio generation.
+    Handles text-to-image, text-to-video, image-to-video, and text-to-audio generation.
     Audio/TTS logic is delegated to AudioGenerationHandler via composition.
     """
 
@@ -185,6 +194,7 @@ class OmniHandler(BaseOmniHandler):
                         request_type=inputs.request_type,
                         fps=inputs.fps,
                         response_format=inputs.response_format,
+                        output_format=inputs.output_format,
                         previous_text=previous_text,
                         speed=inputs.speed,
                     )
@@ -248,11 +258,32 @@ class OmniHandler(BaseOmniHandler):
         if text_prompt is None:
             raise ValueError("No user message found in chat completion request")
 
-        prompt = OmniTextPrompt(prompt=text_prompt)
+        output_modalities = {
+            str(modality).lower() for modality in (self.config.output_modalities or [])
+        }
+        if "image" in output_modalities:
+            width, height = image_generation_size_from_request(request)
+            prompt = build_image_generation_prompt(
+                text_prompt,
+                height,
+                width,
+                negative_prompt=image_generation_negative_prompt_from_request(request),
+                multi_modal_data=request.get("multi_modal_data"),
+            )
+            sp = OmniDiffusionSamplingParams(height=height, width=width)
+            for arg, value in image_generation_sampling_overrides(
+                request, height, width
+            ).items():
+                if hasattr(sp, arg):
+                    setattr(sp, arg, value)
+            sampling_params_list = self._build_sampling_params_list(sp)
+        else:
+            prompt = OmniTextPrompt(prompt=text_prompt)
+            sampling_params_list = None
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=None,
+            sampling_params_list=sampling_params_list,
             request_type=RequestType.CHAT_COMPLETION,
             fps=0,
         )
@@ -269,9 +300,8 @@ class OmniHandler(BaseOmniHandler):
         defaults = list(self.engine_client.default_sampling_params_list or [])
         result = []
         for i, default in enumerate(defaults):
-            stage_type = self.engine_client.engine.get_stage_metadata(i).get(
-                "stage_type", "llm"
-            )
+            metadata = self.engine_client.engine.get_stage_metadata(i)
+            stage_type = getattr(metadata, "stage_type", "llm")
             if stage_type == "diffusion":
                 result.append(diffusion_sp)
             else:
@@ -285,9 +315,12 @@ class OmniHandler(BaseOmniHandler):
         width, height = parse_size(req.size, default_w=1024, default_h=1024)
         nvext = req.nvext or ImageNvExt()
 
-        prompt = OmniTextPrompt(prompt=req.prompt)
-        if nvext and nvext.negative_prompt is not None:
-            prompt.negative_prompt = nvext.negative_prompt
+        prompt = build_image_generation_prompt(
+            req.prompt,
+            height,
+            width,
+            negative_prompt=nvext.negative_prompt,
+        )
 
         sp = OmniDiffusionSamplingParams(
             height=height,

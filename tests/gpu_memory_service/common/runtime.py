@@ -9,11 +9,9 @@ import json
 import logging
 import os
 import sys
-import time
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
 
-import pynvml
 import requests
 
 from tests.gpu_memory_service.common.gms import GMSServer
@@ -24,32 +22,6 @@ from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
-
-
-def get_gpu_memory_used(device: int = 0) -> int:
-    pynvml.nvmlInit()
-    try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-        return pynvml.nvmlDeviceGetMemoryInfo(handle).used
-    finally:
-        pynvml.nvmlShutdown()
-
-
-def wait_for_memory_drop(
-    baseline_bytes: int,
-    *,
-    timeout_s: float = 30.0,
-    poll_interval_s: float = 0.5,
-) -> int:
-    """Poll until GPU memory drops below *baseline_bytes*, then return current usage."""
-    deadline = time.monotonic() + timeout_s
-    current = get_gpu_memory_used()
-    while time.monotonic() < deadline:
-        if current < baseline_bytes:
-            return current
-        time.sleep(poll_interval_s)
-        current = get_gpu_memory_used()
-    return current
 
 
 class GMSProcessManager:
@@ -155,9 +127,9 @@ class GMSProcessManager:
 
 
 class GMSEngineProcess(EngineProcess, ABC):
-    """Backend process wrapper with a common quiesce/resume surface."""
+    """Backend process wrapper with a common pause/resume surface."""
 
-    quiesce_route: str
+    pause_route: str
     resume_route: str
 
     def __init__(
@@ -209,7 +181,7 @@ class GMSEngineProcess(EngineProcess, ABC):
         return json.dumps({"gms_read_only": True})
 
     @abstractmethod
-    def quiesce_payload(self) -> dict:
+    def pause_payload(self) -> dict:
         raise NotImplementedError
 
     def resume_payload(self) -> dict:
@@ -229,7 +201,7 @@ class GMSEngineProcess(EngineProcess, ABC):
         action: str,
     ) -> dict:
         response = requests.post(
-            f"http://localhost:{self.system_port}/engine/{route}",
+            f"http://localhost:{self.system_port}/engine/control/{route}",
             json=payload,
             timeout=timeout,
         )
@@ -238,12 +210,12 @@ class GMSEngineProcess(EngineProcess, ABC):
         logger.info("%s %s: %s", self.engine_id, action, result)
         return result
 
-    def quiesce(self) -> dict:
+    def pause(self) -> dict:
         return self._request_engine(
-            self.quiesce_route,
-            self.quiesce_payload(),
+            self.pause_route,
+            self.pause_payload(),
             30,
-            "quiesce",
+            "pause",
         )
 
     def resume(self, timeout: int = 30) -> dict:
@@ -262,7 +234,7 @@ class GMSEngineProcess(EngineProcess, ABC):
 
 
 class VLLMWithGMSProcess(GMSEngineProcess):
-    quiesce_route = "sleep"
+    pause_route = "sleep"
     resume_route = "wake_up"
 
     def __init__(
@@ -314,7 +286,7 @@ class VLLMWithGMSProcess(GMSEngineProcess):
             "--max-num-seqs",
             "1",
             "--gpu-memory-utilization",
-            "0.9",
+            "0.8",
             "--kv-events-config",
             kv_events_cfg,
         ]
@@ -328,14 +300,14 @@ class VLLMWithGMSProcess(GMSEngineProcess):
             )
         return command
 
-    def quiesce_payload(self) -> dict:
+    def pause_payload(self) -> dict:
         return {"level": 2}
 
 
 class TRTLLMWithGMSProcess(GMSEngineProcess):
-    """TensorRT-LLM engine with GMS weights + sleep/wake enabled."""
+    """TensorRT-LLM engine with GMS weights + pause/resume enabled."""
 
-    quiesce_route = "release_memory_occupation"
+    pause_route = "release_memory_occupation"
     resume_route = "resume_memory_occupation"
 
     # Override via environment variables for CI or custom setups.
@@ -360,7 +332,7 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
         read_only_weights: bool = False,
         override_engine_args: str | None = None,
     ):
-        reserved_ports = allocate_ports(1)
+        reserved_ports = allocate_ports(1, DefaultPort.SYSTEM1.value)
         self._override_engine_args = override_engine_args
         try:
             super().__init__(
@@ -418,12 +390,12 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
             command.extend(["--model-loader-extra-config", extra_config])
         return command
 
-    def quiesce_payload(self) -> dict:
+    def pause_payload(self) -> dict:
         return {}
 
 
 class SGLangWithGMSProcess(GMSEngineProcess):
-    quiesce_route = "release_memory_occupation"
+    pause_route = "release_memory_occupation"
     resume_route = "resume_memory_occupation"
 
     def __init__(
@@ -460,8 +432,9 @@ class SGLangWithGMSProcess(GMSEngineProcess):
             "gms",
             "--enable-memory-saver",
             "--disable-cuda-graph",
+            "--disable-piecewise-cuda-graph",
             "--mem-fraction-static",
-            "0.9",
+            "0.8",
             "--port",
             str(self.serve_port),
         ]
@@ -478,5 +451,5 @@ class SGLangWithGMSProcess(GMSEngineProcess):
     def env_updates(self) -> dict[str, str]:
         return {"NVCC_PREPEND_FLAGS": "-ccbin /usr/bin/g++"}
 
-    def quiesce_payload(self) -> dict:
+    def pause_payload(self) -> dict:
         return {}

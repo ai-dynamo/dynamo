@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-model-cache
+  labels:
+    app.kubernetes.io/name: nemotron-ultra-model-cache
+    app.kubernetes.io/part-of: nemotron-ultra
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: your-storage-class-name
+  resources:
+    requests:
+      storage: 1200Gi

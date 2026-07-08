@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Operator Metrics
+subtitle: Monitors Dynamo operator health with Prometheus metrics for controller reconciliation, webhooks, and managed resources.
 ---
 
 ## Overview
@@ -178,7 +179,7 @@ A pre-built Grafana dashboard is available for visualizing operator metrics.
 ### Deploying the Dashboard
 
 ```bash
-kubectl apply -f deploy/observability/k8s/grafana-operator-dashboard-configmap.yaml
+kubectl apply -f deploy/observability/grafana-operator-dashboard-configmap.yaml
 ```
 
 The dashboard will automatically appear in Grafana (assuming you have the Grafana dashboard sidecar configured, which is included in kube-prometheus-stack).

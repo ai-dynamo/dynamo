@@ -29,7 +29,7 @@ use uuid::Uuid;
 use rustc_hash::FxHashSet;
 
 use super::block_tracker::BlockTracker;
-use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker, added_prefill_tokens};
+use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::protocols::PrefillLoadHint;
 
@@ -107,21 +107,29 @@ pub struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
     blocks: BlockTracker,
-    block_size: usize,
     last_expiry_check_time: Instant,
+    expiry_duration: Option<Duration>,
 }
 
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
     pub(super) fn new(block_size: usize) -> Self {
-        assert!(block_size > 1, "block_size must be greater than 1");
+        Self::new_with_expiry(block_size, Some(EXPIRY_DURATION))
+    }
+
+    pub(super) fn new_without_expiry(block_size: usize) -> Self {
+        Self::new_with_expiry(block_size, None)
+    }
+
+    fn new_with_expiry(block_size: usize, expiry_duration: Option<Duration>) -> Self {
+        assert!(block_size > 0, "block_size must be greater than 0");
 
         Self {
             requests: HashMap::new(),
             prefill: PrefillLoadTracker::default(),
             blocks: BlockTracker::default(),
-            block_size,
             last_expiry_check_time: Instant::now(),
+            expiry_duration,
         }
     }
 
@@ -158,39 +166,12 @@ impl ActiveSequences {
         self.prefill.snapshot().active_tokens_at(decay_now)
     }
 
-    /// Add a new request with its initial tokens.
-    /// Returns block membership transitions plus any expired request IDs removed during cleanup.
-    #[cfg(test)]
-    pub(super) fn add_request(
-        &mut self,
-        request_id: RequestId,
-        token_sequence: Option<Vec<SequenceHash>>,
-        isl: usize,
-        overlap: u32,
-        expected_output_tokens: Option<u32>,
-        decay_now: Instant,
-    ) -> SequenceMutationOutcome {
-        self.add_request_with_prefill_tracking(
-            request_id,
-            token_sequence,
-            isl,
-            overlap,
-            expected_output_tokens,
-            true,
-            None,
-            decay_now,
-        )
-    }
-
     /// Add a new request with optional prompt-token load accounting.
     /// Returns block membership transitions plus any expired request IDs removed during cleanup.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn add_request_with_prefill_tracking(
         &mut self,
         request_id: RequestId,
         token_sequence: Option<Vec<SequenceHash>>,
-        isl: usize,
-        overlap: u32,
         expected_output_tokens: Option<u32>,
         track_prefill_tokens: bool,
         prefill_load_hint: Option<PrefillLoadHint>,
@@ -241,15 +222,11 @@ impl ActiveSequences {
         };
 
         let prefill = if track_prefill_tokens {
-            let default_tokens = self.new_tokens(isl, overlap);
-            let hint = prefill_load_hint.unwrap_or(PrefillLoadHint {
-                initial_effective_prefill_tokens: default_tokens,
-                expected_prefill_duration: None,
-            });
-
-            (hint.initial_effective_prefill_tokens > 0).then_some(PrefillLoadState {
-                initial_effective_prefill_tokens: hint.initial_effective_prefill_tokens,
-                expected_prefill_duration: hint.expected_prefill_duration,
+            prefill_load_hint.and_then(|hint| {
+                (hint.initial_effective_prefill_tokens > 0).then_some(PrefillLoadState {
+                    initial_effective_prefill_tokens: hint.initial_effective_prefill_tokens,
+                    expected_prefill_duration: hint.expected_prefill_duration,
+                })
             })
         } else {
             None
@@ -297,24 +274,15 @@ impl ActiveSequences {
 
         let _ = request_state.expected_output_tokens;
         let mut membership_delta = PromptMembershipDelta::default();
-        let mut first_absent_prompt_idx = None;
-        let prompt_hashes: Vec<_> = request_state
-            .prompt_blocks
-            .iter()
-            .map(|(hash, _)| *hash)
-            .collect();
+        let mut prompt_remove = Vec::new();
 
-        for (idx, (block_hash, rc)) in request_state.prompt_blocks.into_iter().enumerate() {
+        for (block_hash, rc) in request_state.prompt_blocks {
             drop(rc);
-            if self.blocks.try_remove_block(&block_hash) && first_absent_prompt_idx.is_none() {
-                first_absent_prompt_idx = Some(idx);
+            if self.blocks.try_remove_block(&block_hash) || !prompt_remove.is_empty() {
+                prompt_remove.push(block_hash);
             }
         }
-
-        if let Some(first_absent_prompt_idx) = first_absent_prompt_idx {
-            let prompt_remove = prompt_hashes[first_absent_prompt_idx..].to_vec();
-            membership_delta.push_remove(prompt_remove);
-        }
+        membership_delta.push_remove(prompt_remove);
 
         for (block_hash, rc) in request_state.output_blocks {
             drop(rc);
@@ -356,50 +324,12 @@ impl ActiveSequences {
         acquire.became_present_on_worker.then_some(random_hash)
     }
 
-    pub(super) fn new_tokens(&self, isl: usize, overlap: u32) -> usize {
-        added_prefill_tokens(self.block_size, isl, overlap)
-    }
-
-    #[cfg(test)]
-    fn potential_blocks_and_tokens_with_prefill_tracking(
-        &self,
-        token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        overlap: u32,
-        track_prefill_tokens: bool,
-        decay_now: Instant,
-    ) -> (usize, usize) {
-        let potential_blocks = if let Some(token_seq) = token_sequence {
-            self.new_blocks(token_seq) + self.active_blocks()
-        } else {
-            self.active_blocks()
-        };
-        let active_tokens = self.active_tokens(decay_now);
-        let potential_tokens = if track_prefill_tokens {
-            self.new_tokens(isl, overlap) + active_tokens
-        } else {
-            active_tokens
-        };
-
-        (potential_blocks, potential_tokens)
-    }
-
-    /// Match a request against existing blocks and return the number of new blocks that would be added
-    pub(super) fn new_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
-        token_sequence
-            .iter()
-            .filter(|block| !self.blocks.unique_blocks.contains_key(block))
-            .count()
-    }
-
-    /// Return the total number of blocks that would be used if the token sequence was added.
-    pub(super) fn potential_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
-        self.new_blocks(token_sequence) + self.active_blocks()
-    }
-
     /// Force expiry of stale requests if the timer has elapsed.
     /// Returns block membership transitions plus the set of expired request IDs that were removed.
     pub(super) fn force_expiry(&mut self) -> SequenceMutationOutcome {
+        let Some(expiry_duration) = self.expiry_duration else {
+            return SequenceMutationOutcome::default();
+        };
         let now = Instant::now();
 
         if now < self.last_expiry_check_time + CHECK_EXPIRY_FREQUENCY {
@@ -407,7 +337,7 @@ impl ActiveSequences {
         }
 
         self.last_expiry_check_time = now;
-        let expired_requests_time = now - EXPIRY_DURATION;
+        let expired_requests_time = now - expiry_duration;
         let expired_request_ids: HashSet<RequestId> = self
             .requests
             .iter()
@@ -449,6 +379,7 @@ impl ActiveSequences {
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
+            active_requests: self.requests.len(),
             prefill: self.prefill.snapshot(),
         }
     }
@@ -479,6 +410,13 @@ mod tests {
         }
     }
 
+    fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
+        (tokens > 0).then_some(PrefillLoadHint {
+            initial_effective_prefill_tokens: tokens,
+            expected_prefill_duration: None,
+        })
+    }
+
     #[test]
     fn test_prompt_membership_delta_only_reports_first_add_and_last_remove() {
         let mut seq_manager = ActiveSequences::new(4);
@@ -487,11 +425,9 @@ mod tests {
         let first = seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
             Some(vec![1, 2]),
-            8,
-            0,
             None,
             true,
-            None,
+            tracking_hint(8),
             decay_now,
         );
         assert_eq!(
@@ -509,11 +445,9 @@ mod tests {
         let second = seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
             Some(vec![1, 2, 3]),
-            12,
-            0,
             None,
             true,
-            None,
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(
@@ -549,11 +483,9 @@ mod tests {
         let outcome = seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
             Some(vec![1, 2, 3]),
-            12,
-            0,
             None,
             true,
-            None,
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(
@@ -598,34 +530,34 @@ mod tests {
         let mut seq_manager = ActiveSequences::new(block_size);
         let decay_now = Instant::now();
 
-        seq_manager.add_request(
+        seq_manager.add_request_with_prefill_tracking(
             "request_1".to_string(),
             Some(vec![1, 2, 3]),
-            12,
-            0,
             None,
+            true,
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 3);
         assert_eq!(seq_manager.active_tokens(decay_now), 12);
 
-        seq_manager.add_request(
+        seq_manager.add_request_with_prefill_tracking(
             "request_2".to_string(),
             Some(vec![4]),
-            4,
-            0,
             None,
+            true,
+            tracking_hint(4),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 4);
         assert_eq!(seq_manager.active_tokens(decay_now), 16);
 
-        seq_manager.add_request(
+        seq_manager.add_request_with_prefill_tracking(
             "request_3".to_string(),
             Some(vec![1, 2, 3, 4]),
-            16,
-            4,
             None,
+            true,
+            tracking_hint(0),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 4);
@@ -650,12 +582,12 @@ mod tests {
         let mut seq_manager = ActiveSequences::new(block_size);
         let decay_now = Instant::now();
 
-        seq_manager.add_request(
+        seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
             Some(vec![1, 2, 3]),
-            12,
-            0,
             None,
+            true,
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 3);
@@ -667,7 +599,14 @@ mod tests {
         );
         assert_eq!(seq_manager.active_blocks(), 2);
 
-        seq_manager.add_request("r2".to_string(), Some(vec![1, 2]), 8, 0, None, decay_now);
+        seq_manager.add_request_with_prefill_tracking(
+            "r2".to_string(),
+            Some(vec![1, 2]),
+            None,
+            true,
+            tracking_hint(8),
+            decay_now,
+        );
         assert_eq!(seq_manager.active_blocks(), 2);
 
         assert!(
@@ -689,12 +628,12 @@ mod tests {
         let mut seq_manager = ActiveSequences::new(block_size);
         let decay_now = Instant::now();
 
-        seq_manager.add_request(
+        seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
             Some(vec![1, 2, 3]),
-            12,
-            0,
             None,
+            true,
+            tracking_hint(12),
             decay_now,
         );
         assert_eq!(seq_manager.active_tokens(decay_now), 12);
@@ -705,7 +644,14 @@ mod tests {
         seq_manager.mark_prefill_completed(&"r1".to_string(), decay_now);
         assert_eq!(seq_manager.active_tokens(decay_now), 0);
 
-        seq_manager.add_request("r2".to_string(), Some(vec![4, 5]), 8, 0, None, decay_now);
+        seq_manager.add_request_with_prefill_tracking(
+            "r2".to_string(),
+            Some(vec![4, 5]),
+            None,
+            true,
+            tracking_hint(8),
+            decay_now,
+        );
         assert_eq!(seq_manager.active_tokens(decay_now), 8);
 
         seq_manager.free(&"r2".to_string(), decay_now);
@@ -720,8 +666,6 @@ mod tests {
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
             Some(vec![1, 2, 3]),
-            12,
-            0,
             None,
             false,
             None,
@@ -739,32 +683,6 @@ mod tests {
     }
 
     #[test]
-    fn test_potential_blocks_and_tokens_without_prefill_tracking_ignores_prompt_load() {
-        let mut seq_manager = ActiveSequences::new(4);
-        let decay_now = Instant::now();
-        seq_manager.add_request_with_prefill_tracking(
-            "r1".to_string(),
-            Some(vec![1, 2, 3]),
-            12,
-            0,
-            None,
-            false,
-            None,
-            decay_now,
-        );
-
-        let (blocks, tokens) = seq_manager.potential_blocks_and_tokens_with_prefill_tracking(
-            Some(&[1, 2, 3, 4]),
-            16,
-            0,
-            false,
-            decay_now,
-        );
-        assert_eq!(blocks, 4);
-        assert_eq!(tokens, 0);
-    }
-
-    #[test]
     fn test_prefill_queue_and_sum_invariants_survive_idempotent_cleanup() {
         let mut seq_manager = ActiveSequences::new(4);
         let decay_now = Instant::now();
@@ -772,8 +690,6 @@ mod tests {
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
             Some(vec![1]),
-            50,
-            0,
             None,
             true,
             Some(prefill_hint(50, 10)),
@@ -782,8 +698,6 @@ mod tests {
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
             Some(vec![2]),
-            30,
-            0,
             None,
             true,
             Some(prefill_hint(30, 10)),
@@ -823,20 +737,20 @@ mod tests {
         let block_size = 4;
         let mut seq_manager = ActiveSequences::new(block_size);
 
-        seq_manager.add_request(
+        seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
             Some(vec![1, 2]),
-            8,
-            0,
             None,
+            true,
+            tracking_hint(8),
             Instant::now(),
         );
-        seq_manager.add_request(
+        seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
             Some(vec![3, 4]),
-            8,
-            0,
             None,
+            true,
+            tracking_hint(8),
             Instant::now(),
         );
         assert_eq!(seq_manager.active_blocks(), 4);
@@ -869,8 +783,14 @@ mod tests {
         seq_manager.assert_consistent();
 
         tokio::time::advance(Duration::from_secs(31)).await;
-        let expired =
-            seq_manager.add_request("r3".to_string(), Some(vec![5]), 4, 0, None, Instant::now());
+        let expired = seq_manager.add_request_with_prefill_tracking(
+            "r3".to_string(),
+            Some(vec![5]),
+            None,
+            true,
+            tracking_hint(4),
+            Instant::now(),
+        );
         assert!(expired.expired_request_ids.is_empty());
         assert_eq!(seq_manager.active_blocks(), 1);
         assert_eq!(seq_manager.active_tokens(Instant::now()), 4);
@@ -885,8 +805,6 @@ mod tests {
         seq_manager.add_request_with_prefill_tracking(
             "r1".to_string(),
             Some(vec![1]),
-            40,
-            0,
             None,
             true,
             Some(prefill_hint(40, 100)),
@@ -896,8 +814,6 @@ mod tests {
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
             Some(vec![2]),
-            30,
-            0,
             None,
             true,
             Some(prefill_hint(30, 100)),

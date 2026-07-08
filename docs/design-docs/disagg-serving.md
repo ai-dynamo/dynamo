@@ -70,4 +70,3 @@ Dynamo's disaggregation design supports runtime-reconfigurable xPyD (x prefill w
 - **Remove worker**: Worker drains active requests and deregisters from discovery.
 
 The router automatically discovers new workers via the discovery service and incorporates them into routing decisions.
-

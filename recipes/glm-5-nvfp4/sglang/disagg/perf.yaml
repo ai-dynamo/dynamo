@@ -13,9 +13,6 @@ spec:
     spec:
       restartPolicy: Never
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -47,20 +44,39 @@ spec:
           value: "1"
         - name: COLUMNS
           value: "200"
+        envFrom:
+        - secretRef:
+            name: hf-token-secret
         command:
         - /bin/sh
         - -c
         - |
           set -eu
-          apt-get update -qq && apt-get install -y -qq curl jq && apt-get clean
-          pip install -q aiperf transformers tokenizers
+          # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
+          # GB200 benchmark pods need build tools to compile it from source.
+          apt-get update && apt-get install -y --no-install-recommends build-essential && apt-get clean
+          # GLM-5's tokenizer_config.json uses tokenizer_class=TokenizersBackend,
+          # which is supported by Transformers v5.
+          pip install -q aiperf==0.10.0 transformers==5.8.0 tokenizers==0.22.2
 
           echo "Waiting for model at http://$ENDPOINT/v1/models..."
-          while ! curl -sf "http://$ENDPOINT/v1/models" | jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
-            echo "[$(date '+%H:%M:%S')] not ready, retrying in 10s..."
-            sleep 10
-          done
-          echo "Model ready!"
+          python3 - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+
+          endpoint = os.environ["ENDPOINT"]
+          target = os.environ["TARGET_MODEL"]
+          while True:
+              try:
+                  with urllib.request.urlopen(f"http://{endpoint}/v1/models", timeout=5) as r:
+                      data = json.load(r)
+                  if any(model.get("id") == target for model in data.get("data", [])):
+                      break
+              except (urllib.error.URLError, ValueError, KeyError):
+                  pass
+              print(f"[{time.strftime('%H:%M:%S')}] not ready, retrying in 10s...", flush=True)
+              time.sleep(10)
+          print("Model ready!", flush=True)
+          PY
 
           mkdir -p "$ARTIFACT_DIR"
 

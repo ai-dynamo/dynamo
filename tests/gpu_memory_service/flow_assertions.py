@@ -9,14 +9,11 @@ import time
 import requests
 from gpu_memory_service.server.fsm import ServerState
 
-from tests.gpu_memory_service.common.runtime import get_gpu_memory_used
 from tests.utils.client import send_request
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.payloads import CompletionPayload
 
 logger = logging.getLogger(__name__)
-
-MIN_EXPECTED_MEMORY_RESTORE_FRACTION = 0.9
 
 
 def assert_completion_ok(
@@ -60,31 +57,12 @@ def assert_completion_ok(
             time.sleep(retry_interval)
 
 
-def assert_memory_restored_after_quiesce(
-    label: str,
-    quiesced_memory: int,
-    active_memory: int,
-    released_bytes: int,
-    *,
-    min_fraction: float = MIN_EXPECTED_MEMORY_RESTORE_FRACTION,
-) -> None:
-    restored_bytes = active_memory - quiesced_memory
-    logger.info(
-        "%s: %.2f GiB (restored %.0f MB)",
-        label,
-        active_memory / (1 << 30),
-        restored_bytes / (1 << 20),
-    )
-    assert active_memory > quiesced_memory
-    assert restored_bytes >= released_bytes * min_fraction
-
-
-def quiesce_engine(
+def pause_engine(
     weights_gms,
     kv_cache_gms,
     engine,
     *,
-    quiesce_label: str,
+    pause_label: str,
     expected_weights_hash: str | None = None,
 ):
     weights_state, _ = wait_for_active_layout(
@@ -93,22 +71,11 @@ def quiesce_engine(
         expected_weights_hash=expected_weights_hash,
     )
 
-    memory_before_quiesce = get_gpu_memory_used()
-    assert engine.quiesce()["status"] == "ok"
-    memory_after_quiesce = get_gpu_memory_used()
-    released_bytes = memory_before_quiesce - memory_after_quiesce
-    logger.info(
-        "%s: %.2f -> %.2f GiB (freed %.0f MB)",
-        quiesce_label,
-        memory_before_quiesce / (1 << 30),
-        memory_after_quiesce / (1 << 30),
-        released_bytes / (1 << 20),
-    )
-    assert memory_after_quiesce < memory_before_quiesce
-    assert released_bytes > 0
+    assert engine.pause()["status"] == "ok"
+    logger.info("%s completed", pause_label)
 
-    wait_for_quiesced_layout(weights_gms, kv_cache_gms, weights_state)
-    return weights_state, released_bytes, memory_after_quiesce
+    wait_for_paused_layout(weights_gms, kv_cache_gms, weights_state)
+    return weights_state
 
 
 def wait_for_active_layout(
@@ -141,41 +108,38 @@ def wait_for_active_layout(
         time.sleep(0.1)
 
 
-def wait_for_quiesced_layout(
+def wait_for_paused_layout(
     weights_gms,
     kv_cache_gms,
-    weights_state_before_quiesce,
+    weights_state_before_pause,
     *,
     require_no_ro_sessions: bool = False,
     timeout: float = 30.0,
 ):
     deadline = time.monotonic() + timeout
     while True:
-        weights_after_quiesce = weights_gms.get_runtime_state()
-        kv_after_quiesce = kv_cache_gms.get_runtime_state()
+        weights_after_pause = weights_gms.get_runtime_state()
+        kv_after_pause = kv_cache_gms.get_runtime_state()
         if (
-            weights_after_quiesce.state == ServerState.COMMITTED
-            and weights_after_quiesce.allocation_count
-            == weights_state_before_quiesce.allocation_count
-            and weights_after_quiesce.memory_layout_hash
-            == weights_state_before_quiesce.memory_layout_hash
-            and kv_after_quiesce.state == ServerState.EMPTY
-            and kv_after_quiesce.allocation_count == 0
+            weights_after_pause.state == ServerState.COMMITTED
+            and weights_after_pause.allocation_count
+            == weights_state_before_pause.allocation_count
+            and weights_after_pause.memory_layout_hash
+            == weights_state_before_pause.memory_layout_hash
+            and kv_after_pause.state == ServerState.EMPTY
+            and kv_after_pause.allocation_count == 0
         ):
-            if (
-                not require_no_ro_sessions
-                or weights_after_quiesce.ro_session_count == 0
-            ):
-                return weights_after_quiesce, kv_after_quiesce
+            if not require_no_ro_sessions or weights_after_pause.ro_session_count == 0:
+                return weights_after_pause, kv_after_pause
         if time.monotonic() > deadline:
-            raise TimeoutError("GMS state did not reach the quiesced layout")
+            raise TimeoutError("GMS state did not reach the paused layout")
         time.sleep(0.1)
 
 
 def wait_for_resumed_layout(
     weights_gms,
     kv_cache_gms,
-    weights_state_before_quiesce,
+    weights_state_before_pause,
     *,
     min_weight_ro_sessions: int = 0,
     timeout: float = 30.0,
@@ -188,9 +152,9 @@ def wait_for_resumed_layout(
             weights_after_resume.state == ServerState.RO
             and weights_after_resume.ro_session_count >= min_weight_ro_sessions
             and weights_after_resume.allocation_count
-            == weights_state_before_quiesce.allocation_count
+            == weights_state_before_pause.allocation_count
             and weights_after_resume.memory_layout_hash
-            == weights_state_before_quiesce.memory_layout_hash
+            == weights_state_before_pause.memory_layout_hash
             and kv_after_resume.state == ServerState.RW
             and kv_after_resume.allocation_count > 0
         ):

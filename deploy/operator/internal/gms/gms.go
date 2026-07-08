@@ -8,8 +8,6 @@
 package gms
 
 import (
-	"path/filepath"
-
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
@@ -20,41 +18,36 @@ const (
 	ServerContainerName = "gms-server"
 
 	// SharedVolumeName is the emptyDir volume shared between the GMS server
-	// sidecar and the main workload container for UDS sockets.
-	SharedVolumeName = "gms-shared"
+	// sidecar and the main workload container for UDS sockets. The name
+	// disambiguates it from the snapshot-control volume, which carries
+	// checkpoint/restore lifecycle sentinels written by the snapshot agent.
+	SharedVolumeName = "gms-intrapod-control"
 
-	// SharedMountPath is the mount path for the shared GMS socket directory.
-	SharedMountPath = "/shared"
+	// SharedMountPath is the mount path for the GMS intra-pod IPC directory.
+	SharedMountPath = "/gms-intrapod-control"
 
 	// EnvSocketDir is the environment variable name for the GMS UDS socket directory.
 	EnvSocketDir = "GMS_SOCKET_DIR"
 
 	// ServerModule is the Python module for the GMS server entry point.
 	ServerModule = "gpu_memory_service.cli.server"
-
-	readyFile = "gms-ready"
 )
 
-// EnsureServerSidecar adds the GMS server as a restartable init sidecar with a
-// startup probe. Idempotent — safe to call from both the DGD and checkpoint paths.
+// EnsureServerSidecar adds the GMS server as a native sidecar (init +
+// restartPolicy=Always). With no StartupProbe, kubelet considers it Started
+// as soon as the process is running — clients ride out the sub-second
+// socket-bind via connect-retry. Native sidecar status is kept so kubelet
+// terminates the server when the Job's regular containers exit; a regular
+// container here would keep the Pod in Running forever. Idempotent.
 func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container) {
 	if podSpec == nil || mainContainer == nil {
 		return
 	}
 
-	EnsureSharedVolume(podSpec, mainContainer)
+	EnsureClient(podSpec, mainContainer)
 
 	sidecar := Container(ServerContainerName, ServerModule, mainContainer.Image)
 	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
-	sidecar.StartupProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"test", "-f", filepath.Join(SharedMountPath, readyFile)},
-			},
-		},
-		PeriodSeconds:    1,
-		FailureThreshold: 300, // 1s * 300 = 5 min
-	}
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == sidecar.Name {
 			return
@@ -63,48 +56,69 @@ func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 	podSpec.InitContainers = append(podSpec.InitContainers, sidecar)
 }
 
-// EnsureSharedVolume adds the GMS UDS socket volume, mount, and GMS_SOCKET_DIR
-// env var to the main container. Idempotent.
-func EnsureSharedVolume(podSpec *corev1.PodSpec, mainContainer *corev1.Container) {
-	hasVolume := false
-	for _, v := range podSpec.Volumes {
-		if v.Name == SharedVolumeName {
-			hasVolume = true
+// EnsureClient adds the GMS UDS socket volume, mount, GMS_SOCKET_DIR env var,
+// and DRA claim to a GMS client container. Idempotent.
+func EnsureClient(podSpec *corev1.PodSpec, container *corev1.Container) {
+	if podSpec == nil || container == nil {
+		return
+	}
+	sharedVolume := corev1.Volume{
+		Name:         SharedVolumeName,
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}
+	foundVolume := false
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name == SharedVolumeName {
+			podSpec.Volumes[i] = sharedVolume
+			foundVolume = true
 			break
 		}
 	}
-	if !hasVolume {
-		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
-			Name:         SharedVolumeName,
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-		})
+	if !foundVolume {
+		podSpec.Volumes = append(podSpec.Volumes, sharedVolume)
 	}
 
-	hasMount := false
-	for _, m := range mainContainer.VolumeMounts {
-		if m.Name == SharedVolumeName {
-			hasMount = true
+	sharedMount := corev1.VolumeMount{Name: SharedVolumeName, MountPath: SharedMountPath}
+	foundMount := false
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name == SharedVolumeName {
+			container.VolumeMounts[i] = sharedMount
+			foundMount = true
 			break
 		}
 	}
-	if !hasMount {
-		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{Name: SharedVolumeName, MountPath: SharedMountPath})
+	if !foundMount {
+		container.VolumeMounts = append(container.VolumeMounts, sharedMount)
 	}
 
-	hasEnv := false
-	for _, e := range mainContainer.Env {
-		if e.Name == EnvSocketDir {
-			hasEnv = true
+	sharedEnv := corev1.EnvVar{Name: EnvSocketDir, Value: SharedMountPath}
+	foundEnv := false
+	for i := range container.Env {
+		if container.Env[i].Name == EnvSocketDir {
+			container.Env[i] = sharedEnv
+			foundEnv = true
 			break
 		}
 	}
-	if !hasEnv {
-		mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{Name: EnvSocketDir, Value: SharedMountPath})
+	if !foundEnv {
+		container.Env = append(container.Env, sharedEnv)
+	}
+
+	dra.RemoveGPUResources(container.Resources.Limits)
+	dra.RemoveGPUResources(container.Resources.Requests)
+	foundClaim := false
+	for i := range container.Resources.Claims {
+		if container.Resources.Claims[i].Name == dra.ClaimName {
+			foundClaim = true
+			break
+		}
+	}
+	if !foundClaim {
+		container.Resources.Claims = append(container.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	}
 }
 
-// Container builds a GMS container with the shared socket volume, env, and
-// DRA claim. Used for the server, loader, and saver.
+// Container builds a GMS container with the shared socket volume, env, and DRA claim.
 func Container(name, module, image string) corev1.Container {
 	return corev1.Container{
 		Name:    name,

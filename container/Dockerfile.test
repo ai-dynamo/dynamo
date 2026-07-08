@@ -3,14 +3,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standalone test image — layers test deps on top of a pre-built runtime image.
-# Usage: docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=<runtime-image> .
+# Usage: docker build -f container/Dockerfile.test --target test_image --build-arg BASE_IMAGE=<runtime-image> .
+# For adding specific unique tests software, like in planner, add a target: docker build -f container/Dockerfile.test --target test_distroless --build-arg BASE_IMAGE=<runtime-image> .
 ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
+
+FROM ${BASE_IMAGE} AS test_image
 
 # Install test dependencies on top of runtime image
 USER root
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     export PIP_CACHE_DIR=/root/.cache/pip && \
@@ -22,8 +24,53 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
             --requirement /tmp/requirements.test.txt; \
     fi
 
-USER dynamo
-
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
+# Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
+COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+
+# The ARC runner executes the job pod as uid 1001 with a non-dynamo gid (see
+# shared-test.yml), which lands in "other" perms on this baked dynamo:0 tree.
+# Tests create files in their CWD (fault-tolerance engine configs in
+# /workspace, launch-script ./logs dirs under examples/), so grant others the
+# directory write bit. Directories only: creating a file needs w on its parent
+# dir, and touching file modes would copy every file into a new image layer.
+# The distroless planner base has no find here — it takes the skip branch and
+# test_distroless below repeats the chmod after the runner tools land.
+RUN if command -v find; then find /workspace -type d -exec chmod o+w {} +; else echo "skipped (distroless planner)"; fi
+
+USER dynamo
+
+FROM debian:bookworm-slim AS github_runner_tools
+
+# glibc-family libs (loader, libc, libm) are excluded from the harvest: they
+# must resolve from the base image. A copied bookworm libm shadows the base's
+# newer one via LD_LIBRARY_PATH and breaks its consumers — libpython needs
+# GLIBC_2.38 symbols that bookworm's 2.36 libm lacks.
+RUN set -eux; \
+    tools="bash tail tar gzip cat grep env tr head mkdir chmod mv sleep find"; \
+    mkdir -p /github-runner-tools/usr/local/bin /github-runner-tools/opt/dynamo/lib; \
+    for tool in ${tools}; do \
+        tool_path="$(command -v "${tool}")"; \
+        cp -L "${tool_path}" "/github-runner-tools/usr/local/bin/${tool}"; \
+        ldd "${tool_path}" \
+            | awk '/=> \// { print $3 } /^\// { print $1 }' \
+            | grep -Ev '/(ld-linux|libc\.so|libm\.so)' \
+            | while read -r lib_path; do \
+                cp -L "${lib_path}" "/github-runner-tools/opt/dynamo/lib/$(basename "${lib_path}")"; \
+            done; \
+    done
+
+FROM test_image AS test_distroless
+
+# The planner runtime is distroless, so add supporting software for GitHub Actions.
+USER root
+COPY --from=github_runner_tools /github-runner-tools/usr/local/bin/ /usr/local/bin/
+COPY --from=github_runner_tools /github-runner-tools/opt/dynamo/lib/ /opt/dynamo/lib/
+
+# find/chmod exist now (copied above): apply the /workspace dir-write fix that
+# test_image skipped on this distroless base.
+RUN find /workspace -type d -exec chmod o+w {} +
+
+USER dynamo

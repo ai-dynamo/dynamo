@@ -20,15 +20,19 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use super::metrics::WORKER_LOAD_METRICS;
+use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+#[cfg(test)]
+use dynamo_kv_router::protocols::PrefillLoadHint;
 
 /// Concrete [`SequencePublisher`] backed by NATS [`EventPublisher`] and Prometheus gauges.
 pub struct RuntimeSequencePublisher {
     event_publisher: EventPublisher,
     metrics_publisher: Arc<EventPublisher>,
+    worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
 }
 
 impl SequencePublisher for RuntimeSequencePublisher {
@@ -49,6 +53,21 @@ impl SequencePublisher for RuntimeSequencePublisher {
         });
     }
 
+    fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
+        let publisher = self.metrics_publisher.clone();
+        tokio::spawn(async move {
+            for load in loads {
+                if let Err(e) = publisher.publish(&load).await {
+                    tracing::trace!(
+                        "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
+                        load.worker_id,
+                        load.dp_rank
+                    );
+                }
+            }
+        });
+    }
+
     fn observe_load(
         &self,
         worker: &WorkerWithDpRank,
@@ -64,6 +83,16 @@ impl SequencePublisher for RuntimeSequencePublisher {
             tokens,
         );
     }
+
+    fn observe_worker_registered(&self, worker: &WorkerWithDpRank, worker_type: &str) {
+        self.worker_status_metrics
+            .set_registered(worker.worker_id, worker.dp_rank, worker_type);
+    }
+
+    fn observe_worker_removed(&self, worker: &WorkerWithDpRank, worker_type: &str) {
+        self.worker_status_metrics
+            .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
+    }
 }
 
 /// Concrete [`SequenceSubscriber`] backed by NATS typed event stream.
@@ -76,6 +105,18 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
         match self.inner.next().await? {
             Ok((_envelope, event)) => Some(Ok(event)),
             Err(e) => Some(Err(e)),
+        }
+    }
+
+    fn poll_next_event(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<anyhow::Result<ActiveSequenceEvent>>> {
+        match self.inner.poll_next(cx) {
+            Poll::Ready(Some(Ok((_envelope, event)))) => Poll::Ready(Some(Ok(event))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -97,10 +138,12 @@ pub async fn create_multi_worker_sequences(
         EventPublisher::for_component(&component, ACTIVE_SEQUENCES_SUBJECT).await?;
     let metrics_publisher =
         Arc::new(EventPublisher::for_namespace(component.namespace(), KV_METRICS_SUBJECT).await?);
+    let worker_status_metrics = RouterWorkerStatusMetrics::from_component(&component);
 
     let publisher = RuntimeSequencePublisher {
         event_publisher,
         metrics_publisher,
+        worker_status_metrics,
     };
 
     let dp_range: HashMap<u64, (u32, u32)> = workers_with_configs
@@ -145,6 +188,13 @@ mod tests {
     use dynamo_runtime::{DistributedRuntime, Runtime};
     use tokio::time::Instant;
 
+    fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
+        Some(PrefillLoadHint {
+            initial_effective_prefill_tokens: tokens,
+            expected_prefill_duration: None,
+        })
+    }
+
     #[tokio::test]
     #[ignore]
     async fn test_multi_worker_cross_instance_sync() -> Result<()> {
@@ -187,50 +237,45 @@ mod tests {
         .await?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let decay_now = Instant::now();
 
         seq_manager_1.add_request(
             SequenceRequest {
                 request_id: "request_0".to_string(),
                 token_sequence: Some(vec![0, 1, 2]),
-                isl: 12,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(12),
                 worker: WorkerWithDpRank::new(0, 0),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         seq_manager_1.add_request(
             SequenceRequest {
                 request_id: "request_1".to_string(),
                 token_sequence: Some(vec![3, 4]),
-                isl: 8,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(8),
                 worker: WorkerWithDpRank::new(0, 1),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         seq_manager_2.add_request(
             SequenceRequest {
                 request_id: "request_2".to_string(),
                 token_sequence: Some(vec![0, 1, 2, 3]),
-                isl: 16,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(16),
                 worker: WorkerWithDpRank::new(1, 0),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -346,50 +391,45 @@ mod tests {
         .await?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let decay_now = Instant::now();
 
         seq_manager_1.add_request(
             SequenceRequest {
                 request_id: "request_0".to_string(),
                 token_sequence: None,
-                isl: 12,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(12),
                 worker: WorkerWithDpRank::from_worker_id(0),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         seq_manager_1.add_request(
             SequenceRequest {
                 request_id: "request_1".to_string(),
                 token_sequence: None,
-                isl: 8,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(8),
                 worker: WorkerWithDpRank::from_worker_id(1),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         seq_manager_2.add_request(
             SequenceRequest {
                 request_id: "request_2".to_string(),
                 token_sequence: None,
-                isl: 16,
-                overlap: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
-                prefill_load_hint: None,
+                prefill_load_hint: tracking_hint(16),
                 worker: WorkerWithDpRank::from_worker_id(2),
                 lora_name: None,
             },
-            Instant::now(),
+            decay_now,
         )?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;

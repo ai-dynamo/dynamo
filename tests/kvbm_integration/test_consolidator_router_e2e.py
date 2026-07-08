@@ -43,10 +43,12 @@ if HAS_TRTLLM:
 # Test markers
 pytestmark = [
     pytest.mark.kvbm,
+    pytest.mark.kvbm_consolidator,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,
-    pytest.mark.pre_merge,
+    pytest.mark.h100,
+    pytest.mark.post_merge,
     pytest.mark.skipif(not (HAS_VLLM or HAS_TRTLLM), reason="requires vllm or trtllm"),
 ]
 
@@ -356,6 +358,8 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
             model_id,
             "--kv-transfer-config",
             '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
+            "--kv-events-config",
+            '{"enable_kv_cache_events": true}',
             "--enforce-eager",  # For faster startup in tests
         ]
     else:  # trtllm
@@ -385,6 +389,13 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
             "ETCD_ENDPOINTS": "http://localhost:2379",
             "DYN_KVBM_CPU_CACHE_GB": "5",
             "DYN_KVBM_DISK_CACHE_GB": "5",
+            # Disable O_DIRECT on the KVBM G3 disk cache so the test runs on
+            # hardware / filesystems that don't support `fcntl(F_SETFL, O_DIRECT)`
+            # (e.g. tmpfs on Linux kernels <~6.1, lustre, overlay, NFS). Without
+            # this, trtllm's blocking layout init hangs until the 120s worker
+            # registration timeout. Only affects disk I/O path, not functional
+            # event/dedup coverage this test exercises.
+            "DYN_KVBM_DISK_DISABLE_O_DIRECT": "true",
             "DYN_LOG": "debug",  # Enable debug logs for consolidator visibility
         }
     )
@@ -392,6 +403,12 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
     # Set ZMQ port for TensorRT-LLM consolidator
     if engine == "trtllm":
         env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
+    elif engine == "vllm":
+        # Enable forward-pass metrics (InstrumentedScheduler + FpmEventRelay).
+        # One serial worker per test and the suite pins fixed ports, so the
+        # canonical FPM default port is safe here. (trtllm uses FpmDirectPublisher
+        # and ignores this var, so it's only set for vLLM.)
+        env["DYN_FORWARDPASS_METRIC_PORT"] = "20380"
 
     # Create separate log directory for worker to avoid conflicts with frontend
     worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
@@ -758,9 +775,11 @@ class TestConsolidatorRouterE2E:
             model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
 
             # Fixed cache tier sizes
+            block_size = 16
             g1_gpu_blocks = 10  # Very small GPU cache to force evictions
             g2_cpu_blocks = 5  # Smaller than GPU but large enough to retain blocks
             g3_disk_blocks = 5  # Smaller than GPU but large enough to retain blocks
+            max_model_len = g1_gpu_blocks * block_size
 
             # Compute optimal test parameters for this configuration
             test_params = compute_deduplication_test_params(
@@ -779,10 +798,16 @@ class TestConsolidatorRouterE2E:
                     model_id,
                     "--kv-transfer-config",
                     '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
+                    "--kv-events-config",
+                    '{"enable_kv_cache_events": true}',
                     "--enforce-eager",
                     "--enable-prefix-caching",
                     "--num-gpu-blocks-override",
                     str(g1_gpu_blocks),
+                    "--block-size",
+                    str(block_size),
+                    "--max-model-len",
+                    str(max_model_len),
                 ]
             else:  # trtllm
                 # Create TensorRT-LLM config file with KVBM connector
@@ -813,6 +838,12 @@ class TestConsolidatorRouterE2E:
                     "ETCD_ENDPOINTS": "http://localhost:2379",
                     "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS": str(g2_cpu_blocks),
                     "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS": str(g3_disk_blocks),
+                    # Disable O_DIRECT on the KVBM G3 disk cache so the test runs
+                    # on hardware / filesystems that don't support
+                    # `fcntl(F_SETFL, O_DIRECT)` (e.g. tmpfs on Linux kernels
+                    # <~6.1, lustre, overlay, NFS). Only affects disk I/O path,
+                    # not the event/dedup behavior under test.
+                    "DYN_KVBM_DISK_DISABLE_O_DIRECT": "true",
                     "DYN_LOG": "debug",
                 }
             )
@@ -820,6 +851,10 @@ class TestConsolidatorRouterE2E:
             # Set ZMQ port for TensorRT-LLM consolidator
             if engine == "trtllm":
                 worker_env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
+            elif engine == "vllm":
+                # Enable forward-pass metrics (InstrumentedScheduler + relay);
+                # canonical default port, safe for this serial fixed-port suite.
+                worker_env["DYN_FORWARDPASS_METRIC_PORT"] = "20380"
 
             worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
             worker_log_dir.mkdir(parents=True, exist_ok=True)

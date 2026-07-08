@@ -30,6 +30,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use lru::LruCache;
+use rand::TryRngCore;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::pin::Pin;
@@ -41,7 +42,7 @@ use crate::discovery::{
     Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
 };
 use crate::traits::DistributedRuntimeProvider;
-use crate::utils::ip_resolver::get_local_ip_for_advertise;
+use crate::utils::local_ip_for_advertise;
 
 /// Scope of the event plane - determines the subject prefix for pub/sub.
 #[derive(Debug, Clone)]
@@ -278,13 +279,15 @@ impl Stream for DeduplicatingStream {
 /// Event publisher for a specific topic.
 pub struct EventPublisher {
     transport_kind: EventTransportKind,
-    scope: EventScope,
     topic: String,
+    subject: String,
     publisher_id: u64,
     sequence: AtomicU64,
     tx: Arc<dyn EventTransportTx>,
     codec: Arc<Codec>,
     runtime_handle: tokio::runtime::Handle,
+    // Keeps unregister work in graceful-shutdown Phase 2 when dropped before shutdown.
+    graceful_shutdown_tracker: Arc<crate::utils::GracefulShutdownTracker>,
     /// Discovery client and registered instance for unregistration on drop
     discovery_client: Option<Arc<dyn Discovery>>,
     discovery_instance: Option<crate::discovery::DiscoveryInstance>,
@@ -292,9 +295,15 @@ pub struct EventPublisher {
 
 impl EventPublisher {
     /// Create a publisher for a component-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_component_with_transport`](Self::for_component_with_transport) to
+    /// override explicitly.
     pub async fn for_component(comp: &Component, topic: impl Into<String>) -> Result<Self> {
-        Self::for_component_with_transport(comp, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = comp.drt().default_event_transport_kind();
+        Self::for_component_with_transport(comp, topic, transport_kind).await
     }
 
     /// Create a publisher with explicit transport.
@@ -312,9 +321,15 @@ impl EventPublisher {
     }
 
     /// Create a publisher for a namespace-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_namespace_with_transport`](Self::for_namespace_with_transport) to
+    /// override explicitly.
     pub async fn for_namespace(ns: &Namespace, topic: impl Into<String>) -> Result<Self> {
-        Self::for_namespace_with_transport(ns, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = ns.drt().default_event_transport_kind();
+        Self::for_namespace_with_transport(ns, topic, transport_kind).await
     }
 
     /// Create a namespace publisher with explicit transport.
@@ -334,9 +349,17 @@ impl EventPublisher {
         topic: String,
         transport_kind: EventTransportKind,
     ) -> Result<Self> {
-        let publisher_id = drt.discovery().instance_id();
+        // Publishers are discovery objects in their own right. A single process
+        // can host multiple publishers for the same scope/topic, each with its
+        // own ZMQ endpoint and sequence space, so the process ID is not unique
+        // enough here.
+        let publisher_id = rand::rngs::OsRng
+            .try_next_u64()
+            .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?;
         let discovery = Some(drt.discovery());
         let runtime_handle = drt.runtime().secondary();
+        let subject = format!("{}.{}", scope.subject_prefix(), topic);
+        let graceful_shutdown_tracker = drt.graceful_shutdown_tracker();
 
         // Use Msgpack codec for all transports
         enum TransportSetup {
@@ -347,7 +370,10 @@ impl EventPublisher {
 
         let transport_setup = match transport_kind {
             EventTransportKind::Nats => {
-                let transport = Arc::new(nats_transport::NatsTransport::new(drt.clone()));
+                let transport = Arc::new(nats_transport::NatsTransport::new_publisher(
+                    drt.clone(),
+                    subject.clone(),
+                ));
                 let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                 TransportSetup::Nats(transport as Arc<dyn EventTransportTx>, codec)
             }
@@ -397,7 +423,7 @@ impl EventPublisher {
                         .next()
                         .and_then(|s| s.parse().ok())
                         .expect("Failed to parse port from bind endpoint");
-                    let local_ip = get_local_ip_for_advertise();
+                    let local_ip = local_ip_for_advertise();
                     let public_endpoint = format!("tcp://{}:{}", local_ip, actual_port);
 
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
@@ -418,17 +444,18 @@ impl EventPublisher {
                     namespace: scope.namespace().to_string(),
                     component: scope.component().unwrap_or("").to_string(),
                     topic: topic.clone(),
+                    publisher_id,
                     transport: transport_config,
                 };
 
-                let registered_instance = drt.discovery().register(spec).await?;
+                let discovery_instance = drt.discovery().register(spec).await?;
                 tracing::info!(
                     topic = %topic,
                     transport = ?transport_kind,
-                    instance_id = %registered_instance.instance_id(),
+                    publisher_id = %publisher_id,
                     "EventPublisher registered with discovery"
                 );
-                (tx, codec, Some(registered_instance))
+                (tx, codec, Some(discovery_instance))
             }
             TransportSetup::ZmqDirect(tx, codec, public_endpoint) => {
                 let transport_config = EventTransport::zmq(public_endpoint);
@@ -436,17 +463,18 @@ impl EventPublisher {
                     namespace: scope.namespace().to_string(),
                     component: scope.component().unwrap_or("").to_string(),
                     topic: topic.clone(),
+                    publisher_id,
                     transport: transport_config,
                 };
 
-                let registered_instance = drt.discovery().register(spec).await?;
+                let discovery_instance = drt.discovery().register(spec).await?;
                 tracing::info!(
                     topic = %topic,
                     transport = ?transport_kind,
-                    instance_id = %registered_instance.instance_id(),
+                    publisher_id = %publisher_id,
                     "EventPublisher registered with discovery (direct mode)"
                 );
-                (tx, codec, Some(registered_instance))
+                (tx, codec, Some(discovery_instance))
             }
             TransportSetup::ZmqBroker(tx, codec) => {
                 tracing::info!(
@@ -460,13 +488,14 @@ impl EventPublisher {
 
         Ok(Self {
             transport_kind,
-            scope,
             topic,
+            subject,
             publisher_id,
             sequence: AtomicU64::new(0),
             tx,
             codec,
             runtime_handle,
+            graceful_shutdown_tracker,
             discovery_client: discovery,
             discovery_instance,
         })
@@ -475,23 +504,25 @@ impl EventPublisher {
     /// Publish a serializable event.
     pub async fn publish<T: Serialize + Send + Sync>(&self, event: &T) -> Result<()> {
         let payload = self.codec.encode_payload(event)?;
-        self.publish_bytes(payload.to_vec()).await
+        self.publish_bytes_ref(payload.as_ref()).await
     }
 
     /// Publish raw bytes.
     pub async fn publish_bytes(&self, bytes: Vec<u8>) -> Result<()> {
-        let envelope = EventEnvelope {
-            publisher_id: self.publisher_id,
-            sequence: self.sequence.fetch_add(1, Ordering::SeqCst),
-            published_at: current_timestamp_ms(),
-            topic: self.topic.clone(),
-            payload: Bytes::from(bytes),
-        };
+        self.publish_bytes_ref(&bytes).await
+    }
 
-        let envelope_bytes = self.codec.encode_envelope(&envelope)?;
-        let subject = format!("{}.{}", self.scope.subject_prefix(), self.topic);
+    /// Publish raw bytes without taking ownership of the payload buffer.
+    pub async fn publish_bytes_ref(&self, bytes: &[u8]) -> Result<()> {
+        let envelope_bytes = self.codec.encode_envelope_parts(
+            self.publisher_id,
+            self.sequence.fetch_add(1, Ordering::SeqCst),
+            current_timestamp_ms(),
+            &self.topic,
+            bytes,
+        )?;
 
-        self.tx.publish(&subject, envelope_bytes).await
+        self.tx.publish(&self.subject, envelope_bytes).await
     }
 
     /// Get the publisher ID.
@@ -517,25 +548,27 @@ impl Drop for EventPublisher {
             (self.discovery_client.take(), self.discovery_instance.take())
         {
             let topic = self.topic.clone();
-            let instance_id = instance.instance_id();
+            let publisher_id = instance.instance_id();
             let runtime_handle = self.runtime_handle.clone();
+            let shutdown_guard = self.graceful_shutdown_tracker.register_task();
 
             // Drop can run outside any Tokio context (notably via PyO3 finalizers), so use
             // the runtime that created the publisher rather than the ambient thread state.
             let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 runtime_handle.spawn(async move {
+                    let _shutdown_guard = shutdown_guard;
                     match discovery.unregister(instance).await {
                         Ok(()) => {
                             tracing::info!(
                                 topic = %topic,
-                                instance_id = %instance_id,
+                                publisher_id = %publisher_id,
                                 "EventPublisher unregistered from discovery"
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
                                 topic = %topic,
-                                instance_id = %instance_id,
+                                publisher_id = %publisher_id,
                                 error = %e,
                                 "Failed to unregister EventPublisher from discovery"
                             );
@@ -547,7 +580,7 @@ impl Drop for EventPublisher {
             if spawn_result.is_err() {
                 tracing::warn!(
                     topic = %self.topic,
-                    instance_id = %instance_id,
+                    publisher_id = %publisher_id,
                     "Skipping EventPublisher unregister during drop because the runtime is unavailable"
                 );
             }
@@ -567,9 +600,15 @@ pub struct EventSubscriber {
 
 impl EventSubscriber {
     /// Create a subscriber for a component-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_component_with_transport`](Self::for_component_with_transport) to
+    /// override explicitly.
     pub async fn for_component(comp: &Component, topic: impl Into<String>) -> Result<Self> {
-        Self::for_component_with_transport(comp, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = comp.drt().default_event_transport_kind();
+        Self::for_component_with_transport(comp, topic, transport_kind).await
     }
 
     /// Create a subscriber with explicit transport.
@@ -587,9 +626,15 @@ impl EventSubscriber {
     }
 
     /// Create a subscriber for a namespace-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_namespace_with_transport`](Self::for_namespace_with_transport) to
+    /// override explicitly.
     pub async fn for_namespace(ns: &Namespace, topic: impl Into<String>) -> Result<Self> {
-        Self::for_namespace_with_transport(ns, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = ns.drt().default_event_transport_kind();
+        Self::for_namespace_with_transport(ns, topic, transport_kind).await
     }
 
     /// Create a namespace subscriber with explicit transport.
@@ -746,13 +791,21 @@ pub struct TypedEventSubscriber<T> {
 impl<T: DeserializeOwned + Send + 'static> TypedEventSubscriber<T> {
     /// Get the next typed event with its envelope.
     pub async fn next(&mut self) -> Option<Result<(EventEnvelope, T)>> {
-        let envelope = self.stream.next().await?;
-        match envelope {
-            Ok(env) => match self.codec.decode_payload(&env.payload) {
-                Ok(typed) => Some(Ok((env, typed))),
-                Err(e) => Some(Err(e)),
-            },
-            Err(e) => Some(Err(e)),
+        std::future::poll_fn(|cx| self.poll_next(cx)).await
+    }
+
+    /// Poll for the next typed event.
+    pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<(EventEnvelope, T)>>> {
+        match self.stream.as_mut().poll_next(cx) {
+            Poll::Ready(Some(envelope)) => Poll::Ready(Some(match envelope {
+                Ok(env) => match self.codec.decode_payload(&env.payload) {
+                    Ok(typed) => Ok((env, typed)),
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            })),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -768,7 +821,285 @@ fn current_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::environment_names::event_plane as env;
+    use crate::config::environment_names::zmq_broker as broker_env;
+
+    #[tokio::test]
+    async fn same_topic_publishers_are_independent_across_recreation() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(
+                    runtime,
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .expect("create distributed runtime");
+                let component = drt
+                    .namespace("event-publisher-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component");
+
+                let publisher_a = EventPublisher::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create first publisher");
+                let publisher_b = EventPublisher::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create second publisher");
+                let publisher_a_id = publisher_a.publisher_id();
+                let publisher_b_id = publisher_b.publisher_id();
+
+                assert_ne!(publisher_a_id, publisher_b_id);
+
+                let query = DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+                    "event-publisher-test",
+                    "worker",
+                    "events",
+                ));
+                let instances = drt
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .expect("list event publishers");
+                assert_eq!(instances.len(), 2);
+                assert!(
+                    instances
+                        .iter()
+                        .any(|instance| instance.instance_id() == publisher_a_id)
+                );
+                assert!(
+                    instances
+                        .iter()
+                        .any(|instance| instance.instance_id() == publisher_b_id)
+                );
+
+                let mut subscriber = EventSubscriber::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create subscriber");
+                let mut received_a = false;
+                let mut received_b = false;
+
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !received_a || !received_b {
+                        publisher_a
+                            .publish_bytes(vec![0xa1])
+                            .await
+                            .expect("publish from first publisher");
+                        publisher_b
+                            .publish_bytes(vec![0xb2])
+                            .await
+                            .expect("publish from second publisher");
+
+                        if let Ok(Some(envelope)) = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            subscriber.next(),
+                        )
+                        .await
+                        {
+                            let envelope = envelope.expect("receive event envelope");
+                            if envelope.publisher_id == publisher_a_id {
+                                assert_eq!(envelope.payload.as_ref(), &[0xa1]);
+                                received_a = true;
+                            } else if envelope.publisher_id == publisher_b_id {
+                                assert_eq!(envelope.payload.as_ref(), &[0xb2]);
+                                received_b = true;
+                            } else {
+                                panic!("event from unexpected publisher");
+                            }
+                        }
+
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("subscriber should receive events from both publishers");
+
+                drop(publisher_a);
+                let publisher_a_recreated = EventPublisher::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("recreate first publisher");
+                let publisher_a_recreated_id = publisher_a_recreated.publisher_id();
+
+                assert_ne!(publisher_a_recreated_id, publisher_a_id);
+                assert_ne!(publisher_a_recreated_id, publisher_b_id);
+                assert_eq!(
+                    publisher_a_recreated.sequence.load(Ordering::SeqCst),
+                    0,
+                    "a recreated publisher starts a new sequence space"
+                );
+
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        let instances = drt
+                            .discovery()
+                            .list(query.clone())
+                            .await
+                            .expect("list event publishers after recreation");
+                        if instances.len() == 2
+                            && instances
+                                .iter()
+                                .any(|instance| instance.instance_id() == publisher_b_id)
+                            && instances
+                                .iter()
+                                .any(|instance| instance.instance_id() == publisher_a_recreated_id)
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("old publisher should unregister without removing current publishers");
+
+                let mut received_b_after_recreation = false;
+                let mut received_recreated_a = false;
+
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !received_b_after_recreation || !received_recreated_a {
+                        publisher_b
+                            .publish_bytes(vec![0xb3])
+                            .await
+                            .expect("publish from second publisher after recreation");
+                        publisher_a_recreated
+                            .publish_bytes(vec![0xa2])
+                            .await
+                            .expect("publish from recreated publisher");
+
+                        if let Ok(Some(envelope)) = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            subscriber.next(),
+                        )
+                        .await
+                        {
+                            let envelope = envelope.expect("receive event envelope after drop");
+                            if envelope.publisher_id == publisher_b_id
+                                && envelope.payload.as_ref() == [0xb3]
+                            {
+                                received_b_after_recreation = true;
+                            } else if envelope.publisher_id == publisher_a_recreated_id
+                                && envelope.payload.as_ref() == [0xa2]
+                            {
+                                received_recreated_a = true;
+                            }
+                        }
+
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("subscriber should receive from surviving and recreated publishers");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn dropped_publisher_unregister_completes_within_graceful_shutdown() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(
+                    runtime,
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .expect("create distributed runtime");
+                let component = drt
+                    .namespace("event-publisher-shutdown-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component");
+
+                let publisher = EventPublisher::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create publisher");
+                let publisher_id = publisher.publisher_id();
+
+                let query = DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+                    "event-publisher-shutdown-test",
+                    "worker",
+                    "events",
+                ));
+                let instances = drt
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .expect("list event publishers");
+                assert_eq!(instances.len(), 1);
+                assert_eq!(instances[0].instance_id(), publisher_id);
+
+                let tracker = drt.graceful_shutdown_tracker();
+                assert_eq!(tracker.get_count(), 0);
+
+                let main_token = drt.runtime().primary_token();
+                let endpoint_token = drt.runtime().child_token();
+
+                // Dropping the publisher schedules the async discovery unregister.
+                // The drop path must synchronously take a graceful-shutdown guard so
+                // that `Runtime::shutdown` Phase 2 waits for the unregister task.
+                drop(publisher);
+                assert_eq!(
+                    tracker.get_count(),
+                    1,
+                    "dropping a publisher must register its unregister work with the graceful-shutdown tracker"
+                );
+
+                drt.runtime().shutdown();
+
+                tokio::time::timeout(std::time::Duration::from_secs(5), main_token.cancelled())
+                    .await
+                    .expect("graceful shutdown should complete once the unregister task finishes");
+
+                assert!(endpoint_token.is_cancelled());
+                assert_eq!(
+                    tracker.get_count(),
+                    0,
+                    "the unregister task must release its graceful-shutdown guard"
+                );
+
+                // Phase 3 (main token cancellation) only runs after Phase 2 drained
+                // the tracker, so the dropped publisher must already be unregistered.
+                let instances = drt
+                    .discovery()
+                    .list(query)
+                    .await
+                    .expect("list event publishers after shutdown");
+                assert!(
+                    instances.is_empty(),
+                    "unregister must complete within the graceful-shutdown window"
+                );
+            },
+        )
+        .await;
+    }
 
     #[test]
     fn test_event_scope_subject_prefix() {

@@ -52,7 +52,7 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
+            .set_endpoint_registered(endpoint_name_local.as_str());
 
         loop {
             let req = tokio::select! {
@@ -148,21 +148,13 @@ impl PushEndpoint {
 
         // await for all inflight requests to complete if graceful shutdown
         if self.graceful_shutdown {
-            let inflight_count = inflight.load(Ordering::SeqCst);
-            if inflight_count > 0 {
-                tracing::info!(
-                    endpoint_name = endpoint_name_local.as_str(),
-                    inflight_count = inflight_count,
-                    "Waiting for inflight NATS requests to complete"
-                );
-                while inflight.load(Ordering::SeqCst) > 0 {
-                    notify.notified().await;
-                }
-                tracing::info!(
-                    endpoint_name = endpoint_name_local.as_str(),
-                    "All inflight NATS requests completed"
-                );
-            }
+            super::drain_inflight(
+                inflight,
+                notify,
+                endpoint_name_local.as_str(),
+                crate::runtime::graceful_shutdown_timeout(),
+            )
+            .await;
         } else {
             tracing::info!(
                 endpoint_name = endpoint_name_local.as_str(),

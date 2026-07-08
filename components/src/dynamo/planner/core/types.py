@@ -35,6 +35,10 @@ class ScheduledTick:
 
     # What data the adapter should collect before calling on_tick
     need_traffic_metrics: bool = False
+    # True requests the full throughput traffic snapshot; False with
+    # need_traffic_metrics=True requests the cheaper load-only
+    # kv-hit-rate observation.
+    use_full_traffic_metrics: bool = False
     traffic_metrics_duration_s: float = 0.0
     need_worker_states: bool = False
     need_worker_fpm: bool = False
@@ -48,6 +52,8 @@ class TrafficObservation:
     num_req: float
     isl: float
     osl: float
+    kv_hit_rate: Optional[float] = None
+    accept_length: Optional[float] = None
 
 
 @dataclass
@@ -58,6 +64,8 @@ class WorkerCounts:
     ready_num_decode: Optional[int] = None
     expected_num_prefill: Optional[int] = None
     expected_num_decode: Optional[int] = None
+    prefill_scaling_in_progress: bool = False
+    decode_scaling_in_progress: bool = False
 
 
 @dataclass
@@ -94,7 +102,7 @@ class ScalingDecision:
 
 @dataclass
 class TickDiagnostics:
-    """Intermediate decision data populated by the state machine for
+    """Intermediate decision data populated by the planner core for
     observability.  The adapter layer reads these to set Prometheus
     metrics and feed the diagnostics recorder.
     """
@@ -103,18 +111,75 @@ class TickDiagnostics:
     estimated_ttft_ms: Optional[float] = None
     estimated_itl_ms: Optional[float] = None
 
-    # Throughput-scaling: predicted next-interval traffic
+    # Throughput-scaling: predicted next-interval traffic and last-value
+    # runtime metadata used by throughput decisions.
     predicted_num_req: Optional[float] = None
     predicted_isl: Optional[float] = None
     predicted_osl: Optional[float] = None
+    predicted_kv_hit_rate: Optional[float] = None
 
     # Throughput-scaling: single-engine capacity under SLA (req/s)
     engine_rps_prefill: Optional[float] = None
     engine_rps_decode: Optional[float] = None
 
+    # Throughput-scaling: lower bound on replicas
+    throughput_lower_bound_prefill: Optional[int] = None
+    throughput_lower_bound_decode: Optional[int] = None
+
     # Scaling decision reasons (set by the mixin that ran)
+    # Aggregate reasons (agg mode, or combined disagg).
     load_decision_reason: Optional[str] = None
     throughput_decision_reason: Optional[str] = None
+    # Per-component reasons (populated in disagg mode for separate
+    # prefill / decode decision timelines).
+    load_decision_reason_prefill: Optional[str] = None
+    load_decision_reason_decode: Optional[str] = None
+    throughput_decision_reason_prefill: Optional[str] = None
+    throughput_decision_reason_decode: Optional[str] = None
+
+    # Plugin-pipeline fields below. Legacy callers that bypass the pipeline
+    # may leave them empty. Downstream readers must treat "empty" as
+    # "not available for this tick".
+
+    # PROPOSE/RECONCILE/CONSTRAIN overrides contributed this tick.
+    # Tuple: (plugin_id, stage, override_type, component_key, value).
+    # override_type ∈ {"SET", "AT_LEAST", "AT_MOST", "REJECT"};
+    # component_key = ``sub_component_type`` (one bucket per type in this
+    # PR — multi-pool addressing is deferred to the hierarchical planner
+    # PR); value = replica target (``-1`` for REJECT).
+    plugin_overrides: list[tuple[str, str, str, str, int]] = field(default_factory=list)
+
+    # Per-component reconcile reason.  Keyed by ``component_key`` as
+    # above; value is a short audit string such as
+    # ``"set_by_<plugin_id>"``, ``"clamped_to_floor"``,
+    # ``"clamped_to_ceiling"``, or ``"passthrough"``.
+    reconcile_reasons: dict[str, str] = field(default_factory=dict)
+
+    # plugin_id list of HOLD_LAST cache replays this tick (plugin was
+    # skipped because its execution_interval hadn't elapsed, and its
+    # previous output is being reused).
+    held_over_plugins: list[str] = field(default_factory=list)
+
+    # Pipeline execute_action — one of ``"apply"``,
+    # ``"skip_short_circuit"``, ``"skip_no_targets"``,
+    # ``"skip_tick_timeout"``.  Mirrors
+    # ``PipelineOutcome.execute_action``. ``None`` means no pipeline action
+    # was recorded. Same information is also emitted as Prometheus
+    # ``tick_skip_reasons_total`` etc., but exposing it on
+    # ``PlannerEffects.diagnostics`` lets in-process consumers (replay
+    # adapter, diagnostics recorder) see the action without scraping
+    # metrics.
+    execute_action: Optional[str] = None
+
+    # Why a tick short-circuited (e.g. ``"propose: my-plugin: ..."``).
+    # Populated when ``execute_action == "skip_short_circuit"``; empty
+    # otherwise.  Mirrors ``PipelineOutcome.short_circuit_reason``.
+    short_circuit_reason: str = ""
+
+    # Audit-quality breadcrumbs emitted by the pipeline (chain-augment
+    # warnings, CONSTRAIN SET drops, etc.).  Mirrors
+    # ``PipelineOutcome.audit_events``.
+    audit_events: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -135,6 +200,8 @@ class EngineCapabilities:
     max_num_seqs: Optional[int] = None
     context_length: Optional[int] = None
     max_kv_tokens: Optional[int] = None
+    kv_cache_block_size: Optional[int] = None
+    speculative_nextn: Optional[int] = None
 
 
 @dataclass

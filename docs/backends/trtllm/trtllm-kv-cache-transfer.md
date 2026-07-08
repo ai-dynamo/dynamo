@@ -8,13 +8,17 @@ For general TensorRT-LLM features and configuration, see the [Reference Guide](t
 
 ---
 
-In disaggregated serving architectures, KV cache must be transferred between prefill and decode workers. TensorRT-LLM supports two methods for this transfer:
+In disaggregated serving architectures, KV cache must be transferred between prefill and decode workers. TensorRT-LLM supports three methods for this transfer:
+* NIXL with UCX (default)
+* NIXL with Libfabric
+* using UCX directly
+
 
 ## Using NIXL for KV Cache Transfer
 
 Start the disaggregated service: See [Disaggregated Serving](./trtllm-examples.md#disaggregated) to learn how to start the deployment.
 
-## Default Method: NIXL
+## Default Method: NIXL with UCX
 By default, TensorRT-LLM uses **NIXL** (NVIDIA Inference Xfer Library) with UCX (Unified Communication X) as backend for KV cache transfer between prefill and decode workers. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
 
 ### Specify Backends for NIXL
@@ -37,7 +41,7 @@ On AWS, UCX uses the **SRD (Scalable Reliable Datagram)** transport over EFA dev
 - **Pre-built EFA image (AMD64 only):** A dedicated EFA image with the EFA SDK baked in is available on NGC. This is recommended for AMD64 instances (e.g. `p5.48xlarge`):
 
 ```
-nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.1-efa-amd64
+nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1-efa-amd64
 ```
 
 See [Release Artifacts](../../reference/release-artifacts.md) for all available EFA images.

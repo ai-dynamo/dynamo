@@ -5,9 +5,13 @@ import json
 import logging
 import os
 import shutil
+import threading
+import time
 from enum import Enum
 
+import psutil
 import pytest
+import requests
 
 from tests.conftest import NatsServer
 from tests.fault_tolerance.etcd_ha.utils import (
@@ -17,6 +21,10 @@ from tests.fault_tolerance.etcd_ha.utils import (
     wait_for_processes_to_terminate,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.device import (
+    build_nixl_kv_transfer_config,
+    get_default_vllm_block_size,
+)
 from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
@@ -55,6 +63,8 @@ class DynamoWorkerProcess(ManagedProcess):
             "0.45",
             "--max-model-len",
             "8192",
+            "--block-size",
+            str(get_default_vllm_block_size()),
         ]
 
         # Set port based on worker type
@@ -85,12 +95,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    json.dumps(
-                        {
-                            "kv_connector": "NixlConnector",
-                            "kv_role": "kv_both",
-                        }
-                    ),
+                    json.dumps(build_nixl_kv_transfer_config()),
                 ]
             )
 
@@ -155,6 +160,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.nightly
@@ -226,6 +232,7 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -267,13 +274,17 @@ def test_etcd_ha_failover_vllm_disaggregated(
 
                 # Step 4: Start the prefill worker
                 with DynamoWorkerProcess(
-                    request, etcd_endpoints, mode=WorkerMode.PREFILL
+                    request,
+                    etcd_endpoints,
+                    mode=WorkerMode.PREFILL,
                 ):
                     logger.info("Prefill worker started successfully")
 
                     # Step 5: Start the decode worker
                     with DynamoWorkerProcess(
-                        request, etcd_endpoints, mode=WorkerMode.DECODE
+                        request,
+                        etcd_endpoints,
+                        mode=WorkerMode.DECODE,
                     ):
                         logger.info("Decode worker started successfully")
 
@@ -307,6 +318,7 @@ def test_etcd_ha_failover_vllm_disaggregated(
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -362,6 +374,7 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -397,13 +410,17 @@ def test_etcd_non_ha_shutdown_vllm_disaggregated(
 
                 # Step 4: Start the prefill worker
                 with DynamoWorkerProcess(
-                    request, etcd_endpoints, mode=WorkerMode.PREFILL
+                    request,
+                    etcd_endpoints,
+                    mode=WorkerMode.PREFILL,
                 ) as prefill_worker:
                     logger.info("Prefill worker started successfully")
 
                     # Step 5: Start the decode worker
                     with DynamoWorkerProcess(
-                        request, etcd_endpoints, mode=WorkerMode.DECODE
+                        request,
+                        etcd_endpoints,
+                        mode=WorkerMode.DECODE,
                     ) as decode_worker:
                         logger.info("Decode worker started successfully")
 
@@ -430,3 +447,164 @@ def test_etcd_non_ha_shutdown_vllm_disaggregated(
                                 "Frontend": frontend,
                             }
                         )
+
+
+# Lease-loss zombie: a non-cancellable in-flight request (modeled by
+# SIGSTOP-ing the vLLM engine) must not wedge worker teardown.
+ZOMBIE_GRACEFUL_SHUTDOWN_TIMEOUT_SECS = 10  # worker-side drain bound
+# Hold the frontend's drain open so it does not abort the request and mask the
+# worker-side behavior under test.
+ZOMBIE_FRONTEND_DRAIN_TIMEOUT_SECS = 300
+ZOMBIE_WORKER_EXIT_DEADLINE_SECS = ZOMBIE_GRACEFUL_SHUTDOWN_TIMEOUT_SECS + 50
+ZOMBIE_INFLIGHT_MAX_TOKENS = 8000
+
+
+def _zombie_verify_serving():
+    r = requests.post(
+        f"http://localhost:{FRONTEND_PORT}/v1/completions",
+        json={
+            "model": FAULT_TOLERANCE_MODEL_NAME,
+            "prompt": "The capital of France is",
+            "max_tokens": 5,
+            "temperature": 0.0,
+        },
+        timeout=120,
+    )
+    assert (
+        r.status_code == 200
+    ), f"pre-fault completion failed: {r.status_code} {r.text}"
+
+
+def _zombie_start_inflight_request():
+    """Fire a long completion in the background so a request is in flight.
+
+    Non-streaming on purpose: the worker's handle_payload runs the full
+    generation before returning, holding the push-endpoint inflight counter.
+    """
+
+    errors: list = []
+
+    def _run():
+        try:
+            requests.post(
+                f"http://localhost:{FRONTEND_PORT}/v1/completions",
+                json={
+                    "model": FAULT_TOLERANCE_MODEL_NAME,
+                    "prompt": "Tell me a very long story.",
+                    "max_tokens": ZOMBIE_INFLIGHT_MAX_TOKENS,
+                    "temperature": 0.0,
+                },
+                timeout=600,
+            )
+        except requests.RequestException as exc:
+            errors.append(exc)
+            logger.info("in-flight request ended: %s", exc)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t, errors
+
+
+def _freeze_vllm_engine_descendants(worker_pid: int) -> list:
+    """SIGSTOP the vLLM engine (rank) subprocess(es) under this worker.
+
+    Scoped to the worker's process tree so concurrent tests/workers on the same
+    host are untouched. A frozen engine cannot finish or abort the in-flight
+    request, so it stays pinned in the endpoint inflight counter -- a
+    non-cancellable inflight.
+    """
+    frozen = []
+    for child in psutil.Process(worker_pid).children(recursive=True):
+        try:
+            if "EngineCore" in child.name() or "EngineCore" in " ".join(
+                child.cmdline()
+            ):
+                child.suspend()
+                frozen.append(child.pid)
+                logger.info("SIGSTOP vLLM engine pid=%s", child.pid)
+        except psutil.Error:
+            continue
+    assert frozen, "no vLLM EngineCore descendant of the worker to freeze"
+    return frozen
+
+
+def _resume_kill(pids: list) -> None:
+    """Resume then kill frozen engines so they can't hang teardown or hold a GPU."""
+    for pid in pids:
+        try:
+            proc = psutil.Process(pid)
+            proc.resume()
+            proc.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
+@pytest.mark.gpu_1
+@pytest.mark.xpu_1
+@pytest.mark.e2e
+@pytest.mark.nightly
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(420)
+@pytest.mark.parametrize("request_plane", ["tcp", "nats"])
+def test_etcd_lease_loss_zombie_vllm_frozen_engine(
+    request, monkeypatch, request_plane, predownload_models
+):
+    """A worker that loses its etcd lease with a non-cancellable in-flight
+    request must still exit.
+
+    Repro: freeze the vLLM engine mid-generation so the request can neither
+    complete nor be aborted, then kill etcd. With the bounded endpoint drain the
+    worker times out the drain and exits; the unbounded drain wedges (zombie).
+
+    Parametrized over both request planes: the bounded drain must cover the
+    default ``tcp`` plane (SharedTcpServer) as well as ``nats`` (PushEndpoint).
+    """
+    # Hold the frontend's drain open so only the worker behavior is measured.
+    monkeypatch.setenv("DYN_REQUEST_PLANE", request_plane)
+    monkeypatch.setenv(
+        "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS",
+        str(ZOMBIE_FRONTEND_DRAIN_TIMEOUT_SECS),
+    )
+
+    with NatsServer(request):
+        with EtcdCluster(request, num_replicas=1) as etcd_cluster:
+            etcd_endpoints = etcd_cluster.get_client_endpoints()
+            with DynamoFrontendProcess(request, etcd_endpoints):
+                worker = DynamoWorkerProcess(
+                    request, etcd_endpoints, mode=WorkerMode.AGGREGATED
+                )
+                worker.env["DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS"] = str(
+                    ZOMBIE_GRACEFUL_SHUTDOWN_TIMEOUT_SECS
+                )
+                with worker:
+                    _zombie_verify_serving()
+
+                    logger.info("Starting long in-flight request")
+                    (
+                        inflight_thread,
+                        inflight_errors,
+                    ) = _zombie_start_inflight_request()
+                    time.sleep(5)  # let it reach decode
+                    assert inflight_thread.is_alive(), (
+                        "in-flight request ended before engine freeze: "
+                        f"{inflight_errors!r}"
+                    )
+
+                    # Freeze the engine: the in-flight request is now
+                    # non-cancellable (cannot complete or be aborted). Resume/kill
+                    # in finally before the worker context unwinds, so a SIGSTOP-ed
+                    # engine can't hang teardown or strand a GPU-holding process.
+                    frozen_pids = _freeze_vllm_engine_descendants(worker.proc.pid)
+                    try:
+                        time.sleep(1)
+
+                        logger.info("Terminating ETCD to induce lease loss")
+                        etcd_cluster.stop()
+
+                        # Bounded drain -> worker exits; unbounded -> zombie.
+                        wait_for_processes_to_terminate(
+                            {"Worker": worker},
+                            timeout=ZOMBIE_WORKER_EXIT_DEADLINE_SECS,
+                        )
+                    finally:
+                        _resume_kill(frozen_pids)

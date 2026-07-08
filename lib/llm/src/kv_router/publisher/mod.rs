@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
@@ -15,8 +14,6 @@ pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
 #[cfg(test)]
 use dynamo_kv_router::zmq_wire::*;
 use dynamo_runtime::config::environment_names::nats as env_nats;
-use dynamo_runtime::metrics::MetricsHierarchy;
-use dynamo_runtime::metrics::prometheus_names::kv_publisher;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
     component::Component,
@@ -25,19 +22,31 @@ use dynamo_runtime::{
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
+    metrics::KvPublisherMetrics,
 };
 
+mod batching;
+mod dedup;
 mod event_processor;
+mod multimodal_embedding_cache;
+mod sinks;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
 
 #[cfg(test)]
-use event_processor::{BatchingState, EventDedupFilter, run_event_processor_loop};
-use event_processor::{
-    EventPlanePublisher, start_event_processor, start_event_processor_jetstream,
+use batching::BatchingState;
+#[cfg(test)]
+use dedup::EventDedupFilter;
+#[cfg(test)]
+use event_processor::run_event_processor_loop;
+use event_processor::{start_event_processor, start_event_processor_jetstream};
+pub use multimodal_embedding_cache::{
+    MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher,
+    MultimodalEmbeddingCacheUpdate,
 };
+use sinks::EventPlanePublisher;
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
 
@@ -60,73 +69,17 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
     .replace("_", "-")
 }
 
-/// Metrics for the KV publisher, created via the MetricsHierarchy API.
-/// This provides automatic `dynamo_namespace`, `dynamo_component`, and other
-/// hierarchy labels for free.
-pub(super) struct KvPublisherMetrics {
-    /// Total number of raw events dropped by engines before reaching publisher
-    pub engines_dropped_events_total: prometheus::IntCounterVec,
-}
-
-static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
-
-impl KvPublisherMetrics {
-    /// Create from a Component, memoized in a static OnceLock.
-    /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
-    /// injects hierarchy labels, and registers with the DRT `MetricsRegistry`.
-    pub fn from_component(component: &Component) -> Arc<Self> {
-        KV_PUBLISHER_METRICS
-            .get_or_init(|| {
-                let metrics = component.metrics();
-                match metrics.create_intcountervec(
-                    kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
-                    "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
-                    &["worker_id"],
-                    &[],
-                ) {
-                    Ok(engines_dropped_events_total) => {
-                        Arc::new(Self { engines_dropped_events_total })
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create kv_publisher metrics from component: {}. Using unregistered metrics as fallback.", e);
-                        Arc::new(Self::new_unregistered())
-                    }
-                }
-            })
-            .clone()
-    }
-
-    /// Creates unregistered metrics for use when the MetricsRegistry is not available.
-    /// This is used as a fallback when metric creation fails.
-    pub fn new_unregistered() -> Self {
-        Self {
-            engines_dropped_events_total: prometheus::IntCounterVec::new(
-                prometheus::Opts::new(
-                    kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
-                    "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
-                ),
-                &["worker_id"],
-            )
-            .expect("failed to create engines_dropped_events_total counter"),
-        }
-    }
-
-    /// Increment the engines dropped events counter by the given amount.
-    pub fn increment_engines_dropped_events(&self, worker_id: u64, count: u64) {
-        self.engines_dropped_events_total
-            .with_label_values(&[&worker_id.to_string()])
-            .inc_by(count);
-    }
-}
-
-fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
-    KV_PUBLISHER_METRICS.get().cloned()
-}
-
 /// Configure the source of KV events.
 /// Currently, only ZMQ is supported.
 pub enum KvEventSourceConfig {
-    Zmq { endpoint: String, topic: String },
+    Zmq {
+        endpoint: String,
+        topic: String,
+        /// Model image-placeholder token id, used by the normalizer to rewrite
+        /// vLLM BlockStored events to the canonical pad_value scheme. `None`
+        /// for text-only / non-MM deployments (normalization is a no-op).
+        image_token_id: Option<u32>,
+    },
 }
 
 enum KvEventSource {
@@ -146,7 +99,11 @@ impl KvEventSource {
         next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
-            KvEventSourceConfig::Zmq { endpoint, topic } => {
+            KvEventSourceConfig::Zmq {
+                endpoint,
+                topic,
+                image_token_id,
+            } => {
                 let zmq_handle = component
                     .drt()
                     .runtime()
@@ -159,6 +116,7 @@ impl KvEventSource {
                         cancellation_token.clone(),
                         kv_block_size,
                         next_event_id,
+                        image_token_id,
                     ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })
@@ -216,6 +174,26 @@ impl KvEventPublisher {
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
+        Self::new_with_local_indexer_and_worker_id(
+            component,
+            None,
+            kv_block_size,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+        )
+    }
+
+    pub fn new_with_local_indexer_and_worker_id(
+        component: Component,
+        worker_id: Option<WorkerId>,
+        kv_block_size: u32,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+    ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
         let batching_timeout_ms = batching_timeout_ms
             .filter(|&ms| {
@@ -231,9 +209,9 @@ impl KvEventPublisher {
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
         let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
-        let worker_id = component.drt().connection_id();
+        let worker_id = worker_id.unwrap_or_else(|| component.drt().connection_id());
 
-        KvPublisherMetrics::from_component(&component);
+        let _ = KvPublisherMetrics::from_component(&component);
 
         let component_name = component.name();
         tracing::info!(
@@ -359,6 +337,21 @@ impl KvEventPublisher {
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
         let placement_event = PlacementEvent::local_gpu(self.worker_id, event);
+        match self.tx.send(placement_event) {
+            Ok(()) => Ok(()),
+            Err(err) => Err(mpsc::error::SendError(err.0.event)),
+        }
+    }
+
+    pub fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+        let placement_event = PlacementEvent::new(
+            Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
+            event,
+        );
         match self.tx.send(placement_event) {
             Ok(()) => Ok(()),
             Err(err) => Err(mpsc::error::SendError(err.0.event)),

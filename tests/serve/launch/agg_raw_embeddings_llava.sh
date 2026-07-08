@@ -5,18 +5,18 @@
 # LLaVA Raw-Embeddings E/PD Test
 #
 # Phase 1 — Run HuggingFace vision encoder standalone to produce
-#            pre-computed embeddings at $EMBEDDINGS_FILE (.pt tensor).
+#            pre-computed embeddings at $EMBEDDINGS_FILE (.safetensors format).
 #
 # Phase 2 — Start Encode + Aggregated PD workers for LLaVA, then
 #            accept chat/completions requests whose image_url points
-#            to the embeddings file (file:///tmp/llava_embeddings.pt).
+#            to the embeddings file (file:///tmp/llava_embeddings.safetensors).
 #
 # Known limitation: The default revision of llava-hf/llava-v1.6-mistral-7b-hf
 # may crash with certain TRT-LLM versions.  Set MODEL_REVISION to pin a
 # safe commit (e.g. 52320fb52229).
 
 set -e
-trap 'echo Cleaning up...; rm -f "${EMBEDDINGS_FILE:-/tmp/llava_embeddings.pt}" /tmp/_resolved_model_path.txt; kill 0' EXIT
+trap 'echo Cleaning up...; rm -f "${EMBEDDINGS_FILE:-/tmp/llava_embeddings.safetensors}" /tmp/_resolved_model_path.txt; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
@@ -30,14 +30,14 @@ export ENCODE_ENGINE_ARGS=${ENCODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/
 export PD_ENGINE_ARGS=${PD_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/llava-v1.6-mistral-7b-hf/agg.yaml"}
 export ENCODE_CUDA_VISIBLE_DEVICES=${ENCODE_CUDA_VISIBLE_DEVICES:-"0"}
 export PD_CUDA_VISIBLE_DEVICES=${PD_CUDA_VISIBLE_DEVICES:-"1"}
-export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.tensorrt_llm_encode.generate"}
+export ENCODE_ENDPOINT=${ENCODE_ENDPOINT:-"dyn://dynamo.encode.generate"}
 export MODALITY=${MODALITY:-"multimodal"}
 export ALLOWED_LOCAL_MEDIA_PATH=${ALLOWED_LOCAL_MEDIA_PATH:-"/tmp"}
 export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 export CUSTOM_TEMPLATE=${CUSTOM_TEMPLATE:-"$DYNAMO_HOME/examples/backends/trtllm/templates/llava_multimodal.jinja"}
 
 # Embeddings configuration
-EMBEDDINGS_FILE="${EMBEDDINGS_FILE:-/tmp/llava_embeddings.pt}"
+EMBEDDINGS_FILE="${EMBEDDINGS_FILE:-/tmp/llava_embeddings.safetensors}"
 TEST_IMAGE_URL="${TEST_IMAGE_URL:-https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png}"
 
 # Extra arguments forwarded to the PD worker (e.g. --multimodal-embedding-cache-capacity-gb 10)
@@ -71,13 +71,14 @@ CUDA_VISIBLE_DEVICES=0 python3 - <<'PYEOF'
 import torch, io, os, urllib.request
 from PIL import Image
 from huggingface_hub import snapshot_download
+from safetensors.torch import save_file as safetensors_save_file
 from transformers import LlavaNextForConditionalGeneration, LlavaNextProcessor
 
 model_id   = os.environ["MODEL_PATH"]
 revision   = os.environ.get("MODEL_REVISION", "") or None
 image_url  = os.environ.get("TEST_IMAGE_URL",
     "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png")
-output     = os.environ.get("EMBEDDINGS_FILE", "/tmp/llava_embeddings.pt")
+output     = os.environ.get("EMBEDDINGS_FILE", "/tmp/llava_embeddings.safetensors")
 
 # ── Download / resolve model ──
 print(f"Resolving model {model_id} (revision={revision}) …")
@@ -99,34 +100,48 @@ print(f"Image size: {image.size}")
 
 inputs = processor(text="<image>", images=image, return_tensors="pt")
 pixel_values = inputs["pixel_values"].to(device="cuda:0", dtype=torch.float16)
+image_sizes = inputs.get("image_sizes")
+if image_sizes is not None:
+    image_sizes = image_sizes.to(device="cuda:0")
 
 # ── Run vision encoder + projector ──
-print("Running vision tower …")
+print("Running vision encoder …")
 with torch.no_grad():
-    # LlavaNext may produce 5-D pixel_values: (batch, num_patches, C, H, W)
-    if pixel_values.ndim == 5:
-        b, n, c, h, w = pixel_values.shape
-        pixel_values_flat = pixel_values.reshape(b * n, c, h, w)
-    else:
-        pixel_values_flat = pixel_values
-
-    vision_out = model.vision_tower(pixel_values_flat, output_hidden_states=True)
-    features = vision_out.hidden_states[model.config.vision_feature_layer]
-
     strategy = getattr(model.config, "vision_feature_select_strategy", "default")
-    if strategy == "default":
-        features = features[:, 1:]
 
-    embeddings = model.multi_modal_projector(features)
+    if not hasattr(model, "get_image_features"):
+        raise AttributeError(
+            "LlavaNextForConditionalGeneration.get_image_features is required"
+        )
 
-    # Collapse (num_patches, seq_len, hidden) → (total_tokens, hidden)
+    # Transformers 5.x exposes the vision encoder + projector through this
+    # helper instead of stable top-level vision_tower/projector attributes.
+    if image_sizes is None:
+        raise KeyError(
+            "Processor output missing image_sizes required by get_image_features"
+        )
+    image_features = model.get_image_features(
+        pixel_values=pixel_values,
+        image_sizes=image_sizes,
+        vision_feature_layer=model.config.vision_feature_layer,
+        vision_feature_select_strategy=strategy,
+    )
+    embeddings = getattr(image_features, "pooler_output", None)
+    if embeddings is None:
+        embeddings = image_features
+
+    if isinstance(embeddings, (list, tuple)):
+        embeddings = torch.cat(
+            [embedding.reshape(-1, embedding.shape[-1]) for embedding in embeddings],
+            dim=0,
+        )
     if embeddings.ndim == 3:
         embeddings = embeddings.reshape(-1, embeddings.shape[-1])
 
 print(f"Embeddings: shape={embeddings.shape}, dtype={embeddings.dtype}")
 
-# ── Save to disk ──
-torch.save(embeddings.cpu(), output)
+# ── Save to disk as safetensors (safe format, no pickle) ──
+safetensors_save_file({"embedding": embeddings.cpu()}, output)
 print(f"Saved embeddings → {output}")
 
 # ── Write resolved model path so Phase 2 uses the exact same revision ──
@@ -136,7 +151,7 @@ with open(model_path_file, "w") as f:
 print(f"Resolved model path written to {model_path_file}")
 
 # ── Free GPU memory ──
-del model, processor, vision_out, features, embeddings, pixel_values
+del model, processor, embeddings, pixel_values, image_sizes
 torch.cuda.empty_cache()
 print("GPU memory released. Phase 1 complete ✓")
 PYEOF

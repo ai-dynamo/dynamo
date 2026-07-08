@@ -12,8 +12,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, RouterSchedulingPolicy,
-    SequencePublisher,
+    ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, SequencePublisher,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -56,12 +55,8 @@ impl WorkerConfigLike for ReplayWorkerConfig {
     }
 }
 
-pub(super) type ReplayScheduler = LocalScheduler<
-    ReplayNoopPublisher,
-    ReplayWorkerConfig,
-    RouterSchedulingPolicy,
-    DefaultWorkerSelector,
->;
+pub(super) type ReplayScheduler =
+    LocalScheduler<ReplayNoopPublisher, ReplayWorkerConfig, DefaultWorkerSelector>;
 
 pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWorkerConfig {
     ReplayWorkerConfig {
@@ -92,7 +87,12 @@ pub(super) fn replay_slots(
         .copied()
         .map(|worker_id| (worker_id, (0, 1)))
         .collect();
-    Arc::new(ActiveSequencesMultiWorker::new(
+    // NOTE: Offline replay must retire requests through explicit lifecycle events. Wall-clock
+    // expiry is a live-router cleanup heuristic and must not observe simulator CPU time: a
+    // healthy replay may spend minutes of wall time advancing seconds of virtual time. Keep
+    // expiry disabled here until replay has a liveness-aware definition of a stale request; do
+    // not mask replay dead ends by expiring requests that are still live in virtual time.
+    Arc::new(ActiveSequencesMultiWorker::new_without_expiry(
         ReplayNoopPublisher,
         args.block_size,
         dp_range,
@@ -115,11 +115,4 @@ pub(crate) fn replay_router_config(
         config.router_queue_policy = policy;
     }
     config
-}
-
-pub(super) fn replay_policy(
-    config: &KvRouterConfig,
-    args: &MockEngineArgs,
-) -> RouterSchedulingPolicy {
-    RouterSchedulingPolicy::new(config.router_queue_policy, args.block_size)
 }

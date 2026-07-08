@@ -10,6 +10,7 @@
 //! - Cancellation with confirmation
 
 use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use tokio::sync::watch;
@@ -104,6 +105,89 @@ pub struct TransferResult {
     pub error: Option<String>,
 }
 
+/// Monotonic block counts for a transfer.
+///
+/// Counts are published through a watch channel, while the corresponding block
+/// IDs remain in shared progress storage. This keeps progress notifications
+/// constant-size regardless of the number of blocks in the transfer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransferProgressCounts {
+    /// Blocks accepted by policy evaluation.
+    pub passed: usize,
+    /// Blocks transferred successfully.
+    pub completed: usize,
+    /// Blocks whose transfer failed.
+    pub failed: usize,
+}
+
+impl TransferProgressCounts {
+    /// Number of blocks that have reached either success or failure.
+    pub fn settled(self) -> usize {
+        self.completed.saturating_add(self.failed)
+    }
+}
+
+/// Per-consumer cursor for incrementally reading transfer progress.
+///
+/// A cursor belongs to one transfer. Create it with
+/// [`TransferHandle::new_progress_cursor`] and retain it at the consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransferProgressCursor {
+    transfer_id: TransferId,
+    passed: usize,
+    completed: usize,
+    failed: usize,
+}
+
+/// Blocks appended since a [`TransferProgressCursor`] was last consumed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TransferProgressDelta {
+    /// Blocks newly accepted by policy evaluation.
+    pub passed_blocks: Vec<BlockId>,
+    /// Blocks newly transferred successfully.
+    pub completed_blocks: Vec<BlockId>,
+    /// Blocks whose transfer newly failed.
+    pub failed_blocks: Vec<BlockId>,
+}
+
+impl TransferProgressDelta {
+    /// Whether the cursor observed no new progress.
+    pub fn is_empty(&self) -> bool {
+        self.passed_blocks.is_empty()
+            && self.completed_blocks.is_empty()
+            && self.failed_blocks.is_empty()
+    }
+}
+
+#[derive(Debug)]
+struct TransferProgress {
+    input_blocks: Vec<BlockId>,
+    policy_evaluated: bool,
+    passed_blocks: Vec<BlockId>,
+    completed_blocks: Vec<BlockId>,
+    failed_blocks: Vec<BlockId>,
+}
+
+impl TransferProgress {
+    fn new(input_blocks: Vec<BlockId>) -> Self {
+        Self {
+            input_blocks,
+            policy_evaluated: false,
+            passed_blocks: Vec::new(),
+            completed_blocks: Vec::new(),
+            failed_blocks: Vec::new(),
+        }
+    }
+
+    fn counts(&self) -> TransferProgressCounts {
+        TransferProgressCounts {
+            passed: self.passed_blocks.len(),
+            completed: self.completed_blocks.len(),
+            failed: self.failed_blocks.len(),
+        }
+    }
+}
+
 /// Handle for tracking and controlling an offload transfer.
 ///
 /// Obtained from `OffloadEngine::enqueue()`. Use this to:
@@ -114,10 +198,8 @@ pub struct TransferResult {
 pub struct TransferHandle {
     id: TransferId,
     status_rx: watch::Receiver<TransferStatus>,
-    passed_blocks_rx: watch::Receiver<Vec<BlockId>>,
-    completed_rx: watch::Receiver<Vec<BlockId>>,
-    failed_rx: watch::Receiver<Vec<BlockId>>,
-    remaining_rx: watch::Receiver<Vec<BlockId>>,
+    progress: Arc<RwLock<TransferProgress>>,
+    progress_rx: watch::Receiver<TransferProgressCounts>,
     cancel_token: CancellationToken,
     result_rx: watch::Receiver<Option<TransferResult>>,
 }
@@ -135,22 +217,94 @@ impl TransferHandle {
 
     /// Get blocks that passed all filter policies.
     pub fn passed_blocks(&self) -> Vec<BlockId> {
-        self.passed_blocks_rx.borrow().clone()
+        self.progress
+            .read()
+            .expect("transfer progress lock poisoned")
+            .passed_blocks
+            .clone()
     }
 
     /// Get blocks that have been successfully transferred.
     pub fn completed_blocks(&self) -> Vec<BlockId> {
-        self.completed_rx.borrow().clone()
+        self.progress
+            .read()
+            .expect("transfer progress lock poisoned")
+            .completed_blocks
+            .clone()
     }
 
     /// Get blocks that failed transfer.
     pub fn failed_blocks(&self) -> Vec<BlockId> {
-        self.failed_rx.borrow().clone()
+        self.progress
+            .read()
+            .expect("transfer progress lock poisoned")
+            .failed_blocks
+            .clone()
     }
 
     /// Get blocks remaining to be transferred.
     pub fn remaining_blocks(&self) -> Vec<BlockId> {
-        self.remaining_rx.borrow().clone()
+        let progress = self
+            .progress
+            .read()
+            .expect("transfer progress lock poisoned");
+        if !progress.policy_evaluated {
+            return progress.input_blocks.clone();
+        }
+
+        let settled: HashSet<_> = progress
+            .completed_blocks
+            .iter()
+            .chain(&progress.failed_blocks)
+            .copied()
+            .collect();
+        progress
+            .passed_blocks
+            .iter()
+            .filter(|id| !settled.contains(id))
+            .copied()
+            .collect()
+    }
+
+    /// Return constant-size progress counts without cloning block vectors.
+    pub fn progress_counts(&self) -> TransferProgressCounts {
+        *self.progress_rx.borrow()
+    }
+
+    /// Create a cursor that consumes this transfer's progress from the start.
+    pub fn new_progress_cursor(&self) -> TransferProgressCursor {
+        TransferProgressCursor {
+            transfer_id: self.id,
+            passed: 0,
+            completed: 0,
+            failed: 0,
+        }
+    }
+
+    /// Read each newly passed, completed, or failed block exactly once for this
+    /// cursor, then advance the cursor to the current progress boundary.
+    pub fn consume_progress(&self, cursor: &mut TransferProgressCursor) -> TransferProgressDelta {
+        assert_eq!(
+            cursor.transfer_id, self.id,
+            "transfer progress cursor used with a different handle"
+        );
+        let progress = self
+            .progress
+            .read()
+            .expect("transfer progress lock poisoned");
+        assert!(cursor.passed <= progress.passed_blocks.len());
+        assert!(cursor.completed <= progress.completed_blocks.len());
+        assert!(cursor.failed <= progress.failed_blocks.len());
+
+        let delta = TransferProgressDelta {
+            passed_blocks: progress.passed_blocks[cursor.passed..].to_vec(),
+            completed_blocks: progress.completed_blocks[cursor.completed..].to_vec(),
+            failed_blocks: progress.failed_blocks[cursor.failed..].to_vec(),
+        };
+        cursor.passed = progress.passed_blocks.len();
+        cursor.completed = progress.completed_blocks.len();
+        cursor.failed = progress.failed_blocks.len();
+        delta
     }
 
     /// Check if the transfer is complete (success, cancelled, or failed).
@@ -203,16 +357,22 @@ impl TransferHandle {
     pub fn subscribe_status(&self) -> watch::Receiver<TransferStatus> {
         self.status_rx.clone()
     }
+
+    /// Subscribe to constant-size block progress counts.
+    pub fn subscribe_progress(&self) -> watch::Receiver<TransferProgressCounts> {
+        self.progress_rx.clone()
+    }
 }
 
 impl std::fmt::Debug for TransferHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let progress = self.progress_counts();
         f.debug_struct("TransferHandle")
             .field("id", &self.id)
             .field("status", &self.status())
-            .field("passed_count", &self.passed_blocks().len())
-            .field("completed_count", &self.completed_blocks().len())
-            .field("failed_count", &self.failed_blocks().len())
+            .field("passed_count", &progress.passed)
+            .field("completed_count", &progress.completed)
+            .field("failed_count", &progress.failed)
             .field("remaining_count", &self.remaining_blocks().len())
             .finish()
     }
@@ -224,16 +384,11 @@ pub(crate) struct TransferState {
     pub(crate) id: TransferId,
     /// Current phase
     pub(crate) status: TransferStatus,
-    /// Original input block IDs
-    pub(crate) input_blocks: Vec<BlockId>,
-    /// Blocks that passed policy filters
-    pub(crate) passed_blocks: Vec<BlockId>,
+    /// Shared cumulative block progress. Consumers use monotonic cursors so
+    /// scheduler ticks copy only newly settled IDs.
+    progress: Arc<RwLock<TransferProgress>>,
     /// Blocks currently in-flight (being transferred)
     pub(crate) in_flight: HashSet<BlockId>,
-    /// Successfully transferred blocks
-    pub(crate) completed: Vec<BlockId>,
-    /// Blocks that failed transfer
-    pub(crate) failed: Vec<BlockId>,
     /// Blocks that failed filters
     pub(crate) filtered_out: Vec<BlockId>,
     /// Error message if failed
@@ -258,30 +413,22 @@ impl TransferState {
     /// Create transfer state and associated handle.
     pub(crate) fn new(id: TransferId, input_blocks: Vec<BlockId>) -> (Self, TransferHandle) {
         let (status_tx, status_rx) = watch::channel(TransferStatus::Evaluating);
-        let (passed_tx, passed_rx) = watch::channel(Vec::new());
-        let (completed_tx, completed_rx) = watch::channel(Vec::new());
-        let (failed_tx, failed_rx) = watch::channel(Vec::new());
-        let (remaining_tx, remaining_rx) = watch::channel(input_blocks.clone());
+        let progress = Arc::new(RwLock::new(TransferProgress::new(input_blocks)));
+        let (progress_tx, progress_rx) = watch::channel(TransferProgressCounts::default());
         let (result_tx, result_rx) = watch::channel(None);
         let (cancel_token, cancel_updater) = CancellationToken::new();
 
         let notifiers = TransferNotifiers {
             status_tx,
-            passed_tx,
-            completed_tx,
-            failed_tx,
-            remaining_tx,
+            progress_tx,
             result_tx,
         };
 
         let state = TransferState {
             id,
             status: TransferStatus::Evaluating,
-            input_blocks: input_blocks.clone(),
-            passed_blocks: Vec::new(),
+            progress: progress.clone(),
             in_flight: HashSet::new(),
-            completed: Vec::new(),
-            failed: Vec::new(),
             filtered_out: Vec::new(),
             error: None,
             notifiers,
@@ -294,10 +441,8 @@ impl TransferState {
         let handle = TransferHandle {
             id,
             status_rx,
-            passed_blocks_rx: passed_rx,
-            completed_rx,
-            failed_rx,
-            remaining_rx,
+            progress,
+            progress_rx,
             cancel_token,
             result_rx,
         };
@@ -318,15 +463,21 @@ impl TransferState {
 
     /// Add blocks that passed filters.
     pub(crate) fn add_passed(&mut self, block_ids: impl IntoIterator<Item = BlockId>) {
-        self.passed_blocks.extend(block_ids);
-        let _ = self.notifiers.passed_tx.send(self.passed_blocks.clone());
-        self.update_remaining();
+        let counts = {
+            let mut progress = self
+                .progress
+                .write()
+                .expect("transfer progress lock poisoned");
+            progress.policy_evaluated = true;
+            progress.passed_blocks.extend(block_ids);
+            progress.counts()
+        };
+        let _ = self.notifiers.progress_tx.send(counts);
     }
 
     /// Add blocks that were filtered out.
     pub(crate) fn add_filtered(&mut self, block_ids: impl IntoIterator<Item = BlockId>) {
         self.filtered_out.extend(block_ids);
-        self.update_remaining();
     }
 
     /// Mark blocks as in-flight (being transferred).
@@ -336,33 +487,36 @@ impl TransferState {
 
     /// Mark blocks as completed (transferred successfully).
     pub(crate) fn mark_completed(&mut self, block_ids: impl IntoIterator<Item = BlockId>) {
-        for id in block_ids {
-            self.in_flight.remove(&id);
-            self.completed.push(id);
+        let completed: Vec<_> = block_ids.into_iter().collect();
+        for id in &completed {
+            self.in_flight.remove(id);
         }
-        let _ = self.notifiers.completed_tx.send(self.completed.clone());
-        self.update_remaining();
+        let counts = {
+            let mut progress = self
+                .progress
+                .write()
+                .expect("transfer progress lock poisoned");
+            progress.completed_blocks.extend(completed);
+            progress.counts()
+        };
+        let _ = self.notifiers.progress_tx.send(counts);
     }
 
     /// Mark blocks as failed (transfer unsuccessful).
     pub(crate) fn mark_failed(&mut self, block_ids: impl IntoIterator<Item = BlockId>) {
-        for id in block_ids {
-            self.in_flight.remove(&id);
-            self.failed.push(id);
+        let failed: Vec<_> = block_ids.into_iter().collect();
+        for id in &failed {
+            self.in_flight.remove(id);
         }
-        let _ = self.notifiers.failed_tx.send(self.failed.clone());
-        self.update_remaining();
-    }
-
-    /// Update remaining blocks notification.
-    fn update_remaining(&self) {
-        let remaining: Vec<BlockId> = self
-            .passed_blocks
-            .iter()
-            .filter(|id| !self.completed.contains(id) && !self.failed.contains(id))
-            .copied()
-            .collect();
-        let _ = self.notifiers.remaining_tx.send(remaining);
+        let counts = {
+            let mut progress = self
+                .progress
+                .write()
+                .expect("transfer progress lock poisoned");
+            progress.failed_blocks.extend(failed);
+            progress.counts()
+        };
+        let _ = self.notifiers.progress_tx.send(counts);
     }
 
     /// Set error and mark as failed.
@@ -387,16 +541,27 @@ impl TransferState {
 
     /// Finalize and send result.
     fn finalize(&mut self) {
+        let progress = self
+            .progress
+            .read()
+            .expect("transfer progress lock poisoned");
         let result = TransferResult {
             id: self.id,
             status: self.status,
-            passed_blocks: self.passed_blocks.clone(),
-            completed_blocks: self.completed.clone(),
-            failed_blocks: self.failed.clone(),
+            passed_blocks: progress.passed_blocks.clone(),
+            completed_blocks: progress.completed_blocks.clone(),
+            failed_blocks: progress.failed_blocks.clone(),
             filtered_blocks: self.filtered_out.clone(),
             error: self.error.clone(),
         };
         let _ = self.notifiers.result_tx.send(Some(result));
+    }
+
+    pub(crate) fn progress_counts(&self) -> TransferProgressCounts {
+        self.progress
+            .read()
+            .expect("transfer progress lock poisoned")
+            .counts()
     }
 
     /// Get current in-flight count (for draining).
@@ -419,10 +584,7 @@ impl TransferState {
 #[allow(dead_code)]
 pub(crate) struct TransferNotifiers {
     pub(crate) status_tx: watch::Sender<TransferStatus>,
-    pub(crate) passed_tx: watch::Sender<Vec<BlockId>>,
-    pub(crate) completed_tx: watch::Sender<Vec<BlockId>>,
-    pub(crate) failed_tx: watch::Sender<Vec<BlockId>>,
-    pub(crate) remaining_tx: watch::Sender<Vec<BlockId>>,
+    pub(crate) progress_tx: watch::Sender<TransferProgressCounts>,
     pub(crate) result_tx: watch::Sender<Option<TransferResult>>,
 }
 
@@ -455,9 +617,7 @@ mod tests {
 
         assert_eq!(state.id, id);
         assert_eq!(state.status, TransferStatus::Evaluating);
-        assert_eq!(state.input_blocks, blocks);
-        assert!(state.passed_blocks.is_empty());
-        assert!(state.completed.is_empty());
+        assert_eq!(state.progress_counts(), TransferProgressCounts::default());
 
         assert_eq!(handle.id(), id);
         assert_eq!(handle.status(), TransferStatus::Evaluating);
@@ -554,7 +714,7 @@ mod tests {
     fn test_partial_failure_result() {
         let id = TransferId::new();
         let blocks = vec![1, 2, 3, 4, 5];
-        let (mut state, _handle) = TransferState::new(id, blocks);
+        let (mut state, handle) = TransferState::new(id, blocks);
 
         state.add_passed(vec![1, 2, 3]);
         state.add_filtered(vec![4, 5]);
@@ -564,22 +724,53 @@ mod tests {
         state.mark_completed(vec![1, 3]);
         state.mark_failed(vec![2]);
 
-        assert_eq!(state.completed, vec![1, 3]);
-        assert_eq!(state.failed, vec![2]);
+        assert_eq!(handle.completed_blocks(), vec![1, 3]);
+        assert_eq!(handle.failed_blocks(), vec![2]);
         assert_eq!(state.in_flight_count(), 0);
 
         // Simulate the pipeline's terminal state logic
-        let total = state.passed_blocks.len() + state.filtered_out.len();
-        let done = state.completed.len() + state.failed.len() + state.filtered_out.len();
+        let progress = state.progress_counts();
+        let total = progress.passed + state.filtered_out.len();
+        let done = progress.settled() + state.filtered_out.len();
         assert_eq!(done, total);
 
         // With failures, should set_error not set_complete
-        let failed_count = state.failed.len();
+        let failed_count = progress.failed;
         assert!(failed_count > 0);
         state.set_error(format!(
             "{failed_count} blocks failed to transfer to object storage",
         ));
         assert_eq!(state.status, TransferStatus::Failed);
+    }
+
+    #[test]
+    fn test_progress_cursor_consumes_each_block_once() {
+        let id = TransferId::new();
+        let (mut state, handle) = TransferState::new(id, vec![1, 2, 3]);
+        let mut cursor = handle.new_progress_cursor();
+
+        state.add_passed([1, 2, 3]);
+        state.mark_completed([1]);
+        let first = handle.consume_progress(&mut cursor);
+        assert_eq!(first.passed_blocks, vec![1, 2, 3]);
+        assert_eq!(first.completed_blocks, vec![1]);
+        assert!(first.failed_blocks.is_empty());
+
+        state.mark_completed([2]);
+        state.mark_failed([3]);
+        let second = handle.consume_progress(&mut cursor);
+        assert!(second.passed_blocks.is_empty());
+        assert_eq!(second.completed_blocks, vec![2]);
+        assert_eq!(second.failed_blocks, vec![3]);
+        assert!(handle.consume_progress(&mut cursor).is_empty());
+        assert_eq!(
+            handle.progress_counts(),
+            TransferProgressCounts {
+                passed: 3,
+                completed: 2,
+                failed: 1,
+            }
+        );
     }
 
     #[tokio::test]

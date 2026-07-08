@@ -10,11 +10,13 @@
 # Trade-off: prefill does vision encoding internally (no dedicated encoder),
 # which uses more GPU memory on the prefill worker.
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
+set -- "${REMAINING_ARGS[@]}"
 
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-2B-Instruct"
@@ -40,6 +42,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --model <model_name>   Specify the VLM model (default: $MODEL_NAME)"
             echo "  --single-gpu           Pack both workers on 1 GPU (for small models)"
+            echo "  --unified              Use the unified vLLM backend"
             echo "  -h, --help             Show this help message"
             exit 0
             ;;
@@ -49,6 +52,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+trap dynamo_exit_trap EXIT
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 if [[ "$SINGLE_GPU" == "true" ]]; then
@@ -64,6 +69,8 @@ python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 PD_EXTRA_ARGS=""
+PREFILL_GPU_MEM_ARGS=""
+DECODE_GPU_MEM_ARGS=""
 
 # GPU assignments
 DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
@@ -73,43 +80,54 @@ DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-1}
 DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
 DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
 
-PD_KV_CACHE_BYTES=$((512 * 1024 * 1024))
-
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_PREFILL_WORKER_GPU=0
     DYN_DECODE_WORKER_GPU=0
     DYN_PREFILL_GPU_MEM=0.45
     DYN_DECODE_GPU_MEM=0.45
     EXTRA_ARGS="--enforce-eager"
+    # Default KV cache cap from profiling for single-GPU worker packing; the
+    # profiler/test framework overrides via env, and gpu_utils.sh builds args.
+    : "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=$((512 * 1024 * 1024))}"
     PD_EXTRA_ARGS="--max-model-len 4096 \
---kv-cache-memory-bytes $PD_KV_CACHE_BYTES \
 --limit-mm-per-prompt {\"image\":1,\"video\":0,\"audio\":0}"
 fi
 
+PD_GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+if [[ -n "$PD_GPU_MEM_ARGS" ]]; then
+    PREFILL_GPU_MEM_ARGS="$PD_GPU_MEM_ARGS"
+    DECODE_GPU_MEM_ARGS="$PD_GPU_MEM_ARGS"
+else
+    PREFILL_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_PREFILL_GPU_MEM"
+    DECODE_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_DECODE_GPU_MEM"
+fi
+
 # Start prefill worker (handles image loading internally, no --route-to-encoder)
-echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREFILL_GPU_MEM)..."
+echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_ARGS})..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-${DYN_SYSTEM_PORT:-8081}} \
 CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU \
-python -m dynamo.vllm \
+python -m "$WORKER_MODULE" \
   --disaggregation-mode prefill \
   --enable-multimodal \
   --model $MODEL_NAME \
-  --gpu-memory-utilization $DYN_PREFILL_GPU_MEM \
+  $PREFILL_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
 
 # Start decode worker
-echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE_GPU_MEM)..."
+echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU \
-python -m dynamo.vllm \
+python -m "$WORKER_MODULE" \
   --disaggregation-mode decode \
   --enable-multimodal \
   --enable-mm-embeds \
   --model $MODEL_NAME \
-  --gpu-memory-utilization $DYN_DECODE_GPU_MEM \
+  $DECODE_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   $PD_EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \

@@ -5,6 +5,7 @@
 
 import asyncio
 import re
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -19,9 +20,9 @@ if not torch.cuda.is_available():
     )
 
 from dynamo.trtllm.args import Config, parse_args
-from dynamo.trtllm.constants import Modality
+from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
-from dynamo.trtllm.utils.trtllm_utils import deep_update
+from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import init_llm_worker
 
 # Get path relative to this test file
@@ -37,6 +38,7 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 
@@ -98,7 +100,7 @@ def test_parse_args_returns_config_with_expected_attrs(monkeypatch):
     assert isinstance(config, Config)
     assert config.model == "Qwen/Qwen3-0.6B"
     assert config.namespace == "testns"
-    assert config.component == "tensorrt_llm"
+    assert config.component == "backend"
     assert config.endpoint == "generate"
 
 
@@ -112,6 +114,30 @@ def test_config_use_kv_events_derived_from_publish_events(monkeypatch):
     config_off = parse_args(["--no-publish-events"])
     assert config_off.publish_events_and_metrics is False
     assert config_off.use_kv_events is False
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_rejects_invalid_kv_cache_config_override(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-kv-events",
+            "--override-engine-args",
+            '{"kv_cache_config": []}',
+        ]
+    )
+
+    with pytest.raises(
+        TypeError, match="kv_cache_config must be a dict or KvCacheConfig, got list"
+    ):
+        await init_llm_worker(
+            runtime=mock.MagicMock(),
+            config=config,
+            shutdown_event=asyncio.Event(),
+        )
 
 
 def test_config_has_connector(monkeypatch):
@@ -134,6 +160,63 @@ def test_config_multiple_connectors_fails(monkeypatch):
         match="TRT-LLM supports at most one connector entry. Use `--connector none` or `--connector kvbm`.",
     ):
         parse_args(["--connector", "none", "kvbm"])
+
+
+def test_enable_multimodal_maps_to_multimodal_modality():
+    config = parse_args(["--model", "fake-model", "--enable-multimodal"])
+
+    assert config.enable_multimodal is True
+    assert config.modality == Modality.MULTIMODAL
+
+
+def test_modality_multimodal_alias_does_not_warn():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = parse_args(["--model", "fake-model", "--modality", "multimodal"])
+
+    assert config.enable_multimodal is True
+    assert config.modality == Modality.MULTIMODAL
+    assert not [
+        warning
+        for warning in caught
+        if issubclass(warning.category, DeprecationWarning)
+    ]
+
+
+def test_disaggregation_mode_accepts_canonical_agg():
+    config = parse_args(["--model", "fake-model", "--disaggregation-mode", "agg"])
+
+    assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+    assert config.component == "backend"
+
+
+def test_disaggregation_mode_accepts_pd_alias():
+    config = parse_args(["--model", "fake-model", "--disaggregation-mode", "pd"])
+
+    assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+    assert config.component == "backend"
+
+
+def test_disaggregation_mode_legacy_aggregated_value_warns():
+    with pytest.warns(DeprecationWarning, match="prefill_and_decode"):
+        config = parse_args(
+            ["--model", "fake-model", "--disaggregation-mode", "prefill_and_decode"]
+        )
+
+    assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+
+
+def test_enable_multimodal_rejects_diffusion_modality():
+    with pytest.raises(ValueError, match="--enable-multimodal cannot be combined"):
+        parse_args(
+            [
+                "--model",
+                "fake-model",
+                "--enable-multimodal",
+                "--modality",
+                "video_diffusion",
+            ]
+        )
 
 
 # ---- Tests for trtllm_utils.deep_update ----
@@ -168,6 +251,50 @@ def test_deep_update_adds_new_keys():
     source = {"b": 2, "c": {"nested": 3}}
     deep_update(target, source)
     assert target == {"a": 1, "b": 2, "c": {"nested": 3}}
+
+
+# ---- Tests for trtllm_utils.warn_override_collisions ----
+
+
+def test_warn_override_collisions_logs_replaced_scalar(caplog):
+    """A scalar override that changes an existing value emits a warning."""
+    target = {"max_seq_len": 1024}
+    source = {"max_seq_len": 2048}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert any(
+        "max_seq_len" in r.message and "1024" in r.message and "2048" in r.message
+        for r in caplog.records
+    )
+
+
+def test_warn_override_collisions_recurses_into_nested_dicts(caplog):
+    """Nested-dict overrides report the full dotted path."""
+    target = {"kv_cache_config": {"max_tokens": 1000, "free_gpu_memory_fraction": 0.85}}
+    source = {"kv_cache_config": {"max_tokens": 2592}}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert any("kv_cache_config.max_tokens" in r.message for r in caplog.records)
+    # free_gpu_memory_fraction wasn't in source — should not warn.
+    assert not any("free_gpu_memory_fraction" in r.message for r in caplog.records)
+
+
+def test_warn_override_collisions_skips_new_keys(caplog):
+    """Keys not present in target are additions, not collisions — no warning."""
+    target = {"max_seq_len": 1024}
+    source = {"max_batch_size": 32}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert caplog.records == []
+
+
+def test_warn_override_collisions_skips_identical_values(caplog):
+    """Override with the same value as target is a no-op — no warning."""
+    target = {"max_seq_len": 1024}
+    source = {"max_seq_len": 1024}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert caplog.records == []
 
 
 # ---- Tests for engine_args resolution with extra/override engine args ----
@@ -219,22 +346,28 @@ async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
 async def test_init_llm_worker_engine_args_with_extra_engine_args(
     tmp_path, monkeypatch
 ):
-    """--extra-engine-args YAML overrides are reflected in engine_args passed to get_llm_engine."""
+    """--extra-engine-args YAML overrides are reflected in engine_args and MDC-visible config."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
 
     yaml_file = tmp_path / "engine_config.yaml"
-    yaml_file.write_text("max_num_tokens: 32768\nmax_batch_size: 512\n")
+    yaml_file.write_text(
+        "max_seq_len: 32768\nmax_num_tokens: 32768\nmax_batch_size: 512\n"
+    )
 
     config = parse_args(
         [
             "--model",
             "fake-model",
+            "--max-seq-len",
+            "131072",
             "--extra-engine-args",
             str(yaml_file),
         ]
     )
     # CLI config should NOT reflect the YAML values
+    assert config.max_seq_len != 32768
     assert config.max_num_tokens != 32768
     assert config.max_batch_size != 512
 
@@ -256,6 +389,10 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
             )
 
         engine_args = exc_info.value.engine_args
+        assert engine_args["max_seq_len"] == 32768, (
+            f"Expected max_seq_len=32768 from YAML override, "
+            f"got {engine_args['max_seq_len']}"
+        )
         assert engine_args["max_num_tokens"] == 32768, (
             f"Expected max_num_tokens=32768 from YAML override, "
             f"got {engine_args['max_num_tokens']}"
@@ -264,6 +401,11 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
             f"Expected max_batch_size=512 from YAML override, "
             f"got {engine_args['max_batch_size']}"
         )
+        # MDC registration reads config.max_seq_len, so keep it in sync with
+        # the final engine args.
+        assert config.max_seq_len == 32768
+        assert config.max_num_tokens == 32768
+        assert config.max_batch_size == 512
 
 
 class MultimodalProcessorInstantiated(Exception):

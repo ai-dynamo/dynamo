@@ -43,11 +43,15 @@ from dynamo.common.utils.prometheus import (
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import parse_endpoint
+from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
+    MediaDecoder,
+    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     register_model,
 )
 from dynamo.runtime import DistributedRuntime
@@ -61,10 +65,11 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.utils.trtllm_utils import deep_update
+from dynamo.trtllm.utils.trtllm_utils import deep_update, get_spec_decode_runtime_data
 
 # Default buffer size for kv cache events.
-DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
+SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
 def build_kv_connector_config(config: Config):
@@ -121,18 +126,25 @@ def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     )
 
 
+def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
+    """Sync MDC-visible config fields from final TensorRT-LLM engine args."""
+    for field_name in ("max_seq_len", "max_num_tokens", "max_batch_size"):
+        if field_name in engine_args:
+            setattr(config, field_name, engine_args[field_name])
+
+
 def _register_memory_routes(runtime, handler) -> None:
     runtime.register_engine_route(
-        "release_memory_occupation",
+        "control/release_memory_occupation",
         handler.release_memory_occupation,
     )
     runtime.register_engine_route(
-        "resume_memory_occupation",
+        "control/resume_memory_occupation",
         handler.resume_memory_occupation,
     )
     logging.info(
         "Registered engine routes: "
-        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
+        "/engine/control/release_memory_occupation, /engine/control/resume_memory_occupation"
     )
 
 
@@ -286,6 +298,9 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    _sync_config_from_engine_args(config, arg_map)
+
+    event_buffer_max_size = 0
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
@@ -293,14 +308,27 @@ async def init_llm_worker(
         if isinstance(current_kv_config, KvCacheConfig):
             # Convert KvCacheConfig object to dict, preserving ALL existing settings
             # This ensures YAML overrides are not lost when adding event_buffer_max_size
-            kv_config_dict = current_kv_config.model_dump(exclude_none=True)
-            kv_config_dict["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
-            arg_map["kv_cache_config"] = kv_config_dict
-        elif isinstance(current_kv_config, dict):
-            # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
+            current_kv_config = current_kv_config.model_dump(exclude_none=True)
+            arg_map["kv_cache_config"] = current_kv_config
+
+        if not isinstance(current_kv_config, dict):
+            raise TypeError(
+                "kv_cache_config must be a dict or KvCacheConfig, "
+                f"got {type(current_kv_config).__name__}"
+            )
+
+        # Preserve a user-specified event_buffer_max_size from YAML/overrides;
+        # only apply the default when it is unset or zero (TRTLLM's disabled value).
+        existing = current_kv_config.get("event_buffer_max_size")
+        if existing:
+            logging.info(
+                f"Using existing event_buffer_max_size={existing} from kv_cache_config"
+            )
+        else:
             current_kv_config[
                 "event_buffer_max_size"
             ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+        event_buffer_max_size = int(current_kv_config["event_buffer_max_size"])
 
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
@@ -378,9 +406,18 @@ async def init_llm_worker(
         default_sampling_params.return_perf_metrics = True
     model_input = ModelInput.Tokens
 
-    # Set model type based on disaggregation mode for unified frontend support
+    # Set model type based on disaggregation mode. Prefill and encode workers
+    # carry no OpenAI surface — their role is declared via `worker_type`.
     if config.disaggregation_mode == DisaggregationMode.PREFILL:
+        # Prefill registers the legacy `ModelType.Prefill` marker bit (not a
+        # surface) so an OLD frontend, which detects prefill via that bit,
+        # still routes disaggregated traffic during the cross-version rollout. A new
+        # frontend ignores it and dispatches off `worker_type`.
         model_type = ModelType.Prefill
+    elif config.disaggregation_mode == DisaggregationMode.ENCODE:
+        # Encode helpers expose no surface and (unlike prefill) had no legacy
+        # marker bit, so they stay Empty.
+        model_type = ModelType.Empty
     else:
         model_type = parse_endpoint_types(config.endpoint_types)
         logging.info(f"Registering model with endpoint types: {config.endpoint_types}")
@@ -394,7 +431,7 @@ async def init_llm_worker(
 
     multimodal_processor = None
 
-    if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+    if os.getenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
         # We need to initialize the tokenizer for the test logits processor
         # But detokenizing still happens in the rust engine, so we do _not_ want
         # to set default_sampling_params.detokenize to True.
@@ -403,13 +440,17 @@ async def init_llm_worker(
 
     if config.modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
-        model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
+        model_config = AutoConfig.from_pretrained(
+            config.model,
+            trust_remote_code=engine_args.get("trust_remote_code", False),
+        )
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
             model_dir=config.model,
             max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,
             allowed_local_media_path=config.allowed_local_media_path,
+            enable_frontend_decoding=config.frontend_decoding,
         )
 
     else:
@@ -417,8 +458,31 @@ async def init_llm_worker(
         default_sampling_params.detokenize = False
 
     connector = None
-    logging.info("Initializing NIXL Connect.")
-    connector = nixl_connect.Connector()
+    needs_nixl = config.disaggregation_mode != DisaggregationMode.AGGREGATED or (
+        config.modality == Modality.MULTIMODAL
+        and (
+            config.frontend_decoding
+            or config.disaggregation_mode == DisaggregationMode.ENCODE
+            or (
+                config.disaggregation_mode == DisaggregationMode.PREFILL
+                and bool(config.encode_endpoint)
+            )
+        )
+    )
+    if needs_nixl:
+        try:
+            logging.info("Initializing NIXL Connect.")
+            connector = nixl_connect.Connector()
+            await connector._create_connection()
+        except Exception:
+            logging.warning(
+                "Failed to initialize NIXL Connect; "
+                "KV-cache transfer will be unavailable.",
+                exc_info=True,
+            )
+            connector = None
+    else:
+        logging.info("Skipping NIXL Connect initialization (aggregated mode).")
 
     dump_config(
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
@@ -440,10 +504,20 @@ async def init_llm_worker(
         config.disaggregation_mode,
         component_gauges=component_gauges,
     ) as engine:
-        # Expose engine to the drain callback installed by main.py (#7319).
+        # Expose engine to the drain callback installed by main.py.
         # The callback uses this to poll active request count during shutdown.
         if engine_holder is not None:
             engine_holder.append(engine)
+
+        # Snapshot mode must capture the initialized TRT-LLM/CUDA state before
+        # Dynamo runtime endpoints, health routes, or discovery sockets exist.
+        # The snapshot runtime proxy waits here for capture/restore and creates
+        # the real runtime only after restore; normal runtimes skip this hook.
+        snapshot_before_endpoint = getattr(runtime, "snapshot_before_endpoint", None)
+        if snapshot_before_endpoint is not None:
+            await snapshot_before_endpoint(engine, config)
+
+        engine.start_health_monitor(runtime=runtime, shutdown_event=shutdown_event)
 
         endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -459,6 +533,7 @@ async def init_llm_worker(
         # So for now, we just set the parsers from the config
         # TODO: fix this once we have a better way to get total_kv_blocks
         runtime_config = ModelRuntimeConfig()
+        runtime_config.context_length = config.max_seq_len
 
         # Set values from config that are available immediately
         # Note: We populate max_num_seqs and max_num_batched_tokens from config
@@ -478,6 +553,11 @@ async def init_llm_worker(
         runtime_config.exclude_tools_when_tool_choice_none = (
             config.exclude_tools_when_tool_choice_none
         )
+        runtime_config.set_structural_tag_mode(
+            "on" if config.dyn_enable_structural_tag else "off"
+        )
+        runtime_config.set_structural_tag_scope(config.dyn_structural_tag_scope)
+        runtime_config.set_structural_tag_schema(config.dyn_structural_tag_schema)
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer
@@ -488,6 +568,20 @@ async def init_llm_worker(
         # Need to name ADP as `data_parallel_size` for parity with other frameworks
         attention_dp_size = engine.get_attention_dp_size()
         runtime_config.data_parallel_size = attention_dp_size
+
+        # Set topology and KV transfer policy for topology-aware routing
+        apply_topology_config(runtime_config)
+
+        spec_decode_runtime_data = get_spec_decode_runtime_data(engine_args)
+        if spec_decode_runtime_data is not None:
+            runtime_config.set_engine_specific(
+                SPEC_DECODE_RUNTIME_KEY,
+                json.dumps(spec_decode_runtime_data),
+            )
+            logging.info(
+                "Published TRT-LLM spec decode runtime metadata: %s",
+                spec_decode_runtime_data,
+            )
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
@@ -580,30 +674,73 @@ async def init_llm_worker(
             kv_block_size=config.kv_block_size,
             shutdown_event=shutdown_event,
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
-            disable_request_abort=config.disable_request_abort,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
 
-        # Register the model with runtime config
-        # Encode workers do NOT register - they're internal workers only
-        # Prefill and decode workers register - frontend detects their role via ModelType
-        if config.disaggregation_mode != DisaggregationMode.ENCODE:
-            await register_model(
-                model_input,
-                model_type,
-                endpoint,
-                config.model,
-                config.served_model_name,
-                context_length=config.max_seq_len,
-                kv_cache_block_size=config.kv_block_size,
-                runtime_config=runtime_config,
-                custom_template_path=config.custom_jinja_template,
-            )
+        media_decoder = None
+        media_fetcher = None
+        if config.frontend_decoding:
+            media_decoder = MediaDecoder()
+            media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+            media_fetcher = MediaFetcher()
+            media_fetcher.timeout_ms(30000)
+            allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+            media_fetcher.allow_direct_ip(allow_internal)
+            media_fetcher.allow_direct_port(allow_internal)
 
-        # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+        # Register the model with runtime config for every disaggregation
+        # role, including ENCODE. Encode workers get their own bucket in the
+        # WorkerSet via `worker_type` in the ws_key.
+        if config.disaggregation_mode == DisaggregationMode.PREFILL:
+            worker_type = WorkerType.Prefill
+            needs_set: list[WorkerType] = [WorkerType.Decode]
+        elif config.disaggregation_mode == DisaggregationMode.DECODE:
+            worker_type = WorkerType.Decode
+            needs_set = [WorkerType.Prefill]
+        elif config.disaggregation_mode == DisaggregationMode.ENCODE:
+            worker_type = WorkerType.Encode
+            # Encode workers want either a P+D pair, or a single Aggregated
+            # peer that handles both stages. DNF: outer OR, inner AND.
+            needs_set = []  # placeholder, overridden below
+        else:
+            # AGGREGATED ("prefill_and_decode")
+            worker_type = WorkerType.Aggregated
+            needs_set = []
+        # `--encode-endpoint` is non-empty when this worker talks to a
+        # separate encode worker; that adds Encode to its needs.
+        if worker_type != WorkerType.Encode and getattr(
+            config, "encode_endpoint", None
+        ):
+            needs_set.append(WorkerType.Encode)
+        if worker_type == WorkerType.Encode:
+            needs: list[list[WorkerType]] = [
+                [WorkerType.Prefill, WorkerType.Decode],
+                [WorkerType.Aggregated],
+            ]
+        else:
+            needs = [needs_set] if needs_set else []
+
+        await register_model(
+            model_input,
+            model_type,
+            endpoint,
+            config.model,
+            config.served_model_name,
+            kv_cache_block_size=config.kv_block_size,
+            runtime_config=runtime_config,
+            custom_template_path=config.custom_jinja_template,
+            media_decoder=media_decoder,
+            media_fetcher=media_fetcher,
+            worker_type=worker_type,
+            needs=needs,
+        )
+
+        health_check_payload = TrtllmHealthCheckPayload(
+            tokenizer=tokenizer,
+            disaggregation_mode=config.disaggregation_mode,
+        ).to_dict()
 
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
@@ -631,6 +768,7 @@ async def init_llm_worker(
                     kv_block_size=config.kv_block_size,
                     zmq_endpoint=consolidator_output_connect_endpoint,
                     zmq_topic="",
+                    enable_local_indexer=config.enable_local_indexer,
                 )
                 logging.info(
                     f"Created worker-side publisher for consolidated events: "
@@ -644,6 +782,8 @@ async def init_llm_worker(
                 config.kv_block_size,
                 metrics_labels,
                 component_gauges=component_gauges,
+                additional_metrics=additional_metrics,
+                event_buffer_max_size=event_buffer_max_size,
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,

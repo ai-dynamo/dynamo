@@ -110,6 +110,10 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            engine_data: None,
+            routing_data: None,
         },
         BackendOutput {
             token_ids: vec![1917],
@@ -123,6 +127,10 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            engine_data: None,
+            routing_data: None,
         },
         BackendOutput {
             token_ids: vec![0],
@@ -145,6 +153,10 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
                 completion_tokens_details: None,
             }),
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
+            engine_data: None,
+            routing_data: None,
         },
     ]
 }
@@ -190,7 +202,9 @@ fn create_chat_request(
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -211,6 +225,10 @@ async fn test_streaming_without_usage() {
         backend_stream,
         response_generator,
         ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
     );
 
     // Collect all chunks
@@ -270,6 +288,10 @@ async fn test_streaming_with_usage_compliance() {
         backend_stream,
         response_generator,
         ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
     );
 
     // Collect all chunks
@@ -343,6 +365,10 @@ async fn test_streaming_with_continuous_usage() {
         backend_stream,
         response_generator,
         ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
     );
 
     // Collect all chunks
@@ -434,6 +460,10 @@ async fn test_streaming_with_usage_false() {
         backend_stream,
         response_generator,
         ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
     );
 
     // Collect all chunks
@@ -494,6 +524,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
         common: Default::default(),
         nvext: None,
         metadata: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -520,7 +551,9 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -556,6 +589,10 @@ async fn test_nonstreaming_has_usage_field() {
         backend_stream,
         response_generator,
         ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
     );
 
     // Aggregate the streaming chunks into a single non-streaming response
@@ -612,6 +649,10 @@ async fn test_cmpl_streaming_with_usage_true_no_backend_usage() {
         backend_stream,
         response_generator,
         ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
     );
 
     let chunks: Vec<_> = transformed_stream.collect().await;
@@ -676,6 +717,10 @@ async fn test_cmpl_streaming_with_cached_tokens_propagation() {
         backend_stream,
         response_generator,
         ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
     );
     let chunks: Vec<_> = transformed_stream.collect().await;
 
@@ -720,6 +765,10 @@ async fn test_chat_streaming_with_cached_tokens_propagation() {
         backend_stream,
         response_generator,
         ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
     );
     let chunks: Vec<_> = transformed_stream.collect().await;
 
@@ -764,6 +813,10 @@ async fn test_cmpl_nonstreaming_has_usage_and_cached_tokens() {
         backend_stream,
         response_generator,
         ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
     );
 
     // Aggregate into a single non-streaming response
@@ -790,4 +843,51 @@ async fn test_cmpl_nonstreaming_has_usage_and_cached_tokens() {
         Some(9),
         "cached_tokens must propagate to non-streaming response"
     );
+}
+
+#[tokio::test]
+async fn test_multimodal_counts_on_every_metrics_frame() {
+    // Regression: request-constant media counts must ride *every* metrics frame,
+    // not just the first. Downstream stages can drop the first frame (empty/role-only
+    // chunks) or keep only the last buffered template (tool-call jail), so emitting on
+    // the first frame only would lose the counts. See PR #11166 review (rmccorm4 P1).
+    use dynamo_llm::preprocessor::MultimodalCounts;
+
+    let request = create_chat_request(Some(true), Some(true));
+    let mut response_generator = Box::new(request.response_generator("mm-every-frame".into()));
+    response_generator.update_isl(0);
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = create_backend_stream_with_cached_tokens(ctx.clone(), None);
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+        false,
+        false,
+        None,
+        MultimodalCounts {
+            image: 2,
+            video: 1,
+            audio: 0,
+        },
+    );
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    let frames: Vec<_> = chunks
+        .iter()
+        .filter_map(|c| c.data.as_ref().and_then(|d| d.llm_metrics.as_ref()))
+        .collect();
+    assert!(
+        frames.len() >= 2,
+        "expected multiple metrics-bearing frames, got {}",
+        frames.len()
+    );
+    for (i, m) in frames.iter().enumerate() {
+        assert_eq!(
+            (m.image_count, m.video_count, m.audio_count),
+            (2, 1, 0),
+            "frame {i} must carry the request counts (every frame, not just the first)"
+        );
+    }
 }

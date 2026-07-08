@@ -1,0 +1,107 @@
+{
+  "description": "Maps (from_image:tag, baseline_image:tag) pairs to slim CycloneDX SBOMs of the baseline. Each entry records the engineer-specified compliance boundary: NGC (or other upstream) owns everything in the baseline; we own everything from_image adds on top. The captured SBOM is the BASELINE -- runtime licenses stages subtract its components from final-image NOTICES to filter out NGC-owned content. CI runs container/compliance/base_sboms/check_drift.py on every PR/post-merge; if either digest moved or the from_image's layer prefix no longer matches the recorded baseline, CI fails and a refresh PR is required.",
+  "entries": [
+    {
+      "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
+      "baseline_tag": "13.0.2-base-ubuntu24.04",
+      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
+      "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "v0.22.1-ubuntu2404",
+      "layer_prefix_check_skipped": true,
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:8b2705ea7a8653ad3451b46ab835eced92d77b44e671b9cf3ad4f95fbb2efe5e",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@8b2705ea-amd64.cdx.json",
+      "baseline_tag": "13.0.1-cudnn-devel-ubuntu24.04",
+      "capture_note": "lmsysorg/sglang is built on this nvidia/cuda cudnn-devel base; re-baselined from the prior sglang@8df56b54 self-baseline so the framework stack over the clean CUDA+cuDNN floor is attributed. Delta-validation skipped at capture (the from-image's imageio-ffmpeg GPL pip binary is replaced in the runtime Dockerfile); validated at runtime in CI.",
+      "from_digest": "sha256:8df56b542526f4fffd5372f7f65a583c7852e50442c1f43c9c3feddfd93944a4",
+      "from_image": "lmsysorg/sglang",
+      "from_tag": "v0.5.12.post1-cu130-runtime",
+      "layer_prefix_check_skipped": true,
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:0082fd4f9934326e46bc77c7eb1e14404b168f2c8fd830d926a2da5a092bac28",
+      "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
+      "baseline_sbom": "release@0082fd4f-amd64.cdx.json",
+      "baseline_tag": "1.3.0rc19",
+      "from_digest": "sha256:0082fd4f9934326e46bc77c7eb1e14404b168f2c8fd830d926a2da5a092bac28",
+      "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
+      "from_tag": "1.3.0rc19",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@2ab6381d-arm64.cdx.json",
+      "baseline_tag": "13.0.2-base-ubuntu24.04",
+      "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
+      "from_digest": "sha256:525c7fb8b20102c501bf9d066a4671c94468e58db9b072972d743a327e8ab909",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "v0.22.1-ubuntu2404",
+      "layer_prefix_check_skipped": true,
+      "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:8b2705ea7a8653ad3451b46ab835eced92d77b44e671b9cf3ad4f95fbb2efe5e",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@8b2705ea-arm64.cdx.json",
+      "baseline_tag": "13.0.1-cudnn-devel-ubuntu24.04",
+      "capture_note": "lmsysorg/sglang is built on this nvidia/cuda cudnn-devel base; re-baselined from the prior sglang@8df56b54 self-baseline so the framework stack over the clean CUDA+cuDNN floor is attributed. Delta-validation skipped at capture (the from-image's imageio-ffmpeg GPL pip binary is replaced in the runtime Dockerfile); validated at runtime in CI.",
+      "from_digest": "sha256:8df56b542526f4fffd5372f7f65a583c7852e50442c1f43c9c3feddfd93944a4",
+      "from_image": "lmsysorg/sglang",
+      "from_tag": "v0.5.12.post1-cu130-runtime",
+      "layer_prefix_check_skipped": true,
+      "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:0082fd4f9934326e46bc77c7eb1e14404b168f2c8fd830d926a2da5a092bac28",
+      "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
+      "baseline_sbom": "release@0082fd4f-arm64.cdx.json",
+      "baseline_tag": "1.3.0rc19",
+      "from_digest": "sha256:0082fd4f9934326e46bc77c7eb1e14404b168f2c8fd830d926a2da5a092bac28",
+      "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
+      "from_tag": "1.3.0rc19",
+      "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:efec382c17b5090114ea8b2b7c8fc6678c5d1a74ce5be6676bf31082e0e44f36",
+      "baseline_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
+      "baseline_sbom": "vllm-ci-test-repo@efec382c-amd64.cdx.json",
+      "baseline_tag": "ad7125a431e176d4161099480a66f0169609a690-xpu",
+      "from_digest": "sha256:efec382c17b5090114ea8b2b7c8fc6678c5d1a74ce5be6676bf31082e0e44f36",
+      "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
+      "from_tag": "ad7125a431e176d4161099480a66f0169609a690-xpu",
+      "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:b15b9f691838b46723fcb0a51a01a015576cac8e5c52f174eba7cab0d1c893c7",
+      "baseline_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
+      "baseline_sbom": "vllm-ci-test-repo@b15b9f69-amd64.cdx.json",
+      "baseline_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
+      "from_digest": "sha256:b15b9f691838b46723fcb0a51a01a015576cac8e5c52f174eba7cab0d1c893c7",
+      "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
+      "from_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
+      "platform": "linux/amd64"
+    }
+  ],
+  "entry_schema": {
+    "baseline_digest": "manifest-list digest of baseline_image at capture time",
+    "baseline_image": "engineer-specified compliance floor (upstream owns below; we own above)",
+    "baseline_sbom": "filename of the slim CycloneDX SBOM of the baseline in this directory",
+    "baseline_tag": "registry tag of baseline_image",
+    "from_digest": "manifest-list digest of from_image at capture time",
+    "from_image": "registry-qualified image used in our Dockerfile's FROM line",
+    "from_tag": "registry tag of from_image",
+    "layer_prefix_check_skipped": "(optional) true if the engineer opted out at capture time",
+    "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
+  },
+  "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
+  "generated_at": "2026-07-03T06:54:02+00:00",
+  "schema_version": 2
+}

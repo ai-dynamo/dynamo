@@ -20,7 +20,8 @@ spec:
           image: python:3.10-slim
           command: ["sh", "-c"]
           env:
-            - name: HF_HUB_ENABLE_HF_TRANSFER
+            # Uses up to 64 GB RAM for XET buffers; set "0" on low-memory nodes (8 GB cap): https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
+            - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             # Optional: create with: kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<token> -n <namespace>
             - name: HF_TOKEN
@@ -32,9 +33,16 @@ spec:
           args:
             - |
               set -eux
-              pip install --no-cache-dir huggingface_hub hf_transfer
+              pip install --no-cache-dir huggingface_hub==1.16.4
               hf download nvidia/DeepSeek-R1-FP4 --local-dir /model-cache/deepseek-r1-fp4
               hf download deepseek-ai/DeepSeek-R1 --local-dir /model-cache/deepseek-r1
+          resources:
+            requests:
+              cpu: "2"
+              memory: "64Gi"
+            limits:
+              cpu: "8"
+              memory: "64Gi"
           volumeMounts:
             - name: model-cache
               mountPath: /model-cache

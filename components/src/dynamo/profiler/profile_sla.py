@@ -27,12 +27,17 @@ from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation
 from dynamo.profiler.rapid import run_rapid
 from dynamo.profiler.thorough import run_thorough
+from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.defaults import SearchStrategy
-from dynamo.profiler.utils.dgd_generation import assemble_final_config
+from dynamo.profiler.utils.dgd_generation import (
+    assemble_final_config,
+    build_aic_interpolation_spec,
+    build_aic_perf_model_spec,
+)
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     BackendType,
     DynamoGraphDeploymentRequestSpec,
@@ -71,6 +76,29 @@ def _apply_tolerations_to_final_config(final_config: Any, tolerations: list) -> 
     return inject_tolerations_into_dgd(final_config, tolerations)
 
 
+def _apply_model_runtime_constraints_to_final_config(
+    final_config: Any,
+    backend: str,
+    model_name_or_path: str,
+) -> Any:
+    if backend != "vllm" or not final_config:
+        return final_config
+
+    config_modifier = CONFIG_MODIFIERS[backend]
+    if not hasattr(config_modifier, "apply_model_runtime_constraints"):
+        return final_config
+
+    if isinstance(final_config, list):
+        final_config[-1] = config_modifier.apply_model_runtime_constraints(
+            final_config[-1], model_name_or_path
+        )
+    elif isinstance(final_config, dict):
+        final_config = config_modifier.apply_model_runtime_constraints(
+            final_config, model_name_or_path
+        )
+    return final_config
+
+
 def _check_auto_backend_support(model: str, system: str) -> bool:
     """
     Return True if *any* concrete backend is AIC-supported for this model/system.
@@ -79,6 +107,16 @@ def _check_auto_backend_support(model: str, system: str) -> bool:
     return any(
         check_model_hardware_support(model, system, b) for b in _CONCRETE_BACKENDS
     )
+
+
+def _check_dgdr_aic_support(
+    dgdr: DynamoGraphDeploymentRequestSpec, backend: str, system: str
+) -> bool:
+    """Check AIC support using a mounted model config when one is available."""
+    model_path = resolve_model_path(dgdr)
+    if backend == "auto":
+        return _check_auto_backend_support(model_path, system)
+    return check_model_hardware_support(model_path, system, backend)
 
 
 def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
@@ -276,6 +314,56 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
     return True
 
 
+_MAX_COMBINED_RESOURCE_NAME_LENGTH = 45
+
+
+def _validate_dgd_service_name_lengths(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    final_config: Any,
+) -> None:
+    """Raise ValueError if any DGD name + service name would exceed the 45-char pod-naming limit."""
+    dgdr_name = os.environ.get("DGDR_NAME", "")
+    dgd_spec = final_config[-1] if isinstance(final_config, list) else final_config
+
+    if dgdr_name:
+        # Operator path: compute the DGD name exactly as the Go controller does.
+        dgd_name = dgdr_name + "-dgd"
+        if dgdr.overrides and dgdr.overrides.dgd:
+            metadata = dgdr.overrides.dgd.get("metadata")
+            if isinstance(metadata, dict):
+                override_name = metadata.get("name", "")
+                if override_name:
+                    dgd_name = override_name
+    else:
+        # Non-operator path (e.g. standalone CLI): fall back to the name already
+        # embedded in the generated config. These template names ("vllm-disagg",
+        # "trtllm-disagg", …) are always short, so violations are unlikely here,
+        # but we still run the check to catch any edge cases.
+        dgd_name = dgd_spec.get("metadata", {}).get("name", "")
+        if not dgd_name:
+            logger.debug(
+                "DGDR_NAME unset and no metadata.name in config; "
+                "skipping DGD service name length validation."
+            )
+            return
+    services = dgd_spec.get("spec", {}).get("services", {})
+    violations = []
+    for svc_name in services:
+        combined = len(dgd_name) + len(svc_name)
+        if combined > _MAX_COMBINED_RESOURCE_NAME_LENGTH:
+            violations.append(
+                f"'{svc_name}' ({len(svc_name)}): combined length {combined}"
+            )
+
+    if violations:
+        raise ValueError(
+            f"DGD name '{dgd_name}' (length {len(dgd_name)}) combined with service "
+            f"name(s) exceeds the {_MAX_COMBINED_RESOURCE_NAME_LENGTH}-character "
+            f"pod-naming limit. Shorten the DGDR name '{dgdr_name}'. "
+            f"Violations: {'; '.join(violations)}"
+        )
+
+
 async def run_profile(
     dgdr: DynamoGraphDeploymentRequestSpec,
     ops: ProfilerOperationalConfig | None = None,
@@ -317,10 +405,7 @@ async def run_profile(
             search_strategy,
             picking_mode,
         ) = _extract_profiler_params(dgdr)
-        if backend == "auto":
-            aic_supported = _check_auto_backend_support(model, system)
-        else:
-            aic_supported = check_model_hardware_support(model, system, backend)
+        aic_supported = _check_dgdr_aic_support(dgdr, backend, system)
         # then validate DGDR features based on AIC support
         validate_dgdr_dynamo_features(dgdr, aic_supported)
 
@@ -371,11 +456,25 @@ async def run_profile(
             )
 
         # ---------------------------------------------------------------
-        # Interpolation curves — only needed when something consumes
-        # the per-engine performance data (throughput scaling or mocker).
+        # Interpolation curves — only needed when something consumes the
+        # per-engine performance data on disk (thorough-mode planner or
+        # mocker). Rapid-mode planner bootstraps AIC in-process at
+        # startup, so the profiler skips the NPZ sweep for that case.
         # ---------------------------------------------------------------
         chosen_exp = pick_result.get("chosen_exp", "")
         is_disagg_config = chosen_exp not in ("agg",) and bool(chosen_exp)
+
+        # Compute max context length unconditionally — both the NPZ sweep
+        # (thorough, mocker) and the planner's rapid-mode AIC spec need it.
+        try:
+            model_cfg = get_model_config_from_model_path(resolve_model_path(dgdr))
+            sweep_max_context_length = model_cfg.get("max_position_embeddings", 0)
+        except Exception:
+            logger.warning("Could not fetch model max context length.")
+            sweep_max_context_length = 0
+        if not sweep_max_context_length:
+            sweep_max_context_length = isl * 2 if isl > 0 else 8192
+
         if not ops.dry_run and dgd_config and needs_profile_data(dgdr):
             ops.current_phase = ProfilingPhase.BuildingCurves
             write_profiler_status(
@@ -385,36 +484,27 @@ async def run_profile(
                 phase=ops.current_phase,
             )
             if not is_disagg_config:
+                # TODO: agg + throughput-scaling has no profiling-data
+                # fallback today. The NPZ sweep (thorough) and the AIC
+                # spec (rapid, see build_aic_interpolation_spec) are both
+                # shaped around prefill + decode picks. For agg picks the
+                # planner currently falls back to DYN_BENCHMARK_MODE at
+                # runtime only. Extend AICInterpolationSpec and
+                # run_interpolation to carry an agg_pick so both paths
+                # work for aggregated deployments too.
                 logger.info(
                     "Picked config is aggregated (chosen_exp=%r) — "
                     "skipping interpolation (requires disaggregated config).",
                     chosen_exp,
                 )
             else:
-                try:
-                    model_cfg = get_model_config_from_model_path(
-                        resolve_model_path(dgdr)
-                    )
-                    sweep_max_context_length = model_cfg.get(
-                        "max_position_embeddings", 0
-                    )
-                except Exception:
-                    logger.warning("Could not fetch model max context length.")
-                    sweep_max_context_length = 0
-                if not sweep_max_context_length:
-                    sweep_max_context_length = isl * 2 if isl > 0 else 8192
-
                 await run_interpolation(
                     dgdr,
                     ops,
                     dgd_config,
                     best_prefill_config,
                     best_decode_config,
-                    model,
-                    system,
                     resolved_backend,
-                    isl,
-                    osl,
                     sweep_max_context_length,
                     deployment_clients,
                     job_tolerations=job_tolerations,
@@ -430,8 +520,42 @@ async def run_profile(
             message="Packaging data and generating final DGD YAML",
             phase=ops.current_phase,
         )
+        aic_spec = (
+            build_aic_interpolation_spec(
+                dgdr,
+                best_prefill_pick=best_prefill_config,
+                best_decode_pick=best_decode_config,
+                isl=isl,
+                osl=osl,
+                sweep_max_context_length=sweep_max_context_length,
+                resolved_backend=resolved_backend,
+                system=system,
+                prefill_interpolation_granularity=ops.prefill_interpolation_granularity,
+                decode_interpolation_granularity=ops.decode_interpolation_granularity,
+            )
+            if is_disagg_config and not ops.dry_run
+            else None
+        )
+        aic_perf_model = (
+            build_aic_perf_model_spec(
+                dgdr,
+                best_prefill_pick=best_prefill_config,
+                best_decode_pick=best_decode_config,
+                resolved_backend=resolved_backend,
+                system=system,
+            )
+            if not ops.dry_run
+            else None
+        )
         final_config = assemble_final_config(
-            dgdr, ops, dgd_config, best_prefill_config, best_decode_config
+            dgdr,
+            ops,
+            dgd_config,
+            best_prefill_config,
+            best_decode_config,
+            aic_spec=aic_spec,
+            aic_perf_model=aic_perf_model,
+            resolved_backend=resolved_backend,
         )
 
         # --- Apply DGD overrides (user-supplied partial DGD) ---
@@ -444,6 +568,12 @@ async def run_profile(
                 final_config = apply_dgd_overrides(final_config, dgdr.overrides.dgd)
             logger.info("Applied DGD overrides to the final config.")
 
+        final_config = _apply_model_runtime_constraints_to_final_config(
+            final_config,
+            resolved_backend,
+            resolve_model_path(dgdr),
+        )
+
         # Propagate profiling-job tolerations to the final DGD (covers any
         # services added by assemble_final_config, e.g. Planner).
         if job_tolerations and final_config:
@@ -454,6 +584,9 @@ async def run_profile(
                 "Propagated %d profiling-job toleration(s) to the final DGD config.",
                 len(job_tolerations),
             )
+
+        if final_config:
+            _validate_dgd_service_name_lengths(dgdr, final_config)
 
         if not _write_final_output(ops, final_config):
             return

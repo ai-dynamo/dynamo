@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
 	"k8s.io/client-go/kubernetes"
 
@@ -25,21 +24,28 @@ import (
 
 // RestoreRequest holds the parameters for a restore operation.
 type RestoreRequest struct {
-	CheckpointID       string
-	CheckpointLocation string
-	StartedAt          time.Time
-	NSRestorePath      string
-	PodName            string
-	PodNamespace       string
-	ContainerName      string
-	Clientset          kubernetes.Interface
+	CheckpointID                string
+	CheckpointLocation          string
+	ContainerCheckpointLocation string
+	ContainerID                 string
+	StartedAt                   time.Time
+	NSRestorePath               string
+	PodName                     string
+	PodNamespace                string
+	TargetPodIP                 string
+	ContainerName               string
+	Clientset                   kubernetes.Interface
 }
 
 // Restore performs external restore for the given request.
 // Returns the namespace-relative PID of the restored process.
 // The DaemonSet side inspects the placeholder and launches nsrestore,
 // which handles rootfs application, CRIU restore, and CUDA restore inside the namespace.
-func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req RestoreRequest) (int, error) {
+//
+// Returns the placeholder container's host PID so callers can reach into the
+// container's mount namespace (e.g. to write sentinels under /snapshot-control)
+// without re-resolving via the runtime.
+func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (int, error) {
 	restoreStart := time.Now()
 	log.Info("=== Starting external restore ===",
 		"checkpoint_id", req.CheckpointID,
@@ -50,7 +56,7 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 
 	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map
 	hostInspectStart := time.Now()
-	snap, err := inspectRestore(ctx, ctrd, log, req)
+	snap, err := inspectRestore(ctx, rt, log, req)
 	if err != nil {
 		return 0, err
 	}
@@ -90,14 +96,15 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 
 	log.Info("=== External restore completed ===",
 		"restored_pid", result.RestoredPID,
+		"placeholder_host_pid", snap.PlaceholderPID,
 		"validation_duration", time.Since(validationStart),
 		"total_duration", time.Since(restoreStart),
 	)
 
-	return result.RestoredPID, nil
+	return snap.PlaceholderPID, nil
 }
 
-func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
+func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
 	if req.CheckpointLocation == "" {
 		return nil, fmt.Errorf("checkpoint location is required")
 	}
@@ -125,7 +132,12 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		containerName = "main"
 	}
 
-	placeholderPID, _, err := snapshotruntime.ResolveContainerByPod(ctx, ctrd, req.PodName, req.PodNamespace, containerName)
+	var placeholderPID int
+	if req.ContainerID != "" {
+		placeholderPID, _, err = rt.ResolveContainer(ctx, req.ContainerID)
+	} else {
+		placeholderPID, _, err = rt.ResolveContainerByPod(ctx, req.PodName, req.PodNamespace, containerName)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}
@@ -142,17 +154,18 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		if len(m.CUDA.SourceGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing source GPU UUIDs in checkpoint manifest")
 		}
-		targetGPUUUIDs, err := cuda.GetPodGPUUUIDs(ctx, req.PodName, req.PodNamespace, containerName)
+		targetGPUUUIDs, err := cuda.DiscoverGPUUUIDs(
+			ctx,
+			req.Clientset,
+			req.PodName,
+			req.PodNamespace,
+			containerName,
+			snapshotruntime.HostProcPath,
+			placeholderPID,
+			log,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
-		}
-		if len(targetGPUUUIDs) == 0 {
-			log.Info("PodResources API returned no target GPU UUIDs, falling back to nvidia-smi", "pid", placeholderPID)
-			targetGPUUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, snapshotruntime.HostProcPath, placeholderPID)
-			if err != nil {
-				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed for restore target: %w", err)
-			}
-			log.Info("nvidia-smi fallback discovered target GPU UUIDs", "uuids", targetGPUUUIDs)
 		}
 		if len(targetGPUUUIDs) == 0 {
 			return nil, fmt.Errorf("missing target GPU UUIDs for %s/%s container %s", req.PodNamespace, req.PodName, containerName)
@@ -180,19 +193,29 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
 func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
+	checkpointPath := req.ContainerCheckpointLocation
+	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
+		return nil, fmt.Errorf("container checkpoint location must be absolute: %q", checkpointPath)
+	}
+	if checkpointPath == "" {
+		checkpointPath = snap.CheckpointPath
+	}
 	args := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 		// from the host-visible hierarchy so --cgroup-root remap works.
 		"-m", "-u", "-i", "-n", "-p",
 		"--", req.NSRestorePath,
-		"--checkpoint-path", snap.CheckpointPath,
+		"--checkpoint-path", checkpointPath,
 	}
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)
+	}
+	if req.TargetPodIP != "" {
+		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)

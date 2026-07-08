@@ -16,7 +16,8 @@ def parse_platform(platform_str: str) -> str:
     """Normalize a --platform value to the template variable used by Jinja2.
 
     Accepts Docker-style values (linux/amd64, linux/arm64) or short form (amd64,
-    arm64), and comma-separated lists for multi-arch (linux/amd64,linux/arm64).
+    arm64, x86_64), and comma-separated lists for multi-arch
+    (linux/amd64,linux/arm64).
 
     Returns one of: 'amd64', 'arm64', or 'multi'.
 
@@ -77,9 +78,9 @@ def parse_args():
     parser.add_argument(
         "--cuda-version",
         type=str,
-        default="12.9",
-        choices=["12.9", "13.0", "13.1"],
-        help="CUDA version to use. [12.9 or 13.0 for vllm and sglang, 13.1 for trtllm]",
+        default="13.0",
+        choices=["13.0", "13.1"],
+        help="CUDA version to use. [13.0 for vllm and sglang, 13.1 for trtllm].  Not required for non-cuda devices.",
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(
@@ -104,11 +105,10 @@ def validate_args(args):
                 "runtime",
                 "dev",
                 "local-dev",
-                "framework",
                 "wheel_builder",
                 "base",
             ],
-            "cuda_version": ["12.9", "13.0"],
+            "cuda_version": ["13.0"],
         },
         "trtllm": {
             "device": ["cuda"],
@@ -116,14 +116,13 @@ def validate_args(args):
                 "runtime",
                 "dev",
                 "local-dev",
-                "framework",
                 "wheel_builder",
                 "base",
             ],
             "cuda_version": ["13.1"],
         },
         "sglang": {
-            "device": ["cuda"],
+            "device": ["cuda", "xpu"],
             "target": [
                 "runtime",
                 "dev",
@@ -131,7 +130,7 @@ def validate_args(args):
                 "wheel_builder",
                 "base",
             ],
-            "cuda_version": ["12.9", "13.0"],
+            "cuda_version": ["13.0"],
         },
         "dynamo": {
             "device": ["cuda"],
@@ -144,16 +143,26 @@ def validate_args(args):
                 "wheel_builder",
                 "base",
             ],
-            "cuda_version": ["12.9", "13.0"],
+            "cuda_version": ["13.0"],
         },
     }
 
     if args.framework in valid_inputs:
+        cuda_version_valid = (
+            args.device != "cuda"
+            or args.cuda_version in valid_inputs[args.framework]["cuda_version"]
+        )
         if (
             args.target in valid_inputs[args.framework]["target"]
-            and args.cuda_version in valid_inputs[args.framework]["cuda_version"]
+            and cuda_version_valid
             and args.device in valid_inputs[args.framework]["device"]
         ):
+            # XPU is only supported on amd64 (Intel discrete GPUs)
+            if args.device == "xpu" and args.platform != "amd64":
+                raise ValueError(
+                    f"XPU builds require --platform linux/amd64, "
+                    f"got '{args.platform}'"
+                )
             return
 
         raise ValueError(
@@ -165,23 +174,64 @@ def validate_args(args):
     )
 
 
-def render(args, context, script_dir):
-    env = Environment(
+def _make_jinja_env(script_dir):
+    return Environment(
         loader=FileSystemLoader(script_dir),
         trim_blocks=False,
         lstrip_blocks=True,
-        undefined=StrictUndefined,  # Raise an error if a variable in the template is not provided in the context
+        undefined=StrictUndefined,
     )
-    template = env.get_template("Dockerfile.template")
-    rendered = template.render(
-        context=context,
+
+
+def _render_context(args, context=None):
+    # device_key is the lookup key into context.yaml's per-device dict
+    # (e.g. "cuda12.9", "xpu"). Computed here so it's available to every
+    # included template — `{% set device_key = ... %}` inside an
+    # included file doesn't propagate to peer includes in Jinja's
+    # default scoping rules.
+    device_key = (
+        args.device + args.cuda_version if args.device == "cuda" else args.device
+    )
+    # Compliance Jinja vars consumed by templates/compliance.Dockerfile.
+    # Computed here (not in the template) so the per-target lookup
+    # against context.yaml stays in Python and the template stays declarative.
+    compliance_base_stage, compliance_baseline_sbom = _resolve_compliance_inputs(
+        args.framework, args.target, device_key, context
+    )
+    return dict(
         framework=args.framework,
         device=args.device,
+        device_key=device_key,
         target=args.target,
-        platform=args.platform,  # normalized: 'amd64', 'arm64', or 'multi'
+        platform=args.platform,
         cuda_version=args.cuda_version,
         make_efa=args.make_efa,
+        compliance_base_stage=compliance_base_stage,
+        compliance_baseline_sbom=compliance_baseline_sbom,
     )
+
+
+def _resolve_compliance_inputs(framework, target, device_key, context):
+    """Return (base_stage, baseline_sbom_filename) for templates/compliance.Dockerfile.
+
+    The shared compliance template needs to know:
+      - which earlier stage to FROM (pre_runtime)
+      - which baseline SBOM file to subtract (may be empty if not captured)
+    Both depend on `framework` + `device_key`, so the lookup lives here
+    rather than being repeated as Jinja expressions per template.
+    """
+    if context is None:
+        return "pre_runtime", ""
+    # runtime / dev / local-dev / wheel_builder / base / framework
+    return "pre_runtime", (
+        context.get(framework, {}).get(device_key, {}).get("baseline_sbom", "")
+    )
+
+
+def render(args, context, script_dir):
+    env = _make_jinja_env(script_dir)
+    template = env.get_template("Dockerfile.template")
+    rendered = template.render(context=context, **_render_context(args, context))
     # Replace all instances of 3+ newlines with 2 newlines
     cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
 
@@ -201,8 +251,6 @@ def render(args, context, script_dir):
         print("##############")
 
     print(f"INFO: Generated Dockerfile written to {script_dir}/{filename}")
-
-    return
 
 
 def main():

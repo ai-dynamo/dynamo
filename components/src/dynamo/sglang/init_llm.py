@@ -8,10 +8,11 @@ import time
 from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
+from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.llm import ModelInput, ModelType
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
@@ -19,7 +20,11 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
-from dynamo.sglang.publisher import handle_non_leader_node, setup_sgl_metrics
+from dynamo.sglang.publisher import (
+    handle_non_leader_node,
+    set_forward_pass_metrics_worker_id,
+    setup_sgl_metrics,
+)
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
 
@@ -28,31 +33,12 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     """Perform warmup request for prefill engine to reduce initial TTFT.
 
     Raises on failure so the caller can prevent the worker from registering
-    with a broken engine (silent request drops).
+    with a broken engine (silent request drops). Shared with the unified
+    backend (`dynamo.sglang.llm_engine`) via `_disagg.warmup_prefill_engine`.
     """
-    logging.info("Start of prefill disaggregation warmup ...")
-    from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+    from dynamo.sglang._disagg import warmup_prefill_engine
 
-    sampling_params = {
-        "temperature": 0.0,
-        "max_new_tokens": 8,
-        "ignore_eos": True,
-    }
-
-    async def _do_warmup():
-        results = await engine.async_generate(
-            input_ids=[0, 1, 2, 3],
-            sampling_params=sampling_params,
-            stream=True,
-            bootstrap_host=FAKE_BOOTSTRAP_HOST,
-            bootstrap_port=server_args.disaggregation_bootstrap_port,
-            bootstrap_room=999999,
-        )
-        async for _ in results:
-            pass
-
-    await asyncio.wait_for(_do_warmup(), timeout=1800)
-    logging.info("Prefill warmup completed")
+    await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
 
 
 async def init_decode(
@@ -68,18 +54,33 @@ async def init_decode(
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
+    )
+    clear_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
+    )
+
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
+        if getattr(server_args, "enable_forward_pass_metrics", False):
+            logging.warning(
+                "Forward pass metrics disabled in snapshot mode: the engine was "
+                "created before the endpoint existed, so its FPM publisher bound "
+                "a different IPC path than the relay would subscribe to."
+            )
+            server_args.enable_forward_pass_metrics = False
     else:
+        set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
-    generate_endpoint = runtime.endpoint(
-        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
-    )
+    if server_args.enable_trace:
+        set_global_trace_level(dynamo_args.sglang_trace_level)
+
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
     )
@@ -95,6 +96,9 @@ async def init_decode(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
     logging.debug(f"SGLang model load time: {load_time:.2f}s")
@@ -106,7 +110,12 @@ async def init_decode(
     ready_event = asyncio.Event()
 
     handler = DecodeWorkerHandler(
-        engine, config, publisher, generate_endpoint, shutdown_event
+        engine,
+        config,
+        publisher,
+        generate_endpoint,
+        shutdown_event,
+        enable_frontend_decoding=dynamo_args.frontend_decoding,
     )
     handler.register_engine_routes(runtime)
 
@@ -126,12 +135,13 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-    # Only serve session_control when streaming sessions are enabled.
-    if getattr(server_args, "enable_streaming_session", False):
-        session_control_endpoint = runtime.endpoint(
-            f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
-        )
-        shutdown_endpoints.append(session_control_endpoint)
+    # Worker type and needs, derived from serving_mode.
+    if config.serving_mode == DisaggregationMode.DECODE:
+        decode_worker_type = WorkerType.Decode
+        decode_needs: list[list[WorkerType]] = [[WorkerType.Prefill]]
+    else:
+        decode_worker_type = WorkerType.Aggregated
+        decode_needs = []
 
     try:
         gather_tasks = [
@@ -153,6 +163,10 @@ async def init_decode(
                 handler.list_loras,
                 metrics_labels=metrics_labels,
             ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks,
+                metrics_labels=metrics_labels,
+            ),
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
@@ -160,12 +174,12 @@ async def init_decode(
                 dynamo_args,
                 output_type=parse_endpoint_types(dynamo_args.endpoint_types),
                 readiness_gate=ready_event,
+                worker_type=decode_worker_type,
+                needs=decode_needs,
+                # Decode workers serve the LoRA load endpoints, so they may advertise capacity.
+                serves_lora_load=True,
             ),
         ]
-        if getattr(server_args, "enable_streaming_session", False):
-            gather_tasks.append(
-                session_control_endpoint.serve_endpoint(handler.session_control)
-            )
         await asyncio.gather(*gather_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -196,18 +210,33 @@ async def init_prefill(
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
+    generate_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
+    )
+    clear_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
+    )
+
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
+        if getattr(server_args, "enable_forward_pass_metrics", False):
+            logging.warning(
+                "Forward pass metrics disabled in snapshot mode: the engine was "
+                "created before the endpoint existed, so its FPM publisher bound "
+                "a different IPC path than the relay would subscribe to."
+            )
+            server_args.enable_forward_pass_metrics = False
     else:
+        set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
-    generate_endpoint = runtime.endpoint(
-        f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
-    )
+    if server_args.enable_trace:
+        set_global_trace_level(dynamo_args.sglang_trace_level)
+
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
     )
@@ -223,6 +252,9 @@ async def init_prefill(
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
     )
+    # ``setup_sgl_metrics`` only returns ``None`` for embedding workers,
+    # which take a different init path entirely. Narrow for mypy.
+    assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     publisher.component_gauges.set_model_load_time(load_time)
 
@@ -270,14 +302,29 @@ async def init_prefill(
                 handler.list_loras,
                 metrics_labels=metrics_labels,
             ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks,
+                metrics_labels=metrics_labels,
+            ),
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
                 dynamo_args,
                 input_type=ModelInput.Tokens,
+                # Prefill workers have no OpenAI surface — the role is carried
+                # by `worker_type=Prefill` below. We register the legacy
+                # `ModelType.Prefill` marker bit (not a surface) so an OLD
+                # frontend, which detects prefill via that bit, still routes
+                # disaggregated traffic during the cross-version rollout. A new
+                # frontend ignores it and dispatches off `worker_type`.
                 output_type=ModelType.Prefill,
                 readiness_gate=ready_event,
+                worker_type=WorkerType.Prefill,
+                needs=[[WorkerType.Decode]],
+                # Prefill workers also serve the LoRA load endpoints (init_prefill), so they may
+                # advertise capacity.
+                serves_lora_load=True,
             ),
         )
     except Exception as e:

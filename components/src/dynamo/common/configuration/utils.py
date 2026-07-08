@@ -42,7 +42,7 @@ def env_or_default(
     target_type = value_type if value_type is not None else type(default)
 
     if target_type is bool:
-        return value.lower() in ("true", "1", "yes", "on")  # type: ignore
+        return value.strip().lower() in ("true", "1", "yes", "on")  # type: ignore
     if target_type is int:
         return int(value)  # type: ignore
     if target_type is float:
@@ -52,6 +52,20 @@ def env_or_default(
 
     # Fall back to calling the type/callable for custom validators (e.g., pathlib.Path)
     return target_type(value) if callable(target_type) else value  # type: ignore
+
+
+def nullable_float(value: str) -> Optional[float]:
+    """Parse a float, or return None for empty/'None' values."""
+    if value is None or value == "" or value == "None":
+        return None
+    return float(value)
+
+
+def nullable_int(value: str) -> Optional[int]:
+    """Parse an int, or return None for empty/'None' values."""
+    if value is None or value == "" or value == "None":
+        return None
+    return int(value)
 
 
 def add_argument(
@@ -82,7 +96,7 @@ def add_argument(
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
     value_type_for_env: Optional[Union[type, Callable[..., Any]]] = None
-    if arg_type is not None and isinstance(arg_type, type):
+    if arg_type is not None and callable(arg_type):
         value_type_for_env = arg_type
     if isinstance(default, list) and (arg_type is None or arg_type is str):
         value_type_for_env = None

@@ -22,11 +22,14 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -34,8 +37,9 @@ import (
 
 const (
 	// DynamoGraphDeploymentWebhookName is the name of the validating webhook handler for DynamoGraphDeployment.
-	DynamoGraphDeploymentWebhookName = "dynamographdeployment-validating-webhook"
-	dynamoGraphDeploymentWebhookPath = "/validate-nvidia-com-v1alpha1-dynamographdeployment"
+	DynamoGraphDeploymentWebhookName         = "dynamographdeployment-validating-webhook"
+	dynamoGraphDeploymentV1Alpha1WebhookPath = "/validate-nvidia-com-v1alpha1-dynamographdeployment"
+	dynamoGraphDeploymentV1Beta1WebhookPath  = "/validate/nvidia.com/v1beta1/dynamographdeployments"
 )
 
 // DynamoGraphDeploymentHandler is a handler for validating DynamoGraphDeployment resources.
@@ -43,21 +47,44 @@ const (
 type DynamoGraphDeploymentHandler struct {
 	mgr               manager.Manager
 	operatorPrincipal string
+	groveEnabled      bool
+}
+
+// dynamoGraphDeploymentV1Alpha1Handler keeps the previous endpoint available
+// during the v1alpha1-to-v1beta1 admission migration. It converts the spoke
+// request to the v1beta1 hub before invoking the shared validation logic.
+type dynamoGraphDeploymentV1Alpha1Handler struct {
+	handler *DynamoGraphDeploymentHandler
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
+// mgr must not be nil.
 // operatorPrincipal is the full Kubernetes SA username of the operator, used to authorize
-// replica changes on scaling-adapter-enabled services (#7656).
-func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string) *DynamoGraphDeploymentHandler {
+// replica changes on scaling-adapter-enabled components (#7656).
+// groveEnabled reflects the operator's runtime Grove configuration.
+func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string, groveEnabled bool) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
 		mgr:               mgr,
 		operatorPrincipal: operatorPrincipal,
+		groveEnabled:      groveEnabled,
 	}
 }
 
 // ValidateCreate validates a DynamoGraphDeployment create request.
 func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	return h.validateCreate(ctx, obj, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+}
+
+func (h *DynamoGraphDeploymentHandler) validateCreate(
+	ctx context.Context,
+	obj runtime.Object,
+	expectedGVK schema.GroupVersionKind,
+) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, expectedGVK); err != nil {
+		return nil, err
+	}
 
 	deployment, err := castToDynamoGraphDeployment(obj)
 	if err != nil {
@@ -67,13 +94,25 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	// Create validator with manager for API group detection and perform validation
-	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr)
-	return validator.Validate(ctx)
+	validator := NewDynamoGraphDeploymentValidator(h.mgr, h.groveEnabled)
+	return validator.Validate(ctx, deployment)
 }
 
 // ValidateUpdate validates a DynamoGraphDeployment update request.
 func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+	return h.validateUpdate(ctx, oldObj, newObj, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+}
+
+func (h *DynamoGraphDeploymentHandler) validateUpdate(
+	ctx context.Context,
+	oldObj, newObj runtime.Object,
+	expectedGVK schema.GroupVersionKind,
+) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, expectedGVK); err != nil {
+		return nil, err
+	}
 
 	newDeployment, err := castToDynamoGraphDeployment(newObj)
 	if err != nil {
@@ -94,8 +133,8 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	}
 
 	// Create validator with manager for API group detection and perform validation.
-	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr)
-	warnings, err := validator.Validate(ctx)
+	validator := NewDynamoGraphDeploymentValidator(h.mgr, h.groveEnabled)
+	warnings, err := validator.Validate(ctx, newDeployment)
 	if err != nil {
 		return warnings, err
 	}
@@ -105,13 +144,13 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
 		logger.Error(err, "failed to get admission request from context, replica changes for DGDSA-enabled services will be rejected")
-		// userInfo remains nil - validateReplicasChanges will fail closed
+		// userInfo remains nil, so scaling-adapter replica validation fails closed.
 	} else {
 		userInfo = &req.UserInfo
 	}
 
 	// Validate stateful rules (immutability + replicas protection)
-	updateWarnings, err := validator.ValidateUpdate(oldDeployment, userInfo, h.operatorPrincipal)
+	updateWarnings, err := validator.ValidateUpdate(ctx, oldDeployment, newDeployment, userInfo, h.operatorPrincipal)
 	if err != nil {
 		username := "<unknown>"
 		if userInfo != nil {
@@ -128,14 +167,26 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 
 // ValidateDelete validates a DynamoGraphDeployment delete request.
 func (h *DynamoGraphDeploymentHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	return h.validateDelete(ctx, obj, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
+}
+
+func (h *DynamoGraphDeploymentHandler) validateDelete(
+	ctx context.Context,
+	obj runtime.Object,
+	expectedGVK schema.GroupVersionKind,
+) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
 
-	deployment, err := castToDynamoGraphDeployment(obj)
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, expectedGVK); err != nil {
+		return nil, err
+	}
+
+	deployment, err := dynamoGraphDeploymentMetadata(obj)
 	if err != nil {
 		return nil, err
 	}
 
-	logger.Info("validate delete", "name", deployment.Name, "namespace", deployment.Namespace)
+	logger.Info("validate delete", "name", deployment.GetName(), "namespace", deployment.GetNamespace())
 
 	// No special validation needed for deletion
 	return nil, nil
@@ -145,24 +196,75 @@ func (h *DynamoGraphDeploymentHandler) ValidateDelete(ctx context.Context, obj r
 // The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic
 // and ObservedValidator to add metrics collection.
 func (h *DynamoGraphDeploymentHandler) RegisterWithManager(mgr manager.Manager) error {
+	h.registerWithManager(
+		mgr,
+		&nvidiacomv1beta1.DynamoGraphDeployment{},
+		dynamoGraphDeploymentV1Beta1WebhookPath,
+		h,
+	)
+
+	// TODO(1.5): Remove the v1alpha1 endpoint and handler after 1.3 is no longer
+	// a supported upgrade or rollback target.
+	alphaHandler := &dynamoGraphDeploymentV1Alpha1Handler{handler: h}
+	h.registerWithManager(
+		mgr,
+		&nvidiacomv1alpha1.DynamoGraphDeployment{},
+		dynamoGraphDeploymentV1Alpha1WebhookPath,
+		alphaHandler,
+	)
+	return nil
+}
+
+func (h *DynamoGraphDeploymentHandler) registerWithManager(
+	mgr manager.Manager,
+	object runtime.Object,
+	path string,
+	validator admission.CustomValidator,
+) {
 	// Wrap the handler with lease-aware logic for cluster-wide coordination
-	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
+	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(validator, internalwebhook.GetExcludedNamespaces())
 
 	// Wrap with metrics collection
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoGraphDeployment)
 
 	webhook := admission.
-		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, observedValidator).
+		WithCustomValidator(mgr.GetScheme(), object, observedValidator).
 		WithRecoverPanic(true)
-	mgr.GetWebhookServer().Register(dynamoGraphDeploymentWebhookPath, webhook)
-	return nil
+	mgr.GetWebhookServer().Register(path, webhook)
 }
 
-// castToDynamoGraphDeployment attempts to cast a runtime.Object to a DynamoGraphDeployment.
-func castToDynamoGraphDeployment(obj runtime.Object) (*nvidiacomv1alpha1.DynamoGraphDeployment, error) {
-	deployment, ok := obj.(*nvidiacomv1alpha1.DynamoGraphDeployment)
-	if !ok {
+func (h *dynamoGraphDeploymentV1Alpha1Handler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	return h.handler.validateCreate(ctx, obj, nvidiacomv1alpha1.DynamoGraphDeploymentGVK)
+}
+
+func (h *dynamoGraphDeploymentV1Alpha1Handler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+	return h.handler.validateUpdate(ctx, oldObj, newObj, nvidiacomv1alpha1.DynamoGraphDeploymentGVK)
+}
+
+func (h *dynamoGraphDeploymentV1Alpha1Handler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	return h.handler.validateDelete(ctx, obj, nvidiacomv1alpha1.DynamoGraphDeploymentGVK)
+}
+
+// castToDynamoGraphDeployment converts the v1alpha1 spoke to the v1beta1 hub
+// used by the DGD validator, or returns a v1beta1 object unchanged.
+func castToDynamoGraphDeployment(obj runtime.Object) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
+	switch deployment := obj.(type) {
+	case *nvidiacomv1beta1.DynamoGraphDeployment:
+		return deployment, nil
+	case *nvidiacomv1alpha1.DynamoGraphDeployment:
+		return internalwebhook.ConvertDynamoGraphDeploymentToV1Beta1(deployment)
+	default:
+		return nil, fmt.Errorf("expected v1alpha1 or v1beta1 DynamoGraphDeployment but got %T", obj)
+	}
+}
+
+func dynamoGraphDeploymentMetadata(obj runtime.Object) (metav1.Object, error) {
+	switch deployment := obj.(type) {
+	case *nvidiacomv1beta1.DynamoGraphDeployment:
+		return deployment, nil
+	case *nvidiacomv1alpha1.DynamoGraphDeployment:
+		return deployment, nil
+	default:
 		return nil, fmt.Errorf("expected DynamoGraphDeployment but got %T", obj)
 	}
-	return deployment, nil
 }

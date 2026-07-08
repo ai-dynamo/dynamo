@@ -4,6 +4,7 @@
 use anyhow::Error;
 use async_stream::stream;
 use dynamo_llm::{
+    discovery::UNKNOWN_METRIC_MODEL,
     http::service::{metrics::Endpoint, service_v2::HttpService},
     model_card::ModelDeploymentCard,
     preprocessor::LLMMetricAnnotation,
@@ -25,7 +26,7 @@ use std::{sync::Arc, time::Duration};
 
 #[path = "common/ports.rs"]
 mod ports;
-use ports::get_random_port;
+use ports::bind_random_port;
 
 // Mock engine for testing metrics
 struct MockModelEngine {}
@@ -55,7 +56,7 @@ impl
             // output_sequence_tokens is properly recorded (the histogram only
             // records when osl > 0, which requires the annotation to be present).
             for i in 0..5 {
-                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None, None);
+                let output = generator.create_choice(i, Some(format!("Mock response {i}")), None, None);
                 let mut annotated = Annotated::from_data(output);
                 let metrics = LLMMetricAnnotation {
                     input_tokens: 5,
@@ -71,6 +72,78 @@ impl
                     tokenize_latency: None,
                     detokenize_total_latency: None,
                     detokenize_count: None,
+                    ..Default::default()
+                };
+                if let Ok(ann) = metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
+                    annotated.event = ann.event;
+                    annotated.comment = ann.comment;
+                }
+                yield annotated;
+            }
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// Counts the media parts in the incoming request (same enum the preprocessor
+/// uses) so the test's asserted counts flow from the actual request inputs.
+fn count_request_media(request: &NvCreateChatCompletionRequest) -> (usize, usize, usize) {
+    use dynamo_protocols::types::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent as Content,
+        ChatCompletionRequestUserMessageContentPart as Part,
+    };
+    let (mut images, mut videos, mut audio) = (0, 0, 0);
+    for message in &request.inner.messages {
+        if let ChatCompletionRequestMessage::User(user) = message
+            && let Content::Array(parts) = &user.content
+        {
+            for part in parts {
+                match part {
+                    Part::ImageUrl(_) => images += 1,
+                    Part::VideoUrl(_) => videos += 1,
+                    Part::AudioUrl(_) => audio += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    (images, videos, audio)
+}
+
+/// Emits chunks whose `LLMMetricAnnotation` carries the media counts derived from
+/// the request, verifying the annotation -> observe -> exposition path end to end.
+struct MockMultimodalEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for MockMultimodalEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let (image_count, video_count, audio_count) = count_request_media(&request);
+        let mut generator = request.response_generator(ctx.id().to_string());
+
+        let stream = stream! {
+            for i in 0..3 {
+                let output = generator.create_choice(i, Some(format!("chunk {i}")), None, None);
+                let mut annotated = Annotated::from_data(output);
+                let metrics = LLMMetricAnnotation {
+                    input_tokens: 5,
+                    output_tokens: (i + 1) as usize,
+                    chunk_tokens: 1,
+                    image_count,
+                    video_count,
+                    audio_count,
+                    ..Default::default()
                 };
                 if let Ok(ann) = metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
                     annotated.event = ann.event;
@@ -88,10 +161,10 @@ impl
 async fn test_metrics_prefix_default() {
     // Test default prefix when no env var is set
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder().port(port).build().unwrap();
         let token = CancellationToken::new();
-        let handle = service.spawn(token.clone()).await;
+        let handle = service.spawn_with_listener(token.clone(), listener).await;
         wait_for_metrics_ready(port).await;
 
         // Populate labeled metrics
@@ -113,6 +186,7 @@ async fn test_metrics_prefix_default() {
             .unwrap();
 
         // Assert metrics that are actually present in the default configuration
+        assert!(body.contains("dynamo_frontend_requests_started_total"));
         assert!(body.contains("dynamo_frontend_requests_total"));
         assert!(body.contains("dynamo_frontend_inflight_requests"));
         assert!(body.contains("dynamo_frontend_request_duration_seconds"));
@@ -128,10 +202,10 @@ async fn test_metrics_prefix_default() {
 async fn test_metrics_prefix_custom() {
     // Test custom prefix override via environment variable
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, Some("custom_prefix"))], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder().port(port).build().unwrap();
         let token = CancellationToken::new();
-        let handle = service.spawn(token.clone()).await;
+        let handle = service.spawn_with_listener(token.clone(), listener).await;
         wait_for_metrics_ready(port).await;
 
         // Populate labeled metrics
@@ -151,6 +225,7 @@ async fn test_metrics_prefix_custom() {
             .text()
             .await
             .unwrap();
+        assert!(body.contains("custom_prefix_requests_started_total"));
         assert!(body.contains("custom_prefix_requests_total"));
         assert!(!body.contains("dynamo_frontend_requests_total"));
 
@@ -164,10 +239,10 @@ async fn test_metrics_prefix_custom() {
 async fn test_metrics_prefix_sanitized() {
     // Test that invalid prefix characters are sanitized
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, Some("nv-llm/http service"))], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder().port(port).build().unwrap();
         let token = CancellationToken::new();
-        let handle = service.spawn(token.clone()).await;
+        let handle = service.spawn_with_listener(token.clone(), listener).await;
         wait_for_metrics_ready(port).await;
 
         let state = service.state_clone();
@@ -216,7 +291,7 @@ async fn test_metrics_with_mock_model() {
     // Test metrics collection with a mock model serving requests
     // Ensure we use the default prefix
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
         let service = HttpService::builder()
             .port(port)
             .enable_chat_endpoints(true)
@@ -229,7 +304,8 @@ async fn test_metrics_with_mock_model() {
         // Start the HTTP service
         let token = CancellationToken::new();
         let cancel_token = token.clone();
-        let task = tokio::spawn(async move { service.run(token.clone()).await });
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
 
         // Add mock model engine
         let card = ModelDeploymentCard::with_name_only("mockmodel");
@@ -315,6 +391,213 @@ async fn test_metrics_with_mock_model() {
     .await;
 }
 
+#[tokio::test]
+async fn test_multimodal_count_metrics_exposed() {
+    // End-to-end: POST a request whose engine emits multimodal counts, consume
+    // the stream, then GET /metrics and assert the per-request histograms are
+    // registered and exposed with the right sums/count. Covers annotation
+    // parsing -> observe -> registration -> Prometheus exposition as one path.
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+
+        let card = ModelDeploymentCard::with_name_only("mmmodel");
+        let mock_engine = Arc::new(MockMultimodalEngine {});
+        manager
+            .add_chat_completions_model("mmmodel", card.mdcsum(), mock_engine)
+            .unwrap();
+
+        wait_for_metrics_ready(port).await;
+
+        let client = reqwest::Client::new();
+        // Real mixed-media request (2 images, 1 video); the mock derives the counts
+        // from these inputs, so the assertions below reflect the actual request.
+        let request = serde_json::json!({
+            "model": "mmmodel",
+            "stream": true,
+            "max_tokens": 50,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "compare"},
+                    {"type": "image_url", "image_url": {"url": "http://example.com/a.png"}},
+                    {"type": "image_url", "image_url": {"url": "http://example.com/b.png"}},
+                    {"type": "video_url", "video_url": {"url": "http://example.com/c.mp4"}}
+                ]
+            }]
+        });
+
+        let response = client
+            .post(format!("http://localhost:{}/v1/chat/completions", port))
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let _ = response.bytes().await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let metrics_body = client
+            .get(format!("http://localhost:{}/metrics", port))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        // Observed once per request; sums == the request's media counts (2/1/0).
+        // Trailing newline so a value like `1` can't prefix-match `10`.
+        assert!(
+            metrics_body
+                .contains("dynamo_frontend_images_per_request_count{model=\"mmmodel\"} 1\n"),
+            "images_per_request_count should be 1; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body.contains("dynamo_frontend_images_per_request_sum{model=\"mmmodel\"} 2\n"),
+            "images_per_request_sum should be 2; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body.contains("dynamo_frontend_videos_per_request_sum{model=\"mmmodel\"} 1\n"),
+            "videos_per_request_sum should be 1; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body.contains("dynamo_frontend_audio_per_request_sum{model=\"mmmodel\"} 0\n"),
+            "audio_per_request_sum should be 0; got:\n{metrics_body}"
+        );
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_unknown_model_uses_sentinel_label() {
+    // Regression test: unknown-model requests must collapse to the bounded
+    // sentinel `UNKNOWN_METRIC_MODEL` instead of letting arbitrary
+    // client-supplied strings create unbounded Prometheus series. Both the
+    // pre-lookup InflightGuard and HttpQueueGuard must use the sentinel from
+    // the start, since their Drop impls cannot retroactively relabel children.
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+
+        // Register exactly one valid model so the manager can distinguish
+        // known vs unknown lookups.
+        let card = ModelDeploymentCard::with_name_only("mockmodel");
+        let mock_engine = Arc::new(MockModelEngine {});
+        manager
+            .add_chat_completions_model("mockmodel", card.mdcsum(), mock_engine)
+            .unwrap();
+
+        wait_for_metrics_ready(port).await;
+
+        let client = reqwest::Client::new();
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                    "hi".to_string(),
+                ),
+                name: None,
+            },
+        );
+
+        // Two distinct unknown-model strings exercise the cardinality concern:
+        // without the sentinel each would create its own Prometheus child.
+        let bogus_models = ["nonexistent-model-1", "Foo"];
+        for bogus in bogus_models {
+            let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+                .model(bogus)
+                .messages(vec![message.clone()])
+                .max_tokens(8u32)
+                .stream(false)
+                .build()
+                .expect("Failed to build request");
+
+            let resp = client
+                .post(format!("http://localhost:{}/v1/chat/completions", port))
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            // Unknown model must fail. The exact status is not what we're
+            // testing; only that the guard's drop path ran.
+            assert!(
+                !resp.status().is_success(),
+                "expected unknown-model request for {bogus} to fail"
+            );
+        }
+
+        // Give Drop impls time to emit the request counter / duration samples.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let metrics_body = client
+            .get(format!("http://localhost:{}/metrics", port))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        // Scan only `dynamo_frontend_*` series lines so we don't false-positive
+        // on HELP/TYPE descriptors or unrelated metric namespaces:
+        //   * at least one such series must carry the sentinel label
+        //   * none of them may carry a raw user-supplied bogus name
+        let sentinel_needle = format!("model=\"{UNKNOWN_METRIC_MODEL}\"");
+        let mut sentinel_seen = false;
+        for line in metrics_body.lines() {
+            if !line.starts_with("dynamo_frontend_") {
+                continue;
+            }
+            if line.contains(&sentinel_needle) {
+                sentinel_seen = true;
+            }
+            for bogus in bogus_models {
+                let needle = format!("model=\"{bogus}\"");
+                assert!(
+                    !line.contains(&needle),
+                    "unknown-model label leaked into Prometheus series: {line}"
+                );
+            }
+        }
+        assert!(
+            sentinel_seen,
+            "expected at least one dynamo_frontend_* series under {sentinel_needle}, got:\n{metrics_body}"
+        );
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    })
+    .await;
+}
+
 // Integration tests that require distributed runtime with etcd
 #[cfg(feature = "integration")]
 mod integration_tests {
@@ -331,7 +614,7 @@ mod integration_tests {
     #[ignore = "Requires etcd and distributed runtime"]
     async fn test_metrics_with_mdc_registration() {
         // Integration test for metrics collection with full MDC registration (like real model servers)
-        let port = get_random_port().await;
+        let (listener, port) = bind_random_port().await;
 
         // Create distributed runtime (required for MDC registration)
         let runtime = dynamo_runtime::Runtime::from_settings().unwrap();
@@ -412,6 +695,8 @@ mod integration_tests {
                 dynamo_llm::model_type::ModelType::Chat,
                 dynamo_llm::model_type::ModelInput::Text,
                 None,
+                Some(dynamo_llm::worker_type::WorkerType::Aggregated),
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -436,7 +721,11 @@ mod integration_tests {
         let token = CancellationToken::new();
         let cancel_token = token.clone();
         let service_for_task = service.clone();
-        let task = tokio::spawn(async move { service_for_task.run(token.clone()).await });
+        let task = tokio::spawn(async move {
+            service_for_task
+                .run_with_listener(token.clone(), listener)
+                .await
+        });
 
         // Wait for service to be ready
         wait_for_metrics_ready(port).await;
@@ -500,6 +789,7 @@ mod integration_tests {
 
         // Assert basic metrics are present (using service_name from the model)
         let model_name = model.service_name();
+        assert!(metrics_body.contains("dynamo_frontend_requests_started_total"));
         assert!(metrics_body.contains("dynamo_frontend_requests_total"));
         assert!(metrics_body.contains(&format!("model=\"{}\"", model_name)));
         assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));

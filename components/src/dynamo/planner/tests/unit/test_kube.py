@@ -46,7 +46,16 @@ def mock_custom_api():
 
 
 @pytest.fixture
-def k8s_api(mock_custom_api, mock_config):
+def mock_namespace():
+    with patch(
+        "dynamo.planner.connectors.kubernetes_api.get_current_k8s_namespace",
+        return_value="default",
+    ) as mock:
+        yield mock
+
+
+@pytest.fixture
+def k8s_api(mock_custom_api, mock_config, mock_namespace):
     return KubernetesAPI()
 
 
@@ -61,7 +70,9 @@ def test_kubernetes_api_init_with_namespace(mock_custom_api, mock_config):
     assert api.current_namespace == "custom-namespace"
 
 
-def test_kubernetes_api_init_without_namespace(mock_custom_api, mock_config):
+def test_kubernetes_api_init_without_namespace(
+    mock_custom_api, mock_config, mock_namespace
+):
     """Test KubernetesAPI initialization without custom namespace"""
     api = KubernetesAPI()
     # Should use the default namespace logic
@@ -78,7 +89,7 @@ def test_get_graph_deployment_from_name(k8s_api, mock_custom_api):
     assert result == mock_deployment
     mock_custom_api.get_namespaced_custom_object.assert_called_once_with(
         group="nvidia.com",
-        version="v1alpha1",
+        version="v1beta1",
         namespace=k8s_api.current_namespace,
         plural="dynamographdeployments",
         name="test-deployment",
@@ -94,7 +105,7 @@ def test_update_service_replicas_uses_dgdsa_scale(k8s_api, mock_custom_api):
     # Should use Scale subresource with lowercase adapter name
     mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once_with(
         group="nvidia.com",
-        version="v1alpha1",
+        version="v1beta1",
         namespace=k8s_api.current_namespace,
         plural="dynamographdeploymentscalingadapters",
         name="test-deployment-frontend",  # lowercase service name
@@ -110,6 +121,15 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
     mock_custom_api.patch_namespaced_custom_object_scale.side_effect = (
         client.ApiException(status=404)
     )
+    mock_custom_api.get_namespaced_custom_object.return_value = {
+        "metadata": {"name": "test-deployment"},
+        "spec": {
+            "components": [
+                {"name": "test-component", "type": "decode", "replicas": 0},
+                {"name": "other-component", "type": "prefill", "replicas": 2},
+            ]
+        },
+    }
     mock_custom_api.patch_namespaced_custom_object.return_value = None
 
     k8s_api.update_service_replicas("test-deployment", "test-component", 1)
@@ -117,14 +137,39 @@ def test_update_service_replicas_fallback_to_dgd(k8s_api, mock_custom_api):
     # Should have tried DGDSA first
     mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once()
 
-    # Should fall back to DGD patch
-    mock_custom_api.patch_namespaced_custom_object.assert_called_once_with(
-        group="nvidia.com",
-        version="v1alpha1",
-        namespace=k8s_api.current_namespace,
-        plural="dynamographdeployments",
-        name="test-deployment",
-        body={"spec": {"services": {"test-component": {"replicas": 1}}}},
+    # Should fall back to a narrow DGD JSON Patch.
+    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
+    mock_custom_api.api_client.call_api.assert_called_once_with(
+        "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
+        "PATCH",
+        {
+            "group": "nvidia.com",
+            "version": "v1beta1",
+            "namespace": k8s_api.current_namespace,
+            "plural": "dynamographdeployments",
+            "name": "test-deployment",
+        },
+        [],
+        {
+            "Accept": "application/json",
+            "Content-Type": "application/json-patch+json",
+        },
+        body=[
+            {
+                "op": "test",
+                "path": "/spec/components/0/name",
+                "value": "test-component",
+            },
+            {
+                "op": "add",
+                "path": "/spec/components/0/replicas",
+                "value": 1,
+            },
+        ],
+        response_type="object",
+        auth_settings=["BearerToken"],
+        _return_http_data_only=True,
+        collection_formats={},
     )
 
 
@@ -152,7 +197,7 @@ def test_update_graph_replicas_calls_update_service_replicas(k8s_api, mock_custo
     # Should delegate to update_service_replicas which uses Scale API
     mock_custom_api.patch_namespaced_custom_object_scale.assert_called_once_with(
         group="nvidia.com",
-        version="v1alpha1",
+        version="v1beta1",
         namespace=k8s_api.current_namespace,
         plural="dynamographdeploymentscalingadapters",
         name="test-deployment-test-component",
@@ -162,17 +207,50 @@ def test_update_graph_replicas_calls_update_service_replicas(k8s_api, mock_custo
 
 def test_update_dgd_replicas_directly(k8s_api, mock_custom_api):
     """Test the internal _update_dgd_replicas method"""
+    mock_custom_api.get_namespaced_custom_object.return_value = {
+        "metadata": {"name": "test-deployment"},
+        "spec": {
+            "components": [
+                {"name": "test-component", "type": "prefill", "replicas": 0},
+            ]
+        },
+    }
     mock_custom_api.patch_namespaced_custom_object.return_value = None
 
     k8s_api._update_dgd_replicas("test-deployment", "test-component", 1)
 
-    mock_custom_api.patch_namespaced_custom_object.assert_called_once_with(
-        group="nvidia.com",
-        version="v1alpha1",
-        namespace=k8s_api.current_namespace,
-        plural="dynamographdeployments",
-        name="test-deployment",
-        body={"spec": {"services": {"test-component": {"replicas": 1}}}},
+    mock_custom_api.patch_namespaced_custom_object.assert_not_called()
+    mock_custom_api.api_client.call_api.assert_called_once_with(
+        "/apis/{group}/{version}/namespaces/{namespace}/{plural}/{name}",
+        "PATCH",
+        {
+            "group": "nvidia.com",
+            "version": "v1beta1",
+            "namespace": k8s_api.current_namespace,
+            "plural": "dynamographdeployments",
+            "name": "test-deployment",
+        },
+        [],
+        {
+            "Accept": "application/json",
+            "Content-Type": "application/json-patch+json",
+        },
+        body=[
+            {
+                "op": "test",
+                "path": "/spec/components/0/name",
+                "value": "test-component",
+            },
+            {
+                "op": "add",
+                "path": "/spec/components/0/replicas",
+                "value": 1,
+            },
+        ],
+        response_type="object",
+        auth_settings=["BearerToken"],
+        _return_http_data_only=True,
+        collection_formats={},
     )
 
 
@@ -363,9 +441,38 @@ def test_get_service_replica_status_stable_with_available_replicas(
 ):
     """Test stable case with availableReplicas present (takes precedence over readyReplicas)"""
     deployment: Dict[str, Any] = {
-        "spec": {"services": {"prefill-worker": {"replicas": 2}}},
+        "spec": {"components": [{"name": "prefill-worker", "replicas": 2}]},
         "status": {
-            "services": {
+            "components": {
+                "prefill-worker": {
+                    "availableReplicas": 2,
+                    "readyReplicas": 2,
+                    "updatedReplicas": 2,
+                }
+            }
+        },
+    }
+
+    count, is_stable = k8s_api.get_service_replica_status(deployment, "prefill-worker")
+
+    assert count == 2
+    assert is_stable is True
+
+
+def test_get_service_replica_status_v1beta_components(k8s_api, mock_custom_api):
+    """Test stable case using v1beta1 spec.components/status.components."""
+    deployment: Dict[str, Any] = {
+        "spec": {
+            "components": [
+                {
+                    "name": "prefill-worker",
+                    "type": "prefill",
+                    "replicas": 2,
+                }
+            ]
+        },
+        "status": {
+            "components": {
                 "prefill-worker": {
                     "availableReplicas": 2,
                     "readyReplicas": 2,
@@ -386,9 +493,9 @@ def test_get_service_replica_status_stable_with_ready_replicas_fallback(
 ):
     """Test stable case falling back to readyReplicas when availableReplicas is not present"""
     deployment: Dict[str, Any] = {
-        "spec": {"services": {"decode-worker": {"replicas": 4}}},
+        "spec": {"components": [{"name": "decode-worker", "replicas": 4}]},
         "status": {
-            "services": {
+            "components": {
                 "decode-worker": {
                     "readyReplicas": 4,
                     "updatedReplicas": 4,
@@ -406,9 +513,9 @@ def test_get_service_replica_status_stable_with_ready_replicas_fallback(
 def test_get_service_replica_status_scale_up_in_progress(k8s_api, mock_custom_api):
     """Test scale-up in progress: desired=4, updated=2, ready=2"""
     deployment: Dict[str, Any] = {
-        "spec": {"services": {"prefill-worker": {"replicas": 4}}},
+        "spec": {"components": [{"name": "prefill-worker", "replicas": 4}]},
         "status": {
-            "services": {
+            "components": {
                 "prefill-worker": {
                     "availableReplicas": 2,
                     "readyReplicas": 2,
@@ -427,9 +534,9 @@ def test_get_service_replica_status_scale_up_in_progress(k8s_api, mock_custom_ap
 def test_get_service_replica_status_scale_down_in_progress(k8s_api, mock_custom_api):
     """Test scale-down in progress: desired=2, updated=4, ready=4"""
     deployment: Dict[str, Any] = {
-        "spec": {"services": {"decode-worker": {"replicas": 2}}},
+        "spec": {"components": [{"name": "decode-worker", "replicas": 2}]},
         "status": {
-            "services": {
+            "components": {
                 "decode-worker": {
                     "availableReplicas": 4,
                     "readyReplicas": 4,
@@ -448,9 +555,9 @@ def test_get_service_replica_status_scale_down_in_progress(k8s_api, mock_custom_
 def test_get_service_replica_status_rollout_in_progress(k8s_api, mock_custom_api):
     """Test rollout in progress: desired=4, updated=2, ready=4 (old replicas still running)"""
     deployment: Dict[str, Any] = {
-        "spec": {"services": {"prefill-worker": {"replicas": 4}}},
+        "spec": {"components": [{"name": "prefill-worker", "replicas": 4}]},
         "status": {
-            "services": {
+            "components": {
                 "prefill-worker": {
                     "availableReplicas": 4,
                     "readyReplicas": 4,
@@ -469,8 +576,8 @@ def test_get_service_replica_status_rollout_in_progress(k8s_api, mock_custom_api
 def test_get_service_replica_status_missing_status_fields(k8s_api, mock_custom_api):
     """Test handling when status fields are missing"""
     deployment: Dict[str, Any] = {
-        "spec": {"services": {"prefill-worker": {"replicas": 2}}},
-        "status": {"services": {}},
+        "spec": {"components": [{"name": "prefill-worker", "replicas": 2}]},
+        "status": {"components": {}},
     }
 
     count, is_stable = k8s_api.get_service_replica_status(deployment, "prefill-worker")
@@ -495,9 +602,9 @@ def test_get_service_replica_status_empty_deployment(k8s_api, mock_custom_api):
 def test_get_service_replica_status_available_replicas_zero(k8s_api, mock_custom_api):
     """Test when availableReplicas is explicitly 0 (should use 0, not fall back to ready)"""
     deployment: Dict[str, Any] = {
-        "spec": {"services": {"prefill-worker": {"replicas": 0}}},
+        "spec": {"components": [{"name": "prefill-worker", "replicas": 0}]},
         "status": {
-            "services": {
+            "components": {
                 "prefill-worker": {
                     "availableReplicas": 0,
                     "readyReplicas": 2,  # Should be ignored

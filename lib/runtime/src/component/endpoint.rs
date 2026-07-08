@@ -144,6 +144,21 @@ impl EndpointConfigBuilder {
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
+            if system_health.lock().health_check_enabled()
+                && endpoint
+                    .drt()
+                    .local_endpoint_registry()
+                    .get(&endpoint.name)
+                    .is_none()
+            {
+                anyhow::bail!(
+                    "Endpoint '{}' has a health_check_payload and canary is enabled, \
+                     but no local engine is registered. Call .register_local_engine() \
+                     before .start() so the canary health check can function.",
+                    endpoint.name
+                );
+            }
+
             // Build transport based on request plane mode
             let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
@@ -257,7 +272,6 @@ impl EndpointConfigBuilder {
 ///
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
-/// - HTTP: Uses full URL path including endpoint name (e.g., http://host:port/v1/rpc/endpoint_name)
 /// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/endpoint_name)
 /// - NATS: Uses subject-based addressing (unique per endpoint)
 ///
@@ -269,27 +283,8 @@ fn build_transport_type_inner(
     connection_id: u64,
 ) -> Result<TransportType> {
     match mode {
-        RequestPlaneMode::Http => {
-            let http_host = crate::utils::get_http_rpc_host_from_env();
-            // If a fixed port is explicitly configured, use it directly.
-            // Otherwise, use the actual bound port (set by HTTP server after binding when port 0 is used).
-            let http_port = std::env::var("DYN_HTTP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse::<u16>().ok())
-                .filter(|&p| p != 0)
-                .unwrap_or(crate::pipeline::network::manager::get_actual_http_rpc_port()?);
-            let rpc_root =
-                std::env::var("DYN_HTTP_RPC_ROOT_PATH").unwrap_or_else(|_| "/v1/rpc".to_string());
-
-            let http_endpoint = format!(
-                "http://{http_host}:{http_port}{rpc_root}/{}",
-                endpoint_id.name
-            );
-
-            Ok(TransportType::Http(http_endpoint))
-        }
         RequestPlaneMode::Tcp => {
-            let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
+            let tcp_host = crate::utils::tcp_rpc_host_from_env();
             // If a fixed port is explicitly configured, use it directly (no init ordering dependency).
             // Otherwise, use the actual bound port (set by TCP server after binding when port 0 is used).
             let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
@@ -328,15 +323,10 @@ pub async fn build_transport_type(
 ) -> Result<TransportType> {
     let mode = endpoint.drt().request_plane();
 
-    // For TCP and HTTP with OS-assigned ports, we must ensure the server is initialized
+    // For TCP with OS-assigned ports, we must ensure the server is initialized
     // (bound to a port) before we can construct a correct transport address.
     let has_fixed_port = match mode {
         RequestPlaneMode::Tcp => std::env::var("DYN_TCP_RPC_PORT")
-            .ok()
-            .and_then(|p| p.parse::<u16>().ok())
-            .filter(|&p| p != 0)
-            .is_some(),
-        RequestPlaneMode::Http => std::env::var("DYN_HTTP_RPC_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
             .filter(|&p| p != 0)

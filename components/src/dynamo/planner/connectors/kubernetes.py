@@ -20,17 +20,30 @@ from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
-from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
+from dynamo.planner.connectors.kubernetes_api import (
+    DYNAMO_WORKER_METADATA_API_VERSION,
+    NVIDIA_API_GROUP,
+    KubernetesAPI,
+)
+from dynamo.planner.connectors.mdc import (
+    MdcEntry,
+    is_model_card,
+    select_entry,
+    worker_info_from_mdc,
+)
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
+    DynamoGraphDeploymentNotReadyError,
     EmptyTargetReplicasError,
     ModelNameNotFoundError,
     PlannerError,
     UserProvidedModelNameMismatchError,
 )
 from dynamo.planner.monitoring.dgd_services import (
-    get_service_from_sub_component_type_or_name,
+    get_component_from_type_or_name,
+    get_component_type,
+    get_components_by_name,
 )
 from dynamo.planner.monitoring.worker_info import (
     WorkerInfo,
@@ -41,6 +54,10 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
+CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
+LEGACY_WORKER_HASH = "legacy"
+
 
 class KubernetesConnector(PlannerConnector):
     def __init__(
@@ -49,6 +66,7 @@ class KubernetesConnector(PlannerConnector):
         model_name: Optional[str] = None,
         k8s_namespace: Optional[str] = None,
         parent_dgd_name: Optional[str] = None,
+        raise_not_ready: bool = False,
     ):
         self.kube_api = KubernetesAPI(k8s_namespace)
 
@@ -71,6 +89,24 @@ class KubernetesConnector(PlannerConnector):
 
         # For backwards compatibility
         self.graph_deployment_name = self.parent_dgd_name
+        self.raise_not_ready = raise_not_ready
+
+    def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
+        """Return the Dynamo namespace used by the current worker generation.
+
+        Managed DGD rolling updates run worker components in
+        ``<base_namespace>-<worker_hash>`` while non-worker components, including
+        the frontend metrics labels, stay on ``base_namespace``.  The active hash
+        is stored on the parent DGD so planners can discover it dynamically.
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
+        worker_hash = annotations.get(CURRENT_WORKER_HASH_ANNOTATION)
+        if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
+            worker_hash = annotations.get(CURRENT_WORKER_HASH_V2_ANNOTATION)
+        if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
+            return base_dynamo_namespace
+        return f"{base_dynamo_namespace}-{worker_hash}"
 
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True
@@ -79,9 +115,7 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
-        service = get_service_from_sub_component_type_or_name(
-            deployment, sub_component_type
-        )
+        service = get_component_from_type_or_name(deployment, sub_component_type)
         self.kube_api.update_graph_replicas(
             self.graph_deployment_name,
             service.name,
@@ -99,9 +133,7 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
-        service = get_service_from_sub_component_type_or_name(
-            deployment, sub_component_type
-        )
+        service = get_component_from_type_or_name(deployment, sub_component_type)
         if service.number_replicas() > 0:
             self.kube_api.update_graph_replicas(
                 self.graph_deployment_name,
@@ -121,12 +153,12 @@ class KubernetesConnector(PlannerConnector):
         require_decode: bool = True,
     ):
         """
-        Verify that the deployment contains services with subComponentType prefill and decode and the model name exists.
-        Will fallback to worker service names for backwards compatibility. (TODO: deprecate)
+        Verify that the deployment contains prefill/decode components and the model name exists.
+        Allows explicit component-name overrides when the caller provides them.
 
         Raises:
             DynamoGraphDeploymentNotFoundError: If the deployment is not found
-            DeploymentValidationError: If the deployment does not contain services with subComponentType prefill and decode
+            DeploymentValidationError: If the deployment does not contain required prefill/decode components
         """
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
@@ -134,7 +166,7 @@ class KubernetesConnector(PlannerConnector):
 
         if require_prefill:
             try:
-                get_service_from_sub_component_type_or_name(
+                get_component_from_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
                     component_name=prefill_component_name,
@@ -144,7 +176,7 @@ class KubernetesConnector(PlannerConnector):
 
         if require_decode:
             try:
-                get_service_from_sub_component_type_or_name(
+                get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
                     component_name=decode_component_name,
@@ -183,13 +215,13 @@ class KubernetesConnector(PlannerConnector):
             prefill_model_name = None
             decode_model_name = None
             if require_prefill:
-                prefill_service = get_service_from_sub_component_type_or_name(
+                prefill_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
                 )
                 prefill_model_name = prefill_service.get_model_name()
             if require_decode:
-                decode_service = get_service_from_sub_component_type_or_name(
+                decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
                 )
@@ -203,7 +235,7 @@ class KubernetesConnector(PlannerConnector):
                 model_name = decode_model_name
             elif decode_model_name is None:
                 model_name = prefill_model_name
-            elif prefill_model_name != decode_model_name:
+            elif prefill_model_name.lower() != decode_model_name.lower():
                 raise DeploymentModelNameMismatchError(
                     prefill_model_name, decode_model_name
                 )
@@ -224,7 +256,7 @@ class KubernetesConnector(PlannerConnector):
 
         # If user provided a model name and it doesn't match the model name from the deployment, raise an error
         if self.user_provided_model_name:
-            if model_name != self.user_provided_model_name:
+            if model_name.lower() != self.user_provided_model_name:
                 raise UserProvidedModelNameMismatchError(
                     model_name, self.user_provided_model_name
                 )
@@ -237,12 +269,12 @@ class KubernetesConnector(PlannerConnector):
         require_prefill: bool = True,
         require_decode: bool = True,
     ) -> tuple[int, int]:
-        """Get the GPU counts for prefill and decode services from the deployment.
+        """Get the GPU counts for prefill and decode components from the deployment.
 
         Args:
             deployment: Optional deployment dict, fetched if not provided
-            require_prefill: Whether to require prefill service
-            require_decode: Whether to require decode service
+            require_prefill: Whether to require a prefill component
+            require_decode: Whether to require a decode component
 
         Returns:
             Tuple of (prefill_gpu_count, decode_gpu_count)
@@ -259,7 +291,7 @@ class KubernetesConnector(PlannerConnector):
 
         if require_prefill:
             try:
-                prefill_service = get_service_from_sub_component_type_or_name(
+                prefill_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
                 )
@@ -269,7 +301,7 @@ class KubernetesConnector(PlannerConnector):
 
         if require_decode:
             try:
-                decode_service = get_service_from_sub_component_type_or_name(
+                decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
                 )
@@ -283,21 +315,21 @@ class KubernetesConnector(PlannerConnector):
         return prefill_gpu_count, decode_gpu_count
 
     def get_frontend_metrics_url(self, port: int = 8000) -> Optional[str]:
-        """Auto-discover the Frontend service's metrics URL from the DGD.
+        """Auto-discover the frontend component's metrics URL from the DGD.
 
-        Iterates spec.services to find the service with componentType "frontend",
+        Iterates DGD components to find the component with type "frontend",
         then constructs the in-cluster URL using the operator's naming convention:
-        http://{dgd_name}-{service_key_lowercase}:{port}/metrics
+        http://{dgd_name}-{component_name_lowercase}:{port}/metrics
 
         Returns:
-            The metrics URL string, or None if no frontend service is found.
+            The metrics URL string, or None if no frontend component is found.
         """
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-        services = deployment.get("spec", {}).get("services", {})
+        components = get_components_by_name(deployment)
 
-        for service_key, service_spec in services.items():
-            if service_spec.get("componentType", "") == "frontend":
-                service_name = f"{self.graph_deployment_name}-{service_key.lower()}"
+        for component_name, component_spec in components.items():
+            if get_component_type(component_spec) == "frontend":
+                service_name = f"{self.graph_deployment_name}-{component_name.lower()}"
                 url = f"http://{service_name}:{port}/metrics"
                 logger.info(f"Auto-discovered frontend metrics URL: {url}")
                 return url
@@ -308,7 +340,7 @@ class KubernetesConnector(PlannerConnector):
         """Wait for the deployment to be ready.
 
         Args:
-            include_planner: If False, skip the planner service when checking
+            include_planner: If False, skip the planner component when checking
                 readiness. This lets the planner read MDC from worker pods
                 without waiting for itself to be marked ready in the DGD.
         """
@@ -328,8 +360,8 @@ class KubernetesConnector(PlannerConnector):
 
         try:
             result = self.kube_api.custom_api.list_namespaced_custom_object(
-                group="nvidia.com",
-                version="v1alpha1",
+                group=NVIDIA_API_GROUP,
+                version=DYNAMO_WORKER_METADATA_API_VERSION,
                 namespace=self.kube_api.current_namespace,
                 plural="dynamoworkermetadatas",
             )
@@ -340,22 +372,18 @@ class KubernetesConnector(PlannerConnector):
                 return []
             raise
 
-    def _extract_mdc_entries(
-        self,
-    ) -> list[dict]:
+    def _extract_mdc_entries(self) -> list[MdcEntry]:
         """Extract MDC entries belonging to this DGD.
 
         CRs are named after the worker pod (e.g. ``<dgd>-0-<service>-<hash>``),
         so we filter by the DGD name prefix to avoid picking up entries from
-        other deployments sharing the namespace.
-
-        Returns a list of dicts, each containing:
-            namespace, component, endpoint, instance_id, card_json
+        other deployments sharing the namespace.  LoRA-adapter wrappers are
+        dropped via :func:`is_model_card`.
         """
         crs = self._list_worker_metadata_crs()
         dgd_prefix = f"{self.graph_deployment_name}-"
 
-        entries: list[dict] = []
+        entries: list[MdcEntry] = []
         for cr in crs:
             cr_name = cr.get("metadata", {}).get("name", "")
             if not cr_name.startswith(dgd_prefix):
@@ -368,125 +396,54 @@ class KubernetesConnector(PlannerConnector):
                 except json.JSONDecodeError:
                     continue
             model_cards = data.get("model_cards", {})
-            for _key, instance in model_cards.items():
-                if instance.get("type") != "Model":
+            for _key, wrapper in model_cards.items():
+                if not is_model_card(wrapper):
                     continue
-                entries.append(instance)
+                entries.append(
+                    MdcEntry(
+                        card_json=wrapper.get("card_json") or {},
+                        component=wrapper.get("component"),
+                        endpoint=wrapper.get("endpoint"),
+                        instance_id=wrapper.get("instance_id"),
+                    )
+                )
         return entries
 
-    def _mdc_entry_is_prefill(self, entry: dict) -> bool:
-        """Check if an MDC entry is a prefill worker.
+    def _resolve_dgd_service(
+        self, sub_component_type: SubComponentType, backend: str
+    ) -> tuple[Optional[str], str]:
+        """Return (dgd_service_name, component_name_for_filter).
 
-        model_type can be serialized as:
-        - An integer bitflag (ModelType::Prefill = 1 << 4 = 16)
-        - A dict with a "bits" key (serde bitflags format)
-        - A string like "Prefill" or "Chat|Completions"
+        ``dgd_service_name`` is the stable DGD component name (typically
+        PascalCase, e.g. ``"VllmPrefillWorker"``) and is used for Kubernetes
+        operations like patching replica counts.
+
+        ``component_name_for_filter`` is the component name that the Rust
+        runtime registers via ``Endpoint`` and writes into the MDC
+        ``component`` field. Source of truth, in priority order:
+
+        1. The user's ``--endpoint <ns>.<component>.<ep>`` override in the
+           worker's container args (supported by all backends --
+           see vllm/args.py:171-176, sglang/args.py:428, trtllm/args.py:137).
+        2. The backend-specific default from
+           :func:`build_worker_info_from_defaults` (e.g. ``"prefill"`` /
+           ``"backend"``).
+
+        Note: the DGD component name (``service.name``) must NOT be used for
+        filtering -- it is typically PascalCase (``"VllmPrefillWorker"``) and
+        would never match the lowercase value the worker writes to MDC.
         """
-        card = entry.get("card_json", {})
-        model_type = card.get("model_type", 0)
-        if isinstance(model_type, str):
-            return "prefill" in model_type.lower()
-        if isinstance(model_type, dict):
-            model_type = model_type.get("bits", 0)
-        return bool(model_type & 0x10)
-
-    def _build_worker_info_from_mdc(
-        self,
-        entry: dict,
-        sub_component_type: SubComponentType,
-    ) -> WorkerInfo:
-        """Build a WorkerInfo from an MDC entry, applying the fallback chain.
-
-        Priority: MDC -> DGD container-arg parsing -> hard-coded defaults.
-        """
-        defaults = build_worker_info_from_defaults(
-            self._backend_hint or "vllm", sub_component_type
-        )
-
-        card = entry.get("card_json", {})
-        runtime_cfg = card.get("runtime_config", {})
-
-        # --- component / endpoint names from MDC wrapper ---
-        mdc_component = entry.get("component")
-        mdc_endpoint = entry.get("endpoint")
-
-        component_name = mdc_component or defaults.component_name
-        endpoint = mdc_endpoint or defaults.endpoint
-        if not mdc_component:
-            logger.info(
-                f"MDC missing 'component' for {sub_component_type.value}, "
-                f"falling back to default: {defaults.component_name}"
-            )
-        if not mdc_endpoint:
-            logger.info(
-                f"MDC missing 'endpoint' for {sub_component_type.value}, "
-                f"falling back to default: {defaults.endpoint}"
-            )
-
-        # --- model name ---
-        mdc_model = card.get("display_name")
-        model_name = mdc_model
-        if not model_name:
-            # Fallback: parse from DGD container args
-            try:
-                deployment = self.kube_api.get_graph_deployment(
-                    self.graph_deployment_name
-                )
-                service = get_service_from_sub_component_type_or_name(
-                    deployment, sub_component_type
-                )
-                model_name = service.get_model_name()
-                if model_name:
-                    logger.info(
-                        f"MDC missing model name for {sub_component_type.value}, "
-                        f"fell back to DGD container args: {model_name}"
-                    )
-            except PlannerError:
-                pass
-        if not model_name:
-            logger.warning(
-                f"Could not determine model name for {sub_component_type.value} "
-                f"from MDC or DGD container args"
-            )
-
-        # --- runtime config fields ---
-        total_kv_blocks = runtime_cfg.get("total_kv_blocks")
-        max_num_seqs = runtime_cfg.get("max_num_seqs")
-        max_num_batched_tokens = runtime_cfg.get("max_num_batched_tokens")
-        kv_cache_block_size = card.get("kv_cache_block_size")
-        context_length = card.get("context_length")
-
-        if total_kv_blocks is None:
-            logger.info(f"MDC missing total_kv_blocks for {sub_component_type.value}")
-        if max_num_seqs is None:
-            logger.info(f"MDC missing max_num_seqs for {sub_component_type.value}")
-
-        # --- k8s_name: resolve from DGD subComponentType ---
-        k8s_name = defaults.k8s_name
+        defaults = build_worker_info_from_defaults(backend, sub_component_type)
+        expected_component = defaults.component_name or ""
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-            service = get_service_from_sub_component_type_or_name(
-                deployment, sub_component_type
-            )
-            k8s_name = service.name
+            service = get_component_from_type_or_name(deployment, sub_component_type)
+            user_component = service.get_component_name_from_endpoint_arg()
+            if user_component:
+                expected_component = user_component
+            return service.name, expected_component
         except PlannerError:
-            logger.info(
-                f"Could not resolve k8s service name for {sub_component_type.value}, "
-                f"using default: {defaults.k8s_name}"
-            )
-
-        info = WorkerInfo(
-            k8s_name=k8s_name,
-            component_name=component_name,
-            endpoint=endpoint,
-            model_name=model_name,
-            total_kv_blocks=total_kv_blocks,
-            kv_cache_block_size=kv_cache_block_size,
-            max_num_seqs=max_num_seqs,
-            max_num_batched_tokens=max_num_batched_tokens,
-            context_length=context_length,
-        )
-        return info
+            return None, expected_component
 
     def get_worker_info(
         self,
@@ -499,74 +456,57 @@ class KubernetesConnector(PlannerConnector):
             sub_component_type: PREFILL or DECODE
             backend: Backend framework name (for default fallback)
         """
-        self._backend_hint = backend
         entries = self._extract_mdc_entries()
+        dgd_service_name, expected_component = self._resolve_dgd_service(
+            sub_component_type, backend
+        )
 
-        # Resolve the expected component name so we can scope card selection
-        # and avoid picking up LoRA-adapter cards that share the same CR but
-        # carry a different component/model identity.
-        expected_component: Optional[str] = None
-        try:
-            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-            service = get_service_from_sub_component_type_or_name(
-                deployment, sub_component_type
-            )
-            expected_component = service.name
-        except PlannerError:
-            expected_component = build_worker_info_from_defaults(
-                backend, sub_component_type
-            ).component_name
-
-        for entry in entries:
-            is_prefill = self._mdc_entry_is_prefill(entry)
-            if sub_component_type == SubComponentType.PREFILL and not is_prefill:
-                continue
-            if sub_component_type == SubComponentType.DECODE and is_prefill:
-                continue
-
-            entry_component = entry.get("component")
-            if (
-                entry_component
-                and expected_component
-                and entry_component != expected_component
-            ):
-                logger.debug(
-                    f"Skipping MDC entry with component={entry_component!r}, "
-                    f"expected {expected_component!r} for {sub_component_type.value}"
+        def _dgd_model_name() -> Optional[str]:
+            try:
+                deployment = self.kube_api.get_graph_deployment(
+                    self.graph_deployment_name
                 )
-                continue
+                service = get_component_from_type_or_name(
+                    deployment, sub_component_type
+                )
+                return service.get_model_name()
+            except PlannerError:
+                return None
 
-            info = self._build_worker_info_from_mdc(entry, sub_component_type)
+        entry = select_entry(entries, sub_component_type, expected_component)
+        if entry is not None:
+            info = worker_info_from_mdc(
+                entry,
+                sub_component_type,
+                backend=backend,
+                model_name_fallback=_dgd_model_name,
+                k8s_name_override=dgd_service_name,
+            )
+            if not info.model_name:
+                logger.warning(
+                    f"Could not determine model name for {sub_component_type.value} "
+                    f"from MDC or DGD container args"
+                )
             logger.info(
                 f"Built {sub_component_type.value} WorkerInfo from MDC: "
                 f"{info.summary()}"
             )
             return info
 
-        # No MDC entry found -- fall back entirely to defaults + DGD arg parsing
+        # No MDC entry found -- fall back entirely to defaults + DGD arg parsing.
         logger.warning(
             f"No DynamoWorkerMetadata CR found for {sub_component_type.value}. "
             f"Workers may not be registered yet. Falling back to defaults."
         )
         info = build_worker_info_from_defaults(backend, sub_component_type)
-
-        # Try to enrich model_name from DGD container args
-        try:
-            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-            service = get_service_from_sub_component_type_or_name(
-                deployment, sub_component_type
-            )
-            info.k8s_name = service.name
-            arg_model = service.get_model_name()
-            if arg_model:
-                info.model_name = arg_model
-                logger.info(
-                    f"Enriched {sub_component_type.value} WorkerInfo model name "
-                    f"from DGD args: {arg_model}"
-                )
-        except PlannerError as e:
+        if dgd_service_name is not None:
+            info.k8s_name = dgd_service_name
+        arg_model = _dgd_model_name()
+        if arg_model:
+            info.model_name = arg_model
             logger.info(
-                f"Could not enrich WorkerInfo from DGD for {sub_component_type.value}: {e}"
+                f"Enriched {sub_component_type.value} WorkerInfo model name "
+                f"from DGD args: {arg_model}"
             )
 
         logger.info(
@@ -584,7 +524,7 @@ class KubernetesConnector(PlannerConnector):
 
         Returns:
             tuple[int, int, bool]: (prefill_count, decode_count, is_stable)
-            - is_stable: False if any service is in a rollout (scaling should be skipped)
+            - is_stable: False if any component is in a rollout (scaling should be skipped)
         """
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
@@ -593,7 +533,7 @@ class KubernetesConnector(PlannerConnector):
         all_stable = True
 
         if prefill_component_name:
-            service = get_service_from_sub_component_type_or_name(
+            service = get_component_from_type_or_name(
                 deployment,
                 SubComponentType.PREFILL,
                 component_name=prefill_component_name,
@@ -606,7 +546,7 @@ class KubernetesConnector(PlannerConnector):
             prefill_count = ready_replicas
 
         if decode_component_name:
-            service = get_service_from_sub_component_type_or_name(
+            service = get_component_from_type_or_name(
                 deployment,
                 SubComponentType.DECODE,
                 component_name=decode_component_name,
@@ -630,13 +570,23 @@ class KubernetesConnector(PlannerConnector):
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         if not self.kube_api.is_deployment_ready(deployment):
+            if self.raise_not_ready:
+                logger.warning(
+                    "Deployment %s is not ready, rejecting this scaling",
+                    self.graph_deployment_name,
+                )
+                raise DynamoGraphDeploymentNotReadyError(
+                    deployment_name=self.graph_deployment_name,
+                    namespace=getattr(self.kube_api, "current_namespace", None),
+                )
             logger.warning(
-                f"Deployment {self.graph_deployment_name} is not ready, ignoring this scaling"
+                "Deployment %s is not ready, ignoring this scaling",
+                self.graph_deployment_name,
             )
             return
 
         for target_replica in target_replicas:
-            service = get_service_from_sub_component_type_or_name(
+            service = get_component_from_type_or_name(
                 deployment,
                 target_replica.sub_component_type,
                 component_name=target_replica.component_name,

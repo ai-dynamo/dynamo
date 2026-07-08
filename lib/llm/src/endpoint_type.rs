@@ -18,10 +18,14 @@ pub enum EndpointType {
     Audios,
     /// Videos API (video generation)
     Videos,
+    /// Realtime API (bidirectional streaming over WebSocket)
+    Realtime,
     /// Responses API
     Responses,
     /// Anthropic Messages API
     AnthropicMessages,
+    /// Generate API (token-in/token-out)
+    Generate,
 }
 
 impl EndpointType {
@@ -33,8 +37,10 @@ impl EndpointType {
             Self::Images => "images",
             Self::Audios => "audios",
             Self::Videos => "videos",
+            Self::Realtime => "realtime",
             Self::Responses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
+            Self::Generate => "generate",
         }
     }
 
@@ -46,8 +52,35 @@ impl EndpointType {
             Self::Images,
             Self::Audios,
             Self::Videos,
+            Self::Realtime,
             Self::Responses,
             Self::AnthropicMessages,
+            Self::Generate,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn realtime_as_str() {
+        assert_eq!(EndpointType::Realtime.as_str(), "realtime");
+    }
+
+    #[test]
+    fn realtime_in_all() {
+        assert!(EndpointType::all().contains(&EndpointType::Realtime));
+    }
+
+    #[test]
+    fn generate_as_str() {
+        assert_eq!(EndpointType::Generate.as_str(), "generate");
+    }
+
+    #[test]
+    fn generate_in_all() {
+        assert!(EndpointType::all().contains(&EndpointType::Generate));
     }
 }

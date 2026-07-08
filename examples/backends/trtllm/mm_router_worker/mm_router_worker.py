@@ -15,7 +15,7 @@ Usage:
         --namespace default \
         --component mm_router \
         --endpoint generate \
-        --downstream-component trtllm \
+        --downstream-component backend \
         --downstream-endpoint generate
 """
 
@@ -28,7 +28,14 @@ import uvloop
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from transformers import AutoProcessor
 
-from dynamo.llm import KvRouter, KvRouterConfig, ModelInput, ModelType, register_llm
+from dynamo.llm import (
+    KvRouter,
+    KvRouterConfig,
+    ModelInput,
+    ModelType,
+    WorkerType,
+    register_llm,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 from .handler import MMRouterHandler
@@ -86,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--downstream-component",
         type=str,
-        default="trtllm",
+        default="backend",
         help="Downstream TRT-LLM workers' component name",
     )
     parser.add_argument(
@@ -94,6 +101,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="generate",
         help="Downstream TRT-LLM workers' endpoint name",
+    )
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Allow loading model repos that execute custom code (HF trust_remote_code). Off by default.",
     )
 
     return parser.parse_args()
@@ -152,12 +164,14 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     # Initialize tokenizer and processor for MM processing
     logger.info(f"Loading tokenizer from {args.model}...")
-    tokenizer = tokenizer_factory(args.model)
+    tokenizer = tokenizer_factory(args.model, trust_remote_code=args.trust_remote_code)
 
     processor = None
     try:
         logger.info(f"Loading HuggingFace processor from {args.model}...")
-        processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
+        processor = AutoProcessor.from_pretrained(
+            args.model, trust_remote_code=args.trust_remote_code
+        )
     except Exception as e:
         logger.warning(f"Failed to load HF processor: {e}")
         logger.warning("Visual token expansion will not be available")
@@ -183,6 +197,7 @@ async def worker(runtime: DistributedRuntime) -> None:
         endpoint,
         args.model,
         kv_cache_block_size=args.block_size,
+        worker_type=WorkerType.Aggregated,
     )
 
     logger.info(f"MM Router Worker ready, serving {args.endpoint} endpoint...")

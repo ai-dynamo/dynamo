@@ -34,6 +34,7 @@ use futures::{Stream, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::http::service::error::SanitizedError;
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
 
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
@@ -195,8 +196,24 @@ async fn connection_monitor(
 pub fn monitor_for_disconnects(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+    )
+}
+
+fn monitor_for_disconnects_with_timeout(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
+    inactivity_timeout: Option<Duration>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -205,12 +222,12 @@ pub fn monitor_for_disconnects(
     // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
     inflight_guard.mark_error(ErrorType::Cancelled);
 
-    // Read the backend inactivity timeout once at stream construction time.
-    // None means the timeout arm in select! will never fire (std::future::pending).
-    let inactivity_timeout = backend_stream_timeout();
-
     async_stream::try_stream! {
         tokio::pin!(stream);
+        // Keep the context's watch-backed cancellation future alive across body frames.
+        // Recreating it for every token repeatedly clones a receiver and churns Notify state.
+        let stopped = context.stopped();
+        tokio::pin!(stopped);
         loop {
             tokio::select! {
                 event = stream.next() => {
@@ -221,7 +238,26 @@ pub fn monitor_for_disconnects(
                         Some(Err(err)) => {
                             // Mark error as internal since it's a streaming error
                             inflight_guard.mark_error(ErrorType::Internal);
-                            yield Event::default().event("error").comment(err.to_string());
+                            // We're terminating the stream intentionally here with a
+                            // structured error + [DONE]; disarm so the stream handle
+                            // doesn't later record this as ClosedUnexpectedly (which
+                            // would mis-attribute the fault as a client disconnect).
+                            stream_handle.disarm();
+                            tracing::error!("Streaming error: {err}");
+                            // Emit a structured OpenAI-style error frame + `data: [DONE]`
+                            // so naive `data:`-line parsers see both the error and a
+                            // stream terminator. Body derived from SanitizedError so
+                            // the sanitized message + status live in one place.
+                            let sanitized = SanitizedError::Internal;
+                            let err_json = serde_json::json!({
+                                "error": {
+                                    "message": sanitized.to_string(),
+                                    "type": sanitized.openai_type_slug(),
+                                    "code": sanitized.status().as_u16(),
+                                }
+                            });
+                            yield Event::default().data(err_json.to_string());
+                            yield Event::default().data("[DONE]");
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;
                         }
@@ -237,7 +273,7 @@ pub fn monitor_for_disconnects(
                         }
                     }
                 }
-                _ = context.stopped() => {
+                _ = &mut stopped => {
                     // Mark as cancelled when context is stopped (client disconnect or timeout)
                     inflight_guard.mark_error(ErrorType::Cancelled);
                     // Token counts (input_tokens, output_tokens) are recorded on
@@ -290,13 +326,15 @@ mod tests {
     use super::*;
     use crate::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
     use futures::StreamExt;
-    use serial_test::serial;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Debug)]
-    struct MockContext;
+    #[derive(Debug, Default)]
+    struct MockContext {
+        stopped_polls: AtomicUsize,
+    }
     impl MockContext {
         fn new() -> Self {
-            Self
+            Self::default()
         }
     }
     #[async_trait::async_trait]
@@ -314,6 +352,7 @@ mod tests {
             false
         }
         async fn stopped(&self) {
+            self.stopped_polls.fetch_add(1, Ordering::Relaxed);
             std::future::pending::<()>().await;
         }
         async fn killed(&self) {
@@ -342,11 +381,9 @@ mod tests {
         }
     }
 
-    // SAFETY: env mutation is safe — all tests are single-threaded (#[serial] + tokio::test).
     fn setup_test(
         model: &str,
         req_id: &str,
-        timeout_secs: &str,
     ) -> (
         Arc<Metrics>,
         InflightGuard,
@@ -361,24 +398,60 @@ mod tests {
         let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::new());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
-        unsafe { std::env::set_var(BACKEND_STREAM_TIMEOUT_ENV, timeout_secs) };
         (metrics, guard, context, handle)
     }
 
-    fn cleanup_env() {
-        unsafe { std::env::remove_var(BACKEND_STREAM_TIMEOUT_ENV) };
+    #[tokio::test]
+    async fn test_monitor_reuses_stopped_future_across_events() {
+        let model = "reuse-stopped-future";
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "req-reuse",
+        );
+        let context = Arc::new(MockContext::new());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+        let stream = futures::stream::unfold(0, |index| async move {
+            tokio::task::yield_now().await;
+            (index < 4).then(|| {
+                (
+                    Ok(Event::default().data(format!("token-{index}"))),
+                    index + 1,
+                )
+            })
+        });
+
+        let monitored =
+            monitor_for_disconnects_with_timeout(stream, engine_context, guard, handle, None);
+        tokio::pin!(monitored);
+        while monitored.next().await.is_some() {}
+
+        assert_eq!(
+            context.stopped_polls.load(Ordering::Relaxed),
+            1,
+            "the same stopped future should remain pending across all response events"
+        );
     }
 
     /// Zombie backend with hanging stream is terminated by inactivity timeout.
     #[tokio::test(start_paused = true)]
-    #[serial]
     async fn test_backend_inactivity_timeout_releases_inflight_gauge() {
         let model = "zombie-model";
         // Config value "1" → HTTP-layer timeout is 2s (2x safety-net multiplier)
-        let (metrics, guard, context, handle) = setup_test(model, "req-zombie", "1");
+        let (metrics, guard, context, handle) = setup_test(model, "req-zombie");
         assert_eq!(metrics.get_inflight_count(model), 1);
 
-        let monitored = monitor_for_disconnects(hanging_stream(), context, guard, handle);
+        let monitored = monitor_for_disconnects_with_timeout(
+            hanging_stream(),
+            context,
+            guard,
+            handle,
+            Some(Duration::from_secs(2)),
+        );
         tokio::pin!(monitored);
 
         tokio::time::advance(Duration::from_secs(3)).await;
@@ -387,8 +460,6 @@ mod tests {
             while monitored.next().await.is_some() {}
         })
         .await;
-
-        cleanup_env();
 
         completed.expect("stream did not terminate — backend inactivity timeout is broken");
         assert_eq!(
@@ -424,21 +495,21 @@ mod tests {
 
     /// Inactivity timeout resets on each token; only fires after a true gap.
     #[tokio::test(start_paused = true)]
-    #[serial]
     async fn test_inactivity_timeout_resets_on_each_token() {
         let model = "reset-model";
 
         // Phase 1: tokens arrive every 2s with a 5s config (10s HTTP timeout after 2x multiplier)
         // — stream completes normally because each token resets the timer.
-        let (metrics, guard_1, ctx_1, handle_1) = setup_test(model, "phase1", "5");
+        let (metrics, guard_1, ctx_1, handle_1) = setup_test(model, "phase1");
         assert_eq!(metrics.get_inflight_count(model), 1);
 
         let token_count = 5;
-        let monitored_1 = monitor_for_disconnects(
+        let monitored_1 = monitor_for_disconnects_with_timeout(
             timed_token_stream(token_count, Duration::from_secs(2)),
             ctx_1,
             guard_1,
             handle_1,
+            Some(Duration::from_secs(10)),
         );
         tokio::pin!(monitored_1);
 
@@ -468,7 +539,13 @@ mod tests {
         let (tx_2, _rx_2) = tokio::sync::oneshot::channel();
         let handle_2 = ConnectionHandle::create_disabled(tx_2);
 
-        let monitored_2 = monitor_for_disconnects(hanging_stream(), ctx_2, guard_2, handle_2);
+        let monitored_2 = monitor_for_disconnects_with_timeout(
+            hanging_stream(),
+            ctx_2,
+            guard_2,
+            handle_2,
+            Some(Duration::from_secs(10)),
+        );
         tokio::pin!(monitored_2);
 
         // Config "5" → HTTP timeout 10s (2x multiplier). Advance past it.
@@ -479,8 +556,6 @@ mod tests {
         })
         .await;
 
-        cleanup_env();
-
         assert!(
             phase2.is_ok(),
             "hanging stream was not terminated by inactivity timeout"
@@ -490,5 +565,151 @@ mod tests {
             0,
             "inflight gauge leaked in phase 2"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // mid-stream fault SSE contract
+    //
+    // When the upstream stream yields `Err(_)` mid-stream — e.g. an upstream
+    // worker dies and the mpsc channel reports
+    // `Disconnected: Stream ended before generation completed`, or the Python
+    // chat-processor raises and the Rust→Python `tx.send()` fails with
+    // `Failed to send response: SendError { .. }` — the client MUST receive:
+    //   1. a structured `data: {"error":{"message":..., "type":... or "code":...}}` frame, then
+    //   2. a `data: [DONE]` terminator.
+    // Before the fix, the code emitted the bare SSE trailer
+    // `event: error\n: <comment>\n\n` with no `[DONE]`, which violates the
+    // OpenAI SSE contract and is silently skipped by naive `data:`-line parsers.
+    // The two tests below pin the post-fix contract.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Builds a stream that yields `data_chunks` successful events, then yields an
+    /// `Err` carrying `err_msg`, simulating a mid-stream upstream fault.
+    fn simulate_mid_stream_error(
+        data_chunks: usize,
+        err_msg: &'static str,
+    ) -> impl futures::Stream<Item = Result<axum::response::sse::Event, axum::Error>> {
+        async_stream::try_stream! {
+            for i in 0..data_chunks {
+                yield axum::response::sse::Event::default().data(format!("chunk-{i}"));
+            }
+            Err(axum::Error::new(err_msg))?;
+        }
+    }
+
+    /// Collect the wire-format SSE body from a monitored stream.
+    async fn collect_sse_body(
+        stream: impl Stream<Item = Result<Event, axum::Error>> + Send + 'static,
+    ) -> String {
+        use axum::body::to_bytes;
+        use axum::response::{IntoResponse, Sse};
+        let response = Sse::new(stream).into_response();
+        let body = to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body bytes");
+        String::from_utf8(body.to_vec()).expect("utf8 body")
+    }
+
+    /// Assert the post-fix SSE fault contract: a parsed structured error frame
+    /// carrying the sanitized static message/type/code, positioned before
+    /// `[DONE]`, with no bare `event: error` trailer, and crucially with no trace
+    /// of `leaked_detail` (the raw backend error) anywhere in the body.
+    fn assert_fault_contract(case: &str, text: &str, leaked_detail: &str) {
+        let done_pos = text.find("data: [DONE]").unwrap_or_else(|| {
+            panic!("[{case}] body does not terminate with `data: [DONE]`. Body:\n{text}")
+        });
+
+        let (error_line, error_frame) = text
+            .lines()
+            .find_map(|line| {
+                let payload = line.strip_prefix("data: ")?;
+                serde_json::from_str::<serde_json::Value>(payload)
+                    .ok()
+                    .filter(|v| v.get("error").is_some())
+                    .map(|v| (line, v))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "[{case}] body missing structured JSON `data: {{\"error\":{{...}}}}` frame. Body:\n{text}"
+                )
+            });
+
+        let error_pos = text.find(error_line).unwrap_or_default();
+        assert!(
+            error_pos < done_pos,
+            "[{case}] structured error frame must precede `data: [DONE]`. Body:\n{text}"
+        );
+
+        let error = error_frame
+            .get("error")
+            .and_then(|v| v.as_object())
+            .unwrap_or_else(|| panic!("[{case}] `error` field is not an object. Body:\n{text}"));
+        let expected = SanitizedError::Internal;
+        let expected_message = expected.to_string();
+        assert_eq!(
+            error.get("message").and_then(|v| v.as_str()),
+            Some(expected_message.as_str()),
+            "[{case}] structured error `message` must be the sanitized static string. Body:\n{text}"
+        );
+        assert_eq!(
+            error.get("type").and_then(|v| v.as_str()),
+            Some(expected.openai_type_slug()),
+            "[{case}] structured error `type` mismatch. Body:\n{text}"
+        );
+        assert_eq!(
+            error.get("code").and_then(|v| v.as_i64()),
+            Some(i64::from(expected.status().as_u16())),
+            "[{case}] structured error `code` mismatch. Body:\n{text}"
+        );
+        assert!(
+            !text.contains("event: error\n: "),
+            "[{case}] body contains bare `event: error\\n: <comment>` trailer (pre-fix bug). Body:\n{text}"
+        );
+        assert!(
+            !text.contains(leaked_detail),
+            "[{case}] SSE body leaked raw backend error detail to the client. \
+             Expected `{leaked_detail}` to be absent. Body:\n{text}"
+        );
+    }
+
+    /// Upstream worker killed mid-stream → mpsc channel reports `Disconnected` to the
+    /// HTTP layer. Client MUST receive structured error + `[DONE]`.
+    #[tokio::test]
+    async fn test_simulate_worker_kill_emits_structured_error_and_done() {
+        let (_metrics, guard, ctx, handle) = setup_test("worker-kill-model", "req-wk");
+        let backend_detail = "Disconnected: Stream ended before generation completed";
+        let stream = simulate_mid_stream_error(3, backend_detail);
+        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
+        let body = collect_sse_body(monitored).await;
+        assert_fault_contract("worker_kill", &body, backend_detail);
+    }
+
+    /// Python chat-processor raises mid-stream → Rust→Python `tx.send()` fails with
+    /// `SendError`. Client MUST receive structured error + `[DONE]`.
+    #[tokio::test]
+    async fn test_simulate_python_consumer_drop_emits_structured_error_and_done() {
+        let (_metrics, guard, ctx, handle) = setup_test("py-drop-model", "req-py");
+        let backend_detail = "Failed to send response: SendError { .. }";
+        let stream = simulate_mid_stream_error(3, backend_detail);
+        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
+        let body = collect_sse_body(monitored).await;
+        assert_fault_contract("python_consumer_drop", &body, backend_detail);
+    }
+
+    /// A backend error carrying sensitive internals (file paths, panic text,
+    /// Python exception details) MUST NOT reach the streaming client. The client
+    /// receives only the sanitized static frame; the detail stays server-side.
+    #[tokio::test]
+    async fn test_mid_stream_error_does_not_leak_internal_details() {
+        let (_metrics, guard, ctx, handle) = setup_test("leak-model", "req-leak");
+        let backend_detail = "panicked at '/opt/dynamo/lib/python3.12/site-packages/engine/worker.py:512: ValueError: secret tensor shape mismatch'";
+        let stream = simulate_mid_stream_error(2, backend_detail);
+        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
+        let body = collect_sse_body(monitored).await;
+        assert_fault_contract("internal_detail_leak", &body, backend_detail);
+        // Spot-check the most damaging fragments explicitly.
+        assert!(!body.contains("site-packages"), "leaked a filesystem path");
+        assert!(!body.contains("panicked at"), "leaked panic text");
+        assert!(!body.contains("ValueError"), "leaked exception type");
     }
 }

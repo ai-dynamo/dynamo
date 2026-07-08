@@ -20,15 +20,22 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
 ]
 
 
 class _MockEngine:
+    engine = None
+
     def generate(self, prompt, request_id="", *, sampling_params_list=None):
         async def _gen():
             yield {}
 
         return _gen()
+
+    def get_tokenizer(self):
+        return None
 
 
 def test_stage_engine_protocol_satisfied():

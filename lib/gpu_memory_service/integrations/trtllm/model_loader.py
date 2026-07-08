@@ -165,7 +165,7 @@ def _load_rw(
         _move_untracked_params(model, gms_client, target_device)
         torch.cuda.empty_cache()
 
-    _last_imported_weights_bytes = finalize_gms_write(gms_client, model)
+    _last_imported_weights_bytes = finalize_gms_write(gms_client, model).committed_bytes
 
     logger.info(
         "[GMS] TRT-LLM RW: published %.2f GiB",

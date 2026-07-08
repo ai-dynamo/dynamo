@@ -82,6 +82,68 @@ on:
         required: false
         type: string
         default: ''
+      dev_version_suffix:
+        description: 'PEP 440 dev suffix (e.g. .dev20260423+g1234567). Empty = stable build.'
+        required: false
+        type: string
+        default: ''
+      archive_sources:
+        description: |
+          Build with ENABLE_SOURCE_ARCHIVAL=true and extract /sources.zip
+          as a workflow artifact. Off by default — top-level callers
+          opt-in (post-merge-ci.yml sets true for push to release/*.*.*
+          branches; nightly-ci.yml sets it true unconditionally; PR /
+          on-demand callers leave it false). Source archives are
+          GB-scale; gathering them per-build would balloon ECR/artifact
+          storage.
+        required: false
+        type: boolean
+        default: false
+      source_ref:
+        description: 'Git ref/SHA to checkout and tag images with. Empty = caller SHA (github.sha).'
+        required: false
+        type: string
+        default: ''
+      image_tag_suffix:
+        description: 'Suffix appended to the SHA-keyed image tag (e.g. "-nightly"). Empty = no suffix.'
+        required: false
+        type: string
+        default: ''
+      compliance_only:
+        description: |
+          Run ONLY the compliance extract + verify (and artifact upload),
+          skipping the image build/push, as a sibling job in parallel with
+          tests instead of serially in the build job.
+
+          NOTE: no caller sets this today — the compliance extract is folded
+          into the build job via `inline_compliance` (same job → same warm
+          builder → cache hit, vs. this sibling-job model which lands on a
+          random pool pod and cold-rebuilds the whole image; see
+          route_buildkit.sh:342). It is intentionally RETAINED so we can revert
+          to the parallel-job model IF the warm-rebuild problem is solved at the
+          routing layer (e.g. a deterministic run_id-seeded pod pick that pins
+          the compliance job to the build job's warm pod). The `!compliance_only`
+          guards on the build/test-image steps stay correct at the false default.
+        required: false
+        type: boolean
+        default: false
+      inline_compliance:
+        description: |
+          Run the compliance extract + verify as a step INSIDE this build job
+          (after "Build and Push Image"), reusing the same warm builder. Set
+          true by callers on the shipped-image build jobs (runtime / efa /
+          planner / frontend); replaces the separate compliance_only sibling
+          job. Skipped for dev / local-dev targets.
+        required: false
+        type: boolean
+        default: false
+      artifact_retention_days:
+        description: |
+          Retention (days) for the uploaded /legal NOTICES + /sboms CSV
+          compliance artifacts. PR passes 7; post-merge / nightly default to 30.
+        required: false
+        type: string
+        default: '30'
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -105,6 +167,9 @@ on:
       target_tag_plain:
         description: 'Plain runtime image tag prefix'
         value: ${{ jobs.build.outputs.target_tag_plain }}
+      baseline_sbom_file:
+        description: 'Baseline SBOM stem baked into the rendered Dockerfile (for the compliance-audit job)'
+        value: ${{ jobs.build.outputs.baseline_sbom_file }}
 
 jobs:
   build:
@@ -116,13 +181,16 @@ jobs:
     # cuda_version not empty -- name: cuda12, linux/amd64
     # cuda_version empty -- name: cpu, linux/amd64
     name: Build multi-arch ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
+      baseline_sbom_file: ${{ steps.gen-dockerfile.outputs.baseline_stem }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           lfs: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -144,16 +212,52 @@ jobs:
           if [ "${{ matrix.cuda_version }}" != "" ]; then
             CUDA_VERSION="${{ matrix.cuda_version }}"
             CUDA_MAJOR=${CUDA_VERSION%%.*}
-            TAG_BUILDER+="-cuda${CUDA_MAJOR}"
+            # cuda13 is the default — no suffix in the ECR tag. cuda12 (and
+            # any future non-13 major) stays explicit so the tag still
+            # disambiguates the variant. Keep the cuda-suffix expressions in
+            # shared-test.yml and dynamo-pipeline.yml in sync with this rule.
+            if [ "${CUDA_MAJOR}" != "13" ]; then
+              TAG_BUILDER+="-cuda${CUDA_MAJOR}"
+            fi
           fi
-          IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}
-          TEST_IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}-test
+          SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          IMAGE_TAG_SUFFIX='${{ inputs.image_tag_suffix }}'
+          IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}
+          TEST_IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}-test
 
-          IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${IMAGE_TAG}"
-          TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
+          ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
+          IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${IMAGE_TAG}"
+          TEST_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
+
+          # When a suffix is set (e.g. "-nightly"), also emit a mutable,
+          # SHA-less floating ECR tag (e.g. vllm-runtime-cuda12-nightly) so
+          # consumers can pull the latest nightly without knowing the SHA.
+          # Repushed on every build via extra_tags below; the immutable
+          # SHA-keyed tag above is still the source of truth for promotions.
+          MUTABLE_IMAGE_URI=""
+          if [ -n "${IMAGE_TAG_SUFFIX}" ]; then
+            MUTABLE_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${TAG_BUILDER}${IMAGE_TAG_SUFFIX}"
+          fi
+
+          # cuda13 is the implicit default, so the tags above carry no cuda
+          # suffix. Also publish explicit `-cuda13` aliases so consumers can
+          # pin to cuda13 specifically (and won't get silently upgraded when
+          # the default flips later). Same digest, additional tags.
+          EXPLICIT_CUDA_IMAGE_URI=""
+          EXPLICIT_CUDA_MUTABLE_IMAGE_URI=""
+          if [ "${CUDA_MAJOR:-}" = "13" ]; then
+            EXPLICIT_CUDA_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${SOURCE_SHA}-${TAG_BUILDER}-cuda13${IMAGE_TAG_SUFFIX}"
+            if [ -n "${IMAGE_TAG_SUFFIX}" ]; then
+              EXPLICIT_CUDA_MUTABLE_IMAGE_URI="${ECR_REGISTRY}/ai-dynamo/dynamo:${TAG_BUILDER}-cuda13${IMAGE_TAG_SUFFIX}"
+            fi
+          fi
+
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "image_uri=${IMAGE_URI}" >> $GITHUB_OUTPUT
           echo "test_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "mutable_image_uri=${MUTABLE_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "explicit_cuda_image_uri=${EXPLICIT_CUDA_IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "explicit_cuda_mutable_image_uri=${EXPLICIT_CUDA_MUTABLE_IMAGE_URI}" >> $GITHUB_OUTPUT
       - name: Calculate Builder Flavor
         id: calculate-builder-flavor
         shell: bash
@@ -176,6 +280,9 @@ jobs:
         shell: bash
         env:
           EXTRA_TAGS: ${{ inputs.extra_tags }}
+          MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.mutable_image_uri }}
+          EXPLICIT_CUDA_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.explicit_cuda_image_uri }}
+          EXPLICIT_CUDA_MUTABLE_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.explicit_cuda_mutable_image_uri }}
         run: |
           ECR_REGISTRY="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
           RESULT=""
@@ -185,6 +292,19 @@ jobs:
                 RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}"$'\n'
               fi
             done <<< "$EXTRA_TAGS"
+          fi
+          # Append the mutable floating tag computed in calculate-target-tag
+          # (e.g. vllm-runtime-cuda12-nightly). Empty for non-nightly builds.
+          if [ -n "${MUTABLE_IMAGE_URI}" ]; then
+            RESULT+="${MUTABLE_IMAGE_URI}"$'\n'
+          fi
+          # Append explicit -cuda13 aliases for cuda13 builds. Empty for
+          # cuda12 / cpu builds.
+          if [ -n "${EXPLICIT_CUDA_IMAGE_URI}" ]; then
+            RESULT+="${EXPLICIT_CUDA_IMAGE_URI}"$'\n'
+          fi
+          if [ -n "${EXPLICIT_CUDA_MUTABLE_IMAGE_URI}" ]; then
+            RESULT+="${EXPLICIT_CUDA_MUTABLE_IMAGE_URI}"$'\n'
           fi
           if [ -n "$RESULT" ]; then
             echo "tags<<EOF" >> $GITHUB_OUTPUT
@@ -206,7 +326,62 @@ jobs:
           echo "push_image: ${{ inputs.push_image }}"
           echo "no_load: ${{ inputs.no_load }}"
           echo "build_timeout_minutes: ${{ inputs.build_timeout_minutes }}"
+      - name: Build EPP Image (For Frontend Only)
+        id: build-epp-image
+        if: ${{ inputs.target == 'frontend' }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_REPOSITORY: ai-dynamo/dynamo
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+        timeout-minutes: 30
+        run: |
+          set -x
+          EPP_REPOSITORY="${{ env.IMAGE_REPOSITORY }}/dynamo-epp"
+          EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${EPP_REPOSITORY}"
+          EPP_IMAGE_TAG="${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}"
+          EPP_IMAGE_REF="${EPP_REPOSITORY}:${EPP_IMAGE_TAG}"
+          echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${EPP_IMAGE_REF}" >> $GITHUB_OUTPUT
+
+          CACHE_ARGS=""
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache "
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache,mode=max "
+          fi
+
+          # Enable sccache to match the runtime image build path
+          # (.github/actions/docker-remote-build). The runner pod injects
+          # AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN via IRSA; the Makefile
+          # forwards them to BuildKit as --secret mounts when both are set.
+          # If IRSA is unavailable, sccache will fail to start inside the
+          # container and the build proceeds without cache (never with a
+          # stale one) -- same fallback as the wheel_builder Rust steps.
+          SCCACHE_MAKE_ARGS=""
+          if [ -n "${SCCACHE_S3_BUCKET:-}" ] \
+              && [ -n "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" ] \
+              && [ -f "${AWS_WEB_IDENTITY_TOKEN_FILE}" ] \
+              && [ -n "${AWS_ROLE_ARN:-}" ]; then
+            SCCACHE_MAKE_ARGS="USE_SCCACHE=true SCCACHE_BUCKET=${SCCACHE_S3_BUCKET} SCCACHE_REGION=${AWS_DEFAULT_REGION}"
+          else
+            echo "::warning::sccache prerequisites missing (bucket or IRSA token); EPP Rust build will run without sccache"
+          fi
+
+          make -C deploy/inference-gateway/epp image-multiarch-push \
+            IMAGE_REPO="${EPP_IMAGE_REPO}" \
+            GIT_TAG="${EPP_IMAGE_TAG}" \
+            DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
+            ${SCCACHE_MAKE_ARGS} \
+            EXTRA_BUILD_ARGS="${CACHE_ARGS}"
+      - name: Refresh BuildKit builder (For Frontend Only)
+        if: ${{ inputs.target == 'frontend' }}
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
+          arch: ${{ inputs.platform }}
       - name: Generate Dockerfile
+        id: gen-dockerfile
         shell: bash
         run: |
           echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
@@ -229,29 +404,77 @@ jobs:
               ${MAKE_EFA_FLAG} \
               --show-result \
               --output-short-filename
+          # Emit the baseline SBOM stem (arch-independent) for the
+          # <framework>-compliance-audit job, so it doesn't need render.py (and
+          # thus PyYAML/Jinja2/pip) on the lightweight audit runner. dev /
+          # local-dev images render no BASELINE_SBOM_FILE ARG (they skip baseline
+          # subtraction and never run the audit), so the grep finds nothing —
+          # the trailing `|| true` keeps that from tripping the step's
+          # `-e -o pipefail` shell (empty stem is correct for them).
+          STEM=$(grep -E '^ARG BASELINE_SBOM_FILE=' container/rendered.Dockerfile | head -1 \
+                 | sed -E 's/^ARG BASELINE_SBOM_FILE="?([^"]*)"?$/\1/' || true)
+          echo "baseline_stem=${STEM}" >> "$GITHUB_OUTPUT"
+      - name: Apply nightly dev version
+        if: inputs.dev_version_suffix != ''
+        shell: bash
+        run: python3 .github/scripts/apply_dev_version.py "${{ inputs.dev_version_suffix }}" .
       - name: Build and Push Image
         id: build-image
+        if: ${{ !inputs.compliance_only }}
         uses: ./.github/actions/docker-remote-build
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
+          build_target: ${{ (inputs.make_efa && (inputs.target == 'runtime' || inputs.target == 'dev')) && 'aws' || inputs.target }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
           extra_build_args: |
-            DYNAMO_COMMIT_SHA=${{ github.sha }}
+            DYNAMO_COMMIT_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+            EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
+            ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}
             ${{ inputs.extra_build_args }}
+      # Compliance extract + verify. Runs as a step INSIDE the build job
+      # (inline_compliance), right after "Build and Push Image", so it reuses
+      # the SAME warm builder — the licenses stage the runtime build already ran
+      # is a cache hit, so this is just the small FROM-scratch /legal + /sboms
+      # export (~1 min) instead of the cold full-image rebuild a separate pod
+      # would do. Also runs in the legacy compliance_only sibling-job mode (no
+      # caller sets that today; see the input note). Skipped for dev / local-dev
+      # targets (those don't ship and don't go through OSRB).
+      - name: Compliance extract
+        if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' }}
+        uses: ./.github/actions/compliance-extract
+        with:
+          framework: ${{ inputs.framework }}
+          target: ${{ inputs.target }}
+          platform: ${{ inputs.platform }}
+          cuda_version: ${{ matrix.cuda_version }}
+          builder_name: ${{ inputs.builder_name }}
+          artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+          git_sha: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          # Match the build's sccache build-args so the extract reuses the warm
+          # wheel_builder/pre_runtime cache instead of a cold rebuild.
+          sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          sccache_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          # Must match the build's render: EFA images attribute libfabric /
+          # aws-ofi-nccl via --make-efa, and a mismatch would cold-miss the cache.
+          make_efa: ${{ inputs.make_efa }}
+          artifact_retention_days: ${{ inputs.artifact_retention_days }}
+          # Source archival is opt-in per top-level caller (see the
+          # `archive_sources` input above). PR / on-demand leave it false;
+          # post-merge-ci + nightly flip it on (release/*.*.* / nightly) so
+          # RC promotions inherit the source archive.
+          archive_sources: ${{ inputs.archive_sources }}
       - name: Refresh BuildKit builder
-        if: ${{ inputs.target != 'dev' }}
+        if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
         uses: ./.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
@@ -259,21 +482,9 @@ jobs:
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
-        if: ${{ inputs.target != 'dev' }}
+        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'frontend' }}
         shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          PLAIN_TAG="${{ steps.calculate-target-tag.outputs.target_tag_plain }}"
-          CACHE_TAG="test-${PLAIN_TAG}-cache"
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
-          CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max"
-          elif [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
-            CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max"
-          fi
-
           PUSH_ARGS=""
           if [ "${{ inputs.push_image }}" == "true" ]; then
             PUSH_ARGS="--push"
@@ -285,15 +496,19 @@ jobs:
           if [ "${{ inputs.no_cache }}" == "true" ]; then
             NO_CACHE_ARG="--no-cache"
           fi
+          TEST_TARGET="test_image"
+          if [ "${{ inputs.target }}" == "planner" ]; then
+            TEST_TARGET="test_distroless"
+          fi
 
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \
             --platform ${{ inputs.platform }} \
+            --target ${TEST_TARGET} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
-            ${CACHE_ARGS} \
             -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
       - name: Show summary
         shell: bash

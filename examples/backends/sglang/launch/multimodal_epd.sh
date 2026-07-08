@@ -16,11 +16,12 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 CHAT_TEMPLATE="qwen2-vl"
 PROVIDED_CHAT_TEMPLATE=""
+CACHE_CAPACITY_GB=""
+TRANSFER_BACKEND="${DYN_SGLANG_DISAGGREGATION_TRANSFER_BACKEND:-nixl}"
 
 # --single-gpu: Packs both workers (encode, PD) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
-# only has 1 GPU available. It uses lower mem-fraction-static values to share the GPU
-# and enables memory-saving options.
+# only has 1 GPU available. It enables memory-saving caps to share the GPU.
 SINGLE_GPU=false
 
 # Parse command line arguments
@@ -42,6 +43,14 @@ while [[ $# -gt 0 ]]; do
             SINGLE_GPU=true
             shift
             ;;
+        --multimodal-embedding-cache-capacity-gb)
+            CACHE_CAPACITY_GB=$2
+            shift 2
+            ;;
+        --disaggregation-transfer-backend)
+            TRANSFER_BACKEND=$2
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -49,6 +58,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --served-model-name <served_model_name> Specify the served model name to use (default: empty)"
             echo "  --chat-template <template> Specify the SGLang chat template to use (default: $CHAT_TEMPLATE)"
             echo "  --single-gpu         Pack both workers on 1 GPU (for small models, e.g. 2B)"
+            echo "  --multimodal-embedding-cache-capacity-gb <gb>"
+            echo "                       Enable encode-worker CPU embedding cache with this capacity"
+            echo "  --disaggregation-transfer-backend <backend>"
+            echo "                       SGLang disaggregation transfer backend (default: $TRANSFER_BACKEND)"
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -71,6 +84,12 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
     SERVED_MODEL_ARG="--served-model-name $SERVED_MODEL_NAME"
 fi
 
+# TODO: Switch back to nixl-write once Dynamo embedding transfer can share a
+# NIXL/UCX backend with SGLang NIXL KV transfer in the same worker process.
+if [[ "$TRANSFER_BACKEND" == "nixl" && -z "${DYN_SGL_EMBEDDING_TRANSFER_MODE:-}" ]]; then
+    export DYN_SGL_EMBEDDING_TRANSFER_MODE="nixl-read"
+fi
+
 # GPU assignments (override via environment variables)
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
@@ -90,18 +109,23 @@ else
     _WORKER_CUDA_PIN="CUDA_VISIBLE_DEVICES=$DYN_WORKER_GPU"
 fi
 
-# GPU memory fractions for workers (used with --mem-fraction-static)
-DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
-DYN_WORKER_GPU_MEM=${DYN_WORKER_GPU_MEM:-0.9}
-
+# Worker KV is sized by --max-total-tokens (build_sglang_gpu_mem_args reads
+# _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS), so this script is portable across
+# 24 / 48 / 80 GiB GPUs. No --mem-fraction-static — fractions don't translate.
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
-ENCODE_EXTRA_ARGS=""
-WORKER_EXTRA_ARGS=""
+ENCODE_EXTRA_ARGS="$GPU_MEM_ARGS"
+WORKER_EXTRA_ARGS="$GPU_MEM_ARGS"
+
+if [[ -n "$CACHE_CAPACITY_GB" ]]; then
+    ENCODE_EXTRA_ARGS="$ENCODE_EXTRA_ARGS --multimodal-embedding-cache-capacity-gb $CACHE_CAPACITY_GB"
+fi
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    ENCODE_EXTRA_ARGS="--mem-fraction-static ${DYN_ENCODE_GPU_MEM}"
-    WORKER_EXTRA_ARGS="--mem-fraction-static ${DYN_WORKER_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --chunked-prefill-size 4096 --max-prefill-tokens 4096 $GPU_MEM_ARGS"
+    # Both workers share one GPU; cap activations tightly.
+    SHARED_CAPS="--max-running-requests 2 --chunked-prefill-size 4096 --max-prefill-tokens 4096"
+    ENCODE_EXTRA_ARGS="$ENCODE_EXTRA_ARGS $SHARED_CAPS"
+    WORKER_EXTRA_ARGS="$WORKER_EXTRA_ARGS $SHARED_CAPS --delete-ckpt-after-loading"
 fi
 
 # Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
@@ -121,9 +145,16 @@ print_launch_banner --multimodal "Launching Multimodal E/PD ($GPU_LABEL)" "$MODE
 python3 -m dynamo.frontend &
 
 # run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
-echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
+echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" --skip-tokenizer-init $ENCODE_EXTRA_ARGS &
+env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang \
+  --enable-multimodal \
+  --disaggregation-mode encode \
+  --model-path "$MODEL_NAME" \
+  $SERVED_MODEL_ARG \
+  --chat-template "$CHAT_TEMPLATE" \
+  --skip-tokenizer-init \
+  $ENCODE_EXTRA_ARGS &
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Wait for encode worker to initialize before starting PD worker.
@@ -138,10 +169,12 @@ fi
 # causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
 # TODO: Remove disable-radix-cache once the issue is fixed.
 # See https://github.com/sgl-project/sglang/pull/11203.
-echo "Starting PD worker on GPU $DYN_WORKER_GPU (GPU mem: $DYN_WORKER_GPU_MEM)..."
+echo "Starting PD worker on GPU $DYN_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
-  --multimodal-worker \
+  --enable-multimodal \
+  --dedicated-mm-encoder \
+  --disaggregation-mode pd \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \
   --page-size 16 \
@@ -149,7 +182,7 @@ env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --disable-radix-cache \
-  --disaggregation-transfer-backend nixl \
+  --disaggregation-transfer-backend "$TRANSFER_BACKEND" \
   $WORKER_EXTRA_ARGS &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

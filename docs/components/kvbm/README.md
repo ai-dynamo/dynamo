@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: KVBM
+subtitle: Unified memory layer and write-through KV cache spanning GPU, host, SSD, and remote storage via NIXL for TensorRT-LLM and vLLM.
 ---
 
 The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to handle memory allocation, management, and remote sharing of Key-Value (KV) blocks for inference tasks across heterogeneous and distributed environments. It acts as a unified memory layer and write-through cache for frameworks like vLLM and TensorRT-LLM.
@@ -59,5 +60,5 @@ KVBM has three primary logical layers:
 - **[KVBM Design](../../design-docs/kvbm-design.md)** — Architecture deep dive, components, and data flows
 - **[LMCache Integration](../../integrations/lmcache-integration.md)** — Use LMCache with Dynamo vLLM backend
 - **[FlexKV Integration](../../integrations/flexkv-integration.md)** — Use FlexKV for KV cache management
-- **[SGLang HiCache](../../integrations/sglang-hicache.md)** — Enable SGLang's hierarchical cache with NIXL
+- **[SGLang HiCache](../../backends/sglang/sglang-hicache.md)** — Enable SGLang's hierarchical cache with NIXL
 - **[NIXL Documentation](https://github.com/ai-dynamo/nixl/blob/main/docs/nixl.md)** — NIXL communication library details

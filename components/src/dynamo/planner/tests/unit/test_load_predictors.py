@@ -27,6 +27,8 @@ from dynamo.planner.core.load.predictors import (
     KalmanPredictor,
     ProphetPredictor,
 )
+from dynamo.planner.core.types import TrafficObservation, WorkerCapabilities
+from dynamo.planner.plugins.builtins.local_planner import BuiltinLoadPredict
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -53,12 +55,15 @@ def _make_config(
     """Create a minimal mock PlannerConfig for predictor instantiation."""
     cfg = MagicMock()
     cfg.load_predictor_log1p = load_predictor_log1p
-    cfg.throughput_adjustment_interval = step_size
+    cfg.throughput_adjustment_interval_seconds = step_size
     cfg.prophet_window_size = prophet_window_size
     cfg.kalman_q_level = kalman_q_level
     cfg.kalman_q_trend = kalman_q_trend
     cfg.kalman_r = kalman_r
     cfg.kalman_min_points = kalman_min_points
+    cfg.load_predictor = "constant"
+    cfg.optimization_target = "sla"
+    cfg.speculative_nextn = 0
     return cfg
 
 
@@ -104,6 +109,36 @@ class TestConstantPredictor:
         predictor.add_data_point(10.0)
         predictor.add_data_point(float("nan"))
         assert predictor.predict_next() == 0
+
+
+class TestBuiltinLoadPredictIdleTraffic:
+    def test_carries_request_shape_forward_across_idle_windows(self):
+        plugin = BuiltinLoadPredict(_make_config(), WorkerCapabilities())
+
+        plugin._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=10, isl=512, osl=128)
+        )
+        plugin._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=0, isl=0, osl=0)
+        )
+        plugin._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=0, isl=0, osl=0)
+        )
+
+        assert plugin._num_req_predictor.data_buffer == [10, 0, 0]
+        assert plugin._isl_predictor.data_buffer == [512, 512, 512]
+        assert plugin._osl_predictor.data_buffer == [128, 128, 128]
+
+    def test_leading_idle_windows_do_not_seed_request_shape(self):
+        plugin = BuiltinLoadPredict(_make_config(), WorkerCapabilities())
+
+        plugin._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=0, isl=0, osl=0)
+        )
+
+        assert plugin._num_req_predictor.data_buffer == []
+        assert plugin._isl_predictor.data_buffer == []
+        assert plugin._osl_predictor.data_buffer == []
 
 
 # ---------------------------------------------------------------------------
