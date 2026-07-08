@@ -886,6 +886,15 @@ impl LoraController {
         desired_replicas: usize,
         current_replicas: usize,
     ) -> usize {
+        // A zero cooldown is an explicit off switch (used by allocator comparisons and useful
+        // operationally when immediate convergence matters). The generic first-scale-down path
+        // below always defers once while it arms per-LoRA state, which would otherwise turn a
+        // configured zero into an undocumented one-tick cooldown.
+        if self.config.scale_down_cooldown_ticks == 0 {
+            self.hysteresis.remove(lora_name);
+            return desired_replicas;
+        }
+
         if desired_replicas < current_replicas {
             // Copy the timestamp so the immutable borrow ends before the mutable re-arm below.
             match self
@@ -1646,6 +1655,23 @@ mod tests {
             LoraController::compute_changed_workers(&workers, &workers, &prev_caps, &prev_caps)
                 .is_empty(),
             "no id/capacity change must yield no changed workers"
+        );
+    }
+
+    #[test]
+    fn test_zero_cooldown_disables_scale_down_hysteresis() {
+        let (mut controller, _st, _le, _rt) = setup_controller();
+        controller.config.scale_down_cooldown_ticks = 0;
+        controller.tick = 1;
+
+        assert_eq!(
+            controller.apply_hysteresis("l", 1, 4),
+            1,
+            "zero cooldown must apply the first scale-down immediately"
+        );
+        assert!(
+            !controller.hysteresis.contains_key("l"),
+            "disabled hysteresis must not retain per-LoRA state"
         );
     }
 
