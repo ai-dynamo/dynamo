@@ -9,7 +9,8 @@ use std::task::{Context, Poll};
 use anyhow::{Context as _, Result, anyhow};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
@@ -34,6 +35,41 @@ pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
 pub(crate) struct ReplicaSyncConfig {
     process_id: u64,
     outbound_tx: ReplicaEventSender,
+}
+
+#[derive(Debug)]
+pub(crate) struct ReplicaSyncRuntime {
+    config: ReplicaSyncConfig,
+    cancel_token: CancellationToken,
+    publisher_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ReplicaSyncRuntime {
+    pub(crate) fn config(&self) -> ReplicaSyncConfig {
+        self.config.clone()
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.cancel_token.cancel();
+        if let Some(task) = self.publisher_task.lock().await.take() {
+            let _ = task.await;
+        }
+    }
+
+    fn abort(&self) {
+        self.cancel_token.cancel();
+        if let Ok(mut task) = self.publisher_task.try_lock()
+            && let Some(task) = task.take()
+        {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for ReplicaSyncRuntime {
+    fn drop(&mut self) {
+        self.abort();
+    }
 }
 
 impl ReplicaSyncConfig {
@@ -183,7 +219,7 @@ pub(crate) fn setup_replica_sync(
     port: Option<u16>,
     initial_peers: &[String],
     cancel_token: CancellationToken,
-) -> Result<Option<ReplicaSyncConfig>> {
+) -> Result<Option<ReplicaSyncRuntime>> {
     let Some(port) = port else {
         if !initial_peers.is_empty() {
             anyhow::bail!("--replica-sync-peers requires --replica-sync-port");
@@ -193,8 +229,13 @@ pub(crate) fn setup_replica_sync(
 
     let bind_endpoint = replica_sync_bind_endpoint(port)?;
     let process_id = generate_process_id();
-    let outbound_tx = start_replica_publisher(&bind_endpoint, cancel_token)?;
-    Ok(Some(ReplicaSyncConfig::new(process_id, outbound_tx)))
+    let (outbound_tx, publisher_task) =
+        start_replica_publisher(&bind_endpoint, cancel_token.clone())?;
+    Ok(Some(ReplicaSyncRuntime {
+        config: ReplicaSyncConfig::new(process_id, outbound_tx),
+        cancel_token,
+        publisher_task: Mutex::new(Some(publisher_task)),
+    }))
 }
 
 pub(crate) fn setup_scoped_replica_sync(
@@ -229,13 +270,13 @@ pub(crate) fn setup_scoped_replica_sync(
 pub(crate) fn start_replica_publisher(
     bind_endpoint: &str,
     cancel_token: CancellationToken,
-) -> Result<ReplicaEventSender> {
+) -> Result<(ReplicaEventSender, JoinHandle<()>)> {
     validate_endpoint(bind_endpoint)?;
     let mut socket = create_bound_pub_socket(bind_endpoint)
         .with_context(|| format!("failed to bind replica publisher to `{bind_endpoint}`"))?;
     let (tx, mut rx) = mpsc::channel::<ScopedReplicaEvent>(REPLICA_EVENT_CHANNEL_CAPACITY);
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             let event = tokio::select! {
                 _ = cancel_token.cancelled() => break,
@@ -270,24 +311,29 @@ pub(crate) fn start_replica_publisher(
         }
     });
 
-    Ok(tx)
+    Ok((tx, task))
 }
 
 #[derive(Debug, thiserror::Error)]
 #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
-pub(crate) enum PeerError {
+pub enum ReplicaPeerError {
     #[error(transparent)]
     InvalidEndpoint(#[from] anyhow::Error),
+
+    #[allow(dead_code)]
+    #[error("replica sync is disabled")]
+    Disabled,
 
     #[error("replica peer manager is unavailable")]
     Unavailable,
 }
 
-#[derive(Clone)]
 #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
 pub(crate) struct PeerManager {
     command_tx: mpsc::Sender<PeerCommand>,
     peers: Arc<RwLock<HashSet<String>>>,
+    cancel_token: CancellationToken,
+    subscriber_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
@@ -326,10 +372,11 @@ impl PeerManager {
         let peers = Arc::new(RwLock::new(configured_peers));
         let (command_tx, mut command_rx) = mpsc::channel(PEER_COMMAND_CHANNEL_CAPACITY);
         let task_peers = Arc::clone(&peers);
-        tokio::spawn(async move {
+        let task_cancel = cancel_token.clone();
+        let subscriber_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = cancel_token.cancelled() => break,
+                    _ = task_cancel.cancelled() => break,
                     command = command_rx.recv() => {
                         let Some(command) = command else {
                             break;
@@ -348,35 +395,40 @@ impl PeerManager {
             }
         });
 
-        Ok(Self { command_tx, peers })
+        Ok(Self {
+            command_tx,
+            peers,
+            cancel_token,
+            subscriber_task: Mutex::new(Some(subscriber_task)),
+        })
     }
 
     #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
-    pub(crate) async fn register_peer(&self, endpoint: String) -> Result<bool, PeerError> {
-        validate_endpoint(&endpoint).map_err(PeerError::InvalidEndpoint)?;
+    pub(crate) async fn register_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
+        validate_endpoint(&endpoint).map_err(ReplicaPeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
         self.command_tx
             .send(PeerCommand::Register { endpoint, response })
             .await
-            .map_err(|_| PeerError::Unavailable)?;
+            .map_err(|_| ReplicaPeerError::Unavailable)?;
         result
             .await
-            .map_err(|_| PeerError::Unavailable)?
-            .map_err(PeerError::InvalidEndpoint)
+            .map_err(|_| ReplicaPeerError::Unavailable)?
+            .map_err(ReplicaPeerError::InvalidEndpoint)
     }
 
     #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
-    pub(crate) async fn deregister_peer(&self, endpoint: String) -> Result<bool, PeerError> {
-        validate_endpoint(&endpoint).map_err(PeerError::InvalidEndpoint)?;
+    pub(crate) async fn deregister_peer(&self, endpoint: String) -> Result<bool, ReplicaPeerError> {
+        validate_endpoint(&endpoint).map_err(ReplicaPeerError::InvalidEndpoint)?;
         let (response, result) = oneshot::channel();
         self.command_tx
             .send(PeerCommand::Deregister { endpoint, response })
             .await
-            .map_err(|_| PeerError::Unavailable)?;
+            .map_err(|_| ReplicaPeerError::Unavailable)?;
         result
             .await
-            .map_err(|_| PeerError::Unavailable)?
-            .map_err(PeerError::InvalidEndpoint)
+            .map_err(|_| ReplicaPeerError::Unavailable)?
+            .map_err(ReplicaPeerError::InvalidEndpoint)
     }
 
     #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
@@ -384,6 +436,28 @@ impl PeerManager {
         let mut peers: Vec<_> = self.peers.read().iter().cloned().collect();
         peers.sort();
         peers
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.cancel_token.cancel();
+        if let Some(task) = self.subscriber_task.lock().await.take() {
+            let _ = task.await;
+        }
+    }
+
+    fn abort(&self) {
+        self.cancel_token.cancel();
+        if let Ok(mut task) = self.subscriber_task.try_lock()
+            && let Some(task) = task.take()
+        {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for PeerManager {
+    fn drop(&mut self) {
+        self.abort();
     }
 }
 
@@ -513,7 +587,7 @@ mod tests {
     async fn dynamic_peer_registration_controls_delivery() {
         let endpoint = reserve_tcp_endpoint();
         let cancel_token = CancellationToken::new();
-        let outbound =
+        let (outbound, publisher_task) =
             start_replica_publisher(&endpoint, cancel_token.child_token()).expect("publisher");
         let (received_tx, mut received_rx) = mpsc::channel(16);
         let manager = PeerManager::start(Vec::new(), cancel_token.child_token(), move |event| {
@@ -551,6 +625,8 @@ mod tests {
         );
 
         cancel_token.cancel();
+        manager.shutdown().await;
+        publisher_task.await.unwrap();
     }
 
     #[cfg(feature = "standalone-slot-tracker")]
@@ -559,8 +635,10 @@ mod tests {
         let endpoint_a = reserve_tcp_endpoint();
         let endpoint_b = reserve_tcp_endpoint();
         let cancel_token = CancellationToken::new();
-        let outbound_a = start_replica_publisher(&endpoint_a, cancel_token.child_token()).unwrap();
-        let outbound_b = start_replica_publisher(&endpoint_b, cancel_token.child_token()).unwrap();
+        let (outbound_a, publisher_a) =
+            start_replica_publisher(&endpoint_a, cancel_token.child_token()).unwrap();
+        let (outbound_b, publisher_b) =
+            start_replica_publisher(&endpoint_b, cancel_token.child_token()).unwrap();
         let registry_a = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),
             ReplicaSyncConfig::new(11, outbound_a),
@@ -570,7 +648,7 @@ mod tests {
             ReplicaSyncConfig::new(22, outbound_b),
         ));
         let dispatch_registry_b = Arc::clone(&registry_b);
-        let _peer_b =
+        let peer_b =
             PeerManager::start(vec![endpoint_a], cancel_token.child_token(), move |event| {
                 dispatch_registry_b.dispatch_replica_event(event)
             })
@@ -610,6 +688,9 @@ mod tests {
         registry_a.free(&key, "target").unwrap();
         wait_for_load(&registry_b, 0, 0).await;
         cancel_token.cancel();
+        peer_b.shutdown().await;
+        publisher_a.await.unwrap();
+        publisher_b.await.unwrap();
     }
 
     #[cfg(feature = "standalone-slot-tracker")]
