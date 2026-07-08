@@ -68,7 +68,6 @@ type DynamoComponentDeploymentSpec struct {
 // container named `"main"` and merges user overrides using strategic-merge-by-name
 // semantics. Users can add sidecars, init containers, and pod-level configuration
 // directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
-// +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 type DynamoComponentDeploymentSharedSpec struct {
@@ -166,11 +165,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// the Scale subresource. Omit the field to opt out.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
-
-	// eppConfig holds EPP-specific configuration for Endpoint Picker Plugin
-	// components. Only meaningful when `type` is `epp`.
-	// +optional
-	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
 	// frontendSidecar optionally designates a container in
 	// `podTemplate.spec.containers` as the frontend sidecar. The value must

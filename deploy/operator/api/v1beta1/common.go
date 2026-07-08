@@ -20,7 +20,6 @@ package v1beta1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 // ComponentType identifies the role of a Dynamo component within a graph.
@@ -134,24 +133,6 @@ type RestartStrategy struct {
 // field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
 // the Scale subresource. Omitting the field opts the component out.
 type ScalingAdapter struct{}
-
-// EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
-// +kubebuilder:validation:XValidation:rule="has(self.configMapRef) != has(self.config)",message="exactly one of configMapRef or config must be specified"
-type EPPConfig struct {
-	// configMapRef references a user-provided ConfigMap containing EPP
-	// configuration. Mutually exclusive with `config`.
-	// +optional
-	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
-
-	// config allows specifying EPP `EndpointPickerConfig` directly as a
-	// structured object. The operator marshals this to YAML and creates a
-	// ConfigMap automatically. Mutually exclusive with `configMapRef`. One of
-	// `configMapRef` or `config` must be specified.
-	// +optional
-	// +kubebuilder:validation:Type=object
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
-}
 
 // GPUMemoryServiceMode selects the GMS deployment topology.
 type GPUMemoryServiceMode string

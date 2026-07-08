@@ -10,39 +10,6 @@ spec:
   - name: Epp
     type: epp
     replicas: 1
-    eppConfig:
-      # This config uses the same disagg-profile-handler as disaggregated deployments.
-      # The handler's graceful degradation feature makes this possible:
-      # - With no "prefill" profile defined, it runs only the "decode" profile.
-      # - The decode scorer receives isDisaggregated=false, so the Dynamo KV router
-      #   uses full overlap scoring (overlap_score_credit=1.0) for aggregated mode.
-      # - If prefill workers were added later (and a prefill profile configured),
-      #   the same handler would automatically switch to disaggregated routing.
-      config:
-        plugins:
-        - type: disagg-profile-handler
-        - name: decode-filter
-          type: label-filter
-          # allowsNoLabel: true lets pods without decode role labels pass through.
-          parameters:
-            label: nvidia.com/dynamo-component-type
-            validValues:
-            - decode
-            allowsNoLabel: true
-        - name: picker
-          type: max-score-picker
-        - name: dyn-decode
-          type: dyn-decode-scorer
-        # Only a "decode" profile — no "prefill" profile means pure aggregated mode.
-        schedulingProfiles:
-        - name: decode
-          plugins:
-          - pluginRef: decode-filter
-            weight: 1
-          - pluginRef: dyn-decode
-            weight: 1
-          - pluginRef: picker
-            weight: 1
     podTemplate:
       spec:
         containers:

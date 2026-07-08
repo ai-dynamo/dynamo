@@ -10,30 +10,6 @@ spec:
   - name: Epp
     type: epp
     replicas: 1
-    eppConfig:
-      config:
-        plugins:
-        - type: disagg-profile-handler
-        - name: decode-filter
-          parameters:
-            allowsNoLabel: true
-            label: nvidia.com/dynamo-component-type
-            validValues:
-            - decode
-          type: label-filter
-        - name: picker
-          type: max-score-picker
-        - name: dyn-decode
-          type: dyn-decode-scorer
-        schedulingProfiles:
-        - name: decode
-          plugins:
-          - pluginRef: decode-filter
-            weight: 1
-          - pluginRef: dyn-decode
-            weight: 1
-          - pluginRef: picker
-            weight: 1
     podTemplate:
       spec:
         containers:

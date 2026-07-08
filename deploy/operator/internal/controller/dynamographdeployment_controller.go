@@ -2537,7 +2537,7 @@ func generateAdapterName(dgdName, componentName string) string {
 func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
-	componentName, eppService, hasEPP := dgd.GetEPPComponent()
+	componentName, _, hasEPP := dgd.GetEPPComponent()
 	if !hasEPP {
 		logger.V(1).Info("No EPP service defined, skipping EPP resource reconciliation")
 		return nil
@@ -2545,30 +2545,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 
 	logger.Info("Reconciling EPP resources", "componentName", componentName)
 
-	// 1. Reconcile EPP ConfigMap (if needed - not needed when ConfigMapRef is used)
-	if eppService.EPPConfig == nil || eppService.EPPConfig.ConfigMapRef == nil {
-		configMap, err := epp.GenerateConfigMap(ctx, dgd, componentName, eppService.EPPConfig)
-		if err != nil {
-			logger.Error(err, "Failed to generate EPP ConfigMap")
-			return fmt.Errorf("failed to generate EPP ConfigMap: %w", err)
-		}
-
-		if configMap != nil {
-			_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
-				return configMap, false, nil
-			})
-			if err != nil {
-				logger.Error(err, "Failed to sync EPP ConfigMap")
-				return fmt.Errorf("failed to sync EPP ConfigMap: %w", err)
-			}
-		}
-	}
-
-	// 2. Reconcile InferencePool
+	// 1. Reconcile InferencePool
 	// Note: EPP Service is created automatically by the standard component reconciliation
-	// via GenerateComponentService() in graph.go (see ComponentTypeEPP case)
+	// via GenerateComponentService() in graph.go (see ComponentTypeEPP case).
+	// The Dynamo EPP is configured via environment variables and needs no
+	// ConfigMap, so no EPP config ConfigMap is generated.
 	eppServiceName := dynamo.GetDCDResourceName(dgd, componentName, "")
-	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName, eppService.EPPConfig)
+	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName)
 	if err != nil {
 		logger.Error(err, "Failed to generate EPP InferencePool")
 		return fmt.Errorf("failed to generate EPP InferencePool: %w", err)

@@ -249,9 +249,9 @@ spec:
 
 For event-driven prefix-cache state, enable worker event publication only
 where prefill happens: the single worker in aggregated serving, or prefill
-workers in disaggregated serving. Decode workers are scored by load
-(`dyn-decode-scorer`), not prefix overlap (`dyn-prefill-scorer`), so vLLM
-decode workers omit both `--enable-prefix-caching` and `--kv-events-config`.
+workers in disaggregated serving. Decode workers are scored by load, not
+prefix overlap, so vLLM decode workers omit both `--enable-prefix-caching`
+and `--kv-events-config`.
 Service names depend on the selected backend and topology, so inspect the
 generated DGD first, especially when `autoApply: false`.
 

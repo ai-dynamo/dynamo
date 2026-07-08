@@ -169,11 +169,6 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 		ConvertFromTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
 	}
 
-	if src.EPPConfig != nil {
-		dst.EPPConfig = &v1beta1.EPPConfig{}
-		ConvertFromEPPConfig(src.EPPConfig, dst.EPPConfig)
-	}
-
 	// sharedMemory <-> sharedMemorySize (lossy struct flatten).
 	if src.SharedMemory != nil && (src.SharedMemory.Disabled || !src.SharedMemory.Size.IsZero()) {
 		dst.SharedMemorySize = &resource.Quantity{}
@@ -515,11 +510,6 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		dst.TopologyConstraint = &TopologyConstraint{}
 		ConvertToTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
 	}
-	if src.EPPConfig != nil {
-		dst.EPPConfig = &EPPConfig{}
-		ConvertToEPPConfig(src.EPPConfig, dst.EPPConfig)
-	}
-
 	dst.ServiceName = src.ComponentName
 
 	// sharedMemorySize -> SharedMemorySpec.
@@ -829,22 +819,6 @@ func ConvertFromTopologyConstraint(src *TopologyConstraint, dst *v1beta1.Topolog
 func ConvertToTopologyConstraint(src *v1beta1.TopologyConstraint, dst *TopologyConstraint) {
 	*dst = TopologyConstraint{
 		PackDomain: TopologyDomain(src.PackDomain),
-	}
-}
-
-// ConvertFromEPPConfig converts EPP config from v1alpha1 to v1beta1.
-func ConvertFromEPPConfig(src *EPPConfig, dst *v1beta1.EPPConfig) {
-	*dst = v1beta1.EPPConfig{
-		ConfigMapRef: src.ConfigMapRef.DeepCopy(),
-		Config:       src.Config.DeepCopy(),
-	}
-}
-
-// ConvertToEPPConfig converts EPP config from v1beta1 to v1alpha1.
-func ConvertToEPPConfig(src *v1beta1.EPPConfig, dst *EPPConfig) {
-	*dst = EPPConfig{
-		ConfigMapRef: src.ConfigMapRef.DeepCopy(),
-		Config:       src.Config.DeepCopy(),
 	}
 }
 

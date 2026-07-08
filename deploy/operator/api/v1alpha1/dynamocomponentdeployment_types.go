@@ -26,7 +26,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 const (
@@ -146,11 +145,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// the service using the Scale subresource. When disabled, replicas can be modified directly.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
-
-	// EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.
-	// Only applicable when ComponentType is "epp".
-	// +optional
-	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
 	// FrontendSidecar configures an auto-generated frontend sidecar container.
 	// When specified, the operator injects a fully configured frontend container
@@ -487,24 +481,4 @@ type FrontendSidecarSpec struct {
 	// These are merged with (and can override) the auto-generated Dynamo env vars.
 	// +optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
-}
-
-// EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
-// EPP is responsible for intelligent endpoint selection and KV-aware routing.
-type EPPConfig struct {
-	// ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
-	// The ConfigMap should contain EndpointPickerConfig YAML.
-	// Mutually exclusive with Config.
-	// +optional
-	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
-
-	// Config allows specifying EPP EndpointPickerConfig directly as a structured object.
-	// The operator will marshal this to YAML and create a ConfigMap automatically.
-	// Mutually exclusive with ConfigMapRef.
-	// One of ConfigMapRef or Config must be specified (no default configuration).
-	// Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
-	// +optional
-	// +kubebuilder:validation:Type=object
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
 }

@@ -1879,7 +1879,6 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		ParentGraphDeploymentNamespace: namespace,
 		Discovery:                      discovery,
 		DynamoNamespace:                dynamoNamespace,
-		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
 	}
 	return componentContext
