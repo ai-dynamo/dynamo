@@ -73,7 +73,6 @@ from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import (
     VllmEnginePauseController,
-    _apply_nvext_cache_salt,
     _engine_generate_reasoning_kwargs,
     _request_reasoning_metadata,
     build_sampling_params,

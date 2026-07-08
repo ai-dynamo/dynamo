@@ -21,7 +21,6 @@ from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
-    start_profile_compat,
 )
 from dynamo.sglang.args import (
     _normalize_multimodal_disaggregation_args,
