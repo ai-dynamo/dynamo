@@ -284,11 +284,18 @@ class TestValidateCustomEncoder:
 
 
 class TestValidateBenchmarkConfig:
+    @pytest.mark.parametrize(
+        "axis",
+        [
+            "benchmark_prefill_kv_read_granularity",
+            "benchmark_prefill_batch_granularity",
+        ],
+    )
     @pytest.mark.parametrize("value", [0, -1, 1025])
-    def test_rejects_out_of_range_grid_axis(self, value):
+    def test_rejects_out_of_range_grid_axis(self, axis, value):
         config = create_config()
         config.benchmark_mode = "prefill"
-        config.benchmark_prefill_kv_read_granularity = value
+        setattr(config, axis, value)
 
         with pytest.raises(ValueError, match="must be between 1 and 1024"):
             config._validate_benchmark_config()
@@ -296,12 +303,13 @@ class TestValidateBenchmarkConfig:
     def test_caps_prefill_cartesian_grid(self):
         config = create_config()
         config.benchmark_mode = "prefill"
-        config.benchmark_prefill_granularity = 64
-        config.benchmark_prefill_kv_read_granularity = 64
+        config.benchmark_prefill_granularity = 16
+        config.benchmark_prefill_kv_read_granularity = 16
+        config.benchmark_prefill_batch_granularity = 16
         config._validate_benchmark_config()
 
-        config.benchmark_prefill_granularity = 65
-        with pytest.raises(ValueError, match="requests 4160 grid points"):
+        config.benchmark_prefill_batch_granularity = 17
+        with pytest.raises(ValueError, match="requests 4352 grid points"):
             config._validate_benchmark_config()
 
     def test_decode_mode_ignores_inactive_prefill_grid(self):
@@ -309,5 +317,6 @@ class TestValidateBenchmarkConfig:
         config.benchmark_mode = "decode"
         config.benchmark_prefill_granularity = 1024
         config.benchmark_prefill_kv_read_granularity = 1024
+        config.benchmark_prefill_batch_granularity = 1024
 
         config._validate_benchmark_config()

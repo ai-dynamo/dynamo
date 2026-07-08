@@ -373,6 +373,7 @@ def update_engine_config_with_dynamo(
             "mode": dynamo_config.benchmark_mode,
             "prefill_isl_granularity": dynamo_config.benchmark_prefill_granularity,
             "prefill_kv_read_granularity": dynamo_config.benchmark_prefill_kv_read_granularity,
+            "prefill_batch_size_granularity": dynamo_config.benchmark_prefill_batch_granularity,
             "decode_length_granularity": dynamo_config.benchmark_decode_length_granularity,
             "decode_batch_size_granularity": dynamo_config.benchmark_decode_batch_granularity,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,

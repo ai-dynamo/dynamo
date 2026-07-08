@@ -13,6 +13,7 @@ spinning up vLLM engine internals.
 from __future__ import annotations
 
 import json
+import math
 from collections import deque
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -141,6 +142,22 @@ def test_extract_scheduled_reports_prefill_kv_reads():
     assert metrics.sum_prefill_tokens == 96
     assert metrics.sum_prefill_kv_tokens == 32
     assert metrics.num_decode_requests == 0
+
+
+def test_extract_scheduled_aggregates_batched_prefill_kv_reads():
+    metrics = _run_extract_scheduled(
+        [
+            _make_new_request("req-1", prompt_len=128, num_computed_tokens=32),
+            _make_new_request("req-2", prompt_len=128, num_computed_tokens=32),
+            _make_new_request("req-3", prompt_len=128, num_computed_tokens=32),
+        ],
+        {"req-1": 96, "req-2": 96, "req-3": 96},
+    )
+
+    assert metrics.num_prefill_requests == 3
+    assert metrics.sum_prefill_tokens == 288
+    assert metrics.sum_prefill_kv_tokens == 96
+    assert metrics.var_prefill_length == 0.0
 
 
 def test_extract_scheduled_counts_benchmark_decode_new_requests_as_decode():
@@ -745,15 +762,25 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
     block_hasher_factory.assert_called_once_with(16, caching_hash_fn)
 
 
-def _prefill_grid_stub(*, kv_read_granularity: int, block_size: int = 8):
+def _prefill_grid_stub(
+    *,
+    kv_read_granularity: int,
+    batch_granularity: int = 1,
+    block_size: int = 8,
+    num_gpu_blocks: int = 64,
+):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_grid = []
     stub._bench_config = SimpleNamespace(
         prefill_isl_granularity=2,
         prefill_kv_read_granularity=kv_read_granularity,
+        prefill_batch_size_granularity=batch_granularity,
     )
     stub.max_num_scheduled_tokens = 40
+    stub.max_num_running_reqs = 8
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=num_gpu_blocks)
     stub.block_size = block_size
+    stub.num_lookahead_tokens = 0
     return stub
 
 
@@ -762,9 +789,9 @@ def test_prefill_kv_read_grid_default_preserves_miss_only_sweep():
 
     InstrumentedScheduler._bench_generate_prefill_grid(stub)
 
-    assert [(p.isl, p.kv_read_tokens) for p in stub._bench_grid] == [
-        (10, 0),
-        (40, 0),
+    assert [(p.isl, p.kv_read_tokens, p.batch_size) for p in stub._bench_grid] == [
+        (10, 0, 1),
+        (40, 0, 1),
     ]
 
 
@@ -773,15 +800,156 @@ def test_prefill_kv_read_grid_crosses_with_isl_and_aligns_to_blocks():
 
     InstrumentedScheduler._bench_generate_prefill_grid(stub)
 
-    assert [(p.isl, p.kv_read_tokens) for p in stub._bench_grid] == [
-        (10, 0),
-        (10, 8),
-        (40, 0),
-        (40, 16),
-        (40, 32),
+    assert [(p.isl, p.kv_read_tokens, p.batch_size) for p in stub._bench_grid] == [
+        (10, 0, 1),
+        (10, 8, 1),
+        (40, 0, 1),
+        (40, 16, 1),
+        (40, 32, 1),
     ]
     assert all(p.kv_read_tokens % stub.block_size == 0 for p in stub._bench_grid)
     assert all(p.kv_read_tokens <= p.isl - 1 for p in stub._bench_grid)
+
+
+def test_prefill_batch_grid_crosses_with_isl_and_kv_reads_within_limits():
+    stub = _prefill_grid_stub(
+        kv_read_granularity=3,
+        batch_granularity=3,
+        block_size=8,
+    )
+
+    InstrumentedScheduler._bench_generate_prefill_grid(stub)
+
+    assert [(p.isl, p.kv_read_tokens, p.batch_size) for p in stub._bench_grid] == [
+        (10, 0, 1),
+        (10, 0, 2),
+        (10, 0, 4),
+        (10, 8, 1),
+        (10, 8, 4),
+        (10, 8, 8),
+        (40, 0, 1),
+        (40, 16, 1),
+        (40, 32, 1),
+        (40, 32, 3),
+        (40, 32, 5),
+    ]
+    for point in stub._bench_grid:
+        assert point.batch_size <= stub.max_num_running_reqs
+        assert (
+            point.batch_size * (point.isl - point.kv_read_tokens)
+            <= stub.max_num_scheduled_tokens
+        )
+        blocks_per_req = math.ceil(point.isl / stub.block_size)
+        assert point.batch_size * blocks_per_req <= stub.cache_config.num_gpu_blocks
+
+
+@pytest.mark.parametrize(
+    ("stub_kwargs", "attrs", "point", "expected"),
+    [
+        (
+            {"batch_granularity": 3, "num_gpu_blocks": 8},
+            {"num_lookahead_tokens": 8},
+            (10, 0),
+            [1, 2],
+        ),
+        ({"batch_granularity": 2, "num_gpu_blocks": 4}, {}, (10, 0), [1]),
+        (
+            {"batch_granularity": 2, "num_gpu_blocks": 11},
+            {"kv_cache_manager": SimpleNamespace(watermark_blocks=3)},
+            (10, 0),
+            [1, 3],
+        ),
+        (
+            {"batch_granularity": 2, "num_gpu_blocks": 13},
+            {
+                "kv_cache_manager": SimpleNamespace(
+                    coordinator=SimpleNamespace(
+                        single_type_managers=[
+                            SimpleNamespace(block_size=8),
+                            SimpleNamespace(block_size=16),
+                        ]
+                    )
+                )
+            },
+            (16, 8),
+            [1, 4],
+        ),
+        (
+            {"batch_granularity": 2, "num_gpu_blocks": 22},
+            {
+                "kv_cache_manager": SimpleNamespace(
+                    coordinator=SimpleNamespace(
+                        single_type_managers=[
+                            SimpleNamespace(block_size=8),
+                            SimpleNamespace(
+                                block_size=8,
+                                mamba_cache_mode="align",
+                                num_speculative_blocks=0,
+                            ),
+                        ]
+                    )
+                )
+            },
+            (40, 32),
+            [1, 3],
+        ),
+        (
+            {"batch_granularity": 2, "num_gpu_blocks": 10},
+            {
+                "kv_cache_manager": SimpleNamespace(
+                    coordinator=SimpleNamespace(
+                        single_type_managers=[
+                            SimpleNamespace(
+                                block_size=8,
+                                _max_admission_blocks_per_request=2,
+                            )
+                        ]
+                    )
+                )
+            },
+            (40, 32),
+            [1, 4],
+        ),
+        (
+            {"batch_granularity": 3},
+            {
+                "scheduler_config": SimpleNamespace(
+                    long_prefill_token_threshold=8
+                )
+            },
+            (40, 16),
+            [1, 3, 5],
+        ),
+        (
+            {"batch_granularity": 3},
+            {
+                "need_mamba_block_aligned_split": True,
+                "kv_cache_manager": SimpleNamespace(use_eagle=False),
+            },
+            (10, 0),
+            [1, 3, 5],
+        ),
+    ],
+    ids=[
+        "lookahead",
+        "null-block",
+        "watermark",
+        "hybrid-groups",
+        "align-mamba",
+        "recycling-cap",
+        "long-prefill-threshold",
+        "mamba-aligned-split",
+    ],
+)
+def test_prefill_batch_grid_respects_scheduler_capacity_constraints(
+    stub_kwargs, attrs, point, expected
+):
+    stub = _prefill_grid_stub(kv_read_granularity=1, block_size=8, **stub_kwargs)
+    stub.cache_config.block_size = 8
+    for name, value in attrs.items():
+        setattr(stub, name, value)
+
+    assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, *point) == expected
 
 
 def test_prefill_kv_read_grid_accounts_for_eagle_cache_block_drop():
@@ -841,8 +1009,10 @@ def test_prefill_kv_read_validation_does_not_record_prefix_cache_stats():
     get_computed_blocks.assert_not_called()
 
 
-def test_prefill_kv_read_seed_drains_then_measures_with_same_salt():
-    point = BenchmarkPoint(point_type="prefill", isl=40, kv_read_tokens=16)
+def test_prefill_kv_read_seed_drains_then_measures_with_distinct_salts():
+    point = BenchmarkPoint(
+        point_type="prefill", isl=40, kv_read_tokens=16, batch_size=3
+    )
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_grid = deque([point])
     stub._bench_config = SimpleNamespace(mode="prefill")
@@ -850,7 +1020,7 @@ def test_prefill_kv_read_seed_drains_then_measures_with_same_salt():
     stub._bench_current_point = None
     stub._bench_current_fpms = []
     stub._bench_pending_seed_point = None
-    stub._bench_pending_seed_salt = None
+    stub._bench_pending_seed_salts = None
     stub._bench_drain_pending = False
     stub._bench_seq = 7
     stub._schedule_times = deque()
@@ -861,7 +1031,7 @@ def test_prefill_kv_read_seed_drains_then_measures_with_same_salt():
     def inject(**kwargs):
         calls.append(kwargs)
         stub._bench_active_req_ids.add(f"request-{len(calls)}")
-        return 1
+        return kwargs.get("n", 1)
 
     stub._bench_inject_prefill = inject
     stub._bench_cleanup_requests = stub._bench_active_req_ids.clear
@@ -872,7 +1042,10 @@ def test_prefill_kv_read_seed_drains_then_measures_with_same_salt():
     assert stub._bench_pending_seed_point is point
     assert calls[0]["prompt_len"] == point.kv_read_tokens
     assert calls[0]["max_tokens"] == 1
-    seed_salt = calls[0]["cache_salt"]
+    assert calls[0]["n"] == point.batch_size
+    seed_salts = calls[0]["cache_salts"]
+    assert len(seed_salts) == point.batch_size
+    assert len(set(seed_salts)) == point.batch_size
 
     # Simulate the seed finishing. The next step requests an async drain.
     stub.requests.clear()
@@ -886,13 +1059,16 @@ def test_prefill_kv_read_seed_drains_then_measures_with_same_salt():
     assert calls[1] == {
         "prompt_len": point.isl,
         "max_tokens": 1,
-        "cache_salt": seed_salt,
+        "n": point.batch_size,
+        "cache_salts": seed_salts,
         "expected_kv_read_tokens": point.kv_read_tokens,
     }
 
 
 def test_prefill_kv_read_validation_miss_skips_measured_point():
-    point = BenchmarkPoint(point_type="prefill", isl=40, kv_read_tokens=16)
+    point = BenchmarkPoint(
+        point_type="prefill", isl=40, kv_read_tokens=16, batch_size=3
+    )
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_grid = deque()
     stub._bench_config = SimpleNamespace(mode="prefill")
@@ -900,7 +1076,7 @@ def test_prefill_kv_read_validation_miss_skips_measured_point():
     stub._bench_current_point = None
     stub._bench_current_fpms = []
     stub._bench_pending_seed_point = point
-    stub._bench_pending_seed_salt = "seed-salt"
+    stub._bench_pending_seed_salts = ["seed-0", "seed-1", "seed-2"]
     stub._bench_drain_pending = False
     stub._schedule_times = deque()
     stub._bench_skipped_points = []
@@ -914,9 +1090,46 @@ def test_prefill_kv_read_validation_miss_skips_measured_point():
     stub._bench_inject_prefill.assert_called_once_with(
         prompt_len=point.isl,
         max_tokens=1,
-        cache_salt="seed-salt",
+        n=point.batch_size,
+        cache_salts=["seed-0", "seed-1", "seed-2"],
         expected_kv_read_tokens=point.kv_read_tokens,
     )
+
+
+def test_prefill_batch_validation_is_atomic(monkeypatch):
+    created_cache_salts = []
+
+    class FakeRequest:
+        def __init__(self, request_id, cache_salt, **kwargs):
+            self.request_id = request_id
+            self.cache_salt = cache_salt
+            created_cache_salts.append(cache_salt)
+
+    monkeypatch.setattr(instrumented_scheduler_module, "Request", FakeRequest)
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "SamplingParams", lambda **kwargs: object()
+    )
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_seq = 4
+    stub._bench_block_hasher = None
+    stub._bench_active_req_ids = set()
+    stub._bench_cached_kv_read_tokens = MagicMock(side_effect=[16, 8, 16])
+    stub.add_request = MagicMock()
+
+    injected = InstrumentedScheduler._bench_inject_prefill(
+        stub,
+        prompt_len=40,
+        max_tokens=1,
+        n=3,
+        cache_salts=["seed-0", "seed-1", "seed-2"],
+        expected_kv_read_tokens=16,
+    )
+
+    assert injected == 0
+    assert created_cache_salts == ["seed-0", "seed-1"]
+    assert stub._bench_seq == 4
+    assert stub._bench_active_req_ids == set()
+    stub.add_request.assert_not_called()
 
 
 def test_benchmark_output_marks_skipped_kv_point_invalid(tmp_path):
@@ -953,7 +1166,15 @@ def test_prefill_point_with_measured_kv_mismatch_is_skipped():
     point = BenchmarkPoint(point_type="prefill", isl=40, kv_read_tokens=16)
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_current_point = point
-    stub._bench_current_fpms = [{"scheduled_requests": {"sum_prefill_kv_tokens": 8}}]
+    stub._bench_current_fpms = [
+        {
+            "scheduled_requests": {
+                "num_prefill_requests": 1,
+                "sum_prefill_tokens": 24,
+                "sum_prefill_kv_tokens": 8,
+            }
+        }
+    ]
     stub._bench_results = []
     stub._bench_skipped_points = []
 
@@ -962,4 +1183,64 @@ def test_prefill_point_with_measured_kv_mismatch_is_skipped():
     assert stub._bench_results == []
     assert stub._bench_skipped_points == [
         SkippedBenchmarkPoint(point=point, reason="measured_kv_read_mismatch")
+    ]
+
+
+def test_prefill_point_with_exact_batch_shape_is_saved():
+    point = BenchmarkPoint(
+        point_type="prefill", isl=40, kv_read_tokens=16, batch_size=3
+    )
+    fpms = [
+        {
+            "scheduled_requests": {
+                "num_prefill_requests": 3,
+                "sum_prefill_tokens": 24,
+                "sum_prefill_kv_tokens": 48,
+            }
+        },
+        {
+            "scheduled_requests": {
+                "num_prefill_requests": 3,
+                "sum_prefill_tokens": 24,
+                "sum_prefill_kv_tokens": 72,
+            }
+        },
+    ]
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_current_point = point
+    stub._bench_current_fpms = fpms
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == [
+        instrumented_scheduler_module.BenchmarkPointResult(point=point, fpms=fpms)
+    ]
+    assert stub._bench_skipped_points == []
+
+
+def test_prefill_point_with_measured_batch_size_mismatch_is_skipped():
+    point = BenchmarkPoint(
+        point_type="prefill", isl=40, kv_read_tokens=16, batch_size=3
+    )
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_current_point = point
+    stub._bench_current_fpms = [
+        {
+            "scheduled_requests": {
+                "num_prefill_requests": 2,
+                "sum_prefill_tokens": 48,
+                "sum_prefill_kv_tokens": 32,
+            }
+        }
+    ]
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == [
+        SkippedBenchmarkPoint(point=point, reason="measured_batch_size_mismatch")
     ]

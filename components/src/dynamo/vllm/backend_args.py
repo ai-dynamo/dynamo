@@ -226,7 +226,7 @@ class DynamoVllmArgGroup(ArgGroup):
             choices=["prefill", "decode", "agg"],
             help=(
                 "Run self-benchmark on startup before accepting requests. "
-                "Sweeps prefill (ISL x KV-read tokens) and/or decode "
+                "Sweeps prefill (ISL x KV-read tokens x batch_size) and/or decode "
                 "(context_length x batch_size) points, collecting "
                 "ForwardPassMetrics at each operating point."
             ),
@@ -255,6 +255,22 @@ class DynamoVllmArgGroup(ArgGroup):
                 "(cache miss; default: 1). Values greater than 1 require prefix "
                 "caching. The total benchmark grid is limited to "
                 f"{MAX_BENCHMARK_GRID_POINTS} points."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-prefill-batch-granularity",
+            env_var="DYN_BENCHMARK_PREFILL_BATCH_GRANULARITY",
+            default=1,
+            arg_type=int,
+            help=(
+                "Maximum number of batch-size samples per prefill ISL and "
+                f"KV-read point (1 to {MAX_BENCHMARK_AXIS_GRANULARITY}). "
+                "Samples are evenly spaced from 1 to the largest homogeneous "
+                "batch that fits the request-count, uncached-token, and KV-cache "
+                "limits, then deduplicated; therefore fewer samples may result. "
+                "A value of 1 samples only batch size 1 (default: 1). The total "
+                f"benchmark grid is limited to {MAX_BENCHMARK_GRID_POINTS} points."
             ),
         )
         add_argument(
@@ -350,6 +366,7 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_mode: Optional[str] = None
     benchmark_prefill_granularity: int = 16
     benchmark_prefill_kv_read_granularity: int = 1
+    benchmark_prefill_batch_granularity: int = 1
     benchmark_decode_length_granularity: int = 6
     benchmark_decode_batch_granularity: int = 6
     benchmark_warmup_iterations: int = 5
@@ -375,6 +392,9 @@ class DynamoVllmConfig(ConfigBase):
             "benchmark_prefill_kv_read_granularity": int(
                 self.benchmark_prefill_kv_read_granularity
             ),
+            "benchmark_prefill_batch_granularity": int(
+                self.benchmark_prefill_batch_granularity
+            ),
             "benchmark_decode_length_granularity": int(
                 self.benchmark_decode_length_granularity
             ),
@@ -393,7 +413,8 @@ class DynamoVllmConfig(ConfigBase):
 
         point_counts = {
             "prefill": axes["benchmark_prefill_granularity"]
-            * axes["benchmark_prefill_kv_read_granularity"],
+            * axes["benchmark_prefill_kv_read_granularity"]
+            * axes["benchmark_prefill_batch_granularity"],
             "decode": axes["benchmark_decode_length_granularity"]
             * axes["benchmark_decode_batch_granularity"],
         }
