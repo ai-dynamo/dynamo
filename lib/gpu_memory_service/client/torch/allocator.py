@@ -295,9 +295,9 @@ def prune_allocations(
         return
 
     if synchronize:
-        from gpu_memory_service.common.vmm import get_vmm
+        from gpu_memory_service.integrations.common.utils import torch_device
 
-        get_vmm().synchronize()
+        torch_device().synchronize(manager.device)
 
     keep = {str(allocation_id) for allocation_id in referenced_allocation_ids}
 

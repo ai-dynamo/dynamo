@@ -27,9 +27,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _child_command(device: int) -> list[str]:
+def _child_command(device: int, device_type: str) -> list[str]:
     """Command for one child process serving every production tag on one GPU."""
-    return [sys.executable, "-m", "gpu_memory_service", "--device", str(device)]
+    return [
+        sys.executable,
+        "-m",
+        "gpu_memory_service",
+        "--device",
+        str(device),
+        "--device-type",
+        device_type,
+    ]
 
 
 def _terminate_all(processes: list[subprocess.Popen]) -> None:
@@ -69,16 +77,7 @@ def main() -> None:
     devices = vmm.list_devices()
     processes = []
     for device in devices:
-        cmd = [
-            sys.executable,
-            "-m",
-            "gpu_memory_service",
-            "--device",
-            str(device),
-            "--device-type",
-            args.device_type,
-        ]
-        proc = subprocess.Popen(cmd)
+        proc = subprocess.Popen(_child_command(device, args.device_type))
         logger.info(
             "Started GMS device=%d device_type=%s pid=%d",
             device,

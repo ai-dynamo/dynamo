@@ -8,7 +8,6 @@ from _fake_vmm import FakeVMM
 
 try:
     from gpu_memory_service.cli.snapshot import loader
-    from gpu_memory_service.common.vmm import VMMDeviceType
 except ModuleNotFoundError:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
@@ -34,7 +33,7 @@ def test_list_checkpoint_devices_requires_exact_visible_device_match(
     (tmp_path / "device-1").write_text("not a directory", encoding="utf-8")
     monkeypatch.setattr(loader, "get_vmm", lambda: FakeVMM(devices=[0, 2]))
 
-    assert loader._list_checkpoint_devices(str(tmp_path), VMMDeviceType.CUDA) == [0, 2]
+    assert loader._list_checkpoint_devices(str(tmp_path)) == [0, 2]
 
 
 @pytest.mark.parametrize(
@@ -58,7 +57,7 @@ def test_list_checkpoint_devices_rejects_mismatched_checkpoints(
     monkeypatch.setattr(loader, "get_vmm", lambda: FakeVMM(devices=visible_devices))
 
     with pytest.raises(RuntimeError, match=expected):
-        loader._list_checkpoint_devices(str(tmp_path), VMMDeviceType.CUDA)
+        loader._list_checkpoint_devices(str(tmp_path))
 
 
 def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):

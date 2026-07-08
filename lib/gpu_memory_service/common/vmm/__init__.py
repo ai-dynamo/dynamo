@@ -65,8 +65,9 @@ def init_vmm(device_type: VMMDeviceType) -> None:
                     f"cannot reinitialize as {device_type!r}"
                 )
             return
+        inst = _create_vmm(device_type)
         _vmm_device_type = device_type
-        _vmm_instance = _create_vmm(device_type)
+        _vmm_instance = inst
 
 
 def _detect_device_type() -> VMMDeviceType:

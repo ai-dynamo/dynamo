@@ -37,8 +37,8 @@ This design introduces a **device-agnostic VMM abstraction layer** so that Intel
 │  get_vmm() → VMMDevice                               │
 │                                                      │
 │  ┌───────────────┐          ┌───────────────┐        │
-│  │  CudaVMM      │          │  XpuVMM (TBD) │        │
-│  │  (cuda_utils) │          │  (sycl_utils) │        │
+│  │  CudaVMM      │          │  XpuVMM       │        │
+│  │  (cuda_utils) │          │  (xpu_utils)  │        │
 │  └───────────────┘          └───────────────┘        │
 └──────────────────────────────────────────────────────┘
                          │
@@ -156,7 +156,7 @@ No constructor threading — every module calls `get_vmm()` directly.
 
 ### 5.1 `XpuVMM(VMMDevice)`
 
-Implement the methods on the oneAPI SYCL runtime.
+Implement the methods on the OneAPI/Torch runtime.
 
 ### 5.2 Torch Allocator Dispatch
 

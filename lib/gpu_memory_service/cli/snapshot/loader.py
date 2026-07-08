@@ -119,7 +119,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _list_checkpoint_devices(
     checkpoint_dir: str | None,
-    device_type: VMMDeviceType,
 ) -> list[int]:
     vmm = get_vmm()
     vmm.ensure_initialized()
@@ -182,7 +181,7 @@ def main(argv: list[str] | None = None) -> None:
         ",".join(sharded_ssd_roots) or "-",
         sharded_ssd_queues_per_root,
     )
-    devices = _list_checkpoint_devices(checkpoint_dir, device_type)
+    devices = _list_checkpoint_devices(checkpoint_dir)
 
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(devices)) as pool:
