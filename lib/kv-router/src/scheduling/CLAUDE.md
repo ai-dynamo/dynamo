@@ -3,9 +3,50 @@
 Scheduling owns request admission, queueing, worker selection, and the handoff
 from projected load into sequence-state booking.
 
+## Queue hierarchy
+
+There is one `SchedulerQueueActor` per scheduler, not one per policy class. It owns one outer `PolicyQueue`, which owns one `PolicyClassQueue` for every class in the resolved profile.
+
+```mermaid
+sequenceDiagram
+    participant H as SchedulerQueue
+    participant A as SchedulerQueueActor
+    box PolicyQueue owns all class queues
+        participant P as PolicyQueue
+        participant C as PolicyClassQueue instances
+    end
+    participant S as WorkerSelector
+
+    H->>A: Enqueue(request)
+    A->>A: Resolve class_index
+    alt Immediate path
+        A->>S: select_worker(request)
+        S-->>A: Selected worker
+        A->>A: Book state and respond
+    else Queued path
+        A->>P: enqueue(class_index, request)
+        P->>C: Push into the selected class queue
+        H->>A: Update after capacity changes
+        A->>P: pop_next()
+        P->>C: Get one candidate per dispatchable class
+        C-->>P: Class-local candidates
+        P-->>A: DRR winner
+        A->>S: select_worker(request)
+        S-->>A: Selected worker
+        A->>A: Book state and respond
+    end
+```
+
+- `SchedulerQueue` is the public handle that sends commands to the actor.
+- `SchedulerQueueActor` classifies each request and chooses the immediate or queued path.
+- `PolicyQueue` does not classify requests. It owns all class queues and runs DRR across their candidates.
+- Each `PolicyClassQueue` owns ordering and accounting for one class such as `latency`, `agents`, or `batch`.
+- `SchedulerQueueActor::admit_one` performs final worker selection and booking after either path.
+- A single-class profile still uses `PolicyQueue`, but DRR has no cross-class effect.
+
 ## Guardrails
 
-- `SchedulerQueue::admit_one` is the canonical admission path: compute projected
+- `SchedulerQueueActor::admit_one` is the canonical admission path: compute projected
   load, select worker, skip booking if the response receiver is closed, then
   book state before responding. Failed response delivery must roll back the
   booking. Do not bypass this for normal scheduling.
