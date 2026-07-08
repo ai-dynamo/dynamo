@@ -11,9 +11,11 @@
 //! emit. Test fixtures are handwritten JSONL under `tests/data/replays/harness/`.
 //!
 //! This intentionally stays as a small Rust `AsyncEngine` instead of reusing
-//! `python -m dynamo.replay`: these tests exercise the Rust HTTP service
-//! in-process, need direct access to the engine cancellation context, and should
-//! not depend on a separate Python process or replay deployment.
+//! the Rust replay/mocker implementation behind `python -m dynamo.replay`.
+//! That implementation simulates request traces through mock workers and
+//! produces performance artifacts; these tests instead need to feed recorded
+//! `NvCreateChatCompletionStreamResponse` chunks directly into the in-process
+//! HTTP service and observe its engine cancellation context.
 
 use std::path::Path;
 use std::sync::Arc;
