@@ -2402,6 +2402,7 @@ dependencies = [
  "futures-util",
  "hf-hub 0.4.3",
  "indicatif 0.18.4",
+ "libc",
  "minstant",
  "rand 0.9.4",
  "reqwest 0.12.28",

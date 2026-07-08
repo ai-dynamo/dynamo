@@ -7,6 +7,9 @@ mod support;
 #[path = "support/mooncake_g2_lower_tier.rs"]
 mod g2_lower_tier;
 
+#[allow(dead_code)]
+#[path = "../kv_router/mooncake_open_loop.rs"]
+mod mooncake_open_loop;
 #[path = "../kv_router/mooncake_shared.rs"]
 mod mooncake_shared;
 
@@ -26,15 +29,25 @@ use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{
-    KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier, TokensWithHashes, WorkerWithDpRank,
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+    KvCacheStoredBlockData, OverlapScores, StorageTier, TokensWithHashes, WorkerWithDpRank,
 };
+use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
-use dynamo_mocker::loadgen::{SessionTrace, Trace, TurnTrace};
-use dynamo_mocker::replay::ReplayKvEventVisibility;
+use dynamo_mocker::loadgen::{ReplayRequestHashes, SessionTrace, Trace, TurnTrace};
+use dynamo_mocker::replay::{
+    ReplayKvEventVisibility, ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts,
+};
+use mooncake_open_loop::{
+    MooncakeOperationPayload, OpenLoopConfig, PreparedMooncakeCorpus, prepare_mooncake_corpus,
+    prepare_open_loop_trial, run_open_loop,
+};
 use mooncake_shared::{
-    MooncakeBenchmarkConfig, MooncakeBenchmarkInput, MooncakeIndexerConfig, run_benchmark,
+    MooncakeBenchmarkConfig, MooncakeIndexerConfig, PreparedMooncakeBenchmark, WorkerTraceEntry,
+    merge_worker_traces, prepare_scaled_benchmark,
 };
 use tempfile::NamedTempFile;
+use uuid::Uuid;
 
 const BLOCK_SIZE: u32 = 128;
 const NUM_GPU_BLOCKS: usize = 16384;
@@ -49,6 +62,21 @@ const G2_TEST_NUM_GPU_BLOCKS: usize = 512;
 const G2_TEST_NUM_G2_BLOCKS: usize = 16_384;
 
 type NormalizedOverlapScores = BTreeMap<WorkerWithDpRank, u32>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComparableOverlapScores {
+    scores: NormalizedOverlapScores,
+    frequencies: Vec<usize>,
+}
+
+impl From<OverlapScores> for ComparableOverlapScores {
+    fn from(overlap: OverlapScores) -> Self {
+        Self {
+            scores: overlap.scores.into_iter().collect(),
+            frequencies: overlap.frequencies,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct MockEngineReplayArtifacts {
@@ -110,38 +138,42 @@ impl MockEngineParityKind {
     }
 }
 
+#[cfg(feature = "mocker-kvbm-offload")]
 #[derive(Clone)]
-enum ReplayEntryKind {
+enum DeviceReplayEntryKind {
     Request(Vec<LocalBlockHash>),
     Event {
         event: KvCacheEvent,
         storage_tier: StorageTier,
     },
-    ApproxWrite(Vec<u32>),
 }
 
+#[cfg(feature = "mocker-kvbm-offload")]
 #[derive(Clone)]
-struct ReplayEntry {
+struct DeviceReplayEntry {
     timestamp_us: u64,
     worker_id: u64,
     kind_rank: u8,
-    kind: ReplayEntryKind,
+    kind: DeviceReplayEntryKind,
 }
 
-fn collect_replay_entries(artifacts: &[WorkerReplayArtifacts]) -> Vec<ReplayEntry> {
+#[cfg(feature = "mocker-kvbm-offload")]
+fn collect_device_only_replay_entries(
+    artifacts: &[WorkerReplayArtifacts],
+) -> Vec<DeviceReplayEntry> {
     let mut entries = Vec::new();
     for (worker_id, artifact) in artifacts.iter().enumerate() {
-        entries.extend(artifact.requests.iter().map(|request| ReplayEntry {
+        entries.extend(artifact.requests.iter().map(|request| DeviceReplayEntry {
             timestamp_us: request.timestamp_us,
             worker_id: worker_id as u64,
             kind_rank: 0,
-            kind: ReplayEntryKind::Request(request.replay_hashes.local_block_hashes.clone()),
+            kind: DeviceReplayEntryKind::Request(request.replay_hashes.local_block_hashes.clone()),
         }));
-        entries.extend(artifact.kv_events.iter().map(|event| ReplayEntry {
+        entries.extend(artifact.kv_events.iter().map(|event| DeviceReplayEntry {
             timestamp_us: event.timestamp_us,
             worker_id: worker_id as u64,
             kind_rank: 1,
-            kind: ReplayEntryKind::Event {
+            kind: DeviceReplayEntryKind::Event {
                 event: event.event.clone(),
                 storage_tier: event.storage_tier,
             },
@@ -149,37 +181,6 @@ fn collect_replay_entries(artifacts: &[WorkerReplayArtifacts]) -> Vec<ReplayEntr
     }
     entries.sort_by_key(|entry| (entry.timestamp_us, entry.kind_rank, entry.worker_id));
     entries
-}
-
-fn collect_approx_replay_entries(traces: &[Trace]) -> anyhow::Result<Vec<ReplayEntry>> {
-    let mut entries = Vec::new();
-    for (worker_id, trace) in traces.iter().enumerate() {
-        let trace_block_size = trace.block_size;
-        for session in &trace.sessions {
-            let mut timestamp_ms = session.first_arrival_timestamp_ms.unwrap_or(0.0);
-            for (turn_idx, turn) in session.turns.iter().enumerate() {
-                if turn_idx > 0 {
-                    timestamp_ms += turn.delay_after_previous_ms;
-                }
-                let replay_hashes = turn.to_replay_hashes(trace_block_size, BLOCK_SIZE as usize)?;
-                let timestamp_us = (timestamp_ms.max(0.0) * 1000.0) as u64;
-                entries.push(ReplayEntry {
-                    timestamp_us,
-                    worker_id: worker_id as u64,
-                    kind_rank: 0,
-                    kind: ReplayEntryKind::Request(replay_hashes.local_block_hashes),
-                });
-                entries.push(ReplayEntry {
-                    timestamp_us,
-                    worker_id: worker_id as u64,
-                    kind_rank: 1,
-                    kind: ReplayEntryKind::ApproxWrite(turn.synthesize_tokens(trace_block_size)?),
-                });
-            }
-        }
-    }
-    entries.sort_by_key(|entry| (entry.timestamp_us, entry.kind_rank, entry.worker_id));
-    Ok(entries)
 }
 
 fn count_removed_kv_events(artifacts: &[WorkerReplayArtifacts]) -> usize {
@@ -225,39 +226,121 @@ async fn generate_mock_engine_parity_artifacts(
     Ok(artifact_sets)
 }
 
-#[derive(Clone, Copy, Debug)]
-enum MooncakeReplayMode {
-    KvEvents,
-    Approx,
-}
-
-impl MooncakeReplayMode {
-    fn name(self) -> &'static str {
-        match self {
-            MooncakeReplayMode::KvEvents => "kv-events",
-            MooncakeReplayMode::Approx => "approx",
-        }
+fn original_prepared_query(
+    prepared: &PreparedMooncakeBenchmark,
+    benchmark: MooncakeBenchmarkConfig,
+    worker_id: u64,
+    source_ordinal: usize,
+) -> anyhow::Result<&[LocalBlockHash]> {
+    let worker_id = usize::try_from(worker_id)?;
+    let num_workers = prepared.worker_traces.len();
+    let total_workers = num_workers
+        .checked_mul(benchmark.inference_worker_duplication_factor)
+        .ok_or_else(|| anyhow::anyhow!("prepared worker count overflow"))?;
+    if worker_id >= total_workers || num_workers == 0 {
+        anyhow::bail!("prepared dispatch references unknown worker {worker_id}");
     }
+    let base_worker = worker_id % num_workers;
+    let entry = prepared
+        .worker_traces
+        .iter()
+        .nth(base_worker)
+        .and_then(|trace| trace.get(source_ordinal))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "prepared dispatch references missing source entry {source_ordinal} for worker {worker_id}"
+            )
+        })?;
+    let WorkerTraceEntry::Request(hashes) = &entry.entry else {
+        anyhow::bail!(
+            "prepared dispatch query points to non-query source entry {source_ordinal} for worker {worker_id}"
+        );
+    };
+    Ok(hashes)
 }
 
-async fn collect_overlap_scores_for_replay(
+async fn collect_prepared_corpus_scores(
+    indexer: Arc<dyn KvIndexerInterface + Send + Sync>,
+    prepared: &PreparedMooncakeBenchmark,
+    benchmark: MooncakeBenchmarkConfig,
+    corpus: &PreparedMooncakeCorpus,
+) -> anyhow::Result<Vec<ComparableOverlapScores>> {
+    let mut scores = Vec::new();
+    let mut idx = 0usize;
+
+    while idx < corpus.operations.len() {
+        let deadline_ns = corpus.operations[idx].deadline_ns;
+        while idx < corpus.operations.len() && corpus.operations[idx].deadline_ns == deadline_ns {
+            let entry = &corpus.operations[idx];
+            match &entry.payload {
+                MooncakeOperationPayload::Query => {
+                    let request = corpus.query_hashes(entry.id)?;
+                    let original = original_prepared_query(
+                        prepared,
+                        benchmark,
+                        entry.worker_id,
+                        entry.source_ordinal,
+                    )?;
+                    assert_eq!(
+                        request, original,
+                        "flattened query slab diverged from source hashes for operation {}",
+                        entry.id
+                    );
+                    let overlap = indexer.find_matches(request.to_vec()).await?;
+                    scores.push(overlap.into());
+                }
+                MooncakeOperationPayload::Event(event) => indexer.apply_event(event.clone()).await,
+            }
+            idx += 1;
+        }
+        indexer.flush().await;
+    }
+
+    indexer.shutdown();
+    Ok(scores)
+}
+
+async fn collect_prepared_corpus_overlap_scores(
     config: &MooncakeIndexerConfig,
-    traces: &[Trace],
     artifacts: &[WorkerReplayArtifacts],
-    mode: MooncakeReplayMode,
+) -> anyhow::Result<Vec<ComparableOverlapScores>> {
+    Ok(
+        collect_prepared_corpus_overlap_scores_with_metrics(config, artifacts)
+            .await?
+            .0,
+    )
+}
+
+async fn collect_prepared_corpus_overlap_scores_with_metrics(
+    config: &MooncakeIndexerConfig,
+    artifacts: &[WorkerReplayArtifacts],
+) -> anyhow::Result<(Vec<ComparableOverlapScores>, Arc<KvIndexerMetrics>)> {
+    let benchmark = MooncakeBenchmarkConfig {
+        benchmark_duration_ms: BENCHMARK_DURATION_MS,
+        inference_worker_duplication_factor: 1,
+    };
+    let merged = merge_worker_traces(artifacts.to_vec(), BLOCK_SIZE)?;
+    let prepared = prepare_scaled_benchmark(merged, benchmark.benchmark_duration_ms);
+    let corpus = prepare_mooncake_corpus(
+        prepared.clone(),
+        benchmark.inference_worker_duplication_factor,
+    )?;
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    let indexer = config.build(BLOCK_SIZE, Arc::clone(&metrics));
+
+    Ok((
+        collect_prepared_corpus_scores(indexer, &prepared, benchmark, &corpus).await?,
+        metrics,
+    ))
+}
+
+#[cfg(feature = "mocker-kvbm-offload")]
+async fn collect_device_only_overlap_scores(
+    config: &MooncakeIndexerConfig,
+    artifacts: &[WorkerReplayArtifacts],
 ) -> anyhow::Result<Vec<NormalizedOverlapScores>> {
-    let indexer = match mode {
-        MooncakeReplayMode::KvEvents => {
-            config.build(BLOCK_SIZE, Arc::new(KvIndexerMetrics::new_unregistered()))
-        }
-        MooncakeReplayMode::Approx => {
-            config.build_approximate(BLOCK_SIZE, Arc::new(KvIndexerMetrics::new_unregistered()))?
-        }
-    };
-    let entries = match mode {
-        MooncakeReplayMode::KvEvents => collect_replay_entries(artifacts),
-        MooncakeReplayMode::Approx => collect_approx_replay_entries(traces)?,
-    };
+    let indexer = config.build(BLOCK_SIZE, Arc::new(KvIndexerMetrics::new_unregistered()));
+    let entries = collect_device_only_replay_entries(artifacts);
     let mut scores = Vec::new();
     let mut idx = 0;
 
@@ -265,32 +348,25 @@ async fn collect_overlap_scores_for_replay(
         let timestamp_us = entries[idx].timestamp_us;
         while idx < entries.len() && entries[idx].timestamp_us == timestamp_us {
             match &entries[idx].kind {
-                ReplayEntryKind::Request(request) => {
+                DeviceReplayEntryKind::Request(request) => {
                     let overlap = indexer.find_matches(request.clone()).await?;
                     scores.push(overlap.scores.into_iter().collect());
                 }
-                ReplayEntryKind::Event {
+                DeviceReplayEntryKind::Event {
                     event,
                     storage_tier,
                 } => {
                     if storage_tier.is_gpu() {
                         indexer
-                            .apply_event(RouterEvent::with_storage_tier(
-                                entries[idx].worker_id,
-                                event.clone(),
-                                *storage_tier,
-                            ))
+                            .apply_event(
+                                dynamo_kv_router::protocols::RouterEvent::with_storage_tier(
+                                    entries[idx].worker_id,
+                                    event.clone(),
+                                    *storage_tier,
+                                ),
+                            )
                             .await;
                     }
-                }
-                ReplayEntryKind::ApproxWrite(tokens) => {
-                    let mut tokens_with_hashes = TokensWithHashes::new(tokens.clone(), BLOCK_SIZE);
-                    indexer
-                        .process_routing_decision_for_request(
-                            &mut tokens_with_hashes,
-                            WorkerWithDpRank::from_worker_id(entries[idx].worker_id),
-                        )
-                        .await?;
                 }
             }
             idx += 1;
@@ -302,80 +378,56 @@ async fn collect_overlap_scores_for_replay(
     Ok(scores)
 }
 
-async fn collect_overlap_scores_for_supported_modes(
-    config: &MooncakeIndexerConfig,
-    traces: &[Trace],
-    artifact_sets: &[MockEngineReplayArtifacts],
-) -> anyhow::Result<Vec<(String, Vec<NormalizedOverlapScores>)>> {
-    let mut results = Vec::new();
-    for artifact_set in artifact_sets {
-        results.push((
-            format!(
-                "{} {} ({})",
-                config.short_name(),
-                artifact_set.engine_name,
-                MooncakeReplayMode::KvEvents.name()
-            ),
-            collect_overlap_scores_for_replay(
-                config,
-                traces,
-                &artifact_set.artifacts,
-                MooncakeReplayMode::KvEvents,
-            )
-            .await?,
-        ));
-    }
-    if config.supports_approximate() {
-        results.push((
-            format!(
-                "{} ({})",
-                config.short_name(),
-                MooncakeReplayMode::Approx.name()
-            ),
-            collect_overlap_scores_for_replay(config, traces, &[], MooncakeReplayMode::Approx)
-                .await?,
-        ));
-    }
-    Ok(results)
-}
-
 async fn assert_overlap_score_parity(
     variants: &[MooncakeIndexerConfig],
-    traces: &[Trace],
     artifact_sets: &[MockEngineReplayArtifacts],
+    warning_count: Option<&Arc<std::sync::atomic::AtomicUsize>>,
 ) -> anyhow::Result<()> {
-    let mut expected_name = None;
-    let mut expected_scores = Vec::new();
+    let mut expected_by_replay = BTreeMap::<String, (String, Vec<ComparableOverlapScores>)>::new();
 
     for config in variants {
-        for (actual_name, actual_scores) in
-            collect_overlap_scores_for_supported_modes(config, traces, artifact_sets).await?
-        {
-            if expected_name.is_none() {
-                expected_name = Some(actual_name);
-                expected_scores = actual_scores;
+        if let Some(warning_count) = warning_count {
+            support::reset_warning_count(warning_count);
+        }
+
+        for artifact_set in artifact_sets {
+            let replay_name = format!("{} (kv-events)", artifact_set.engine_name);
+            let actual_name = format!("{} {replay_name}", config.short_name());
+            let actual_scores =
+                collect_prepared_corpus_overlap_scores(config, &artifact_set.artifacts).await?;
+            let Some((expected_name, expected_scores)) = expected_by_replay.get(&replay_name)
+            else {
+                expected_by_replay.insert(replay_name, (actual_name, actual_scores));
                 continue;
-            }
+            };
 
             assert_eq!(
                 actual_scores.len(),
                 expected_scores.len(),
                 "{} produced a different number of request overlap results than {}",
                 actual_name,
-                expected_name.as_deref().unwrap()
+                expected_name
             );
 
             for (request_idx, (actual, expected)) in
                 actual_scores.iter().zip(expected_scores.iter()).enumerate()
             {
                 assert_eq!(
-                    actual,
-                    expected,
+                    actual, expected,
                     "{} overlap scores diverged from {} at replay request {request_idx}",
-                    actual_name,
-                    expected_name.as_deref().unwrap()
+                    actual_name, expected_name
                 );
             }
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Some(warning_count) = warning_count {
+            assert_eq!(
+                warning_count.load(Ordering::Relaxed),
+                0,
+                "{} parity replay emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker",
+                config.short_name()
+            );
         }
     }
 
@@ -510,6 +562,134 @@ fn removed_legacy_branch_sharded_name_is_rejected() {
     assert!(!valid_names.contains(&removed_name));
 }
 
+#[test]
+fn open_loop_preparation_preserves_query_first_ties_and_removed_blocks() -> anyhow::Result<()> {
+    let artifacts = vec![ReplayWorkerArtifacts {
+        requests: vec![ReplayTimedRequest {
+            uuid: Uuid::nil(),
+            timestamp_us: 100,
+            scheduled_ready_at_ms: 0.0,
+            input_length: 2,
+            output_length: 1,
+            replay_hashes: ReplayRequestHashes {
+                local_block_hashes: vec![LocalBlockHash(1), LocalBlockHash(2)],
+                sequence_hashes: Vec::new(),
+            },
+        }],
+        output_signals: Vec::new(),
+        kv_events: vec![
+            ReplayTimedKvEvent {
+                event: KvCacheEvent {
+                    event_id: 7,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: vec![
+                            ExternalSequenceBlockHash(11),
+                            ExternalSequenceBlockHash(12),
+                            ExternalSequenceBlockHash(13),
+                        ],
+                    }),
+                    dp_rank: 0,
+                },
+                storage_tier: StorageTier::Device,
+                timestamp_us: 100,
+            },
+            ReplayTimedKvEvent {
+                event: KvCacheEvent {
+                    event_id: 8,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None,
+                        start_position: Some(0),
+                        blocks: vec![
+                            KvCacheStoredBlockData {
+                                block_hash: ExternalSequenceBlockHash(21),
+                                tokens_hash: LocalBlockHash(101),
+                                mm_extra_info: None,
+                            },
+                            KvCacheStoredBlockData {
+                                block_hash: ExternalSequenceBlockHash(22),
+                                tokens_hash: LocalBlockHash(102),
+                                mm_extra_info: None,
+                            },
+                        ],
+                    }),
+                    dp_rank: 0,
+                },
+                storage_tier: StorageTier::Device,
+                timestamp_us: 100,
+            },
+        ],
+    }];
+    let benchmark = MooncakeBenchmarkConfig {
+        benchmark_duration_ms: 1_000,
+        inference_worker_duplication_factor: 1,
+    };
+    let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?;
+    let prepared = prepare_scaled_benchmark(merged, benchmark.benchmark_duration_ms);
+    let corpus = prepare_mooncake_corpus(prepared, benchmark.inference_worker_duplication_factor)?;
+
+    assert_eq!(corpus.operations.len(), 3);
+    assert!(
+        matches!(
+            corpus.operations[0].payload,
+            MooncakeOperationPayload::Query
+        ),
+        "query must be accepted before an equal-time event"
+    );
+    assert!(matches!(
+        corpus.operations[1].payload,
+        MooncakeOperationPayload::Event(_)
+    ));
+    assert!(matches!(
+        corpus.operations[2].payload,
+        MooncakeOperationPayload::Event(_)
+    ));
+    assert_eq!(corpus.test_block_totals(), (2, 5));
+    Ok(())
+}
+
+#[test]
+fn mooncake_preparation_normalizes_each_workers_first_entry_before_rescaling() -> anyhow::Result<()>
+{
+    let worker = |first_timestamp_us| ReplayWorkerArtifacts {
+        requests: [first_timestamp_us, first_timestamp_us + 100]
+            .into_iter()
+            .map(|timestamp_us| ReplayTimedRequest {
+                uuid: Uuid::nil(),
+                timestamp_us,
+                scheduled_ready_at_ms: 0.0,
+                input_length: 1,
+                output_length: 1,
+                replay_hashes: ReplayRequestHashes {
+                    local_block_hashes: vec![LocalBlockHash(timestamp_us)],
+                    sequence_hashes: Vec::new(),
+                },
+            })
+            .collect(),
+        output_signals: Vec::new(),
+        kv_events: Vec::new(),
+    };
+    let merged = merge_worker_traces(vec![worker(10), worker(1_000)], BLOCK_SIZE)?;
+    let prepared = prepare_scaled_benchmark(merged, 1_000);
+
+    for trace in prepared.worker_traces.iter() {
+        assert_eq!(trace.first().map(|entry| entry.timestamp_us), Some(0));
+        assert_eq!(
+            trace.last().map(|entry| entry.timestamp_us),
+            Some(1_000_000)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn open_loop_cpu_list_parser_accepts_ranges() {
+    assert_eq!(
+        mooncake_open_loop::parse_cpu_list("0-2,5,7-8").unwrap(),
+        [0, 1, 2, 5, 7, 8]
+    );
+    assert!(mooncake_open_loop::parse_cpu_list("4-2").is_err());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Result<()> {
     let trace = Trace {
@@ -554,6 +734,54 @@ async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Resul
         "expected second request to wait for completion plus delay"
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Result<()> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, 2, 42)?;
+    let artifacts = generate_replay_artifacts(&traces, NUM_GPU_BLOCKS, BLOCK_SIZE, None).await?;
+    let benchmark = MooncakeBenchmarkConfig {
+        benchmark_duration_ms: 5_000,
+        inference_worker_duplication_factor: 1,
+    };
+    let merged = merge_worker_traces(artifacts, BLOCK_SIZE)?;
+    let prepared = prepare_scaled_benchmark(merged, benchmark.benchmark_duration_ms);
+    let corpus = prepare_mooncake_corpus(prepared, benchmark.inference_worker_duplication_factor)?;
+    let trial = prepare_open_loop_trial(corpus, 2)?;
+    let indexer = Arc::new(ThreadPoolIndexer::new(
+        ConcurrentRadixTreeCompressed::new(),
+        2,
+        BLOCK_SIZE,
+    ));
+
+    let result = run_open_loop(
+        "concurrent-radix-tree-compressed",
+        indexer,
+        trial,
+        OpenLoopConfig {
+            query_lanes: 2,
+            issuer_threads: 3,
+            spin_us: 50,
+            issue_lag_diagnostic_threshold_us: 250,
+            pre_run_quiescence_ms: 0,
+            issuer_cpus: Vec::new(),
+            query_issuer_cpu: None,
+            backend_cpus: Vec::new(),
+        },
+    )
+    .await?;
+
+    assert!(result.total_requests > 0);
+    assert!(result.total_events > 0);
+    assert!(
+        result.failure_reasons.is_empty(),
+        "{:?}",
+        result.failure_reasons
+    );
+    assert_eq!(result.queue_depth_at_stop.len(), 2);
+    assert!(result.update_scheduled_to_finished.max_ns > 0);
     Ok(())
 }
 
@@ -624,82 +852,37 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
     ];
 
     for config in &variants {
-        let mut inputs = artifact_sets
-            .iter()
-            .map(|artifact_set| {
-                (
-                    format!(
-                        "{} {} ({})",
-                        config.short_name(),
-                        artifact_set.engine_name,
-                        MooncakeReplayMode::KvEvents.name()
-                    ),
-                    MooncakeBenchmarkInput::KvEvents(artifact_set.artifacts.clone()),
-                    MooncakeReplayMode::KvEvents,
-                )
-            })
-            .collect::<Vec<_>>();
-        if config.supports_approximate() {
-            inputs.push((
-                format!(
-                    "{} ({})",
-                    config.short_name(),
-                    MooncakeReplayMode::Approx.name()
-                ),
-                MooncakeBenchmarkInput::Approx(traces.clone()),
-                MooncakeReplayMode::Approx,
-            ));
-        }
-
-        for (label, input, mode) in inputs {
+        for artifact_set in &artifact_sets {
+            let label = format!(
+                "{} {} ({})",
+                config.short_name(),
+                artifact_set.engine_name,
+                "kv-events"
+            );
             support::reset_warning_count(&warning_count);
-
-            let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-            let indexer = match mode {
-                MooncakeReplayMode::KvEvents => config.build(BLOCK_SIZE, Arc::clone(&metrics)),
-                MooncakeReplayMode::Approx => {
-                    config.build_approximate(BLOCK_SIZE, Arc::clone(&metrics))?
-                }
-            };
-            let run = run_benchmark(
-                indexer,
-                &input,
-                MooncakeBenchmarkConfig {
-                    benchmark_duration_ms: BENCHMARK_DURATION_MS,
-                    inference_worker_duplication_factor: 1,
-                    count_events: config.supports_remove(),
-                    find_matches_concurrency: 0,
-                    block_size: BLOCK_SIZE,
-                },
+            let (scores, metrics) = collect_prepared_corpus_overlap_scores_with_metrics(
+                config,
+                &artifact_set.artifacts,
             )
             .await?;
 
             tokio::time::sleep(Duration::from_millis(50)).await;
 
-            assert!(
-                run.kept_up,
-                "{label} replay fell behind in test profile; increase BENCHMARK_DURATION_MS if this becomes too tight"
-            );
-            assert!(
-                run.results.ops_throughput > 0.0,
-                "{label} replay should record positive throughput"
-            );
+            assert!(!scores.is_empty(), "{label} should resolve queries");
             assert_eq!(
                 warning_count.load(Ordering::Relaxed),
                 0,
                 "{label} emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker"
             );
-            if matches!(mode, MooncakeReplayMode::KvEvents) {
-                assert_eq!(
-                    support::duplicate_store_warning_count(metrics.as_ref()),
-                    0,
-                    "{label} recorded duplicate-store warning metrics"
-                );
-            }
+            assert_eq!(
+                support::duplicate_store_warning_count(metrics.as_ref()),
+                0,
+                "{label} recorded duplicate-store warning metrics"
+            );
         }
     }
 
-    assert_overlap_score_parity(&variants, &traces, &artifact_sets).await?;
+    assert_overlap_score_parity(&variants, &artifact_sets, Some(&warning_count)).await?;
 
     Ok(())
 }
@@ -715,7 +898,7 @@ async fn mooncake_trace_branch_sharded_depth4_matches_baseline() -> anyhow::Resu
         MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 4),
     ];
 
-    assert_overlap_score_parity(&variants, &traces, &artifact_sets).await
+    assert_overlap_score_parity(&variants, &artifact_sets, None).await
 }
 
 #[cfg(feature = "mocker-kvbm-offload")]
@@ -742,11 +925,9 @@ async fn mooncake_trace_g2_events_replay_through_host_pinned_lower_tier() -> any
     );
     let (reference_scores, crtc_scores, host_pinned_dumped_events) =
         g2_lower_tier::collect_tiered_replay_scores(&artifacts).await?;
-    let device_only_scores = collect_overlap_scores_for_replay(
+    let device_only_scores = collect_device_only_overlap_scores(
         &MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
-        &traces,
         &artifacts,
-        MooncakeReplayMode::KvEvents,
     )
     .await?;
 
