@@ -24,25 +24,7 @@
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$
 ^https://etcd\.io/docs/v3\.5/install/?$
-
-# Refuses connections from GitHub runners (consistent across retries and
-# reruns). Loads fine from a normal browser. Covers all three kubebuilder
-# links in the tree, including the webhook-implementation page.
-^https://book\.kubebuilder\.io/
+^https://book\.kubebuilder\.io/cronjob-tutorial/webhook-implementation\.html$
 
 # NGC intermittently returns 503 for this version-filtered page from GitHub runners.
 ^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend\?version=1\.2\.1$
-
-# Intermittently unreachable from GitHub runners (timeouts and connection
-# failures across independent runs). Loads fine from a normal browser.
-^https://cert-manager\.io/
-
-# Connection failed from GitHub runners past retries (2026-07-08); page is
-# fine from a normal browser. Narrow ignore — broaden to the host only if
-# more kubernetes.io links start flaking.
-^https://kubernetes\.io/docs/tasks/administer-cluster/change-default-storage-class/?$
-
-# GitHub serves 404 for the /stargazers route to anonymous requests
-# (repo-wide GitHub behavior as of 2026-07-07, reproduced on unrelated
-# repos). The links in the contribution guides predate this PR.
-^https://github\.com/ai-dynamo/dynamo/stargazers
