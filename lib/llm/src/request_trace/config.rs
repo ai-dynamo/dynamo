@@ -189,10 +189,17 @@ fn load_from_env() -> RequestTracePolicy {
         std::env::var(env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST)
             .ok()
             .map(|raw| {
-                raw.split(|c: char| c == ',' || c.is_whitespace())
-                    .map(|name| name.trim().to_ascii_lowercase())
+                let mut names = Vec::new();
+                for name in raw
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .map(str::to_ascii_lowercase)
                     .filter(|name| !name.is_empty())
-                    .collect::<Vec<_>>()
+                {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                names
             })
             .unwrap_or_default();
     let tool_events_zmq_endpoint =
@@ -515,7 +522,7 @@ mod tests {
                 (env_request_trace::DYN_REQUEST_TRACE, "1"),
                 (
                     env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
-                    " X-Request-Id, NVCF-Function-Id\tx-tenant ,, ",
+                    " X-Request-Id, NVCF-Function-Id\tx-tenant ,, x-request-id ",
                 ),
             ],
             || {
