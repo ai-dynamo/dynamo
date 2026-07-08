@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("pynvml")
 
-from dev.observability.dynamo_local_resource_monitor import (
+from dev.observability.dynamo_local_resource_monitor import (  # noqa: E402
     MetricsCollector,
     ProcessTracker,
 )
