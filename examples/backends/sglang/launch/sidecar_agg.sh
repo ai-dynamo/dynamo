@@ -9,6 +9,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="Qwen/Qwen3-0.6B"
@@ -34,6 +35,7 @@ SGLANG_HOST="${SGLANG_HOST:-127.0.0.1}"
 SGLANG_HTTP_PORT="${SGLANG_HTTP_PORT:-30000}"
 SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-30001}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 print_launch_banner "Launching SGLang Native-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT"
 
@@ -45,6 +47,7 @@ python3 -m sglang.launch_server \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_HTTP_PORT" \
     --grpc-port "$SGLANG_GRPC_PORT" \
+    $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \

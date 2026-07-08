@@ -3,11 +3,13 @@
 
 //! Thin client for SGLang's native `sglang.runtime.v1.SglangService`.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
 use serde_json::Value;
-use tokio::time::Instant;
+use tokio::time::{Instant, timeout_at};
 use tonic::transport::{Channel, Endpoint};
 
 use crate::args::TransportConfig;
@@ -22,17 +24,21 @@ pub type Client = SglangServiceClient<Channel>;
 #[derive(Clone, Debug)]
 pub struct Discovery {
     pub model_path: String,
+    pub tokenizer_path: String,
     pub served_model_name: Option<String>,
     pub max_model_len: Option<u32>,
     pub model_info: Value,
     pub server_info: Value,
 }
 
-pub async fn connect(uri: &str, cfg: &TransportConfig) -> Result<Client, DynamoError> {
-    let deadline = Instant::now() + cfg.deadline;
+pub async fn connect(
+    uri: &str,
+    cfg: &TransportConfig,
+    deadline: Instant,
+) -> Result<Client, DynamoError> {
     let mut last_err;
     loop {
-        match try_connect_once(uri, cfg).await {
+        match try_connect_once(uri, cfg, deadline).await {
             Ok(client) => return Ok(client),
             Err(err) => {
                 last_err = err;
@@ -42,20 +48,35 @@ pub async fn connect(uri: &str, cfg: &TransportConfig) -> Result<Client, DynamoE
                         cfg.deadline
                     )));
                 }
-                tokio::time::sleep(cfg.poll_interval).await;
+                tokio::time::sleep_until((Instant::now() + cfg.poll_interval).min(deadline)).await;
             }
         }
     }
 }
 
-async fn try_connect_once(uri: &str, cfg: &TransportConfig) -> Result<Client, String> {
+async fn try_connect_once(
+    uri: &str,
+    cfg: &TransportConfig,
+    deadline: Instant,
+) -> Result<Client, String> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("startup deadline elapsed".to_string());
+    }
     let endpoint = Endpoint::from_shared(uri.to_string())
         .map_err(|e| format!("invalid endpoint `{uri}`: {e}"))?
-        .connect_timeout(cfg.connect_timeout);
-    let channel = endpoint.connect().await.map_err(|e| e.to_string())?;
-    Ok(SglangServiceClient::new(channel)
+        .connect_timeout(cfg.connect_timeout.min(remaining));
+    let channel = timeout_at(deadline, endpoint.connect())
+        .await
+        .map_err(|_| "startup deadline elapsed while connecting".to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(client_from_channel(channel))
+}
+
+fn client_from_channel(channel: Channel) -> Client {
+    SglangServiceClient::new(channel)
         .max_decoding_message_size(MAX_MESSAGE_SIZE)
-        .max_encoding_message_size(MAX_MESSAGE_SIZE))
+        .max_encoding_message_size(MAX_MESSAGE_SIZE)
 }
 
 /// Fixed-size pool of independent HTTP/2 connections. Generation calls are
@@ -70,11 +91,12 @@ impl Pool {
         uri: &str,
         cfg: &TransportConfig,
         size: usize,
+        deadline: Instant,
     ) -> Result<Self, DynamoError> {
         let size = size.max(1);
         let mut clients = Vec::with_capacity(size);
         for _ in 0..size {
-            clients.push(connect(uri, cfg).await?);
+            clients.push(connect(uri, cfg, deadline).await?);
         }
         Ok(Self {
             clients,
@@ -97,24 +119,71 @@ impl Pool {
     }
 }
 
-pub async fn discover(client: &mut Client) -> Result<Discovery, DynamoError> {
-    let model = client
-        .get_model_info(pb::GetModelInfoRequest {})
-        .await
-        .map_err(|status| status_to_dynamo("GetModelInfo", status))?
-        .into_inner();
-    let server = client
-        .get_server_info(pb::GetServerInfoRequest {})
-        .await
-        .map_err(|status| status_to_dynamo("GetServerInfo", status))?
-        .into_inner();
-    let models = client
-        .list_models(pb::ListModelsRequest {})
-        .await
-        .map_err(|status| status_to_dynamo("ListModels", status))?
-        .into_inner()
-        .models;
+pub async fn discover(client: &mut Client, deadline: Instant) -> Result<Discovery, DynamoError> {
+    let model = rpc_with_deadline(
+        "GetModelInfo",
+        deadline,
+        client.get_model_info(pb::GetModelInfoRequest {}),
+    )
+    .await?
+    .into_inner();
+    let server = rpc_with_deadline(
+        "GetServerInfo",
+        deadline,
+        client.get_server_info(pb::GetServerInfoRequest {}),
+    )
+    .await?
+    .into_inner();
+    let models = rpc_with_deadline(
+        "ListModels",
+        deadline,
+        client.list_models(pb::ListModelsRequest {}),
+    )
+    .await?
+    .into_inner()
+    .models;
 
+    parse_discovery(model, server, models)
+}
+
+pub async fn health_check(client: &mut Client, deadline: Instant) -> Result<bool, DynamoError> {
+    rpc_with_deadline(
+        "HealthCheck",
+        deadline,
+        client.health_check(pb::HealthCheckRequest {}),
+    )
+    .await
+    .map(|response| response.into_inner().healthy)
+}
+
+pub async fn abort(
+    client: &mut Client,
+    request: pb::AbortRequest,
+    timeout: Duration,
+) -> Result<(), DynamoError> {
+    rpc_with_deadline("Abort", Instant::now() + timeout, client.abort(request))
+        .await
+        .map(|_| ())
+}
+
+async fn rpc_with_deadline<T, F>(rpc: &str, deadline: Instant, future: F) -> Result<T, DynamoError>
+where
+    F: Future<Output = Result<T, tonic::Status>>,
+{
+    match timeout_at(deadline, future).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(status)) => Err(status_to_dynamo(rpc, status)),
+        Err(_) => Err(connection_timeout(format!(
+            "{rpc} exceeded the configured deadline"
+        ))),
+    }
+}
+
+fn parse_discovery(
+    model: pb::GetModelInfoResponse,
+    server: pb::GetServerInfoResponse,
+    models: Vec<pb::ModelCard>,
+) -> Result<Discovery, DynamoError> {
     let model_info = parse_json_object("GetModelInfo.json_info", &model.json_info)?;
     let server_info = parse_json_object("GetServerInfo.json_info", &server.json_info)?;
     let model_path = if model.model_path.trim().is_empty() {
@@ -131,6 +200,12 @@ pub async fn discover(client: &mut Client) -> Result<Discovery, DynamoError> {
             "SGLang GetModelInfo returned an empty model_path",
         ));
     }
+    let tokenizer_path = model_info
+        .get("tokenizer_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or(&model_path)
+        .to_string();
 
     let primary = models
         .iter()
@@ -155,6 +230,7 @@ pub async fn discover(client: &mut Client) -> Result<Discovery, DynamoError> {
 
     Ok(Discovery {
         model_path,
+        tokenizer_path,
         served_model_name,
         max_model_len,
         model_info,
@@ -203,6 +279,10 @@ pub fn cannot_connect(message: impl Into<String>) -> DynamoError {
     backend(BackendError::CannotConnect, message)
 }
 
+fn connection_timeout(message: impl Into<String>) -> DynamoError {
+    backend(BackendError::ConnectionTimeout, message)
+}
+
 pub fn protocol_error(message: impl Into<String>) -> DynamoError {
     backend(BackendError::Unknown, message)
 }
@@ -225,9 +305,15 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::time::Duration;
 
-    use super::{json_u32, json_u64};
+    use serde_json::json;
+    use tokio::net::TcpListener;
+    use tokio::time::Instant;
+    use tonic::transport::Endpoint;
+
+    use super::{client_from_channel, discover, json_u32, json_u64, parse_discovery};
+    use crate::proto as pb;
 
     #[test]
     fn numeric_discovery_fields_accept_numbers_and_strings() {
@@ -235,5 +321,42 @@ mod tests {
         assert_eq!(json_u64(&value, "a"), Some(16));
         assert_eq!(json_u32(&value, "b"), Some(32));
         assert_eq!(json_u64(&value, "c"), None);
+    }
+
+    #[test]
+    fn discovery_preserves_distinct_tokenizer_path() {
+        let discovery = parse_discovery(
+            pb::GetModelInfoResponse {
+                model_path: "model-repo".to_string(),
+                json_info: json!({"tokenizer_path": "tokenizer-repo"}).to_string(),
+            },
+            pb::GetServerInfoResponse {
+                json_info: json!({}).to_string(),
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(discovery.model_path, "model-repo");
+        assert_eq!(discovery.tokenizer_path, "tokenizer-repo");
+    }
+
+    #[tokio::test]
+    async fn discovery_deadline_bounds_a_half_open_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let channel = Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect_lazy();
+        let mut client = client_from_channel(channel);
+        let started = Instant::now();
+        let result = discover(&mut client, started + Duration::from_millis(100)).await;
+        peer.abort();
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

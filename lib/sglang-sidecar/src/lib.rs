@@ -16,5 +16,6 @@ pub mod args;
 pub mod client;
 pub mod engine;
 pub mod proto;
+mod protocol;
 
 pub use engine::SglangSidecarEngine;

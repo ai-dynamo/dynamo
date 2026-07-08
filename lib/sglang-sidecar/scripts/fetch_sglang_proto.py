@@ -15,17 +15,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-
 SGLANG_REVISION = "cf2aab82a3c5342f6bc89b7bae47a078ace1149c"
 SGLANG_PROTO_RELATIVE_PATH = "proto/sglang/runtime/v1/sglang.proto"
-SGLANG_PROTO_SHA256 = (
-    "a2e14952ddb2b34b6e22cbbc4e76d76d70c44f2dbf087cb9918aed3399d9ef42"
-)
+SGLANG_PROTO_SHA256 = "a2e14952ddb2b34b6e22cbbc4e76d76d70c44f2dbf087cb9918aed3399d9ef42"
 SGLANG_PROTO_URL = (
     "https://raw.githubusercontent.com/sgl-project/sglang/"
     f"{SGLANG_REVISION}/{SGLANG_PROTO_RELATIVE_PATH}"
@@ -41,13 +38,13 @@ def _read_proto() -> tuple[bytes, str]:
             raise SystemExit(f"failed to read SGLANG_PROTO_PATH {path}: {err}") from err
 
     if sglang_source := os.environ.get("SGLANG_SOURCE"):
-        path = (
-            Path(sglang_source).expanduser().resolve() / SGLANG_PROTO_RELATIVE_PATH
-        )
+        path = Path(sglang_source).expanduser().resolve() / SGLANG_PROTO_RELATIVE_PATH
         try:
             return path.read_bytes(), str(path)
         except OSError as err:
-            raise SystemExit(f"failed to read SGLANG_SOURCE proto {path}: {err}") from err
+            raise SystemExit(
+                f"failed to read SGLANG_SOURCE proto {path}: {err}"
+            ) from err
 
     request = Request(SGLANG_PROTO_URL, headers={"User-Agent": "dynamo-build"})
     try:

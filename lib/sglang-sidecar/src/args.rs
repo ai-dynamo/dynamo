@@ -23,7 +23,8 @@ pub struct Args {
 
     /// Reachable host that decode workers use to connect to a prefill worker's
     /// SGLang disaggregation bootstrap port. By default this is derived from
-    /// `dist_init_addr`, then from the gRPC endpoint host.
+    /// `dist_init_addr`, then a routable local address. This is required when
+    /// discovery exposes only loopback or wildcard addresses.
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
 
@@ -87,18 +88,27 @@ impl Default for TransportConfig {
     }
 }
 
-/// Normalize endpoint schemes for tonic. `grpc://` and `grpcs://` are common
-/// user-facing spellings but tonic expects `http://` and `https://`.
-pub fn normalize_endpoint(raw: &str) -> String {
+/// Normalize plaintext endpoint schemes for tonic.
+///
+/// TLS is intentionally rejected until the sidecar enables and tests tonic's
+/// TLS transport feature instead of advertising an unusable `grpcs://` URL.
+pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("SGLang gRPC endpoint must not be empty".to_string());
+    }
     if let Some(rest) = trimmed.strip_prefix("grpc://") {
-        format!("http://{rest}")
-    } else if let Some(rest) = trimmed.strip_prefix("grpcs://") {
-        format!("https://{rest}")
+        Ok(format!("http://{rest}"))
+    } else if trimmed.starts_with("grpcs://") || trimmed.starts_with("https://") {
+        Err("TLS endpoints are not supported by the SGLang sidecar".to_string())
+    } else if trimmed.starts_with("http://") {
+        Ok(trimmed.to_string())
     } else if trimmed.contains("://") {
-        trimmed.to_string()
+        Err(format!(
+            "unsupported SGLang gRPC endpoint scheme: {trimmed}"
+        ))
     } else {
-        format!("http://{trimmed}")
+        Ok(format!("http://{trimmed}"))
     }
 }
 
@@ -109,11 +119,14 @@ mod tests {
     #[test]
     fn normalizes_bare_and_grpc_endpoints() {
         assert_eq!(
-            normalize_endpoint("127.0.0.1:30001"),
-            "http://127.0.0.1:30001"
+            normalize_endpoint("127.0.0.1:30001").unwrap(),
+            "http://127.0.0.1:30001",
         );
-        assert_eq!(normalize_endpoint("grpc://host:7"), "http://host:7");
-        assert_eq!(normalize_endpoint("grpcs://host:8"), "https://host:8");
-        assert_eq!(normalize_endpoint(" https://host:9 "), "https://host:9");
+        assert_eq!(
+            normalize_endpoint("grpc://host:7").unwrap(),
+            "http://host:7"
+        );
+        assert!(normalize_endpoint("grpcs://host:8").is_err());
+        assert!(normalize_endpoint(" https://host:9 ").is_err());
     }
 }
