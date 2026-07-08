@@ -54,7 +54,7 @@ async def serve_configs(configs: Sequence[Config]) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
         logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
 
-    init_vmm(config.device_type)
+    init_vmm(configs[0].device_type)
     servers = []
     for config in configs:
         logger.info("Starting GPU Memory Service Server for device %d", config.device)

@@ -69,33 +69,23 @@ def main() -> None:
     devices = vmm.list_devices()
     processes = []
     for device in devices:
-        for tag in _TAGS:
-            proc = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "gpu_memory_service",
-                    "--device",
-                    str(device),
-                    "--tag",
-                    tag,
-                    "--device-type",
-                    args.device_type,
-                ]
-            )
-            logger.info(
-                "Started GMS device=%d tag=%s device_type=%s pid=%d",
-                device,
-                tag,
-                args.device_type,
-                proc.pid,
-            )
-            processes.append(proc)
-
-    def shutdown() -> None:
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
+        cmd = [
+            sys.executable,
+            "-m",
+            "gpu_memory_service",
+            "--device",
+            str(device),
+            "--device-type",
+            args.device_type,
+        ]
+        proc = subprocess.Popen(cmd)
+        logger.info(
+            "Started GMS device=%d device_type=%s pid=%d",
+            device,
+            args.device_type,
+            proc.pid,
+        )
+        processes.append(proc)
 
     def terminate(*_args) -> None:
         _terminate_all(processes)
