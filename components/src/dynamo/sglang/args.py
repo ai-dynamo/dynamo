@@ -29,6 +29,7 @@ from dynamo.common.snapshot.lifecycle import (
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
+    disable_skip_tokenizer_init,
     enable_disjoint_streaming_output,
     ensure_sglang_tensor_image_size,
 )
@@ -547,6 +548,8 @@ async def parse_args(
     # behavior behind incremental_streaming_output, while older releases used
     # stream_output.
     enable_disjoint_streaming_output(server_args)
+
+    disable_skip_tokenizer_init(server_args)
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(

@@ -560,6 +560,7 @@ class SglangProcessor:
             # finish_reason.  Use si=1 for the first chunk to minimize
             # TTFT, then switch to the configured interval.
             pending_token_ids: list[int] = []
+            pending_text: str = ""
             pending_usage: dict[str, Any] | None = None
             first_chunk = True
             input_tokens = len(tokens)
@@ -597,6 +598,7 @@ class SglangProcessor:
                     break
 
                 new_ids = engine_response["token_ids"]
+                new_text = engine_response.get("text", "")
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
                 raw_finish = engine_response.get("finish_reason")
@@ -608,6 +610,7 @@ class SglangProcessor:
                 engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)
+                pending_text += new_text
 
                 # Flush on finish or when we've accumulated enough tokens.
                 # First chunk flushes immediately (si=1) to minimize TTFT.
@@ -615,7 +618,7 @@ class SglangProcessor:
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
                     usage_for_metrics = pending_usage
                     mapped_response = {
-                        "token_ids": pending_token_ids,
+                        "text": pending_text,
                         "finish_reason": finish_reason,
                     }
 
@@ -676,6 +679,7 @@ class SglangProcessor:
                     yield envelope
 
                     pending_token_ids = []
+                    pending_text = ""
                     pending_usage = None
                     first_chunk = False
         except Unknown:

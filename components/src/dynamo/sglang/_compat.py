@@ -204,7 +204,20 @@ def enable_disjoint_streaming_output(server_args: Any) -> None:
         server_args.incremental_streaming_output = True
 
 
+def disable_skip_tokenizer_init(server_args: Any) -> None:
+    """Disable SGLang's skip tokenizer init.
+
+    SGLang's skip tokenizer init is a no-op when the attribute is absent.
+    """
+    if hasattr(server_args, "skip_tokenizer_init") and server_args.skip_tokenizer_init:
+        logger.warning(
+            "Disabling SGLang's skip tokenizer init as it is required for incremental decoding"
+        )
+        server_args.skip_tokenizer_init = False
+
+
 __all__ = [
+    "disable_skip_tokenizer_init",
     "enable_disjoint_streaming_output",
     "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",

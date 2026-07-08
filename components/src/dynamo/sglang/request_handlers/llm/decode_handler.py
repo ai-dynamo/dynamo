@@ -553,6 +553,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
+                out["text"] = res.get("text", "")
 
                 if metadata_uploader is None:
                     # Extract logprobs for new tokens if available
