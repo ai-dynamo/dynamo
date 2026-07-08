@@ -177,9 +177,6 @@ sglang_configs = {
         marks=[
             pytest.mark.router,
             pytest.mark.gpu_2,
-            pytest.mark.profiled_vram_gib(
-                13.0
-            ),  # parity with sglang disaggregated (disagg_same_gpu) configs
             pytest.mark.timeout(470),  # parity with sglang disaggregated configs
             pytest.mark.pre_merge,
         ],
