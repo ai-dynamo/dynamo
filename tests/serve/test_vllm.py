@@ -404,6 +404,30 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_lmcache": VLLMConfig(
+        name="disaggregated_lmcache",
+        directory=vllm_dir,
+        script_name="disagg_lmcache.sh",
+        marks=[
+            pytest.mark.lmcache,
+            _xfail_lmcache_upstream_container(),
+            pytest.mark.gpu_2,
+            # Per-GPU peak: prefill and decode run on separate GPUs (GPU1/GPU0),
+            # so each worker peaks like the single-GPU LMCache config (agg_lmcache).
+            pytest.mark.profiled_vram_gib(3.8),
+            # 2 workers + a 20s inter-worker startup sleep in disagg_lmcache.sh;
+            # generous ceiling over the ~200s single-worker LMCache runtime.
+            pytest.mark.timeout(700),
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="vllm"),
+            metric_payload_default(min_num_requests=6, backend="lmcache"),
+        ],
+    ),
     "disaggregated_same_gpu": VLLMConfig(
         name="disaggregated_same_gpu",
         directory=vllm_dir,
