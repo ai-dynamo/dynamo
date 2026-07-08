@@ -297,6 +297,13 @@ pub mod llm {
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
+    /// HTTP status code returned when the frontend rejects a request because
+    /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
+    /// to 503 for Service Unavailable retry semantics. Any valid HTTP status
+    /// code (100–999) is accepted; an unparseable or out-of-range value falls
+    /// back to 529.
+    pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
+
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
@@ -715,6 +722,7 @@ mod tests {
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
