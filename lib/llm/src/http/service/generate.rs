@@ -34,7 +34,7 @@ use super::{RouteDoc, service_v2};
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
-    GenerateRequest, GenerateResponse, GenerateResponseOptions,
+    GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
@@ -153,7 +153,59 @@ fn generate_internal_error_response() -> Response {
     )
 }
 
-/// Project routing controls while retaining the complete client request in
+/// Borrowed worker envelope for vLLM-specific request fields.
+///
+/// `token_ids` are intentionally absent: `PreprocessedRequest.token_ids` is
+/// the canonical routing and wire representation, and the worker reconstructs
+/// the vLLM request from that field.
+#[derive(Serialize)]
+struct VllmTitoEnvelope<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<&'a str>,
+    sampling_params: &'a SamplingParams,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<&'a StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_salt: Option<&'a str>,
+    priority: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kv_transfer_params: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    #[serde(flatten)]
+    passthrough: &'a serde_json::Map<String, serde_json::Value>,
+}
+
+impl<'a> From<&'a GenerateRequest> for VllmTitoEnvelope<'a> {
+    fn from(request: &'a GenerateRequest) -> Self {
+        let GenerateRequest {
+            request_id,
+            token_ids: _,
+            sampling_params,
+            model,
+            stream,
+            stream_options,
+            cache_salt,
+            priority,
+            kv_transfer_params,
+            passthrough,
+        } = request;
+        Self {
+            request_id: request_id.as_deref(),
+            sampling_params,
+            model: model.as_deref(),
+            stream: *stream,
+            stream_options: stream_options.as_ref(),
+            cache_salt: cache_salt.as_deref(),
+            priority: *priority,
+            kv_transfer_params: kv_transfer_params.as_ref(),
+            passthrough,
+        }
+    }
+}
+
+/// Project routing controls while retaining all engine-owned fields in
 /// `extra_args.vllm_tito`. The backend remains the authority for interpreting
 /// every vLLM-specific field.
 fn preprocessed_from_generate(
@@ -164,6 +216,7 @@ fn preprocessed_from_generate(
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
     let routing_priority = dynamo_routing_priority(request.priority);
+    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::from(request))?;
 
     PreprocessedRequest::builder()
         .model(model.to_string())
@@ -189,7 +242,9 @@ fn preprocessed_from_generate(
             ..Default::default()
         }))
         .extra_args(Some(serde_json::json!({
-            "vllm_tito": serde_json::to_value(request)?,
+            // Do not copy token_ids into this envelope. The worker must rebuild
+            // that field from PreprocessedRequest.token_ids after routing.
+            "vllm_tito": vllm_tito,
         })))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
@@ -756,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_request_envelope_reaches_preprocessed_request_unchanged() {
+    fn engine_fields_reach_envelope_without_duplicate_token_ids() {
         let raw = serde_json::json!({
             "request_id": "req-forward",
             "token_ids": [1, 2],
@@ -767,6 +822,7 @@ mod tests {
             "model": "test-model",
             "stream": true,
             "stream_options": {"include_usage": true},
+            "cache_salt": "tenant-a",
             "features": {"future_feature": [1, 2, 3]},
             "priority": 7,
             "kv_transfer_params": {"remote": "worker-a"},
@@ -807,7 +863,15 @@ mod tests {
             .and_then(|extra| extra.get("vllm_tito"))
             .expect("vllm_tito envelope");
 
-        assert_eq!(envelope, &raw);
+        let mut expected_envelope = raw;
+        let expected_token_ids = expected_envelope
+            .as_object_mut()
+            .and_then(|object| object.remove("token_ids"))
+            .expect("token_ids in client request");
+        assert_eq!(preprocessed.token_ids, vec![1, 2]);
+        assert_eq!(expected_token_ids, serde_json::json!([1, 2]));
+        assert_eq!(envelope, &expected_envelope);
+        assert!(envelope.get("token_ids").is_none());
     }
 
     #[test]
