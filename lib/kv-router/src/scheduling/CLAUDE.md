@@ -44,6 +44,25 @@ sequenceDiagram
 - `SchedulerQueueActor::admit_one` performs final worker selection and booking after either path.
 - A single-class profile still uses `PolicyQueue`, but DRR has no cross-class effect.
 
+## Per-class ready storage
+
+`PolicyQueueEntry<T>` is one queued payload plus its class index, priority key, enqueue sequence, and token/accounting snapshot. In production, `T` is `QueuedRequest`, which wraps the `SchedulingRequest`, enqueue timestamp, and optional block hashes.
+
+```text
+PolicyClassQueue("agents")
+├── pending: BinaryHeap<PolicyQueueEntry>                 # WorkerPlacement::Any
+└── ready_by_worker: HashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry>>
+    ├── Worker(7, dp_rank=0) → heap of requests pinned to that rank
+    └── Worker(9, dp_rank=1) → heap of requests pinned to that rank
+```
+
+- `pending` is the shared ready heap for requests where the existing selector may choose any eligible worker.
+- `ready_by_worker` is sparse. A worker/rank heap is created only while exact-placement requests exist for it and removed when empty.
+- A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. `WorkerWithDpRank` is only the exact-placement lane key; the actor and selector retain worker knowledge.
+- Every heap uses the class's configured priority ordering. `BinaryHeap::peek()` reads its highest-priority root in O(1); push and pop are O(log n).
+- To produce one class candidate, peek the root of `pending` and every worker heap, ignore roots that are not currently dispatchable, compare the remaining roots, and pop from the winning heap. Never scan deeper into a heap.
+- Worker lanes contain head-of-line blocking to one exact worker. A blocked Worker 7 root cannot hide a ready Worker 9 root or an unpinned root.
+
 ## Guardrails
 
 - `SchedulerQueueActor::admit_one` is the canonical admission path: compute projected
