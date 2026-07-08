@@ -708,7 +708,7 @@ def _test_remote_indexer_decisions(
 
         raise TimeoutError("Timed out waiting for served indexer endpoints to register")
 
-    async def test_sync():
+    async def run_test(runtimes):
         endpoint_path = (
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
@@ -744,6 +744,7 @@ def _test_remote_indexer_decisions(
                     return runtime, endpoint, kv_router
                 except Exception as error:
                     last_error = error
+                    runtime.shutdown()
                     if not (serve_indexer or use_remote_indexer):
                         raise
                     del endpoint
@@ -761,6 +762,7 @@ def _test_remote_indexer_decisions(
         runtime_a, endpoint_a, router_a = await make_router(
             serve_indexer=True, use_remote_indexer=False
         )
+        runtimes.append(runtime_a)
         serving_runtimes.append(runtime_a)
         serving_endpoints.append(endpoint_a)
         serving_routers.append(router_a)
@@ -769,6 +771,7 @@ def _test_remote_indexer_decisions(
             runtime_b, endpoint_b, router_b = await make_router(
                 serve_indexer=True, use_remote_indexer=False
             )
+            runtimes.append(runtime_b)
             serving_runtimes.append(runtime_b)
             serving_endpoints.append(endpoint_b)
             serving_routers.append(router_b)
@@ -779,11 +782,12 @@ def _test_remote_indexer_decisions(
             expected_record_instances=0 if use_kv_events else 1,
         )
 
-        _, consumer_endpoint, consumer_router = await make_router(
+        consumer_runtime, consumer_endpoint, consumer_router = await make_router(
             serve_indexer=False,
             use_remote_indexer=True,
             router_predicted_ttl_secs=router_predicted_ttl_secs,
         )
+        runtimes.append(consumer_runtime)
 
         worker_ids = sorted(
             await poll_for_worker_instances(
@@ -902,6 +906,14 @@ def _test_remote_indexer_decisions(
         await poll_for_worker_instances(
             consumer_endpoint, expected_num_instances, max_wait_time=120
         )
+
+    async def test_sync():
+        runtimes = []
+        try:
+            await run_test(runtimes)
+        finally:
+            for runtime in runtimes:
+                runtime.shutdown()
 
     asyncio.run(test_sync())
 
