@@ -16,6 +16,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -952,7 +953,7 @@ def _engine_generate_reasoning_support(
 
 
 def _request_reasoning_metadata(
-    request: dict[str, Any],
+    request: Mapping[str, Any],
 ) -> tuple[bool | None, dict[str, Any] | None]:
     reasoning_ended = request.get("reasoning_ended")
     reasoning_parser_kwargs = request.get("reasoning_parser_kwargs")

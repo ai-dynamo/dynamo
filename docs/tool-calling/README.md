@@ -84,7 +84,7 @@ parser exists for this format.
 
 ```bash
 # launch backend worker (or dynamo.vllm)
-python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
+python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --reasoning-parser qwen3 --dyn-reasoning-parser qwen3
 
 # launch frontend worker
 python -m dynamo.frontend
