@@ -647,6 +647,8 @@ fn print_per_tick_churn(
 
 #[path = "csv_export.rs"]
 mod csv_export;
+#[path = "optimization_experiments.rs"]
+mod optimization_experiments;
 #[path = "scenario_tests.rs"]
 mod scenario_tests;
 #[path = "topology_tests.rs"]
