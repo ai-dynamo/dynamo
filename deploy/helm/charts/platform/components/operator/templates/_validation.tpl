@@ -28,14 +28,14 @@
 {{- end -}}
 
 {{- if .Values.apiOwner -}}
-  {{- $mutexName := include "dynamo-operator.apiOwnershipMutexName" . -}}
-  {{- $existingMutex := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" $mutexName -}}
+  {{- $webhooksName := include "dynamo-operator.webhooksName" . -}}
+  {{- $existingMutex := lookup "rbac.authorization.k8s.io/v1" "ClusterRole" "" $webhooksName -}}
   {{- if $existingMutex -}}
     {{- $annotations := $existingMutex.metadata.annotations | default dict -}}
     {{- $existingRelease := index $annotations "meta.helm.sh/release-name" | default "unknown" -}}
     {{- $existingNamespace := index $annotations "meta.helm.sh/release-namespace" | default "unknown" -}}
     {{- if or (ne $existingRelease .Release.Name) (ne $existingNamespace .Release.Namespace) -}}
-      {{- fail (printf "VALIDATION ERROR: The API-ownership mutex is already held by Helm release '%s' in namespace '%s' (mutex ClusterRole: %s). Exactly one operator installation in the cluster may set apiOwner=true. Running parallel operators at the same version is strongly recommended. If versions differ, the owner must be one and only one installation running the newest version." $existingRelease $existingNamespace $mutexName) -}}
+      {{- fail (printf "VALIDATION ERROR: The API-ownership mutex is already held by Helm release '%s' in namespace '%s' (ClusterRole: %s). Exactly one operator installation in the cluster may set apiOwner=true. Running parallel operators at the same version is strongly recommended. If versions differ, the owner must be one and only one installation running the newest version." $existingRelease $existingNamespace $webhooksName) -}}
     {{- end -}}
   {{- end -}}
 {{- end -}}

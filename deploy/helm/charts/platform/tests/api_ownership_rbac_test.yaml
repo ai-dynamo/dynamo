@@ -11,7 +11,7 @@ tests:
           count: 4
       - equal:
           path: metadata.name
-          value: dynamo-operator-api-ownership-mutex
+          value: dynamo-operator-webhooks
         documentIndex: 2
       - equal:
           path: metadata.labels["nvidia.com/dynamo-api-owner"]

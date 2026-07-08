@@ -63,20 +63,19 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "dynamo-operator.fullname" . }}-controller-manager
   namespace: {{ .Release.Namespace }}
-# This fixed-name ClusterRole is the API-ownership mutex and carries owner-only permissions.
-# Helm ownership of the singleton name prevents two releases from becoming API owners.
+# This fixed-name ClusterRole grants owner-only webhook/CRD mutation and admission reads.
+# Helm ownership of the singleton makes it the mutex preventing two API owners.
 {{- if .Values.apiOwner }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "dynamo-operator.apiOwnershipMutexName" . }}
+  name: {{ include "dynamo-operator.webhooksName" . }}
   labels:
     app.kubernetes.io/component: webhook
     app.kubernetes.io/created-by: dynamo-operator
     app.kubernetes.io/part-of: dynamo-operator
-    nvidia.com/dynamo-api-owner: "true"
-    nvidia.com/dynamo-operator-namespace: {{ .Release.Namespace }}
+  {{- include "dynamo-operator.apiOwnerLabels" . | nindent 4 }}
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
 - apiGroups:
@@ -118,18 +117,17 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "dynamo-operator.apiOwnershipMutexName" . }}
+  name: {{ include "dynamo-operator.webhooksName" . }}
   labels:
     app.kubernetes.io/component: webhook
     app.kubernetes.io/created-by: dynamo-operator
     app.kubernetes.io/part-of: dynamo-operator
-    nvidia.com/dynamo-api-owner: "true"
-    nvidia.com/dynamo-operator-namespace: {{ .Release.Namespace }}
+  {{- include "dynamo-operator.apiOwnerLabels" . | nindent 4 }}
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "dynamo-operator.apiOwnershipMutexName" . }}
+  name: {{ include "dynamo-operator.webhooksName" . }}
 subjects:
 - kind: ServiceAccount
   name: {{ include "dynamo-operator.fullname" . }}-controller-manager

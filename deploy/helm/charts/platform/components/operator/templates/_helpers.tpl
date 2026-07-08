@@ -142,12 +142,17 @@ Returns: Error if invalid or missing auth, empty string if valid
 {{- end -}}
 
 {{/*
-The fixed, release-independent ClusterRole name is the API-ownership mutex.
-Helm ownership metadata on this singleton resource prevents two releases from
-claiming ownership concurrently instead of allowing a last-writer-wins race.
+The API owner's fixed, release-independent webhook RBAC name. Helm ownership
+metadata on the singleton ClusterRole makes it the API-ownership mutex.
 */}}
-{{- define "dynamo-operator.apiOwnershipMutexName" -}}
-dynamo-operator-api-ownership-mutex
+{{- define "dynamo-operator.webhooksName" -}}
+dynamo-operator-webhooks
+{{- end -}}
+
+{{/* Labels identifying resources managed by the cluster API owner. */}}
+{{- define "dynamo-operator.apiOwnerLabels" -}}
+nvidia.com/dynamo-api-owner: "true"
+nvidia.com/dynamo-operator-namespace: {{ .Release.Namespace }}
 {{- end -}}
 
 {{/*
