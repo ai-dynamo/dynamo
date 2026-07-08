@@ -41,9 +41,11 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+export DYN_FORWARDPASS_METRIC_PORT="${DYN_FORWARDPASS_METRIC_PORT:-$(allocate_free_port)}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving (1 GPU)" "$MODEL" "$HTTP_PORT"
+echo "Forward-pass metrics port: ${DYN_FORWARDPASS_METRIC_PORT}"
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
@@ -52,6 +54,7 @@ python -m dynamo.frontend &
 # run worker
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+    DYN_FORWARDPASS_METRIC_PORT="$DYN_FORWARDPASS_METRIC_PORT" \
     python -m dynamo.vllm --model "$MODEL" --enforce-eager \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \

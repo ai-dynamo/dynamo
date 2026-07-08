@@ -75,12 +75,14 @@ esac
 # driver/runtime, whose allocations vLLM's accounting doesn't track. The profiler
 # path supplies its own --gpu-memory-utilization 0.01 via $GPU_MEM_ARGS.
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+export DYN_FORWARDPASS_METRIC_PORT="${DYN_FORWARDPASS_METRIC_PORT:-$(allocate_free_port)}"
 
 # Start vLLM worker with vision model
 # --enforce-eager: Quick deployment (remove for production)
 # Extra args from command line come last to allow overrides
 ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+    DYN_FORWARDPASS_METRIC_PORT="$DYN_FORWARDPASS_METRIC_PORT" \
     python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \

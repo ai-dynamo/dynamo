@@ -235,6 +235,19 @@ wait_for_ready() {
     return 1
 }
 
+allocate_free_port() {
+    python3 - <<'PY'
+import socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+finally:
+    sock.close()
+PY
+}
+
 # pick_worker_module <legacy_module> <unified_module> "$@"
 #
 # Strips `--unified` from argv and selects the matching `python -m <module>`

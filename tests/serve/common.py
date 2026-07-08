@@ -275,6 +275,9 @@ def _prepare_deployment(
                 merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
                 merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
 
+        if ports.fpm_port:
+            merged_env["DYN_FORWARDPASS_METRIC_PORT"] = str(ports.fpm_port)
+
         # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
