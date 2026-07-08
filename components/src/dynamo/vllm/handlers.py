@@ -3558,7 +3558,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Cache Qwen VL grid parameters for computing image_grid_thw from
         # PIL images in the P/D path (no separate encode worker).
         if resolve_model_family(config.model) is ModelFamily.QWEN_VL:
-            self._qwen_grid_params = load_qwen_grid_params(config.model)
+            self._qwen_grid_params = load_qwen_grid_params(
+                config.model,
+                trust_remote_code=config.engine_args.trust_remote_code,
+            )
             if self._qwen_grid_params is None and self.embedding_loader is None:
                 logger.error(
                     "Qwen VL grid params failed to load and no encode worker "
