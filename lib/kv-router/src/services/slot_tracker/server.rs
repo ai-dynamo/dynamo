@@ -306,7 +306,10 @@ fn service_error(error: ServiceError) -> Response {
     }
 }
 
-pub(crate) fn create_router(state: Arc<AppState>, peer_manager: Option<PeerManager>) -> Router {
+pub(crate) fn create_router(
+    state: Arc<AppState>,
+    peer_manager: Option<Arc<PeerManager>>,
+) -> Router {
     Router::new()
         .route("/register", post(register))
         .route("/unregister", post(unregister))

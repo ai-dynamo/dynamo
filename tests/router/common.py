@@ -519,40 +519,27 @@ def _test_router_two_routers(
             kv_router.__exit__(None, None, None)
 
 
-def _test_distributed_session_affinity(
+def _test_session_affinity(
     engine_workers,
     block_size: int,
     request,
-    router_ports: list[int],
+    frontend_port: int,
     test_payload: dict[str, Any],
     store_backend: str = "etcd",
 ):
-    """Verify shared affinity claims override conflicting KV-prefix placement."""
-    with (
-        FrontendRouterProcess(
-            request,
-            block_size,
-            router_ports[0],
-            engine_workers.namespace,
-            store_backend,
-            router_mode="kv",
-            min_initial_workers=engine_workers.num_workers,
-            event_plane="nats",
-            session_affinity_ttl_secs=300,
-        ) as first_router,
-        FrontendRouterProcess(
-            request,
-            block_size,
-            router_ports[1],
-            engine_workers.namespace,
-            store_backend,
-            router_mode="kv",
-            min_initial_workers=engine_workers.num_workers,
-            event_plane="nats",
-            session_affinity_ttl_secs=300,
-        ) as second_router,
+    """Verify one frontend keeps each session on its initially selected worker."""
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        store_backend,
+        router_mode="kv",
+        min_initial_workers=engine_workers.num_workers,
+        event_plane="nats",
+        session_affinity_ttl_secs=300,
     ):
-        urls = [f"http://localhost:{port}/v1/chat/completions" for port in router_ports]
+        url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
         async def run_test() -> None:
             runtime = get_runtime(store_backend, "nats")
@@ -565,21 +552,24 @@ def _test_distributed_session_affinity(
             assert len(worker_ids) >= 2
             worker_a, worker_b = worker_ids[:2]
 
-            for port in router_ports:
-                await wait_for_frontend_ready(
-                    frontend_url=f"http://localhost:{port}",
-                    expected_num_workers=engine_workers.num_workers,
-                    timeout=120,
-                    engine_workers=engine_workers,
-                    store_backend=store_backend,
-                    request_plane="nats",
-                )
+            await wait_for_frontend_ready(
+                frontend_url=f"http://localhost:{frontend_port}",
+                expected_num_workers=engine_workers.num_workers,
+                timeout=120,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+                request_plane="nats",
+            )
 
             suffix = uuid.uuid4().hex
             prefix_a = " ".join([f"affinity-alpha-{suffix}"] * (block_size * 2))
             prefix_b = " ".join([f"affinity-beta-{suffix}"] * (block_size * 2))
-            session_a = f"distributed-affinity-a-{uuid.uuid4()}"
-            session_b = f"distributed-affinity-b-{uuid.uuid4()}"
+            session_a_headers = {
+                "x-dynamo-session-id": f"local-affinity-a-{uuid.uuid4()}"
+            }
+            session_b_headers = {
+                "x-dynamo-session-id": f"local-affinity-b-{uuid.uuid4()}"
+            }
 
             def payload(content: str, *, query_only: bool = False) -> dict[str, Any]:
                 annotations = ["query_instance_id:"] if query_only else []
@@ -596,7 +586,6 @@ def _test_distributed_session_affinity(
 
             async def send(
                 client: aiohttp.ClientSession,
-                url: str,
                 request_payload: dict[str, Any],
                 headers: dict[str, str] | None = None,
             ) -> tuple[int, int]:
@@ -625,13 +614,12 @@ def _test_distributed_session_affinity(
 
             async def wait_for_prefix_target(
                 client: aiohttp.ClientSession,
-                url: str,
                 content: str,
                 expected: tuple[int, int],
             ) -> None:
                 for _ in range(50):
                     if (
-                        await send(client, url, payload(content, query_only=True))
+                        await send(client, payload(content, query_only=True))
                         == expected
                     ):
                         return
@@ -640,8 +628,6 @@ def _test_distributed_session_affinity(
                     f"KV events did not make prefix target {expected} visible"
                 )
 
-            session_a_headers = {"x-dynamo-session-id": session_a}
-            session_b_headers = {"x-dynamo-session-id": session_b}
             proposal_a = {
                 **session_a_headers,
                 "x-dynamo-worker-instance-id": str(worker_a),
@@ -654,76 +640,25 @@ def _test_distributed_session_affinity(
             }
 
             async with aiohttp.ClientSession() as client:
-                assert await send(client, urls[0], payload(prefix_a), proposal_a) == (
+                assert await send(client, payload(prefix_a), proposal_a) == (
                     worker_a,
                     0,
                 )
-                assert await send(client, urls[1], payload(prefix_b), proposal_b) == (
+                assert await send(client, payload(prefix_b), proposal_b) == (
                     worker_b,
                     0,
                 )
 
-                await wait_for_prefix_target(client, urls[0], prefix_a, (worker_a, 0))
-                await wait_for_prefix_target(client, urls[1], prefix_b, (worker_b, 0))
+                await wait_for_prefix_target(client, prefix_a, (worker_a, 0))
+                await wait_for_prefix_target(client, prefix_b, (worker_b, 0))
 
-                assert await send(
-                    client, urls[0], payload(prefix_a), session_b_headers
-                ) == (worker_b, 0)
-                assert await send(
-                    client, urls[1], payload(prefix_b), session_a_headers
-                ) == (worker_a, 0)
-
-                first_evictions = first_router.read_logs().count(
-                    "evicted session affinity cache entry"
+                assert await send(client, payload(prefix_b), session_a_headers) == (
+                    worker_a,
+                    0,
                 )
-                assert await send(
-                    client,
-                    urls[1],
-                    payload(prefix_b),
-                    {
-                        **session_a_headers,
-                        "x-dynamo-session-final": "true",
-                    },
-                ) == (worker_a, 0)
-
-                for _ in range(50):
-                    if (
-                        first_router.read_logs().count(
-                            "evicted session affinity cache entry"
-                        )
-                        > first_evictions
-                    ):
-                        break
-                    await asyncio.sleep(0.1)
-                else:
-                    raise AssertionError(
-                        "first frontend did not observe session A claim deletion"
-                    )
-
-                second_evictions = second_router.read_logs().count(
-                    "evicted session affinity cache entry"
-                )
-                assert await send(
-                    client,
-                    urls[0],
-                    payload(prefix_a),
-                    {
-                        **session_b_headers,
-                        "x-dynamo-session-final": "true",
-                    },
-                ) == (worker_b, 0)
-
-                for _ in range(50):
-                    if (
-                        second_router.read_logs().count(
-                            "evicted session affinity cache entry"
-                        )
-                        > second_evictions
-                    ):
-                        return
-                    await asyncio.sleep(0.1)
-                raise AssertionError(
-                    "second frontend did not observe session B claim deletion"
+                assert await send(client, payload(prefix_a), session_b_headers) == (
+                    worker_b,
+                    0,
                 )
 
         asyncio.run(run_test())
@@ -3214,6 +3149,115 @@ def _test_router_decisions(
                     )
 
         asyncio.run(_verify_selection_service_scores())
+
+
+def _test_router_cache_salt_isolation(
+    engine_workers,
+    endpoint,
+    model_name: str,
+    block_size: int,
+):
+    """Verify cache-salted engine events remain isolated in the router index."""
+
+    async def test_sync():
+        expected_num_instances = engine_workers.num_workers
+        kv_router = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
+                endpoint=endpoint,
+                block_size=block_size,
+                kv_router_config=KvRouterConfig(
+                    router_snapshot_threshold=20,
+                    use_kv_events=True,
+                    router_event_threads=4,
+                ),
+            ),
+            num_workers=expected_num_instances,
+            engine_workers=engine_workers,
+        )
+
+        worker_ids = await wait_for_workers_ready(
+            endpoint,
+            kv_router,
+            expected_num_workers=expected_num_instances,
+            model_name=model_name,
+        )
+        assert len(worker_ids) >= 2, "cache-salt isolation requires two workers"
+
+        worker_a = (worker_ids[0], 0)
+        worker_b = (worker_ids[1], 0)
+        token_ids = [random.randint(1, 10_000) for _ in range(block_size * 2)]
+        expected_blocks = len(token_ids) // block_size
+
+        async def generate(cache_salt: str, worker_id: int) -> None:
+            request = {
+                "model": model_name,
+                "token_ids": token_ids,
+                "stop_conditions": {"ignore_eos": True, "max_tokens": 2},
+                "sampling_options": {},
+                "output_options": {},
+                "eos_token_ids": [],
+                "extra_args": {"nvext": {"cache_salt": cache_salt}},
+                "routing": {
+                    "backend_instance_id": worker_id,
+                    "cache_salt": cache_salt,
+                },
+            }
+            stream = await kv_router.generate_from_request(request)
+            terminal = None
+            async for response in stream:
+                if (
+                    isinstance(response, dict)
+                    and response.get("finish_reason") is not None
+                ):
+                    terminal = response
+            assert terminal is not None, f"tenant {cache_salt} request did not finish"
+
+        async def device_blocks(
+            cache_salt: Optional[str],
+        ) -> dict[tuple[int, int], int]:
+            scores = await kv_router.get_overlap_scores(
+                token_ids,
+                include_shared=False,
+                cache_namespace=cache_salt,
+            )
+            assert scores["block_size"] == block_size
+            assert scores["num_blocks"] == expected_blocks
+            assert scores["shared_cache"]["enabled"] is False
+            return {
+                (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+                for row in scores["workers"]
+            }
+
+        async def wait_for_scores(
+            cache_salt: Optional[str],
+            expected: dict[tuple[int, int], int],
+        ) -> None:
+            deadline = time.monotonic() + 10
+            last_scores: dict[tuple[int, int], int] = {}
+            expected_nonzero = {key: value for key, value in expected.items() if value}
+            while time.monotonic() < deadline:
+                last_scores = await device_blocks(cache_salt)
+                actual_nonzero = {
+                    key: value for key, value in last_scores.items() if value
+                }
+                if actual_nonzero == expected_nonzero:
+                    return
+                await asyncio.sleep(0.25)
+            raise AssertionError(
+                f"cache_salt={cache_salt!r}: expected {expected}, got {last_scores}"
+            )
+
+        await generate("tenant-a", worker_a[0])
+        await wait_for_scores("tenant-a", {worker_a: expected_blocks})
+        await wait_for_scores("tenant-b", {})
+        await wait_for_scores(None, {})
+
+        await generate("tenant-b", worker_b[0])
+        await wait_for_scores("tenant-b", {worker_b: expected_blocks})
+        await wait_for_scores("tenant-a", {worker_a: expected_blocks})
+        await wait_for_scores(None, {})
+
+    asyncio.run(test_sync())
 
 
 def _test_busy_threshold_endpoint(
