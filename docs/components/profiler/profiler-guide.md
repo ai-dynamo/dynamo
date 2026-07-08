@@ -636,6 +636,21 @@ overrides:
             claimName: "dynamo-pvc"
 ```
 
+The profiling job also runs an `output-copier` sidecar that relays profiler status and
+writes results to the output ConfigMap. By default it uses `bitnami/kubectl:latest`.
+In air-gapped or private-registry clusters, override the sidecar image via
+`overrides.profilingJob` (the image must include `kubectl` and a POSIX shell):
+
+```yaml
+overrides:
+  profilingJob:
+    template:
+      spec:
+        containers:
+        - name: output-copier
+          image: internal-registry/kubectl:1.29
+```
+
 **ConfigMaps:**
 - `dgdr-output-<name>`: Generated DGD configuration
 - `planner-profile-data`: Profiling data for Planner and mocker consumers (JSON). Only created for thorough sweeping when profile data is needed.
