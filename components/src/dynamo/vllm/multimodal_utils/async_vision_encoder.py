@@ -49,6 +49,12 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
     request; ``shutdown`` on teardown. All model knowledge lives in ``backend``;
     this class owns the optional preprocess pool, the request-atomicity barrier,
     and the single actor thread that runs ``build`` / ``forward_batch`` / ``close``.
+
+    ``preprocess_concurrency`` (backend-declared, constructor-overridable) is not
+    just a pool size — it gates the whole preprocess **phase**: ``0`` means
+    ``preprocess`` is never called and raws go straight to ``forward_batch``. A
+    backend that overrides ``preprocess`` while the effective concurrency is ``0``
+    is rejected at construction (the override would silently never run).
     """
 
     def __init__(
@@ -59,8 +65,9 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         name: str = "vision-encoder",
     ) -> None:
         # The backend declares whether it needs off-loop preprocessing; the
-        # explicit arg is an override for tuning. 0 ⇒ no pool (raws pass straight
-        # to forward_batch).
+        # explicit arg is an override for tuning. Not just a pool size: 0 ⇒ no
+        # preprocess phase at all — preprocess() is never called and raws pass
+        # straight to forward_batch.
         conc = (
             backend.preprocess_concurrency
             if preprocess_concurrency is None
@@ -68,6 +75,19 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         )
         if conc < 0:
             raise ValueError("preprocess_concurrency must be >= 0")
+        # Fail fast on the silent mismatch: an overridden preprocess that the
+        # effective concurrency of 0 would skip forever.
+        overrides_preprocess = (
+            type(backend).preprocess is not VisionEncoderBackend.preprocess
+        )
+        if conc == 0 and overrides_preprocess:
+            raise ValueError(
+                f"{type(backend).__name__} overrides preprocess() but the "
+                "effective preprocess_concurrency is 0, so preprocess would never "
+                "run (raws go straight to forward_batch). Set "
+                "preprocess_concurrency > 0 to enable the preprocess phase, or "
+                "drop the override and do the prep inside forward_batch."
+            )
         self._backend = backend
         self._preprocess_concurrency = conc
         self._name = name

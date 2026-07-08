@@ -188,17 +188,32 @@ def test_shutdown_before_load_is_safe():
     AsyncVisionEncoder(_FakeBackend()).shutdown()  # no-op, no raise
 
 
+class _PassthroughBackend(VisionEncoderBackend):
+    """Keeps the base identity preprocess (no override) — the legal passthrough
+    shape at preprocess_concurrency=0."""
+
+    image_token_id = 151655
+
+    def __init__(self):
+        self.forward_calls: list[list] = []
+
+    def build(self, model_id):
+        pass
+
+    def forward_batch(self, items, target_bucket=None):
+        self.forward_calls.append(list(items))
+        return [torch.zeros(2, 4) for _ in items]
+
+
 async def test_passthrough_skips_preprocess_when_no_pool():
-    """With no pool (preprocess_concurrency=0) preprocess is skipped and raws go
-    straight to forward_batch — no barrier, no pool thread."""
-
-    class _PassthroughBackend(_FakeBackend):
-        preprocess_concurrency = 0
-
-        def preprocess(self, raw):
-            raise AssertionError("preprocess must not run in passthrough mode")
-
+    """With no pool (preprocess_concurrency=0) the preprocess phase is skipped
+    entirely and raws go straight to forward_batch — no barrier, no pool thread."""
     be = _PassthroughBackend()
+    # Instance-level boom (invisible to the class-override check) proves the
+    # phase is never entered, not merely run through an identity hook.
+    be.preprocess = lambda raw: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        AssertionError("preprocess must not run in passthrough mode")
+    )
     enc = AsyncVisionEncoder(be)
     enc.load("m")
     try:
@@ -211,12 +226,30 @@ async def test_passthrough_skips_preprocess_when_no_pool():
 
 
 def test_preprocess_concurrency_zero_disables_pool():
-    enc = AsyncVisionEncoder(_FakeBackend(), preprocess_concurrency=0)
+    enc = AsyncVisionEncoder(_PassthroughBackend(), preprocess_concurrency=0)
     enc.load("m")
     try:
         assert enc._pool is None
     finally:
         enc.shutdown()
+
+
+def test_overridden_preprocess_with_zero_concurrency_raises():
+    """A backend that overrides preprocess but declares no pool would silently
+    never run it — rejected at construction."""
+
+    class _MismatchedBackend(_FakeBackend):
+        preprocess_concurrency = 0
+
+    with pytest.raises(ValueError, match="never run"):
+        AsyncVisionEncoder(_MismatchedBackend())
+
+
+def test_driver_override_to_zero_with_overriding_backend_raises():
+    """The constructor override participates in the same check: forcing the
+    effective concurrency to 0 must not silently skip an overridden preprocess."""
+    with pytest.raises(ValueError, match="never run"):
+        AsyncVisionEncoder(_FakeBackend(), preprocess_concurrency=0)
 
 
 def test_preprocess_concurrency_rejects_negative():
