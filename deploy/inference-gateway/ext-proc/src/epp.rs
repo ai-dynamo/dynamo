@@ -20,13 +20,7 @@ use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-<<<<<<< HEAD
 use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
-=======
-use dynamo_llm::protocols::common::extensions::NvExt;
-use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
-use dynamo_protocols::types::Prompt;
->>>>>>> c3eec5e2db (feat(ext-proc): support /v1/completions tokenization in Rust EPP)
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -215,46 +209,19 @@ impl Router {
 
     /// Tokenize a JSON request body and extract router queue priorities.
     ///
-<<<<<<< HEAD
     /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority)`.
     /// Priorities default to zero when absent. Mirrors the standalone Dynamo
     /// preprocessor lift in `lib/llm/src/preprocessor.rs`.
     pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
-=======
-    /// Returns `(token_ids, priority_jump, strict_priority)`. Priorities default
-    /// to zero when absent. Supports both `/v1/chat/completions` and
-    /// `/v1/completions` bodies; the request kind is discriminated by a
-    /// non-empty `messages` array (chat) versus a `prompt` (completions),
-    /// mirroring the removed Go EPP `BuildOpenAIRequest`.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64, u32)> {
-        let value: serde_json::Value = serde_json::from_str(request_json)?;
-        let has_messages = value
-            .get("messages")
-            .and_then(|m| m.as_array())
-            .is_some_and(|messages| !messages.is_empty());
-        if !has_messages && value.get("prompt").is_some() {
-            return self.tokenize_completion(request_json);
-        }
-        self.tokenize_chat(request_json)
-    }
-
-    /// Tokenize a `/v1/chat/completions` body via the chat template.
-    fn tokenize_chat(&self, request_json: &str) -> Result<(Vec<u32>, f64, u32)> {
->>>>>>> c3eec5e2db (feat(ext-proc): support /v1/completions tokenization in Rust EPP)
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(request_json)?;
 
-<<<<<<< HEAD
         let priority_jump = extract_priority_jump(&request);
         let strict_priority = extract_strict_priority(&request);
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
-=======
-        let priority_jump = extract_priority_jump(request.nvext.as_ref());
-        let strict_priority = extract_strict_priority(request.nvext.as_ref());
->>>>>>> c3eec5e2db (feat(ext-proc): support /v1/completions tokenization in Rust EPP)
 
         let formatted_prompt = self
             .preprocessor
@@ -268,42 +235,6 @@ impl Router {
             priority_jump,
             strict_priority,
         ))
-    }
-
-    /// Tokenize a `/v1/completions` body.
-    ///
-    /// Mirrors the removed Go EPP `addCompletionPrompt`: pre-tokenized
-    /// (integer) prompts route directly on their token IDs, while text prompts
-    /// are wrapped as a single user message and run through the chat template
-    /// so routing reuses the same tokenization path as chat requests. Batched
-    /// prompts route on the first entry, since KV prefix locality is computed
-    /// per prompt.
-    fn tokenize_completion(&self, request_json: &str) -> Result<(Vec<u32>, f64, u32)> {
-        let request: NvCreateCompletionRequest = serde_json::from_str(request_json)?;
-
-        let priority_jump = extract_priority_jump(request.nvext.as_ref());
-        let strict_priority = extract_strict_priority(request.nvext.as_ref());
-
-        let tokens = match completion_prompt_token_ids(&request.inner.prompt) {
-            Some(ids) => ids,
-            None => {
-                self.tokenize_text_as_user(&completion_prompt_routing_text(&request.inner.prompt))?
-            }
-        };
-
-        Ok((tokens, priority_jump, strict_priority))
-    }
-
-    /// Wrap `text` as a single user chat message and tokenize it through the
-    /// chat template, matching the Go EPP's legacy chat-shaped completion path.
-    fn tokenize_text_as_user(&self, text: &str) -> Result<Vec<u32>> {
-        let chat_json = serde_json::json!({
-            "model": "default",
-            "messages": [{"role": "user", "content": text}],
-        })
-        .to_string();
-        let (tokens, _, _) = self.tokenize_chat(&chat_json)?;
-        Ok(tokens)
     }
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
@@ -549,17 +480,20 @@ impl Router {
     }
 }
 
-/// Extract the router queue `priority_jump` from a request's
+/// Extract the router queue `priority_jump` from a chat completion request's
 /// `nvext.agent_hints.priority`.
 ///
 /// Negative priorities are clamped to `0.0` so a low-priority hint never
 /// pushes a request behind FCFS arrivals (matches the standalone preprocessor
 /// in `lib/llm/src/preprocessor.rs`). Falls back to the deprecated
 /// `latency_sensitivity` alias for callers still on the old field name.
-/// Returns `0.0` when `nvext` is absent. Shared by the chat and completion
-/// paths since both carry the same `nvext` block.
-fn extract_priority_jump(nvext: Option<&NvExt>) -> f64 {
-    nvext
+/// Returns `0.0` when `nvext` is absent.
+fn extract_priority_jump(
+    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> f64 {
+    request
+        .nvext
+        .as_ref()
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| {
             h.priority
@@ -569,42 +503,15 @@ fn extract_priority_jump(nvext: Option<&NvExt>) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn extract_strict_priority(nvext: Option<&NvExt>) -> u32 {
-    nvext
+fn extract_strict_priority(
+    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> u32 {
+    request
+        .nvext
+        .as_ref()
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.strict_priority)
         .unwrap_or(0)
-}
-
-/// Token IDs for a pre-tokenized completion prompt.
-///
-/// Mirrors the Go EPP `addCompletionPrompt`: integer prompts route directly on
-/// their token IDs. Batched token prompts route on the first non-empty entry,
-/// since KV prefix locality is computed per prompt. Returns `None` for text
-/// prompts, which must go through the tokenizer instead.
-fn completion_prompt_token_ids(prompt: &Prompt) -> Option<Vec<u32>> {
-    match prompt {
-        Prompt::IntegerArray(ids) => Some(ids.clone()),
-        Prompt::ArrayOfIntegerArray(batches) => Some(
-            batches
-                .iter()
-                .find(|ids| !ids.is_empty())
-                .cloned()
-                .unwrap_or_default(),
-        ),
-        Prompt::String(_) | Prompt::StringArray(_) => None,
-    }
-}
-
-/// Routing text for a text completion prompt (the first prompt in a batch).
-/// Returns an empty string for pre-tokenized prompts, which never reach this
-/// path.
-fn completion_prompt_routing_text(prompt: &Prompt) -> String {
-    match prompt {
-        Prompt::String(text) => text.clone(),
-        Prompt::StringArray(texts) => texts.first().cloned().unwrap_or_default(),
-        Prompt::IntegerArray(_) | Prompt::ArrayOfIntegerArray(_) => String::new(),
-    }
 }
 
 struct DiscoveredModelBootstrap {
@@ -1246,7 +1153,7 @@ mod tests {
                 }"#,
             )
             .unwrap();
-        assert_eq!(extract_priority_jump(with_priority.nvext.as_ref()), 5.0);
+        assert_eq!(extract_priority_jump(&with_priority), 5.0);
 
         let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(
@@ -1256,7 +1163,7 @@ mod tests {
                 }"#,
             )
             .unwrap();
-        assert_eq!(extract_priority_jump(without_nvext.nvext.as_ref()), 0.0);
+        assert_eq!(extract_priority_jump(&without_nvext), 0.0);
     }
 
     #[test]
@@ -1270,7 +1177,7 @@ mod tests {
                 }"#,
             )
             .unwrap();
-        assert_eq!(extract_strict_priority(with_priority.nvext.as_ref()), 9);
+        assert_eq!(extract_strict_priority(&with_priority), 9);
 
         let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_str(
@@ -1280,64 +1187,6 @@ mod tests {
                 }"#,
             )
             .unwrap();
-        assert_eq!(extract_strict_priority(without_nvext.nvext.as_ref()), 0);
-    }
-
-    /// A `/v1/completions` request carries the same `nvext` block as chat, so
-    /// the shared priority extractors must lift `agent_hints` from it too.
-    #[test]
-    fn priority_lifted_from_completion_nvext() {
-        let request: NvCreateCompletionRequest = serde_json::from_str(
-            r#"{
-                "model": "test",
-                "prompt": "hello world",
-                "nvext": {"agent_hints": {"priority": 4, "strict_priority": 7}}
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(extract_priority_jump(request.nvext.as_ref()), 4.0);
-        assert_eq!(extract_strict_priority(request.nvext.as_ref()), 7);
-    }
-
-    /// Pre-tokenized `/v1/completions` prompts route directly on their token
-    /// IDs, matching the Go EPP `addCompletionPrompt` token path.
-    #[test]
-    fn completion_token_prompt_uses_token_ids_directly() {
-        let single: NvCreateCompletionRequest =
-            serde_json::from_str(r#"{"model": "test", "prompt": [1, 2, 3, 4]}"#).unwrap();
-        assert_eq!(
-            completion_prompt_token_ids(&single.inner.prompt),
-            Some(vec![1, 2, 3, 4])
-        );
-
-        // Batched token prompts route on the first non-empty entry.
-        let batched: NvCreateCompletionRequest =
-            serde_json::from_str(r#"{"model": "test", "prompt": [[10, 20], [30, 40, 50]]}"#)
-                .unwrap();
-        assert_eq!(
-            completion_prompt_token_ids(&batched.inner.prompt),
-            Some(vec![10, 20])
-        );
-    }
-
-    /// Text `/v1/completions` prompts are not pre-tokenized, so they fall
-    /// through to the tokenizer path with the first prompt as routing text.
-    #[test]
-    fn completion_string_prompt_routes_on_text() {
-        let single: NvCreateCompletionRequest =
-            serde_json::from_str(r#"{"model": "test", "prompt": "hello world"}"#).unwrap();
-        assert_eq!(completion_prompt_token_ids(&single.inner.prompt), None);
-        assert_eq!(
-            completion_prompt_routing_text(&single.inner.prompt),
-            "hello world"
-        );
-
-        let batched: NvCreateCompletionRequest =
-            serde_json::from_str(r#"{"model": "test", "prompt": ["first", "second"]}"#).unwrap();
-        assert_eq!(completion_prompt_token_ids(&batched.inner.prompt), None);
-        assert_eq!(
-            completion_prompt_routing_text(&batched.inner.prompt),
-            "first"
-        );
+        assert_eq!(extract_strict_priority(&without_nvext), 0);
     }
 }
