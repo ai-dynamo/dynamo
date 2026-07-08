@@ -165,7 +165,9 @@ class NativePlannerBase:
             raise ValueError(
                 "PlannerConfig.model_name must be a non-empty string or None"
             )
-        self._prometheus_metrics: Optional[PlannerPrometheusMetrics] = None
+        self.prometheus_metrics = PlannerPrometheusMetrics(
+            model_name=config.model_name,
+        )
         if self.prometheus_port != 0:
             try:
                 start_http_server(self.prometheus_port)
@@ -174,6 +176,8 @@ class NativePlannerBase:
                 )
             except Exception as e:
                 logger.error(f"Failed to start Prometheus metrics server: {e}")
+            self.prometheus_metrics.sla_target_ttft_ms.set(config.ttft_ms)
+            self.prometheus_metrics.sla_target_itl_ms.set(config.itl_ms)
 
         # Worker info (resolved during _async_init)
         self.prefill_worker_info = WorkerInfo()
@@ -334,7 +338,6 @@ class NativePlannerBase:
         # defaults (subscribers aren't attached yet) which is enough to
         # construct the FPM endpoint.
         await self._init_worker_info()
-        self._init_prometheus_metrics()
 
         if self.runtime is not None:
             if self.require_prefill:
@@ -382,24 +385,6 @@ class NativePlannerBase:
         )
         self.model_name = (
             self.decode_worker_info.model_name or self.prefill_worker_info.model_name
-        )
-
-    @property
-    def prometheus_metrics(self) -> PlannerPrometheusMetrics:
-        assert (
-            self._prometheus_metrics is not None
-        ), "prometheus_metrics accessed before _init_prometheus_metrics()"
-        return self._prometheus_metrics
-
-    def _init_prometheus_metrics(self) -> None:
-        config_name = self.config.model_name
-        effective_name = config_name if config_name is not None else self.model_name
-        self._prometheus_metrics = PlannerPrometheusMetrics(model_name=effective_name)
-        if self.prometheus_port != 0:
-            self._prometheus_metrics.sla_target_ttft_ms.set(self.config.ttft_ms)
-            self._prometheus_metrics.sla_target_itl_ms.set(self.config.itl_ms)
-        logger.info(
-            f"PlannerPrometheusMetrics initialized with model_name={effective_name!r}"
         )
 
     def _resolve_runtime_namespace(self) -> str:
