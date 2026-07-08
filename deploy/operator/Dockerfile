@@ -115,7 +115,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
 #
 # `compliance` build context is plumbed by .github/actions/build-deploy-component/action.yml
 # as `--build-context compliance=../../container/compliance`.
-FROM python:3.12-slim AS licenses
+FROM ${DOCKER_PROXY}library/python:3.12-slim AS licenses
 
 WORKDIR /
 RUN mkdir -p /legal /sboms
@@ -177,7 +177,7 @@ COPY --from=licenses /legal/ /
 # Uses python:3.12-slim as the helper (operator's distroless final has
 # no shell/python). CI extracts via `--target sources_archive` and never
 # COPYs into the runtime image.
-FROM python:3.12-slim AS sources_collect
+FROM ${DOCKER_PROXY}library/python:3.12-slim AS sources_collect
 WORKDIR /
 RUN mkdir -p /sources /opt/compliance /opt/go-vendor
 COPY --from=compliance . /opt/compliance
