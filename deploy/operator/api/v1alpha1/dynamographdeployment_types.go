@@ -54,14 +54,16 @@ const (
 	DGDStateFailed       DGDState = "failed"
 )
 
-// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;NotReported;Unknown
+// PlacementScoreState describes whether placement score is available and how
+// complete the reported score is for a graph deployment. See the v1beta1
+// PlacementScoreState for the authoritative semantics of each value.
+// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;Unknown
 type PlacementScoreState string
 
 const (
 	PlacementScoreStateReported    PlacementScoreState = "Reported"
 	PlacementScoreStatePartial     PlacementScoreState = "Partial"
 	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
-	PlacementScoreStateNotReported PlacementScoreState = "NotReported"
 	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
 )
 
@@ -180,10 +182,17 @@ type DynamoGraphDeploymentStatus struct {
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
 	// PlacementScore is the DGD-level scheduler placement score aggregated from
-	// relevant scheduler placement units when reported.
+	// relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
+	// is better and 1.0 represents the best possible placement. Aggregation uses
+	// the minimum across placement units so the value is a worst-placement
+	// signal for the graph. Scores are only comparable across DGDs that share
+	// the same scheduler scoring contract and version.
 	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
 	PlacementScore *float64 `json:"placementScore,omitempty"`
-	// PlacementScoreState indicates placement score reporting state.
+	// PlacementScoreState indicates placement score reporting state. See
+	// PlacementScoreState for the semantics of each value.
 	// +optional
 	PlacementScoreState PlacementScoreState `json:"placementScoreState,omitempty"`
 }

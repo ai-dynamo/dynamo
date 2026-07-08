@@ -696,14 +696,27 @@ func (r *DynamoGraphDeploymentReconciler) getExistingGrovePodCliqueSet(ctx conte
 	return pcs, nil
 }
 
+// updatePlacementScoreStatus writes the placement score fields on every
+// reconcile so status is never left stale. Per the placement-score DEP,
+// every backend must set placementScoreState after the first reconciliation:
+//   - non-Grove pathways report Unsupported (no placement score source),
+//   - Grove read failures report Unknown (indeterminate; may recover),
+//   - otherwise the aggregator's classification is written through.
+//
+// In every non-Reported/Partial branch PlacementScore is cleared so a value
+// from a previous reconcile cannot linger.
 func (r *DynamoGraphDeploymentReconciler) updatePlacementScoreStatus(ctx context.Context, logger logr.Logger, dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 	if !r.isGrovePathway(dgd) {
+		dgd.Status.PlacementScore = nil
+		dgd.Status.PlacementScoreState = nvidiacomv1beta1.PlacementScoreStateUnsupported
 		return
 	}
 
 	pcs, pcsErr := r.getExistingGrovePodCliqueSet(ctx, dgd)
 	if pcsErr != nil {
 		logger.V(1).Info("Failed to get PodCliqueSet for placement score", "error", pcsErr)
+		dgd.Status.PlacementScore = nil
+		dgd.Status.PlacementScoreState = nvidiacomv1beta1.PlacementScoreStateUnknown
 		return
 	}
 

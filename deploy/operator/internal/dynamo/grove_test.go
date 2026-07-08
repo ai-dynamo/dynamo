@@ -1208,7 +1208,7 @@ func TestAggregatePlacementScore_CurrentBehavior(t *testing.T) {
 				Status: grovev1alpha1.PodCliqueSetStatus{},
 			},
 			wantScore: nil,
-			wantState: v1beta1.PlacementScoreStateNotReported,
+			wantState: v1beta1.PlacementScoreStateUnknown,
 		},
 		{
 			name: "pod gangs present but no score field in current grove api",

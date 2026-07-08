@@ -566,14 +566,22 @@ const (
 
 // PlacementScoreState describes whether placement score is available and how
 // complete the reported score is for a graph deployment.
-// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;NotReported;Unknown
+//
+// Every backend must set this field after the first reconciliation:
+//   - Reported:    a score is available for every scored placement unit.
+//   - Partial:     a score is available for some but not all placement units.
+//   - Unsupported: the backend does not surface a placement score at all.
+//   - Unknown:     the backend supports scores but the current value is
+//     indeterminate (e.g. read failure, not yet populated by the
+//     scheduler). When set, PlacementScore must be cleared.
+//
+// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;Unknown
 type PlacementScoreState string
 
 const (
 	PlacementScoreStateReported    PlacementScoreState = "Reported"
 	PlacementScoreStatePartial     PlacementScoreState = "Partial"
 	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
-	PlacementScoreStateNotReported PlacementScoreState = "NotReported"
 	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
 )
 

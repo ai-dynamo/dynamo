@@ -737,8 +737,8 @@ _Appears in:_
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of operator manged rolling updates.<br />Currently only supported for singl-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
-| `placementScore` _float_ | PlacementScore is the DGD-level scheduler placement score aggregated from<br />relevant scheduler placement units when reported. |  | Optional: \{\} <br /> |
-| `placementScoreState` _[PlacementScoreState](#placementscorestate)_ | PlacementScoreState indicates placement score reporting state. |  | Enum: [Reported Partial Unsupported NotReported Unknown] <br />Optional: \{\} <br /> |
+| `placementScore` _float_ | PlacementScore is the DGD-level scheduler placement score aggregated from<br />relevant scheduler placement units. Normalized to [0.0, 1.0] where higher<br />is better and 1.0 represents the best possible placement. Aggregation uses<br />the minimum across placement units so the value is a worst-placement<br />signal for the graph. Scores are only comparable across DGDs that share<br />the same scheduler scoring contract and version. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
+| `placementScoreState` _[PlacementScoreState](#placementscorestate)_ | PlacementScoreState indicates placement score reporting state. See<br />PlacementScoreState for the semantics of each value. |  | Enum: [Reported Partial Unsupported Unknown] <br />Optional: \{\} <br /> |
 
 
 #### DynamoModel
@@ -1132,10 +1132,12 @@ _Appears in:_
 
 _Underlying type:_ _string_
 
-
+PlacementScoreState describes whether placement score is available and how
+complete the reported score is for a graph deployment. See the v1beta1
+PlacementScoreState for the authoritative semantics of each value.
 
 _Validation:_
-- Enum: [Reported Partial Unsupported NotReported Unknown]
+- Enum: [Reported Partial Unsupported Unknown]
 
 _Appears in:_
 - [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
@@ -1145,7 +1147,6 @@ _Appears in:_
 | `Reported` |  |
 | `Partial` |  |
 | `Unsupported` |  |
-| `NotReported` |  |
 | `Unknown` |  |
 
 
@@ -2394,8 +2395,8 @@ _Appears in:_
 | `restart` _[RestartStatus](#restartstatus)_ | restart contains the status of a graph-level restart. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ComponentCheckpointStatus](#componentcheckpointstatus))_ | checkpoints contains per-component checkpoint status, keyed by component name. |  | Optional: \{\} <br /> |
 | `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | rollingUpdate tracks the progress of operator-managed rolling updates.<br />Currently only supported for single-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
-| `placementScore` _float_ | placementScore is the DGD-level scheduler placement score aggregated from<br />relevant scheduler placement units when reported. |  | Optional: \{\} <br /> |
-| `placementScoreState` _[PlacementScoreState](#placementscorestate)_ | placementScoreState indicates placement score reporting state. |  | Enum: [Reported Partial Unsupported NotReported Unknown] <br />Optional: \{\} <br /> |
+| `placementScore` _float_ | placementScore is the DGD-level scheduler placement score aggregated from<br />relevant scheduler placement units. Normalized to [0.0, 1.0] where higher<br />is better and 1.0 represents the best possible placement. Aggregation uses<br />the minimum across placement units so the value is a worst-placement<br />signal for the graph. Scores are only comparable across DGDs that share<br />the same scheduler scoring contract and version. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
+| `placementScoreState` _[PlacementScoreState](#placementscorestate)_ | placementScoreState indicates placement score reporting state. See<br />PlacementScoreState for the semantics of each value. |  | Enum: [Reported Partial Unsupported Unknown] <br />Optional: \{\} <br /> |
 
 
 #### EPPConfig
@@ -2769,8 +2770,16 @@ _Underlying type:_ _string_
 PlacementScoreState describes whether placement score is available and how
 complete the reported score is for a graph deployment.
 
+Every backend must set this field after the first reconciliation:
+  - Reported:    a score is available for every scored placement unit.
+  - Partial:     a score is available for some but not all placement units.
+  - Unsupported: the backend does not surface a placement score at all.
+  - Unknown:     the backend supports scores but the current value is
+                 indeterminate (e.g. read failure, not yet populated by the
+                 scheduler). When set, PlacementScore must be cleared.
+
 _Validation:_
-- Enum: [Reported Partial Unsupported NotReported Unknown]
+- Enum: [Reported Partial Unsupported Unknown]
 
 _Appears in:_
 - [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
@@ -2780,7 +2789,6 @@ _Appears in:_
 | `Reported` |  |
 | `Partial` |  |
 | `Unsupported` |  |
-| `NotReported` |  |
 | `Unknown` |  |
 
 
