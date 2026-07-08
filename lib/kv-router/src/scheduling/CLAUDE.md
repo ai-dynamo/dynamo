@@ -5,7 +5,7 @@ from projected load into sequence-state booking.
 
 ## Queue hierarchy
 
-There is one `SchedulerQueueActor` per scheduler, not one per policy class. It owns one outer `PolicyQueue`, which owns one `PolicyClassQueue` for every class in the resolved profile.
+There is one `SchedulerQueueActor` per scheduler. It owns one outer `PolicyQueue`, which owns one `PolicyClassQueue` for every class in the resolved profile.
 
 ```mermaid
 sequenceDiagram
