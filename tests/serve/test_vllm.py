@@ -158,6 +158,37 @@ vllm_configs = {
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
     ),
+    # Speculative decoding: Llama-3.1-8B main model with an EAGLE3 draft model
+    # (see launch/agg_spec_decoding.sh). The base model is gated on HF, so this
+    # needs HF_TOKEN set and only runs where the token + VRAM are available;
+    # hence pytest.mark.nightly rather than a per-PR/pre-merge tier.
+    "aggregated_spec_decoding": VLLMConfig(
+        name="aggregated_spec_decoding",
+        directory=vllm_dir,
+        script_name="agg_spec_decoding.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            # Conservative placeholder for an 8B model (weights ~16 GiB fp16 plus
+            # the EAGLE3 draft + KV cache). The launch script pins
+            # --gpu-memory-utilization 0.8, so peak usage tracks the GPU size
+            # rather than this value. TODO: profile the real peak VRAM and tighten.
+            pytest.mark.profiled_vram_gib(20),
+            pytest.mark.timeout(900),
+            # 8B + gated Llama base model -> nightly only (needs HF_TOKEN + VRAM).
+            pytest.mark.nightly,
+        ],
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        request_payloads=[
+            chat_payload_default(),
+            chat_payload(
+                "What is the capital of France? Answer in one word.",
+                repeat_count=1,
+                expected_response=["Paris"],
+                temperature=0.0,
+                max_tokens=16,
+            ),
+        ],
+    ),
     "aggregated_unified": VLLMConfig(
         name="aggregated_unified",
         directory=vllm_dir,
