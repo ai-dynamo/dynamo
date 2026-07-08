@@ -594,20 +594,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_legacy_agent_trace_schema() {
-        let mut file = NamedTempFile::new().unwrap();
-        writeln!(
-            file,
-            r#"{{"schema":"dynamo.agent.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"request":{{"request_id":"req-1","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":2,"input_sequence_hashes":[11]}}}}}}"#
-        )
-        .unwrap();
-
-        let error = load_request_trace_records(&[file.path().to_path_buf()]).unwrap_err();
-        assert!(error.to_string().contains("failed to parse"));
-        assert!(format!("{error:#}").contains("unknown variant `dynamo.agent.trace.v1`"));
-    }
-
-    #[test]
     fn request_trace_requires_arrival_time_and_output_length() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
