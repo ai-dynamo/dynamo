@@ -25,15 +25,16 @@ This design introduces a **device-agnostic VMM abstraction layer** so that Intel
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                  CLI / Supervisor                     │
+│                  CLI / Supervisor                    │
 │  server.py  ──→  --device-type {cuda,xpu}            │
 └────────────────────────┬─────────────────────────────┘
                          │ VMMDeviceType enum
                          ▼
 ┌──────────────────────────────────────────────────────┐
-│            common/vmm/__init__.py                     │
-│  init_vmm(device_type) — once per process            │
-│  get_vmm() → VMMDevice  (singleton)                  │
+│            common/vmm/__init__.py                    |
+│  Singleton instance:                                 |
+│  init_vmm(device_type)                               │
+│  get_vmm() → VMMDevice                               │
 │                                                      │
 │  ┌───────────────┐          ┌───────────────┐        │
 │  │  CudaVMM      │          │  XpuVMM (TBD) │        │
@@ -58,6 +59,14 @@ This design introduces a **device-agnostic VMM abstraction layer** so that Intel
 | `__init__.py` | `VMMDeviceType` enum, `init_vmm()` singleton initializer, `get_vmm()` accessor, `get_vmm_device_type()` |
 | `device.py` | `VMMDevice` — `abc.ABC` with 24 `@abstractmethod` vendor-neutral methods |
 | `cuda_utils.py` | Module-level CUDA helpers (unchanged logic) + `CudaVMM(VMMDevice)` class |
+
+- `init_vmm(device_type)`: explicit process-level backend selection, e.g.
+   CLI `--device-type`. On a mixed node (e.g., CUDA and other device coexist),
+   --device-type device_name overrides the auto-detection because it calls
+   init_vmm(VMMDeviceType.DeviceName) at process startup — before any get_vmm() lazy path fires.
+- `get_vmm()`: returns the singleton and may lazily initialize the default/autodetected
+   backend for public client/integration compatibility via init_vmm(detected_device_type).
+- `vmm.ensure_initialized()`: initializes the selected backend driver/runtime, e.g. CUDA `cuInit`
 
 ### 3.2 `VMMDevice` ABC Surface (24 methods)
 

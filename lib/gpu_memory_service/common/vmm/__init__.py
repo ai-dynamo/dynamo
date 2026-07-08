@@ -7,9 +7,16 @@ GMS depends on a per-vendor virtual-memory-management surface
 (allocate physical memory, export/import shareable handles, reserve and
 map virtual addresses, ...).
 
-The VMM instance is process-global and immutable once initialized.
-Call ``init_vmm(device_type)`` once at process startup, then use
-``get_vmm()`` anywhere a VMMDevice is needed.
+The VMM instance is process-global singleton and immutable once initialized.
+- `init_vmm(device_type)`: explicit process-level backend selection, e.g.
+   CLI `--device-type`. On a mixed node (e.g., CUDA and other device coexist),
+   --device-type device_name overrides the auto-detection because it calls
+   init_vmm(VMMDeviceType.DeviceName) at process startup — before any get_vmm()
+   lazy path fires.
+- `get_vmm()`: returns the singleton and may lazily initialize the default/autodetected
+   backend for public client/integration compatibility via init_vmm(detected_device_type).
+- `vmm.ensure_initialized()`: initializes the selected backend driver/runtime,
+    e.g. CUDA `cuInit`
 
 """
 
