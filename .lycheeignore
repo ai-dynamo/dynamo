@@ -37,6 +37,11 @@
 # failures across independent runs). Loads fine from a normal browser.
 ^https://cert-manager\.io/
 
+# Connection failed from GitHub runners past retries (2026-07-08); page is
+# fine from a normal browser. Narrow ignore — broaden to the host only if
+# more kubernetes.io links start flaking.
+^https://kubernetes\.io/docs/tasks/administer-cluster/change-default-storage-class/?$
+
 # GitHub serves 404 for the /stargazers route to anonymous requests
 # (repo-wide GitHub behavior as of 2026-07-07, reproduced on unrelated
 # repos). The links in the contribution guides predate this PR.
