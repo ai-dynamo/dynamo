@@ -34,7 +34,12 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
 
 from .hash_utils import compute_mm_uuids_from_images
-from .model import ModelFamily, construct_qwen_decode_mm_data, resolve_model_family
+from .model import (
+    ModelFamily,
+    construct_qwen_decode_mm_data,
+    construct_qwen_decode_prompt,
+    resolve_model_family,
+)
 from .models.qwen import (
     QwenGridParams,
     build_qwen_embedding_params,
@@ -303,6 +308,7 @@ class VllmMultimodalRequestProcessor:
                 multi_modal_data,
                 self._qwen_grid_params,
                 mm_processor_kwargs,
+                prompt_token_ids,
             )
         return {"expanded_prompt_token_ids": prompt_token_ids}
 
@@ -597,11 +603,32 @@ class VllmMultimodalRequestProcessor:
             embedding_params = disaggregated_params.get("embedding_params") or None
             if self._model_family is ModelFamily.QWEN_VL:
                 if embedding_params is not None:
-                    multi_modal_data = construct_qwen_decode_mm_data(
-                        embedding_params.get("image_grid_thw"),
-                        embedding_params.get("embeddings_shape"),
-                        request_id,
+                    prompt_token_ids_without_images = embedding_params.get(
+                        "prompt_token_ids_without_images"
                     )
+                    image_token_id = embedding_params.get("image_token_id")
+                    image_placeholders = embedding_params.get("image_placeholders")
+                    if (
+                        prompt_token_ids_without_images is not None
+                        and image_token_id is not None
+                        and image_placeholders
+                    ):
+                        pre_rendered = construct_qwen_decode_prompt(
+                            prompt_token_ids_without_images,
+                            image_token_id,
+                            embedding_params.get("image_grid_thw"),
+                            image_placeholders,
+                            request_id,
+                        )
+                        request_for_prompt["token_ids"] = pre_rendered[
+                            "prompt_token_ids"
+                        ]
+                    else:
+                        multi_modal_data = construct_qwen_decode_mm_data(
+                            embedding_params.get("image_grid_thw"),
+                            embedding_params.get("embeddings_shape"),
+                            request_id,
+                        )
                 elif has_mm_data and request["multi_modal_data"].get(IMAGE_URL_KEY):
                     prefill_result = request.get("prefill_result")
                     message = (

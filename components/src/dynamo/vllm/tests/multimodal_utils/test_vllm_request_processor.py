@@ -537,6 +537,58 @@ async def test_qwen_decode_reconstructs_placeholder_embeddings(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_qwen_decode_uses_metadata_only_prompt_when_handoff_is_complete():
+    processor = _processor()
+
+    prepared = await processor.prepare_prompt(
+        {
+            "token_ids": [1, 99, 2],
+            "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {
+                        "image_grid_thw": [[1, 4, 4]],
+                        "embeddings_shape": [4, 2048],
+                        "prompt_token_ids_without_images": [1, 2],
+                        "image_token_id": 99,
+                        "image_placeholders": [[1, 4]],
+                    }
+                }
+            },
+        },
+        "request-compact",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["type"] == "multimodal"
+    assert prepared.prompt["prompt_token_ids"] == [1, 99, 99, 99, 99, 2]
+    item = prepared.prompt["mm_kwargs"]["image"][0]
+    assert set(item) == {"image_grid_thw"}
+    assert item["image_grid_thw"].data.tolist() == [1, 4, 4]
+    assert prepared.prompt["mm_hashes"] == {"image": ["dynamo-pd-request-compact-0"]}
+    placeholder = prepared.prompt["mm_placeholders"]["image"][0]
+    assert (placeholder.offset, placeholder.length) == (1, 4)
+    assert prepared.request["token_ids"] == [1, 99, 99, 99, 99, 2]
+    processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+def test_qwen_metadata_only_prompt_reconstructs_multiple_image_runs():
+    prompt = mod.construct_qwen_decode_prompt(
+        [1, 2, 3],
+        99,
+        [[1, 2, 4], [1, 2, 6]],
+        [[1, 2], [4, 3]],
+        "request-multi",
+    )
+
+    assert prompt["prompt_token_ids"] == [1, 99, 99, 2, 99, 99, 99, 3]
+    assert [
+        (item.offset, item.length) for item in prompt["mm_placeholders"]["image"]
+    ] == [(1, 2), (4, 3)]
+
+
+@pytest.mark.asyncio
 async def test_non_qwen_decode_uses_expanded_prompt_tokens():
     processor = _processor(model="llava-hf/llava-1.5-7b-hf")
 
@@ -715,8 +767,9 @@ def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs
     llava_processor = _processor(model="llava-hf/llava-1.5-7b-hf")
     observed = {}
 
-    def fake_build_qwen(data, params, processor_kwargs):
+    def fake_build_qwen(data, params, processor_kwargs, prompt_token_ids):
         observed["processor_kwargs"] = processor_kwargs
+        observed["prompt_token_ids"] = prompt_token_ids
         return {"image_grid_thw": [[1, 2, 2]]}
 
     monkeypatch.setattr(
@@ -731,6 +784,7 @@ def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs
         mm_processor_kwargs={"max_pixels": 1003520},
     ) == {"image_grid_thw": [[1, 2, 2]]}
     assert observed["processor_kwargs"] == {"max_pixels": 1003520}
+    assert observed["prompt_token_ids"] == [1, 99, 2]
     assert llava_processor.build_prefill_handoff(
         multi_modal_data=mm_data,
         prompt_token_ids=[1, 99, 2],
@@ -798,6 +852,51 @@ def test_qwen_handoff_computes_grid_for_pil_images():
     assert result == {
         "image_grid_thw": [[1, 30, 40]],
         "embeddings_shape": [300, 2048],
+    }
+
+
+def test_qwen_handoff_includes_compact_decode_metadata():
+    result = qwen_mod.build_qwen_embedding_params(
+        {"image": Image.new("RGB", (64, 64))},
+        qwen_mod.QwenGridParams(
+            patch_size=16,
+            merge_size=2,
+            factor=32,
+            min_pixels=1024,
+            max_pixels=4096,
+            vision_hidden_dim=2048,
+            image_token_id=99,
+        ),
+        prompt_token_ids=[1, 99, 99, 99, 99, 2],
+    )
+
+    assert result == {
+        "image_grid_thw": [[1, 4, 4]],
+        "embeddings_shape": [4, 2048],
+        "prompt_token_ids_without_images": [1, 2],
+        "image_token_id": 99,
+        "image_placeholders": [[1, 4]],
+    }
+
+
+def test_qwen_handoff_omits_compact_metadata_when_tokens_do_not_match_grid():
+    result = qwen_mod.build_qwen_embedding_params(
+        {"image": Image.new("RGB", (64, 64))},
+        qwen_mod.QwenGridParams(
+            patch_size=16,
+            merge_size=2,
+            factor=32,
+            min_pixels=1024,
+            max_pixels=4096,
+            vision_hidden_dim=2048,
+            image_token_id=99,
+        ),
+        prompt_token_ids=[1, 99, 99, 2],
+    )
+
+    assert result == {
+        "image_grid_thw": [[1, 4, 4]],
+        "embeddings_shape": [4, 2048],
     }
 
 
