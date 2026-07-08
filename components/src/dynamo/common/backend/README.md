@@ -6,7 +6,10 @@ metrics + Prometheus bridging, KV event publishing, KV-aware (DP-rank)
 routing, health-check canaries, OpenTelemetry tracing, and request-side
 guided decoding / structural tag.
 
-> **Work in progress.** Multimodal, diffusion (image/video/DLLM),
+> **Work in progress.** Multimodal support is backend-specific: vLLM supports
+> aggregated image and video inference, while P/D multimodal execution,
+> separate encode workers, and SGLang / TRT-LLM multimodal execution remain
+> on their non-unified paths. Diffusion (image/video/DLLM),
 > LoRA (SGLang / TRT-LLM — vLLM is supported),
 > engine routes (pause/resume, profiling, weight updates),
 > text-in-text-out, and snapshot/CRIU are still on the non-unified
@@ -611,7 +614,7 @@ Request handling:
 | Feature | Description |
 |---------|-------------|
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
-| Multimodal | The shared request and `encoder_result` contract, Encode role, and discovery wiring are available. Frontend Encode-to-Prefill/Aggregated request routing and backend-specific encoder implementations remain separate work. |
+| Multimodal parity | The shared request and encoder-handoff contract are available. vLLM supports aggregated image and video inference with frontend decoding/transfer and CPU embedding caching; P/D execution, SGLang/TRT-LLM execution, and separate encode workers remain separate work. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters (SGLang / TRT-LLM) | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading. **vLLM is supported on the unified path** — see [What works today](#what-works-today); SGLang and TRT-LLM advertise no LoRA updates yet. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
@@ -628,7 +631,7 @@ Request handling:
 | `KvConnectorProtocol` abstraction | Legacy abstracts NIXL pull / Mooncake push; unified uses vLLM's internal connector only |
 | `--benchmark-mode` family | The `--benchmark-*` flag family (mode, prefill/decode granularities, warmup, output path, timeout) injects into `vllm_config.additional_config` |
 | "Omni" alternative entry point | `dynamo.vllm.omni.*` parallel mode for alternative tensor workflows |
-| Multimodal (vLLM) | NIXL embedding transfer (`EmbeddingTransferMode`, `--embedding-transfer-mode`), embedding LRU cache (`--multimodal-embedding-cache-capacity-gb`), Qwen VL mRoPE, `EncodeWorkerHandler`, `--route-to-encoder` |
+| Multimodal (vLLM) | P/D execution, Qwen VL mRoPE handoff, `EncodeWorkerHandler`, and `--route-to-encoder` |
 
 ### SGLang-specific gaps
 

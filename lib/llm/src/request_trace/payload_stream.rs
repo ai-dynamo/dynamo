@@ -15,14 +15,14 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_protocols::types::{ChatChoiceStream, ChatCompletionStreamResponseDelta};
 use futures::StreamExt;
 
-type AuditStream =
+type PayloadStream =
     Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>;
 
 /// Resolves to `Some(final_response)` when aggregation succeeds, or `None` when the
 /// client cancels mid-stream / the aggregator fails. The caller emits the single
-/// combined audit record once either way — with the response on `Some`, or
+/// combined request payload record once either way — with the response on `Some`, or
 /// request-only (`response = None`) on `None`.
-type AuditFuture =
+type PayloadFuture =
     Pin<Box<dyn std::future::Future<Output = Option<NvCreateChatCompletionResponse>> + Send>>;
 
 /// Forwards transformed chunks unchanged; collects them for aggregation.
@@ -61,7 +61,9 @@ where
                     // Aggregate all collected chunks
                     let chunks = std::mem::take(&mut self.chunks);
                     if chunks.is_empty() {
-                        tracing::debug!("audit: empty response stream, no response to aggregate");
+                        tracing::debug!(
+                            "request payload: empty response stream, no response to aggregate"
+                        );
                         drop(tx);
                         return Poll::Ready(None);
                     }
@@ -74,7 +76,7 @@ where
                                 let _ = tx.send(final_resp);
                             }
                             Err(e) => {
-                                tracing::warn!("audit: aggregation failed: {e}");
+                                tracing::warn!("request payload: aggregation failed: {e}");
                             }
                         }
                     });
@@ -86,8 +88,8 @@ where
     }
 }
 
-/// Return (pass-through stream, future -> final aggregated response for audit).
-pub fn scan_aggregate_with_future<S>(stream: S) -> (AuditStream, AuditFuture)
+/// Return (pass-through stream, future -> final aggregated response for request payload capture).
+pub fn scan_aggregate_with_future<S>(stream: S) -> (PayloadStream, PayloadFuture)
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Unpin + Send + 'static,
 {
@@ -104,7 +106,7 @@ where
                     // spawned `DeltaAggregator::apply` errored. Either way, the combined
                     // record is emitted with `response = None`.
                     tracing::debug!(
-                        "audit: response aggregation produced no record (client cancel or aggregation error)"
+                        "request payload: response aggregation produced no record (client cancel or aggregation error)"
                     );
                     None
                 }
@@ -114,7 +116,7 @@ where
 }
 
 /// Collect all chunks, aggregate them, then emit a single final chunk (for non-streaming)
-pub fn fold_aggregate_with_future<S>(stream: S) -> (AuditStream, AuditFuture)
+pub fn fold_aggregate_with_future<S>(stream: S) -> (PayloadStream, PayloadFuture)
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
 {
@@ -132,9 +134,9 @@ where
             }
             Err(e) => {
                 tracing::warn!("fold aggregation failed: {e}");
-                // Drop tx without sending so the audit future resolves to None.
+                // Drop tx without sending so the request payload future resolves to None.
                 // The client still receives a (best-effort) empty fallback chunk so
-                // the HTTP response shape stays valid; the combined audit record is
+                // the HTTP response shape stays valid; the combined request payload record is
                 // emitted with `response = None`.
                 drop(tx);
                 let fallback = NvCreateChatCompletionResponse {
@@ -160,7 +162,7 @@ where
             Ok(resp) => Some(resp),
             Err(_) => {
                 tracing::debug!(
-                    "audit: fold response aggregation produced no record (client cancel or aggregation error)"
+                    "request payload: fold response aggregation produced no record (client cancel or aggregation error)"
                 );
                 None
             }
@@ -602,7 +604,7 @@ mod tests {
         // Empty stream is treated the same as a client-cancel mid-stream: the
         // aggregator has nothing to apply, tx drops without sending, and the
         // future resolves to None. The caller (preprocessor) then emits the
-        // combined audit record with `response = None`.
+        // combined request payload record with `response = None`.
         let chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = vec![];
 
         let input_stream = stream::iter(chunks);
@@ -613,7 +615,7 @@ mod tests {
         assert_eq!(results.len(), 0, "Empty stream should produce no chunks");
         assert!(
             final_resp.is_none(),
-            "Empty stream should resolve audit future to None, not a fallback record"
+            "Empty stream should resolve request payload future to None, not a fallback record"
         );
     }
 
@@ -689,7 +691,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_futures() {
-        // Test that multiple concurrent audit streams don't interfere. The
+        // Test that multiple concurrent payload streams don't interfere. The
         // passthrough streams are dropped immediately (the `_` destructure), which
         // models a client cancel before the first poll — each future should
         // independently resolve to None without crosstalk.

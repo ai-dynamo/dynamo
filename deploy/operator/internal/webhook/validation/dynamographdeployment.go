@@ -295,9 +295,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				var err error
 				topologyInfo, err = readGroveClusterTopology(v.ctx, v.mgr, spec.TopologyConstraint.ClusterTopologyName)
 				if err != nil {
-					detail := fmt.Sprintf("failed to read ClusterTopology: %v", err)
+					detail := fmt.Sprintf("failed to read ClusterTopologyBinding: %v", err)
 					if k8serrors.IsNotFound(err) {
-						detail = "references a ClusterTopology resource that was not found"
+						detail = "references a ClusterTopologyBinding resource that was not found"
 					}
 					topologyErrs = append(topologyErrs, field.Invalid(
 						constraintPath.Child("clusterTopologyName"),
@@ -404,7 +404,7 @@ func (v *dynamoGraphDeploymentValidation) validateSpecTopologyConstraint(
 	return field.ErrorList{field.Invalid(
 		fldPath.Child("packDomain"),
 		constraint.PackDomain,
-		fmt.Sprintf("does not exist in ClusterTopology %q; available domains: %v", topologyInfo.name, topologyInfo.domains),
+		fmt.Sprintf("does not exist in ClusterTopologyBinding %q; available domains: %v", topologyInfo.name, topologyInfo.domains),
 	)}
 }
 
@@ -458,9 +458,9 @@ func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicy(
 
 	topologyInfo, err := readGroveClusterTopology(v.ctx, v.mgr, policy.ClusterTopologyName)
 	if err != nil {
-		detail := fmt.Sprintf("failed to read ClusterTopology: %v", err)
+		detail := fmt.Sprintf("failed to read ClusterTopologyBinding: %v", err)
 		if k8serrors.IsNotFound(err) {
-			detail = "references a ClusterTopology resource that was not found"
+			detail = "references a ClusterTopologyBinding resource that was not found"
 		}
 		return append(allErrs, field.Invalid(namePath, policy.ClusterTopologyName, detail))
 	}
@@ -468,7 +468,7 @@ func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicy(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("domain"),
 			policy.Domain,
-			fmt.Sprintf("does not exist in ClusterTopology %q; available domains: %v", topologyInfo.name, topologyInfo.domains),
+			fmt.Sprintf("does not exist in ClusterTopologyBinding %q; available domains: %v", topologyInfo.name, topologyInfo.domains),
 		))
 	}
 	return allErrs
