@@ -132,38 +132,53 @@ the comparative churn evidence.
 Use an explicit profile and kube context for every command. The developer's default kubectl
 context may point at a shared cluster and must never be used implicitly.
 
-Suggested flow:
+The validated smoke path uses direct Kubernetes Deployments. This keeps the first cluster test
+focused on discovery, routing, and request dispatch and avoids coupling it to an operator build
+or an external image registry.
+
+Build and load a local image:
 
 ```bash
-minikube start -p dynamo-lora-e2e --driver=docker --cpus=6 --memory=12288
-
 make -C deploy/operator docker-build-planner REGISTRY=local TAG=lora-e2e
-make -C deploy/operator docker-build-operator REGISTRY=local TAG=lora-e2e
-minikube -p dynamo-lora-e2e image load local/dynamo-planner:lora-e2e
-minikube -p dynamo-lora-e2e image load local/dynamo-operator:lora-e2e
-
-helm dependency build deploy/helm/charts/platform
-helm upgrade --install dynamo-platform deploy/helm/charts/platform \
-  --kube-context=dynamo-lora-e2e \
-  --namespace=dynamo-system --create-namespace \
-  --set global.nats.install=true \
-  --set global.etcd.install=false \
-  --set global.grove.install=false \
-  --set global.kai-scheduler.install=false \
-  --set dynamo-operator.controllerManager.manager.image.repository=local/dynamo-operator \
-  --set dynamo-operator.controllerManager.manager.image.tag=lora-e2e \
-  --set dynamo-operator.controllerManager.manager.image.pullPolicy=Never
+docker build -t local/dynamo-lora-e2e:lora-e2e \
+  -f tests/router/Dockerfile.lora-mocker-e2e .
+minikube start -p dynamo-lora-e2e --driver=docker --cpus=6 --memory=12288 \
+  --disk-size=20g --keep-context
+minikube -p dynamo-lora-e2e image load local/dynamo-lora-e2e:lora-e2e
 ```
 
-Apply a `v1beta1` `DynamoGraphDeployment` with one frontend and one CPU-only mocker pod. The
-mocker pod launches eight in-process workers, reads the placement file from a ConfigMap, and uses
-the local planner image with `imagePullPolicy: Never`. The frontend uses the same image and LoRA
-environment variables as the local pytest. Port-forward the frontend with
-`kubectl --context=dynamo-lora-e2e`, replay the same request schedule, and reuse the same response
-and metric assertions.
+`local/dynamo-lora-e2e:lora-e2e` is a thin layer over the planner image that copies
+`lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct` to `/opt/models/mock-llama`.
+Use this fixture instead of `TinyLlama_v1.1`: the latter has no chat template and the HTTP
+frontend correctly rejects its model registration.
 
-Always collect the DGD, pods, events, frontend metrics, and pod logs before cleanup. Finally run
-`minikube delete -p dynamo-lora-e2e`; do not alter the caller's default kubectl context.
+Apply a test namespace and these resources with `imagePullPolicy: Never`:
+
+| Resource | Configuration |
+|---|---|
+| etcd Deployment + Service | Run `/usr/local/bin/etcd/etcd` on port 2379 with an ephemeral `/tmp/etcd` data directory. |
+| Placement ConfigMap | `{"workers":[["mock-lora-a"],["mock-lora-b"]]}` for the minimal `L=N*K=2` case. |
+| Mocker Deployment | Run `python -m dynamo.mocker` with two workers, model path `/opt/models/mock-llama`, TCP request plane, etcd discovery, capacity one, and the mounted placement file. |
+| Frontend Deployment + Service | Run `python -m dynamo.frontend --router-mode random` with TCP request plane, etcd discovery, LoRA allocation enabled, a one-second timestep, predictor `none`, and scale-down cooldown zero. |
+
+Set `ETCD_ENDPOINTS=http://etcd:2379`, `HF_HUB_OFFLINE=1`, and
+`TRANSFORMERS_OFFLINE=1` on both Dynamo Deployments. Start with min-cost flow, port-forward the
+frontend using `kubectl --context=dynamo-lora-e2e`, and replay the local pytest schedule. Then
+switch only `DYN_LORA_ALLOCATION_ALGORITHM` to `hrw`, wait for the frontend rollout, and replay
+the identical schedule. For each algorithm, assert that both adapters are active with replica
+factor one, repeated requests stay on one worker per adapter, and the worker sets are disjoint.
+For min-cost flow, also assert zero overflow.
+
+Always collect pods, Deployments, events, frontend metrics, and pod logs before cleanup. Finally
+run `minikube delete -p dynamo-lora-e2e`; do not alter the caller's default kubectl context.
+
+### Operator parity follow-up
+
+After the direct smoke test is stable, repeat it through the local platform chart and a `v1beta1`
+`DynamoGraphDeployment`. Build and load a matching operator image, install the chart with
+`--kube-context=dynamo-lora-e2e`, and use the same image, placement ConfigMap, environment, request
+schedule, and assertions. This adds DGD reconciliation coverage without making operator setup a
+prerequisite for the routing test.
 
 ## Milestone 4: residency feedback (separate change)
 
