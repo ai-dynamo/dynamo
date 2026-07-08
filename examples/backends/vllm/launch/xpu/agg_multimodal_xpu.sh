@@ -82,7 +82,6 @@ export DYN_FORWARDPASS_METRIC_PORT="${DYN_FORWARDPASS_METRIC_PORT:-$(allocate_fr
 # Extra args from command line come last to allow overrides
 ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    DYN_FORWARDPASS_METRIC_PORT="$DYN_FORWARDPASS_METRIC_PORT" \
     python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \

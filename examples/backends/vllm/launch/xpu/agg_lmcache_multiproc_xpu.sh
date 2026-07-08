@@ -48,7 +48,6 @@ python -m dynamo.frontend &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
   PROMETHEUS_MULTIPROC_DIR="$PROMETHEUS_MULTIPROC_DIR" \
-  DYN_FORWARDPASS_METRIC_PORT="$DYN_FORWARDPASS_METRIC_PORT" \
   python -m dynamo.vllm --model "$MODEL" --enforce-eager \
   --max-model-len "$MAX_MODEL_LEN" \
   --max-num-seqs "$MAX_CONCURRENT_SEQS" \
