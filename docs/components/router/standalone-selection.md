@@ -180,12 +180,58 @@ been removed. Their values remain internal scheduler inputs.
 
 Ray can keep model invocation separate from selector admission:
 
-1. Call `POST /select`.
+1. Call `POST /select` with a `selection_id`.
 2. Send the request to the returned `endpoint` and `dp_rank`.
-3. Call `POST /reservations` with a globally unique reservation ID, selected
-   worker identity, the same prompt representation, and the returned
-   `effective_prefill_tokens`.
+3. Call `POST /reservations` using the cached selection replay form, or the 
+   explicit form with the full worker identity and prompt.
 4. Report prefill completion and request completion through the lifecycle API.
+
+### Cached selection replay form
+
+A `/select` that carries a `selection_id` caches its booking inputs (the
+chosen worker, the normalized prompt, `effective_prefill_tokens`,
+`expected_output_tokens`, and the prefill-tracking decision) on the selector
+that served it. A reservation that passes the same `selection_id`,
+`model_name`, and `tenant_id` replays the cached selection, booked under its
+own `reservation_id`, without re-sending the prompt:
+
+```http
+POST /reservations
+Content-Type: application/json
+
+{
+  "selection_id": "select-123",
+  "reservation_id": "request-123",
+  "model_name": "model",
+  "tenant_id": "default"
+}
+```
+
+- **Required id**: A reservation with neither `selection_id` nor `worker_id`
+  is rejected with `400`.
+- **Single-use**: The first successful booking consumes the entry; a repeat
+  replay returns `404` (`no pending selection`).
+- **Retryable on failure**: A booking that fails before landing (worker no
+  longer schedulable, service not ready) re-arms the entry, so the same call
+  can be retried once the condition clears.
+- **Bounded window**: Entries expire after 120 seconds, and each selector
+  retains at most 4096 pending selections, evicting oldest first.
+- **Replica-local**: The cache lives in the selector process that served the
+  `/select`. With multiple selector replicas, route the reservation to the
+  same replica or use the explicit form.
+- **Pure replay**: The booking uses exactly what `select` captured; other
+  request fields are ignored. Supplying `worker_id` switches to the explicit
+  form.
+
+On any miss (expired, already consumed, wrong model or tenant, or a different
+replica) the call returns `404`; fall back to the explicit form.
+
+### Explicit form
+
+The self-contained form carries the worker identity and prompt and needs no
+cached selection; it wins whenever `worker_id` is present. It also discards
+any cached selection for `selection_id` (or, when absent, `reservation_id`),
+so a delayed replay cannot book stale state:
 
 ```http
 POST /reservations
@@ -276,9 +322,12 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   not for complete processing. Early selections may temporarily miss recovered
   KV state.
 - `/select` followed by `/reservations` provides eventual, not atomic,
-  cross-replica admission. Use `/select_and_reserve` for atomic local booking.
-- Reservation IDs must be globally unique. Existing conflict and retry
-  semantics are unchanged; no idempotency ledger is added.
+  cross-replica admission, and the pending-selection cache behind the minimal
+  reservation form is local to the selector that served the `/select`. Use
+  `/select_and_reserve` for atomic local booking.
+- Reservation IDs must be globally unique. Duplicate bookings for the same ID
+  conflict (`409`); no idempotency ledger is added. An explicit booking also
+  discards any pending cached selection for its ID.
 
 ## Inspection APIs
 
