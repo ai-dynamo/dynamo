@@ -57,6 +57,8 @@ data:
     orchestrators:
       kaiScheduler:
         enabled: {{ or (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").enabled) (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").install) }}
+      volcanoScheduler:
+        enabled: {{ and .Values.global (index .Values.global "volcano-scheduler") (index .Values.global "volcano-scheduler").enabled }}
       grove:
         enabled: {{ or (and .Values.global .Values.global.grove .Values.global.grove.enabled) (and .Values.global .Values.global.grove .Values.global.grove.install) }}
         {{- if and .Values.dynamo.groveTerminationDelay (ne (.Values.dynamo.groveTerminationDelay | toString) "15m") }}
