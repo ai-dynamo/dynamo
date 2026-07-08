@@ -418,7 +418,7 @@ vllm_configs = {
             # 2 workers + a 20s inter-worker startup sleep in disagg_lmcache.sh;
             # generous ceiling over the ~200s single-worker LMCache runtime.
             pytest.mark.timeout(700),
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
