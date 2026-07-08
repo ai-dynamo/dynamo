@@ -188,7 +188,9 @@ vllm_configs = {
         marks=[
             pytest.mark.kvbm,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(3.8),
+            # TODO: profile real VRAM peak in a KVBM-enabled image and add
+            # profiled_vram_gib. Not guessed here: runs in the sequential GPU
+            # stage until profiled (KVBM footprint ~= agg Qwen3-0.6B).
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
             pytest.mark.timeout(410),
             pytest.mark.pre_merge,
