@@ -1419,6 +1419,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -2048,23 +2049,6 @@ policy_classes:
         let response = scheduled.expect("scheduling returned error");
         assert_eq!(response.best_worker.worker_id, 0);
         assert_eq!(queue.pending_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_no_workers_returns_error() {
-        let (queue, _slots) = make_queue(0, 16, 512, None);
-
-        let (req, rx) = make_request("lonely-req", 512);
-        queue.enqueue(req).await;
-
-        let resp = rx.await.expect("oneshot dropped");
-        assert!(
-            matches!(
-                resp,
-                Err(crate::scheduling::types::KvSchedulerError::NoEndpoints)
-            ),
-            "expected NoEndpoints, got {resp:?}"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

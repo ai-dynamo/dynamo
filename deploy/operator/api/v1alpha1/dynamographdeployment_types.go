@@ -55,6 +55,7 @@ const (
 )
 
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.restart)",message="spec.restart must be unset on create; set spec.restart.id after creation to request a restart",optionalOldSelf=true
 type DynamoGraphDeploymentSpec struct {
 	// Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
 	// Service-level annotations take precedence over these values.

@@ -30,6 +30,7 @@ use crate::{
         shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig, topology_taint},
+    lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -38,8 +39,8 @@ use crate::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
-            embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
-            videos::OpenAIVideosStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
+            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -102,6 +103,20 @@ pub struct ModelManager {
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
+
+    // LoRA allocation state. The state objects are always created so discovery can
+    // populate them, but `lora_filter()` only hands out the filter when LoRA serving is
+    // enabled (DYN_LORA_ENABLED) — so non-LoRA deployments keep the unmodified routing
+    // path. The controller is additionally gated on the allocation config.
+    lora_routing_table: LoraRoutingTable,
+    lora_state_tracker: LoraStateTracker,
+    lora_load_estimator: Arc<LoadEstimator>,
+    lora_filter: Arc<LoraFilter>,
+    lora_enabled: bool,
+    /// Per-decode-component LoRA load-feed subscription handles, so we start exactly one feed
+    /// per component and can restart it if the previous one exited (avoids double counting on
+    /// rebuilds while keeping the feed durable).
+    lora_load_feeds: DashMap<String, tokio::task::JoinHandle<()>>,
 }
 
 impl Default for ModelManager {
@@ -112,11 +127,24 @@ impl Default for ModelManager {
 
 impl ModelManager {
     pub fn new() -> Self {
+        let lora_routing_table = LoraRoutingTable::new();
+        let lora_state_tracker = LoraStateTracker::new();
+        let lora_filter = Arc::new(LoraFilter::new(
+            lora_routing_table.clone(),
+            lora_state_tracker.clone(),
+        ));
+
         Self {
             models: DashMap::new(),
             cards: DashMap::new(),
             prefill_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
+            lora_routing_table,
+            lora_state_tracker,
+            lora_load_estimator: Arc::new(LoadEstimator::new()),
+            lora_filter,
+            lora_enabled: crate::lora::lora_serving_enabled(),
+            lora_load_feeds: DashMap::new(),
         }
     }
 
@@ -170,6 +198,13 @@ impl ModelManager {
         self.cards.iter().map(|r| r.value().clone()).collect()
     }
 
+    /// Return owned discovery instance keys for the locally recorded cards.
+    /// Reconciliation must not hold DashMap guards while it performs
+    /// asynchronous cleanup.
+    pub fn get_model_card_keys(&self) -> Vec<String> {
+        self.cards.iter().map(|r| r.key().clone()).collect()
+    }
+
     /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
     /// deleted.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
@@ -178,6 +213,10 @@ impl ModelManager {
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
+    pub fn get_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
+        self.cards.get(key).map(|r| r.value().clone())
+    }
+
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
         self.cards.remove(key).map(|(_, v)| v)
     }
@@ -329,6 +368,14 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_generate_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_generate_engine())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_prefill_models(&self) -> Vec<String> {
         self.models
             .iter()
@@ -417,6 +464,16 @@ impl ModelManager {
             .get_realtime_engine()
     }
 
+    pub fn get_generate_engine(
+        &self,
+        model: &str,
+    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine()
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
@@ -449,6 +506,22 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_completions_engine_with_parsing()
+    }
+
+    pub fn get_generate_engine_with_parsing(
+        &self,
+        model: &str,
+    ) -> Result<
+        (
+            GenerateStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        ),
+        ModelManagerError,
+    > {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine_with_parsing()
     }
 
     // -- Convenience methods for in-process models (http.rs, grpc.rs) --
@@ -637,6 +710,27 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_generate_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: GenerateStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_generate_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_generate_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.generate_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
     pub fn add_prefill_model(
         &self,
         model: &str,
@@ -715,7 +809,26 @@ impl ModelManager {
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
     }
 
+    pub fn remove_generate_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_generate_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
     // -- KV Router creation --
+
+    /// Whether to start the LoRA load-estimator feed for a KV router being built for `worker_type`.
+    ///
+    /// The feed must run for the worker mode that carries the routable request load. In dynamo's
+    /// KV path that is `WORKER_TYPE_DECODE`, which the binding assigns to BOTH aggregated and
+    /// disaggregated-decode endpoints (any non-prefill endpoint that tracks active blocks; see
+    /// `create_kv_router_from_endpoint`). Only disaggregated PREFILL is excluded, so its transient
+    /// load does not double-count the decode component's active sequences. Returns false when LoRA
+    /// serving is disabled.
+    fn should_start_lora_load_feed(lora_enabled: bool, worker_type: &str) -> bool {
+        lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
+    }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for(
@@ -786,8 +899,65 @@ impl ModelManager {
             model_name,
             is_eagle,
             shared_cache,
+            self.lora_filter(),
         )
         .await?;
+
+        // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
+        // subscription per "decode" component. WORKER_TYPE_DECODE is the routing path for BOTH
+        // aggregated and disaggregated-decode deployments: the binding maps any non-prefill,
+        // active-block-tracking endpoint to WORKER_TYPE_DECODE (see create_kv_router_from_endpoint
+        // in bindings/python/rust/llm/kv.rs), so aggregated KV feeds load here too. Only
+        // disaggregated PREFILL is excluded — its load is transient and would double-count the
+        // decode component's active sequences. Without this feed the estimator is never fed in KV
+        // mode and every LoRA stays "inactive" forever. (Edge case specific to the Python KV path:
+        // create_kv_router_from_endpoint infers WORKER_TYPE_PREFILL for a non-prefill endpoint when
+        // router_track_active_blocks=false, so that aggregated worker would skip this feed and KV
+        // routing is not load-aware — dynamic LoRA allocation then degrades to cold-start pins while
+        // the filter still routes by loaded worker. Constructors that pass WORKER_TYPE_DECODE
+        // directly, e.g. the watcher / C bindings, are unaffected.)
+        if Self::should_start_lora_load_feed(self.lora_enabled, worker_type) {
+            let feed_key = format!("{}/{}", endpoint.id().namespace, endpoint.id().component);
+            // Start a feed if none runs for this component yet, or restart it if the previous
+            // one exited (so a dead subscription does not permanently disable load tracking).
+            //
+            // Use the DashMap entry API so the check-and-insert is atomic per key: two
+            // concurrent `kv_chooser_for` calls for the same component otherwise both observe
+            // "no feed" and each spawn a subscription, double-counting active sequences.
+            // Holding the entry lock across the spawn serializes them — the loser sees the
+            // winner's live handle and skips.
+            let started = match self.lora_load_feeds.entry(feed_key) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get().is_finished() {
+                        // Previous feed exited; replace it (aborting the dead handle is a no-op).
+                        let handle = self
+                            .lora_load_estimator
+                            .clone()
+                            .start_event_subscription(endpoint.component().clone());
+                        entry.insert(handle);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    let handle = self
+                        .lora_load_estimator
+                        .clone()
+                        .start_event_subscription(endpoint.component().clone());
+                    entry.insert(handle);
+                    true
+                }
+            };
+            if started {
+                tracing::info!(
+                    namespace = %endpoint.id().namespace,
+                    component = %endpoint.id().component,
+                    "Started decode-side LoRA load feed (KV active-sequence subscription)"
+                );
+            }
+        }
+
         Ok(Arc::new(chooser))
     }
 
@@ -799,6 +969,75 @@ impl ModelManager {
     /// and registration guards.
     pub(crate) fn model_namespace_key(model_name: &str, namespace: &str) -> String {
         format!("{}:{}", model_name, namespace)
+    }
+
+    // ── LoRA allocation accessors ───────────────────────────────────────
+
+    pub fn lora_routing_table(&self) -> &LoraRoutingTable {
+        &self.lora_routing_table
+    }
+
+    pub fn lora_state_tracker(&self) -> &LoraStateTracker {
+        &self.lora_state_tracker
+    }
+
+    pub fn lora_load_estimator(&self) -> &Arc<LoadEstimator> {
+        &self.lora_load_estimator
+    }
+
+    pub fn lora_filter(&self) -> Option<Arc<LoraFilter>> {
+        // Only expose the filter when LoRA serving is enabled, so non-LoRA deployments
+        // keep the unmodified routing path (no wrapper, no avail-vs-free regression).
+        self.lora_enabled.then(|| self.lora_filter.clone())
+    }
+
+    /// Start the LoRA allocation controller background loop.
+    pub fn start_lora_controller(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let config = crate::lora::LoraAllocationConfig::from_env();
+
+        // F10: respect the allocation-enabled config (DYN_LORA_ALLOCATION_ENABLED). When
+        // disabled, skip the controller entirely — routing still works via the filter's
+        // loaded-worker fallback, just without dynamic replica recomputation.
+        if !config.enabled {
+            tracing::info!(
+                "LoRA allocation controller disabled (DYN_LORA_ALLOCATION_ENABLED=false); \
+                 routing uses the loaded-worker fallback without dynamic allocation"
+            );
+            return tokio::spawn(async {});
+        }
+
+        let rate_window_secs = config.effective_rate_window_secs();
+        // F11: apply the full estimator config (rate window + bucket granularity +
+        // predictor type/alpha), not just the rate window.
+        self.lora_load_estimator
+            .set_config(crate::lora::LoadEstimatorConfig {
+                rate_window: std::time::Duration::from_secs(rate_window_secs),
+                buckets_per_second: config.buckets_per_second,
+                predictor_type: config.predictor_type,
+                ema_alpha: config.ema_alpha,
+                ..Default::default()
+            });
+
+        tracing::info!(
+            enabled = config.enabled,
+            algorithm = ?config.algorithm,
+            timestep_secs = config.timestep_secs,
+            rate_window_secs = rate_window_secs,
+            rate_window_multiplier = config.rate_window_multiplier,
+            buckets_per_second = config.buckets_per_second,
+            predictor_type = ?config.predictor_type,
+            "Starting LoRA allocation controller"
+        );
+        crate::lora::LoraController::start(
+            config,
+            self.lora_routing_table.clone(),
+            self.lora_state_tracker.clone(),
+            self.lora_load_estimator.clone(),
+            cancel_token,
+        )
     }
 
     /// Register a prefill router for a decode WorkerSet. Returns a receiver that will be
@@ -970,7 +1209,7 @@ impl ModelManager {
 
     /// Deactivate the prefill router on the decode WorkerSet for the given model/namespace.
     /// Called by the watcher when all prefill workers in a namespace are removed.
-    /// After deactivation, requests fall back to aggregated mode (or fail if enforce_disagg).
+    /// After deactivation, requests fall back to aggregated mode.
     pub fn deactivate_prefill_router_for_decode(&self, model_name: &str, namespace: &str) {
         if let Some(model) = self.get_model(model_name)
             && let Some(ws) = model.get_worker_set(namespace)
@@ -1233,6 +1472,30 @@ mod tests {
             .topology_domains
             .insert("zone".to_string(), "us-east-1a".to_string());
         config
+    }
+
+    #[test]
+    fn lora_load_feed_starts_for_aggregated_and_decode_not_prefill() {
+        use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+        // Aggregated and disaggregated-decode deployments both route via WORKER_TYPE_DECODE
+        // (create_kv_router_from_endpoint maps any non-prefill, active-block-tracking endpoint to
+        // it), so the LoRA load feed must start for that worker type — otherwise the controller
+        // would treat every adapter as inactive and never run dynamic allocation.
+        assert!(
+            ModelManager::should_start_lora_load_feed(true, WORKER_TYPE_DECODE),
+            "decode/aggregated KV must start the LoRA load feed"
+        );
+        // Disaggregated prefill load is fed via the decode component, so prefill must NOT start its
+        // own feed (avoids double-counting active sequences).
+        assert!(
+            !ModelManager::should_start_lora_load_feed(true, WORKER_TYPE_PREFILL),
+            "prefill KV must not start its own LoRA load feed"
+        );
+        // LoRA serving disabled: never start the feed.
+        assert!(
+            !ModelManager::should_start_lora_load_feed(false, WORKER_TYPE_DECODE),
+            "no feed when LoRA serving is disabled"
+        );
     }
 
     #[test]
@@ -1717,16 +1980,11 @@ mod tests {
     use crate::kv_router::PrefillRouter;
 
     /// Helper: make a WorkerSet with an activated PrefillRouter attached.
-    fn make_worker_set_with_prefill_router(
-        namespace: &str,
-        mdcsum: &str,
-        enforce_disagg: bool,
-    ) -> WorkerSet {
+    fn make_worker_set_with_prefill_router(namespace: &str, mdcsum: &str) -> WorkerSet {
         let mut ws = make_worker_set(namespace, mdcsum);
         let pr = PrefillRouter::disabled(
             std::sync::Arc::new(ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
-            enforce_disagg,
             None,
         );
         pr.mark_active_for_test();
@@ -1749,16 +2007,15 @@ mod tests {
         mm.deactivate_prefill_router_for_decode("llama", "ns1");
     }
 
-    /// Full pipeline test: deactivate finds the WorkerSet, calls deactivate() on its
-    /// PrefillRouter, and the model is hidden from model_display_names() when
-    /// enforce_disagg=true.
+    /// Deactivation updates routing lifecycle but does not add a second visibility policy on top
+    /// of registered worker topology.
     #[test]
-    fn test_deactivate_prefill_router_for_decode_hides_model() {
+    fn test_deactivate_prefill_router_for_decode_keeps_model_visible() {
         let mm = ModelManager::new();
         mm.add_worker_set(
             "llama",
             "ns1",
-            make_worker_set_with_prefill_router("ns1", "abc", true),
+            make_worker_set_with_prefill_router("ns1", "abc"),
         );
 
         // Model is visible before deactivation.
@@ -1766,108 +2023,17 @@ mod tests {
 
         mm.deactivate_prefill_router_for_decode("llama", "ns1");
 
-        // Model must be hidden after deactivation with enforce_disagg=true.
-        assert!(
-            !mm.model_display_names().contains("llama"),
-            "model must be hidden after prefill deactivation with enforce_disagg=true"
-        );
+        assert!(mm.model_display_names().contains("llama"));
+        let router = mm
+            .get_model("llama")
+            .and_then(|model| model.get_worker_set("ns1"))
+            .and_then(|ws| ws.prefill_router.clone())
+            .expect("prefill router");
+        assert!(router.is_deactivated());
 
         // Idempotent: calling again must not panic.
         mm.deactivate_prefill_router_for_decode("llama", "ns1");
-        assert!(!mm.model_display_names().contains("llama"));
-    }
-
-    /// Full disagg lifecycle with enforce_disagg=true:
-    /// decode registers -> prefill registers -> prefill dies -> model hidden.
-    #[test]
-    fn test_disagg_lifecycle_prefill_death_hides_model() {
-        let mm = ModelManager::new();
-
-        // Step 1: Decode WorkerSet with a PrefillRouter (not yet deactivated).
-        mm.add_worker_set(
-            "llama",
-            "decode-ns",
-            make_worker_set_with_prefill_router("decode-ns", "abc", true),
-        );
-        assert!(
-            mm.model_display_names().contains("llama"),
-            "step 1: model must be visible with active prefill router"
-        );
-
-        // Step 2: Prefill WorkerSet registers (same model, different namespace key).
-        mm.add_worker_set("llama", "prefill-ns", make_worker_set("prefill-ns", "abc"));
-        assert!(
-            mm.model_display_names().contains("llama"),
-            "step 2: model must be visible with both decode and prefill"
-        );
-
-        // Step 3: Prefill WorkerSet removed (engine dies).
-        mm.remove_worker_set("llama", "prefill-ns");
-
-        // Step 4: Deactivate the prefill router on the decode side.
-        mm.deactivate_prefill_router_for_decode("llama", "decode-ns");
-        assert!(
-            !mm.model_display_names().contains("llama"),
-            "step 4: model must be hidden after prefill death with enforce_disagg=true"
-        );
-    }
-
-    /// Full disagg lifecycle with enforce_disagg=false (fallback allowed).
-    #[test]
-    fn test_disagg_lifecycle_prefill_death_keeps_model_no_enforce() {
-        let mm = ModelManager::new();
-
-        mm.add_worker_set(
-            "llama",
-            "decode-ns",
-            make_worker_set_with_prefill_router("decode-ns", "abc", false),
-        );
         assert!(mm.model_display_names().contains("llama"));
-
-        // Deactivate -- model stays visible (enforce_disagg=false, fallback allowed).
-        mm.deactivate_prefill_router_for_decode("llama", "decode-ns");
-        assert!(
-            mm.model_display_names().contains("llama"),
-            "model must remain visible (enforce_disagg=false, fallback allowed)"
-        );
-    }
-
-    /// Full disagg lifecycle including prefill rejoin after transient failure.
-    /// decode registers -> prefill dies -> model hidden -> prefill rejoins -> model visible.
-    #[test]
-    fn test_disagg_lifecycle_prefill_rejoin_restores_model() {
-        let mm = ModelManager::new();
-
-        // Decode WorkerSet with enforce_disagg=true.
-        mm.add_worker_set(
-            "llama",
-            "decode-ns",
-            make_worker_set_with_prefill_router("decode-ns", "abc", true),
-        );
-        assert!(mm.model_display_names().contains("llama"));
-
-        // Prefill dies -> deactivate.
-        mm.deactivate_prefill_router_for_decode("llama", "decode-ns");
-        assert!(
-            !mm.model_display_names().contains("llama"),
-            "model must be hidden after prefill death"
-        );
-
-        // Prefill rejoins -> mark the synthetic test router active again. A real
-        // PrefillRouter has an initialized inner router for reactivate() to reuse.
-        if let Some(model) = mm.get_model("llama")
-            && let Some(ws) = model.get_worker_set("decode-ns")
-            && let Some(ref pr) = ws.prefill_router
-        {
-            pr.mark_active_for_test();
-        } else {
-            panic!("decode WorkerSet or prefill_router not found");
-        }
-
-        assert!(
-            mm.model_display_names().contains("llama"),
-            "model must be visible again after prefill rejoin"
-        );
     }
 
     // -- is_model_ready_to_serve / has_any_ready_model tests --

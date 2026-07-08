@@ -47,15 +47,10 @@ spec:
           echo "File descriptor limit set to: $(ulimit -n)"
           echo 2097152 > /proc/sys/fs/inotify/max_user_watches 2>/dev/null || true
           echo 1024 > /proc/sys/fs/inotify/max_user_instances 2>/dev/null || true
-          apt-get update && apt-get install -y curl jq procps git && apt-get clean
-          # pip install git+https://github.com/ai-dynamo/aiperf.git
-          # Pin transformers==4.57.6 (verified to load the deepseek_v32 tokenizer).
-          # The trtllm-runtime base ships transformers 4.55.0; aiperf 0.6.0's
-          # `transformers>=4.56.0` floor would otherwise upgrade to 5.x, which lacks
-          # native support for model_type=deepseek_v32 (huggingface/transformers#41251)
-          # and fails AutoTokenizer.from_pretrained() before reading tokenizer.json.
-          # aiperf surfaces this as "Failed to load tokenizer". DYN-2878.
-          pip install "aiperf==0.6.0" "transformers==4.57.6"
+          # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
+          # GB200 benchmark pods need build tools to compile it from source.
+          apt-get update && apt-get install -y curl jq procps git build-essential && apt-get clean
+          pip install "aiperf==0.10.0"
           echo "aiperf installation completed"
           sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
           export COLUMNS=200

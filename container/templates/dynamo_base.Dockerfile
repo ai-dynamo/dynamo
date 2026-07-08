@@ -52,7 +52,7 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.93.1
+    RUST_VERSION=1.96.1
 
 # Install Rust — ARCH_ALT (x86_64/aarch64) is derived from TARGETARCH at build time
 RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \

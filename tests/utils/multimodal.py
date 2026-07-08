@@ -36,9 +36,21 @@ _MULTIMODAL_COLOR_PROMPT = (
 )
 IMAGE_COLOR_PROMPT = _MULTIMODAL_COLOR_PROMPT
 
+# Topic-aligned filler sentence used by callers that need to pad the prompt
+# past a coarse routing-block threshold without confusing the model's
+# color-identification objective. ~30 tokens per copy.
+_COLOR_PROMPT_FILLER = (
+    " Analyze the image in detail; identify dominant tones, secondary hues, "
+    "and surface textures across the foreground and background regions."
+)
+
 
 def make_image_payload(
-    expected_response: list[str], *, max_attempts: int = 1
+    expected_response: list[str],
+    *,
+    max_attempts: int = 1,
+    repeat_count: int = 1,
+    expected_log: Optional[list[str]] = None,
 ) -> ChatPayload:
     """Standard image color-identification payload using MULTIMODAL_IMG_URL.
 
@@ -46,6 +58,10 @@ def make_image_payload(
     ``run_serve_deployment`` — set >1 only for known-flaky multimodal
     smoke checks (see tests/README.md "Flaky Tests"). The server stays
     up across attempts; only the request/response is re-issued.
+    ``repeat_count`` sends the same image request repeatedly, which is useful
+    for cache smoke coverage.
+    ``expected_log`` contains regex patterns that must appear in the deployment
+    log, allowing callers to verify that optional multimodal paths were enabled.
     """
     return chat_payload(
         [
@@ -55,8 +71,9 @@ def make_image_payload(
                 "image_url": {"url": MULTIMODAL_IMG_URL},
             },
         ],
-        repeat_count=1,
+        repeat_count=repeat_count,
         expected_response=expected_response,
+        expected_log=expected_log,
         temperature=0.0,
         max_tokens=100,
         max_attempts=max_attempts,
@@ -72,6 +89,7 @@ def make_image_payload_cached_tokens(
     require_vllm_mm_processor_init: bool = False,
     min_routing_total_blocks: int = 0,
     min_avg_kv_hit_rate: float = 0.0,
+    prompt_filler_repeats: int = 0,
 ) -> CachedTokensChatPayload:
     """Image payload that asserts MM-aware KV cache reuse on repeats.
 
@@ -80,14 +98,20 @@ def make_image_payload_cached_tokens(
     [ROUTING] block count is well above text-prefix fallback (~1-3 blocks).
     ``min_avg_kv_hit_rate`` asserts the post-R1 mean of router_kv_hit_rate
     >= threshold (fails closed when router-side hashes diverge from the worker).
+    ``prompt_filler_repeats`` prepends N copies of a topic-aligned filler so
+    the routing-token sequence spans multiple blocks on specs that use a
+    coarse routing-block size (e.g. qwen3_5 family at block_size=544).
     """
+    prompt = _MULTIMODAL_COLOR_PROMPT
+    if prompt_filler_repeats > 0:
+        prompt = (_COLOR_PROMPT_FILLER * prompt_filler_repeats).strip() + " " + prompt
     return CachedTokensChatPayload(
         body={
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": _MULTIMODAL_COLOR_PROMPT},
+                        {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
                             "image_url": {"url": MULTIMODAL_IMG_URL},

@@ -81,12 +81,19 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
+mod python_payload;
 
-type JsonServerStreamingIngress =
-    Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+type PythonServerStreamingIngress = Ingress<
+    SingleIn<python_payload::PythonPayload>,
+    ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
 
-type JsonBidirectionalIngress =
-    Ingress<rs::pipeline::ManyIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+type PythonBidirectionalIngress = Ingress<
+    rs::pipeline::ManyIn<python_payload::PythonPayload>,
+    ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
 
 static INIT: OnceCell<()> = OnceCell::new();
 
@@ -348,7 +355,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -371,6 +378,7 @@ fn register_model<'p>(
     self_host_metadata: Option<bool>,
     tensor_model_config: Option<&Bound<'p, PyDict>>,
     ignore_weights: bool,
+    max_gpu_lora_count: Option<u32>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -575,7 +583,16 @@ fn register_model<'p>(
             .model_name(model_name.clone())
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(explicit_router_config.clone())
-            .runtime_config(runtime_config.inner)
+            .runtime_config({
+                let mut rc = runtime_config.inner;
+                // The base worker registration carries the worker's LoRA slot capacity so the
+                // frontend allocator sees idle-but-LoRA-capable workers before any adapter is
+                // loaded. Adapter registrations (lora_name set) carry it via LoraInfo instead.
+                if lora_identifier.is_none() {
+                    rc.max_gpu_lora_count = max_gpu_lora_count;
+                }
+                rc
+            })
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))
@@ -592,7 +609,7 @@ fn register_model<'p>(
             .as_ref()
             .map(|name| llm_rs::model_card::LoraInfo {
                 name: name.clone(),
-                max_gpu_lora_count: None,
+                max_gpu_lora_count,
             });
 
         local_model
@@ -1127,7 +1144,12 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
+        let network_engine = Arc::new(engine.network_engine());
+        let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
+            network_engine,
+            python_payload::PythonIngressPayloadAdapter,
+        )
+        .map_err(to_pyerr)?;
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -1179,10 +1201,9 @@ impl Endpoint {
     /// `async def generate(request_stream, context)` coroutine that
     /// returns an async generator. `request_stream` is a
     /// [`PyAsyncRequestStream`] yielding inbound frames as plain Python
-    /// objects (dicts/lists/etc., the depythonization of
-    /// `serde_json::Value`). The generator yields response frames as
-    /// plain Python objects that are then pythonized back to JSON values
-    /// on the wire.
+    /// objects (dicts/lists/etc.) decoded directly from the configured
+    /// request-plane payload codec. The generator yields plain Python
+    /// response objects that are serialized directly to that codec.
     ///
     /// Request-stream end (when `__anext__` raises `StopAsyncIteration`)
     /// is *not* a cancellation signal: the caller has merely stopped
@@ -1200,8 +1221,9 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress: Arc<JsonBidirectionalIngress> =
-            Ingress::for_engine(engine).map_err(to_pyerr)?;
+        let ingress: Arc<PythonBidirectionalIngress> =
+            Ingress::for_engine_with_adapter(engine, python_payload::PythonIngressPayloadAdapter)
+                .map_err(to_pyerr)?;
 
         let builder = self
             .inner
@@ -1667,11 +1689,10 @@ impl AsyncResponseStream {
 }
 
 /// Python-visible inbound iterator for bidirectional engines. Wraps an
-/// mpsc receiver of pre-pythonized request frames; `__anext__` is a thin
+/// mpsc receiver of Python-owned request frames; `__anext__` is a thin
 /// `.recv()` that returns the next `PyObject` directly, with no per-frame
-/// GIL acquisition on the consumer side. The producer (the forwarder
-/// spawned by `PythonBidirectionalEngine::generate`) acquires the GIL
-/// once per frame and pushes the converted `PyObject` onto the channel.
+/// GIL acquisition or value conversion on the consumer side. The producer
+/// moves the object decoded by the ingress adapter onto the channel.
 ///
 /// Termination follows the same shape as `AsyncResponseStream`: when the
 /// channel returns `None`, `__anext__` raises `PyStopAsyncIteration` and
@@ -1700,7 +1721,7 @@ impl PyAsyncRequestStream {
     }
 
     /// Required by the `AsyncIterator` protocol. Returns an awaitable
-    /// resolving to the next pre-pythonized frame, or raises
+    /// resolving to the next Python-owned frame, or raises
     /// `StopAsyncIteration` when the inbound channel is closed.
     #[pyo3(name = "__anext__")]
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {

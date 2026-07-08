@@ -34,12 +34,13 @@ class TestPadValueForMmHash:
 class TestBuildMmRoutingInfoFromFeatures:
     """Tests for build_mm_routing_info_from_features (pad_value scheme)."""
 
-    def _make_feature(self, mm_hash, offset, length):
+    def _make_feature(self, mm_hash, offset, length, is_embed=None):
         feat = MagicMock()
         feat.mm_hash = mm_hash
         feat.mm_position = MagicMock()
         feat.mm_position.offset = offset
         feat.mm_position.length = length
+        feat.mm_position.is_embed = is_embed
         return feat
 
     def test_single_feature_substitutes_pad_value(self):
@@ -68,6 +69,25 @@ class TestBuildMmRoutingInfoFromFeatures:
 
         p1, p2 = pad_value_for_mm_hash(h1), pad_value_for_mm_hash(h2)
         assert result["routing_token_ids"] == [p1, p1, 2, 3, p2, p2]
+        assert result["block_mm_infos"] == []
+
+    def test_is_embed_mask_leaves_boundary_tokens_unchanged(self):
+        mm_hash = int("abcdef0123456789", 16)
+        features = [
+            self._make_feature(
+                "abcdef0123456789" + "0" * 48,
+                2,
+                4,
+                is_embed=[False, True, True, False],
+            )
+        ]
+        token_ids = list(range(8))
+
+        result = build_mm_routing_info_from_features(features, token_ids)
+
+        assert result is not None
+        pad = pad_value_for_mm_hash(mm_hash)
+        assert result["routing_token_ids"] == [0, 1, 2, pad, pad, 5, 6, 7]
         assert result["block_mm_infos"] == []
 
     def test_no_features_returns_none(self):

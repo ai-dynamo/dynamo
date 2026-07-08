@@ -35,6 +35,7 @@ package v1alpha1
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,9 +47,16 @@ import (
 )
 
 const (
-	annDGDSpec   = "nvidia.com/dgd-spec"
-	annDGDStatus = "nvidia.com/dgd-status"
+	dgdConversionAnnotationPrefix = "nvidia.com/dgd-"
+	annDGDSpec                    = dgdConversionAnnotationPrefix + "spec"
+	annDGDStatus                  = dgdConversionAnnotationPrefix + "status"
 )
+
+// IsDynamoGraphDeploymentConversionAnnotation reports whether key is reserved
+// for DGD conversion bookkeeping.
+func IsDynamoGraphDeploymentConversionAnnotation(key string) bool {
+	return strings.HasPrefix(key, dgdConversionAnnotationPrefix)
+}
 
 // DynamoGraphDeploymentConversionContext carries DGD-level conversion context
 // that component converters cannot derive from their local inputs.

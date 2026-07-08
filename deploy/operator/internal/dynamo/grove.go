@@ -195,13 +195,9 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		"scheduleGatedReplicas", scheduleGatedReplicas,
 	)
 
-	serviceStatus := v1beta1.ComponentReplicaStatus{
-		ComponentKind:   v1beta1.ComponentKindPodClique,
-		ComponentNames:  []string{resourceName},
-		Replicas:        podClique.Status.Replicas,
-		UpdatedReplicas: podClique.Status.UpdatedReplicas,
-		ReadyReplicas:   &readyReplicas,
-	}
+	serviceStatus.Replicas = podClique.Status.Replicas
+	serviceStatus.UpdatedReplicas = podClique.Status.UpdatedReplicas
+	serviceStatus.ReadyReplicas = &readyReplicas
 
 	if observedGeneration == nil {
 		logger.V(1).Info("PodClique observedGeneration is nil", "resourceName", resourceName)
@@ -305,13 +301,9 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 		"scheduledReplicas", scheduledReplicas,
 	)
 
-	serviceStatus := v1beta1.ComponentReplicaStatus{
-		ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
-		ComponentNames:    []string{resourceName},
-		Replicas:          pcsg.Status.Replicas,
-		UpdatedReplicas:   pcsg.Status.UpdatedReplicas,
-		AvailableReplicas: &availableReplicas,
-	}
+	serviceStatus.Replicas = pcsg.Status.Replicas
+	serviceStatus.UpdatedReplicas = pcsg.Status.UpdatedReplicas
+	serviceStatus.AvailableReplicas = &availableReplicas
 
 	if observedGeneration == nil {
 		logger.V(1).Info("PodCliqueScalingGroup observedGeneration is nil", "resourceName", resourceName)
@@ -457,6 +449,13 @@ func ResolveKaiSchedulerQueue(annotations map[string]string) string {
 	return resolveKaiSchedulerQueueName(annotations)
 }
 
+func resolveVolcanoQueueName(annotations map[string]string) string {
+	if annotations == nil {
+		return ""
+	}
+	return strings.TrimSpace(annotations[commonconsts.KubeAnnotationVolcanoQueue])
+}
+
 // injectKaiSchedulerIfEnabled injects kai-scheduler settings into a clique if kai-scheduler is enabled and grove is enabled
 func injectKaiSchedulerIfEnabled(
 	clique *grovev1alpha1.PodCliqueTemplateSpec,
@@ -484,4 +483,43 @@ func injectKaiSchedulerIfEnabled(
 		clique.Labels = make(map[string]string)
 	}
 	clique.Labels[commonconsts.KubeLabelKaiSchedulerQueue] = queueName
+}
+
+// injectVolcanoSchedulerIfEnabled injects Volcano scheduler settings into a clique if Volcano scheduler integration is enabled.
+func injectVolcanoSchedulerIfEnabled(
+	clique *grovev1alpha1.PodCliqueTemplateSpec,
+	runtimeConfig *controller_common.RuntimeConfig,
+) {
+	if !runtimeConfig.GroveEnabled || !runtimeConfig.VolcanoSchedulerEnabled {
+		return
+	}
+
+	// Check if user has manually set schedulerName - if so, respect their choice
+	if clique.Spec.PodSpec.SchedulerName != "" && clique.Spec.PodSpec.SchedulerName != commonconsts.VolcanoSchedulerName {
+		return
+	}
+
+	clique.Spec.PodSpec.SchedulerName = commonconsts.VolcanoSchedulerName
+}
+
+// injectVolcanoQueueAnnotation maps the Dynamo Volcano queue annotation onto
+// the generated PodCliqueSet annotation consumed by Grove's Volcano backend.
+func injectVolcanoQueueAnnotation(
+	gangSet *grovev1alpha1.PodCliqueSet,
+	annotations map[string]string,
+	runtimeConfig *controller_common.RuntimeConfig,
+) {
+	if !runtimeConfig.GroveEnabled || !runtimeConfig.VolcanoSchedulerEnabled {
+		return
+	}
+
+	queueName := resolveVolcanoQueueName(annotations)
+	if queueName == "" {
+		return
+	}
+
+	if gangSet.Annotations == nil {
+		gangSet.Annotations = make(map[string]string)
+	}
+	gangSet.Annotations[commonconsts.GroveAnnotationVolcanoQueue] = queueName
 }

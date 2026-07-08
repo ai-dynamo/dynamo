@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
+use std::io::{ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,6 +35,7 @@ const MIN_KEEP_ALIVE: Duration = Duration::from_secs(1);
 /// Prefix for temporary files used in atomic writes.
 /// Files with this prefix are ignored by the watcher.
 const TEMP_FILE_PREFIX: &str = ".tmp_";
+const TEMP_FILE_CREATE_ATTEMPTS: usize = 16;
 
 /// Treat as a singleton
 #[derive(Clone)]
@@ -193,8 +195,9 @@ pub struct Directory {
 
 impl Directory {
     fn new(root: PathBuf, p: PathBuf, ttl: Duration) -> Self {
-        // Canonicalize root to handle symlinks (e.g., /var -> /private/var on macOS)
+        // Keep watched paths and event paths in the same form across symlinked roots.
         let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let canonical_path = p.canonicalize().unwrap_or_else(|_| p.clone());
         if ttl < MIN_KEEP_ALIVE {
             let h_ttl = humantime::format_duration(ttl);
             tracing::warn!(path = %p.display(), ttl = %h_ttl, "ttl is too short, increasing to {}", humantime::format_duration(MIN_KEEP_ALIVE));
@@ -202,7 +205,7 @@ impl Directory {
         let ttl = cmp::max(ttl, MIN_KEEP_ALIVE);
         Directory {
             root: canonical_root,
-            p,
+            p: canonical_path,
             ttl,
             owned_files: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -285,6 +288,21 @@ impl Directory {
         }
         Ok(())
     }
+
+    fn write_temp_file(&self, value: &[u8]) -> Result<PathBuf, StoreError> {
+        for _ in 0..TEMP_FILE_CREATE_ATTEMPTS {
+            let temp_name = format!("{TEMP_FILE_PREFIX}{:016x}", rand::random::<u64>());
+            let temp_path = self.p.join(&temp_name);
+            if write_temp_file_at(&temp_path, value)? {
+                return Ok(temp_path);
+            }
+        }
+
+        Err(StoreError::FilesystemError(format!(
+            "failed to create unique FileStore temp file in {} after {TEMP_FILE_CREATE_ATTEMPTS} attempts",
+            self.p.display()
+        )))
+    }
 }
 
 impl fmt::Display for Directory {
@@ -295,27 +313,60 @@ impl fmt::Display for Directory {
 
 #[async_trait]
 impl Bucket for Directory {
-    /// Write a file to the directory using atomic write (temp file + rename).
+    /// Write a file to the directory by publishing a completed temp file.
     /// This ensures watchers never see a partially written file.
+    /// Revision-zero inserts provide create-if-absent publication for this
+    /// FileStore path, but not leases, fencing, crash durability, or strict
+    /// runtime-wide cardinality guarantees.
     async fn insert(
         &self,
         key: &Key,
         value: bytes::Bytes,
-        _revision: u64, // Not used. Maybe put in file name?
+        revision: u64,
     ) -> Result<StoreOutcome, StoreError> {
         let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
 
-        // Use atomic write: write to temp file, then rename.
-        // This prevents watchers from seeing partially written files.
-        let temp_name = format!("{TEMP_FILE_PREFIX}{:016x}", rand::random::<u64>());
-        let temp_path = self.p.join(&temp_name);
+        let temp_path = self.write_temp_file(&value)?;
 
-        // Write to temp file first
-        fs::write(&temp_path, &value)
-            .with_context(|| format!("writing temp file {}", temp_path.display()))
-            .map_err(a_to_fs_err)?;
+        if revision == 0 {
+            // No-clobber publish for revision-zero inserts: the link fails if another
+            // writer already created the key, and readers never see a partial target file.
+            match fs::hard_link(&temp_path, &full_path) {
+                Ok(()) => {
+                    if let Err(err) = fs::remove_file(&temp_path) {
+                        tracing::warn!(
+                            path = %temp_path.display(),
+                            error = %err,
+                            "Failed to remove FileStore temp file after create-if-absent publish"
+                        );
+                    }
+                    self.owned_files.lock().insert(full_path.clone());
+                    return Ok(StoreOutcome::Created(0));
+                }
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    if let Err(remove_err) = fs::remove_file(&temp_path) {
+                        tracing::warn!(
+                            path = %temp_path.display(),
+                            error = %remove_err,
+                            "Failed to remove unused FileStore temp file after create-if-absent conflict"
+                        );
+                    }
+                    return Ok(StoreOutcome::Exists(0));
+                }
+                Err(err) => {
+                    if let Err(remove_err) = fs::remove_file(&temp_path) {
+                        tracing::warn!(
+                            path = %temp_path.display(),
+                            error = %remove_err,
+                            "Failed to remove unused FileStore temp file after create-if-absent error"
+                        );
+                    }
+                    return Err(to_fs_err(err));
+                }
+            }
+        }
 
         // Atomic rename to target path
         fs::rename(&temp_path, &full_path)
@@ -323,7 +374,7 @@ impl Bucket for Directory {
             .map_err(a_to_fs_err)?;
 
         self.owned_files.lock().insert(full_path.clone());
-        Ok(StoreOutcome::Created(0))
+        Ok(StoreOutcome::Created(revision))
     }
 
     /// Read a file from the directory
@@ -391,7 +442,6 @@ impl Bucket for Directory {
                         continue;
                     }
                 };
-
                 for item_path in event.paths {
                     // Skip if the event is for the directory itself
                     if item_path == dir {
@@ -399,9 +449,7 @@ impl Bucket for Directory {
                         continue;
                     }
 
-                    // Canonicalize paths to handle symlinks (e.g., /var -> /private/var on macOS)
-                    // The unwrap_or_else path is for Remove case.
-                    let canonical_item_path = item_path.canonicalize().unwrap_or_else(|_| item_path.clone());
+                    let canonical_item_path = canonicalize_event_path(&item_path);
 
                     let key = match canonical_item_path.strip_prefix(&root) {
                         Ok(stripped) => Key::from_url_safe(&stripped.display().to_string()),
@@ -440,7 +488,7 @@ impl Bucket for Directory {
                             let item = KeyValue::new(key, data);
                             yield WatchEvent::Put(item);
                         }
-                        EventKind::Remove(event::RemoveKind::File) => {
+                        EventKind::Remove(_) => {
                             yield WatchEvent::Delete(key);
                         }
                         _ => {
@@ -508,6 +556,50 @@ impl Bucket for Directory {
     }
 }
 
+fn write_temp_file_at(temp_path: &Path, value: &[u8]) -> Result<bool, StoreError> {
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp_path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(false),
+        Err(err) => {
+            let err = anyhow::Error::new(err)
+                .context(format!("creating temp file {}", temp_path.display()));
+            return Err(a_to_fs_err(err));
+        }
+    };
+
+    if let Err(err) = file.write_all(value) {
+        if let Err(remove_err) = fs::remove_file(temp_path) {
+            tracing::warn!(
+                path = %temp_path.display(),
+                error = %remove_err,
+                "Failed to remove FileStore temp file after write error"
+            );
+        }
+        let err =
+            anyhow::Error::new(err).context(format!("writing temp file {}", temp_path.display()));
+        return Err(a_to_fs_err(err));
+    }
+
+    Ok(true)
+}
+
+fn canonicalize_event_path(path: &Path) -> PathBuf {
+    if let Ok(canonical_path) = path.canonicalize() {
+        return canonical_path;
+    }
+    let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) else {
+        return path.to_path_buf();
+    };
+    let Ok(canonical_parent) = parent.canonicalize() else {
+        return path.to_path_buf();
+    };
+    canonical_parent.join(file_name)
+}
+
 // For anyhow preserve the context
 fn a_to_fs_err(err: anyhow::Error) -> StoreError {
     StoreError::FilesystemError(format!("{err:#}"))
@@ -520,10 +612,82 @@ fn to_fs_err<E: std::error::Error>(err: E) -> StoreError {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::time::Duration;
 
+    use futures::StreamExt;
     use tokio_util::sync::CancellationToken;
 
-    use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _};
+    use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _, StoreOutcome};
+
+    #[test]
+    fn deleted_event_path_canonicalizes_existing_parent() {
+        let t = tempfile::tempdir().unwrap();
+        let canonical_root = t.path().join("canonical");
+        let bucket = canonical_root.join("v1/tests");
+        fs::create_dir_all(&bucket).unwrap();
+        let linked_root = t.path().join("linked");
+        symlink(&canonical_root, &linked_root).unwrap();
+
+        assert_eq!(
+            super::canonicalize_event_path(&linked_root.join("v1/tests/deleted")),
+            canonical_root
+                .canonicalize()
+                .unwrap()
+                .join("v1/tests/deleted")
+        );
+    }
+
+    #[tokio::test]
+    async fn external_delete_is_observed_under_noncanonical_root() {
+        let t = tempfile::tempdir().unwrap();
+        let canonical_root = t.path().join("canonical");
+        fs::create_dir_all(&canonical_root).unwrap();
+        let linked_root = t.path().join("linked");
+        symlink(&canonical_root, &linked_root).unwrap();
+        let watcher_cancel = CancellationToken::new();
+        let creator_cancel = CancellationToken::new();
+        let watcher_store = FileStore::new(watcher_cancel.clone(), &linked_root);
+        let creator_store = FileStore::new(creator_cancel.clone(), &canonical_root);
+        let watcher_bucket = watcher_store
+            .get_or_create_bucket("v1/tests", None)
+            .await
+            .unwrap();
+        let creator_bucket = creator_store
+            .get_or_create_bucket("v1/tests", None)
+            .await
+            .unwrap();
+        let mut events = watcher_bucket.watch().await.unwrap();
+        let key = Key::new("scope/item".to_string());
+
+        creator_bucket
+            .insert(&key, "value".into(), 0)
+            .await
+            .unwrap();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+                .await
+                .expect("FileStore watcher did not observe value creation")
+                .expect("FileStore watcher ended after value creation");
+            if matches!(event, super::WatchEvent::Put(ref item) if item.key_str() == "v1/tests/scope/item")
+            {
+                break;
+            }
+        }
+
+        creator_bucket.delete(&key).await.unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .expect("FileStore watcher did not observe value deletion")
+            .expect("FileStore watcher ended after value deletion");
+        assert!(
+            matches!(event, super::WatchEvent::Delete(ref deleted) if deleted == &Key::new("v1/tests/scope/item".to_string()))
+        );
+
+        watcher_cancel.cancel();
+        creator_cancel.cancel();
+    }
 
     #[tokio::test]
     async fn test_entries_full_path() {
@@ -546,5 +710,96 @@ mod tests {
 
         assert!(keys.contains(&Key::new("v1/tests/key1/multi/part".to_string())));
         assert!(keys.contains(&Key::new("v1/tests/key2".to_string())));
+    }
+
+    #[test]
+    fn test_temp_file_creation_does_not_overwrite_existing_path() {
+        let t = tempfile::tempdir().unwrap();
+        let temp_path = t.path().join(".tmp_existing");
+
+        fs::write(&temp_path, b"sentinel").unwrap();
+        let created = super::write_temp_file_at(&temp_path, b"new").unwrap();
+
+        assert!(!created);
+        assert_eq!(fs::read(&temp_path).unwrap(), b"sentinel");
+    }
+
+    #[tokio::test]
+    async fn test_insert_revision_zero_is_create_if_absent() {
+        let t = tempfile::tempdir().unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let m = FileStore::new(cancel_token.clone(), t.path());
+        let bucket = m.get_or_create_bucket("v1/tests", None).await.unwrap();
+        let key = Key::new("singleton".to_string());
+
+        let first = bucket.insert(&key, "winner".into(), 0).await.unwrap();
+        let second = bucket.insert(&key, "loser".into(), 0).await.unwrap();
+        let value = bucket.get(&key).await.unwrap().unwrap();
+        cancel_token.cancel();
+
+        assert_eq!(first, StoreOutcome::Created(0));
+        assert_eq!(second, StoreOutcome::Exists(0));
+        assert_eq!(value.as_ref(), b"winner");
+    }
+
+    #[tokio::test]
+    async fn test_insert_nonzero_revision_overwrites() {
+        let t = tempfile::tempdir().unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let m = FileStore::new(cancel_token.clone(), t.path());
+        let bucket = m.get_or_create_bucket("v1/tests", None).await.unwrap();
+        let key = Key::new("existing".to_string());
+
+        bucket.insert(&key, "old".into(), 0).await.unwrap();
+        let outcome = bucket.insert(&key, "new".into(), 1).await.unwrap();
+        let value = bucket.get(&key).await.unwrap().unwrap();
+        cancel_token.cancel();
+
+        assert_eq!(outcome, StoreOutcome::Created(1));
+        assert_eq!(value.as_ref(), b"new");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_insert_revision_zero_has_one_winner() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().to_path_buf();
+        let key = Key::new("singleton".to_string());
+
+        let mut tasks = Vec::new();
+        for index in 0..16 {
+            let root = root.clone();
+            let key = key.clone();
+            tasks.push(tokio::spawn(async move {
+                let cancel_token = CancellationToken::new();
+                let store = FileStore::new(cancel_token.clone(), root);
+                let bucket = store.get_or_create_bucket("v1/claims", None).await.unwrap();
+                let value = format!("value-{index}");
+                let outcome = bucket.insert(&key, value.clone().into(), 0).await.unwrap();
+                let stored = bucket.get(&key).await.unwrap().unwrap();
+                cancel_token.cancel();
+                (outcome, String::from_utf8(stored.to_vec()).unwrap(), value)
+            }));
+        }
+
+        let mut created_values = Vec::new();
+        let mut observed_values = HashSet::new();
+        for task in tasks {
+            let (outcome, stored, attempted) = task.await.unwrap();
+            observed_values.insert(stored);
+            if outcome == StoreOutcome::Created(0) {
+                created_values.push(attempted);
+            } else {
+                assert_eq!(outcome, StoreOutcome::Exists(0));
+            }
+        }
+
+        assert_eq!(created_values.len(), 1);
+        assert_eq!(observed_values.len(), 1);
+        assert_eq!(
+            observed_values.into_iter().next().unwrap(),
+            created_values.pop().unwrap()
+        );
     }
 }

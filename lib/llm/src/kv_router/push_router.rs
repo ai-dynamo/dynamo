@@ -36,6 +36,22 @@ use cancellation::{cancel_on_stop, cancelled_error};
 use request_guard::RequestGuard;
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
+const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
+const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
+
+fn is_cancelled(error: &Error) -> bool {
+    match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
+}
+
+fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error: &Error) {
+    if is_cancelled(error) {
+        return;
+    }
+    if let Some(operation) = operation.take() {
+        operation.invalidate();
+    }
+}
+
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
@@ -73,6 +89,10 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
+        let session_id = request
+            .agent_context
+            .as_ref()
+            .map(|context| context.session_id.clone());
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
         let mut selection_future = Box::pin(async {
@@ -85,6 +105,7 @@ impl KvPushRouter {
                 SelectionOptions {
                     affinity_worker,
                     policy_class,
+                    session_id,
                 },
             )
             .instrument(tracing::info_span!("kv_router.select_worker"))
@@ -150,15 +171,17 @@ impl KvPushRouter {
         let worker = operation.target().and_then(affinity_worker);
         match self.select_request(request, phase, false, worker).await {
             Ok(selection) => Ok((selection, Some(operation))),
-            Err(error) if match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[]) => {
-                Err(error)
-            }
+            Err(error) if is_cancelled(&error) => Err(error),
             Err(_) if operation.target().is_some() && explicit.is_none() => {
                 operation.invalidate();
                 let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
                     .await?;
-                match self.select_request(request, phase, false, None).await {
+                let retry_worker = retry.target().and_then(affinity_worker);
+                match self
+                    .select_request(request, phase, false, retry_worker)
+                    .await
+                {
                     Ok(selection) => Ok((selection, Some(retry))),
                     Err(retry_error) => {
                         retry.invalidate();
@@ -277,6 +300,7 @@ impl KvPushRouter {
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
+        self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
@@ -321,12 +345,16 @@ impl KvPushRouter {
         let context_for_monitoring = stream_context.clone();
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut guard = guard;
+            // Keep one cancellation future alive for the whole response stream. Calling
+            // `stopped()` for every item repeatedly clones and polls a watch receiver.
+            let stopped = context_for_monitoring.stopped();
+            tokio::pin!(stopped);
 
             loop {
                 tokio::select! {
                     biased;
 
-                    _ = context_for_monitoring.stopped() => {
+                    _ = &mut stopped => {
                         tracing::debug!("Request {context_id} cancelled, ending stream");
                         break;
                     }
@@ -346,13 +374,45 @@ impl KvPushRouter {
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }
 
+    fn warn_if_output_replay_annotation_ignored(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        selection: &WorkerSelection,
+    ) {
+        let Some(replay_key) = request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY) else {
+            return;
+        };
+        let consumes_replay = self
+            .chooser
+            .workers_with_configs
+            .borrow()
+            .get(&selection.instance_id)
+            .and_then(|config| {
+                config
+                    .get_engine_specific::<bool>(OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY)
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(false);
+        if consumes_replay {
+            return;
+        }
+
+        tracing::warn!(
+            replay_key,
+            worker_id = selection.instance_id,
+            dp_rank = selection.dp_rank,
+            "request has output token replay annotation but selected worker has not declared replay-token consumption"
+        );
+    }
+
     pub(crate) async fn select_and_dispatch_prefill<M, F>(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
-        F: FnOnce(&mut PreprocessedRequest, u64, Option<u32>) -> Result<M, Error>,
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         let phase = RequestPhase::Prefill;
         let phase_label = phase.to_string();
@@ -367,25 +427,21 @@ impl KvPushRouter {
         {
             Ok(guard) => guard,
             Err(error) => {
-                if let Some(operation) = operation.take() {
-                    operation.invalidate();
-                }
-                return Err(error);
-            }
-        };
-        let metadata = match prepare(&mut request, selection.instance_id, Some(selection.dp_rank)) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                guard.abort().await;
-                if let Some(operation) = operation.take() {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
         let selected_target = AffinityTarget {
             worker_id: selection.instance_id,
             dp_rank: Some(selection.dp_rank),
+        };
+        let metadata = match prepare(&mut request, selected_target) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                guard.abort().await;
+                invalidate_on_non_cancellation(&mut operation, &error);
+                return Err(error);
+            }
         };
         drop(route_guard);
         let stream = match self
@@ -394,9 +450,7 @@ impl KvPushRouter {
         {
             Ok(stream) => stream,
             Err(error) => {
-                if let Some(operation) = operation.take() {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -493,9 +547,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let guard = match self.track_selection(&request, &mut selection, false).await {
             Ok(guard) => guard,
             Err(error) => {
-                if let Some(operation) = operation.take() {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -510,9 +562,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         {
             Ok(stream) => stream,
             Err(error) => {
-                if let Some(operation) = operation.take() {
-                    operation.invalidate();
-                }
+                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -637,6 +687,7 @@ mod tests {
             None,
             false,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -651,6 +702,42 @@ mod tests {
     async fn session_affinity_disabled_does_not_create_coordinator() {
         let (router, runtime) = router(None).await;
         assert!(router.affinity.is_none());
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_affinity_post_selection_cancellation_preserves_binding() {
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+        let affinity = router.affinity.as_ref().unwrap();
+        let session_id = SessionAffinityId::new("cancelled-after-selection");
+        let original_target = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(0),
+        };
+        let AffinityAcquire::Initialize(initializer) =
+            affinity.acquire(&session_id, None).await.unwrap()
+        else {
+            panic!("first request must initialize");
+        };
+        drop(initializer.commit(original_target).unwrap());
+
+        let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
+        let cancellation = cancelled_error("cancelled-after-selection-request");
+        invalidate_on_non_cancellation(&mut operation, &cancellation);
+        assert!(operation.is_some());
+        drop(operation);
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(original_target)
+        );
+
+        let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
+        let failure = anyhow::anyhow!("dispatch failed");
+        invalidate_on_non_cancellation(&mut operation, &failure);
+        assert!(operation.is_none());
+        assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
 
         drop(router);
         runtime.shutdown();

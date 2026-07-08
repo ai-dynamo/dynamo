@@ -440,7 +440,10 @@ async def init_llm_worker(
 
     if config.modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
-        model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
+        model_config = AutoConfig.from_pretrained(
+            config.model,
+            trust_remote_code=engine_args.get("trust_remote_code", False),
+        )
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
             model_dir=config.model,
@@ -505,6 +508,15 @@ async def init_llm_worker(
         # The callback uses this to poll active request count during shutdown.
         if engine_holder is not None:
             engine_holder.append(engine)
+
+        # Snapshot mode must capture the initialized TRT-LLM/CUDA state before
+        # Dynamo runtime endpoints, health routes, or discovery sockets exist.
+        # The snapshot runtime proxy waits here for capture/restore and creates
+        # the real runtime only after restore; normal runtimes skip this hook.
+        snapshot_before_endpoint = getattr(runtime, "snapshot_before_endpoint", None)
+        if snapshot_before_endpoint is not None:
+            await snapshot_before_endpoint(engine, config)
+
         engine.start_health_monitor(runtime=runtime, shutdown_event=shutdown_event)
 
         endpoint = runtime.endpoint(
