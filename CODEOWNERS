@@ -263,7 +263,6 @@
 /docs/agents/                                                                                 @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /tests/deploy/                                                                                @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /benchmarks/router/                                                                           @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
-/lib/llm/src/audit/                                                                           @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /deploy/power-agent/                                                                          @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners
 /lib/llm/src/mocker/                                                                          @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
 /dev/nats-server.conf                                                                         @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
@@ -284,6 +283,7 @@
 /lib/llm/src/protocols/agents.rs                                                              @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/runtime/src/health_check.rs                                                              @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/omni/                                                             @ai-dynamo/dynamo-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/dev/docker-observability-xpu.yml                                                             @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-xpu-codeowners
 /lib/kvbm-config/src/messenger.rs                                                             @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/system_health.rs                                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/backend-common/src/metrics.rs                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners

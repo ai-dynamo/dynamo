@@ -38,10 +38,6 @@ areas:
   - lib/llm/src/protocols/openai/
   - lib/llm/tests/test_reasoning_parser.rs
   - lib/llm/tests/test_streaming_tool_parsers.rs
-  - lib/protocols/
-  - lib/protocols/src/types/
-  - lib/protocols/tests/
-  - lib/tokenizers/
   - tests/frontend/
   - tests/frontend/grpc/
 - label: agents
@@ -68,6 +64,7 @@ areas:
   - lib/llm/src/kv_router/publisher/
   - tests/router/
   - tests/router/configs/
+  - examples/router/policy-class-queues.yaml
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-vllm-codeowners'
   path_globs:
@@ -211,7 +208,6 @@ areas:
   - components/src/dynamo/profiler/
   - components/src/dynamo/profiler/tests/
   - components/src/dynamo/profiler/utils/
-  - components/src/dynamo/profiler/webui/
   - examples/global_planner/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
@@ -237,7 +233,6 @@ areas:
   - lib/llm/benches/
   - lib/llm/bin/
   - lib/llm/examples/
-  - lib/llm/src/audit/
   - lib/llm/src/bin/
   - lib/llm/src/common/
   - lib/llm/src/discovery/
@@ -769,10 +764,6 @@ shared:
   owners:
   - operator
   - observability
-- glob: lib/llm/src/audit/
-  owners:
-  - runtime
-  - observability
 - glob: lib/llm/src/fpm_publisher.rs
   owners:
   - runtime
@@ -942,6 +933,10 @@ shared:
   owners:
   - ops
   - runtime
+- glob: dev/docker-observability-xpu.yml
+  owners:
+  - observability
+  - xpu
 - glob: dev/nats-server.conf
   owners:
   - ops
