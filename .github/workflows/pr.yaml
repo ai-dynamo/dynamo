@@ -1059,7 +1059,7 @@ jobs:
           vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-trtllm-dt
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
+          operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
