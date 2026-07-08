@@ -187,10 +187,10 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_CONDITIONAL_DISAGG") {
         config.conditional_disagg_enabled = value;
     }
-    if let Some(value) = get_env("DYN_ROUTER_CONDITIONAL_DISAGG_POLICY") {
-        if let Ok(policy) = value.parse() {
-            config.conditional_disagg_policy = policy;
-        }
+    if let Some(value) = get_env("DYN_ROUTER_CONDITIONAL_DISAGG_POLICY")
+        && let Ok(policy) = value.parse()
+    {
+        config.conditional_disagg_policy = policy;
     }
     if let Some(value) = parse_usize(&get_env, "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD") {
         config.conditional_disagg_eff_isl_threshold = value;
