@@ -191,7 +191,7 @@ vllm_configs = {
             pytest.mark.profiled_vram_gib(3.8),
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
             pytest.mark.timeout(410),
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
