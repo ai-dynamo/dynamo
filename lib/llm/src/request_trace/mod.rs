@@ -45,6 +45,41 @@ pub use types::{
 };
 
 static BUS: TelemetryBus<RequestTraceRecord> = TelemetryBus::new();
+static METADATA_BUS: TelemetryBus<RequestTraceRecord> = TelemetryBus::new();
+static PAYLOAD_BUS: TelemetryBus<RequestTraceRecord> = TelemetryBus::new();
+
+/// Receiver for both request-trace delivery lanes.
+///
+/// Payload records use a separate bounded lane so a burst of large payloads
+/// cannot evict request and tool metadata before a sink gets to observe it.
+/// The lanes are selected fairly to avoid starvation. Event timestamps remain
+/// the source of truth for ordering in the unified output stream.
+pub(crate) struct RequestTraceReceiver {
+    metadata: tokio::sync::broadcast::Receiver<RequestTraceRecord>,
+    payload: tokio::sync::broadcast::Receiver<RequestTraceRecord>,
+}
+
+impl RequestTraceReceiver {
+    pub(crate) async fn recv(
+        &mut self,
+    ) -> Result<RequestTraceRecord, tokio::sync::broadcast::error::RecvError> {
+        tokio::select! {
+            result = self.metadata.recv() => result,
+            result = self.payload.recv() => result,
+        }
+    }
+
+    pub(crate) fn try_recv(
+        &mut self,
+    ) -> Result<RequestTraceRecord, tokio::sync::broadcast::error::TryRecvError> {
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        match self.metadata.try_recv() {
+            Err(TryRecvError::Empty | TryRecvError::Closed) => self.payload.try_recv(),
+            result => result,
+        }
+    }
+}
 
 pub const DEFAULT_TOOL_EVENTS_TOPIC: &str = "agent-tool-events";
 pub(crate) const X_REQUEST_ID_CONTEXT_KEY: &str = "request_trace.x_request_id";
@@ -69,6 +104,8 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
     }
 
     BUS.init(policy.capacity);
+    METADATA_BUS.init(policy.capacity);
+    PAYLOAD_BUS.init(policy.capacity);
     sink::spawn_workers_from_env(shutdown).await?;
     config::mark_capture_active();
     tracing::info!(
@@ -100,14 +137,62 @@ pub(crate) async fn start_tool_event_ingest_from_policy(
 }
 
 pub fn publish(record: RequestTraceRecord) {
-    BUS.publish(record);
+    BUS.publish_ref(&record);
+    if record.event_type == RequestTraceEventType::RequestPayload {
+        PAYLOAD_BUS.publish(record);
+    } else {
+        METADATA_BUS.publish(record);
+    }
 }
 
 pub fn subscribe() -> tokio::sync::broadcast::Receiver<RequestTraceRecord> {
     BUS.subscribe()
 }
 
+fn subscribe_sink() -> RequestTraceReceiver {
+    RequestTraceReceiver {
+        metadata: METADATA_BUS.subscribe(),
+        payload: PAYLOAD_BUS.subscribe(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn init_bus_for_test(capacity: usize) {
     BUS.init(capacity);
+    METADATA_BUS.init(capacity);
+    PAYLOAD_BUS.init(capacity);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(event_type: RequestTraceEventType) -> RequestTraceRecord {
+        RequestTraceRecord {
+            schema: RequestTraceSchema::V1,
+            event_type,
+            event_time_unix_ms: 0,
+            event_source: None,
+            agent_context: None,
+            request: None,
+            tool: None,
+            payload: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn payload_burst_does_not_evict_request_metadata() {
+        init_bus_for_test(8);
+        let mut receiver = subscribe_sink();
+
+        publish(record(RequestTraceEventType::RequestEnd));
+        for _ in 0..64 {
+            publish(record(RequestTraceEventType::RequestPayload));
+        }
+
+        assert_eq!(
+            receiver.metadata.recv().await.unwrap().event_type,
+            RequestTraceEventType::RequestEnd
+        );
+    }
 }
