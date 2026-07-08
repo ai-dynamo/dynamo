@@ -274,7 +274,11 @@ impl Node {
     }
 
     fn clear_children_if_unreachable(&self, should_clear_children: bool) {
-        if should_clear_children && !self.children.is_empty() {
+        // `internal` is sticky, so false proves this node never published a child.
+        if should_clear_children
+            && self.internal.load(Ordering::Acquire)
+            && !self.children.is_empty()
+        {
             self.children.clear();
             self.shape_version.fetch_add(1, Ordering::Release);
         }
