@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
+	configv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
@@ -991,6 +992,51 @@ func TestDGD_RoundTrip_FullSharedSpec(t *testing.T) {
 			},
 		},
 	}
+	got := roundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestDGD_RoundTrip_EPPConfigV15 verifies that conversion preserves GAIE v1.5 fields.
+func TestDGD_RoundTrip_EPPConfigV15(t *testing.T) {
+	weight := 0.5
+	maxRequests := resource.MustParse("100")
+	src := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "epp-v15", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "epp",
+					ComponentType: v1beta1.ComponentTypeEPP,
+					EPPConfig: &v1beta1.EPPConfig{
+						Config: &configv1alpha1.EndpointPickerConfig{
+							FeatureGates: configv1alpha1.FeatureGates{"dataLayer", "flowControl"},
+							Plugins: []configv1alpha1.PluginSpec{
+								{Name: "source", Type: "metrics-source"},
+								{Name: "extractor", Type: "metrics-extractor"},
+								{Name: "scorer", Type: "prefix-cache-scorer"},
+								{Name: "detector", Type: "utilization-detector"},
+								{Name: "parser", Type: "openai-parser"},
+							},
+							SchedulingProfiles: []configv1alpha1.SchedulingProfile{
+								{Name: "default", Plugins: []configv1alpha1.SchedulingPlugin{{PluginRef: "scorer", Weight: &weight}}},
+							},
+							SaturationDetector: &configv1alpha1.SaturationDetectorConfig{PluginRef: "detector"},
+							DataLayer: &configv1alpha1.DataLayerConfig{
+								Sources: []configv1alpha1.DataLayerSource{
+									{PluginRef: "source", Extractors: []configv1alpha1.DataLayerExtractor{{PluginRef: "extractor"}}},
+								},
+							},
+							FlowControl: &configv1alpha1.FlowControlConfig{MaxRequests: &maxRequests},
+							Parser:      &configv1alpha1.ParserConfig{PluginRef: "parser"},
+						},
+					},
+				},
+			},
+		},
+	}
+
 	got := roundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)

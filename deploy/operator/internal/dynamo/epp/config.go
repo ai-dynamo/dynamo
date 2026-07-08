@@ -78,7 +78,7 @@ func GetConfigMapName(dgdName string) string {
 func marshalEndpointPickerConfig(config *apixv1alpha1.EndpointPickerConfig) (string, error) {
 	// Set the TypeMeta fields using upstream constants
 	config.TypeMeta = metav1.TypeMeta{
-		APIVersion: apixv1alpha1.SchemeGroupVersion.String(),
+		APIVersion: apixv1alpha1.GroupVersion.String(),
 		Kind:       "EndpointPickerConfig",
 	}
 
