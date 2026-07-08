@@ -873,6 +873,9 @@ impl<'de> Deserialize<'de> for ExternalSequenceBlockHash {
 // ------
 
 /// Errors that can occur during KV Cache Event processing.
+///
+/// Indexer backends may introduce additional failure modes.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum KvCacheEventError {
     #[error("Failed to find parent block")]

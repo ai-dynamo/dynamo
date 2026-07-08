@@ -100,17 +100,13 @@ impl EventTransposedCkfIndexer {
         match event.event.data {
             KvCacheEventData::Stored(store) => {
                 let lane = self.lane_for(worker, event_id)?;
+                if store.blocks.is_empty() {
+                    return Ok(());
+                }
+                let state = self.ensure_state(states, lane)?;
                 let mut first_error = None;
-                let mut entirely_duplicate = !store.blocks.is_empty();
+                let mut entirely_duplicate = true;
                 for block in store.blocks {
-                    let state = match self.ensure_state(states, lane) {
-                        Ok(state) => state,
-                        Err(error) => {
-                            entirely_duplicate = false;
-                            retain_first_error(&mut first_error, error);
-                            continue;
-                        }
-                    };
                     if !state.resident.insert(block.block_hash) {
                         continue;
                     }

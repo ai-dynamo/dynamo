@@ -387,11 +387,24 @@ impl PreBoundCkfSearchCounters {
         lane_probes: u64,
         provenance_skips: u64,
     ) {
-        self.left_edge_lanes.inc_by(left_edge_lanes);
-        self.activated_lanes.inc_by(activated_lanes);
-        self.probe_calls.inc_by(probe_calls);
-        self.lane_probes.inc_by(lane_probes);
-        self.provenance_skips.inc_by(provenance_skips);
+        if left_edge_lanes | activated_lanes | probe_calls | lane_probes | provenance_skips == 0 {
+            return;
+        }
+        if left_edge_lanes != 0 {
+            self.left_edge_lanes.inc_by(left_edge_lanes);
+        }
+        if activated_lanes != 0 {
+            self.activated_lanes.inc_by(activated_lanes);
+        }
+        if probe_calls != 0 {
+            self.probe_calls.inc_by(probe_calls);
+        }
+        if lane_probes != 0 {
+            self.lane_probes.inc_by(lane_probes);
+        }
+        if provenance_skips != 0 {
+            self.provenance_skips.inc_by(provenance_skips);
+        }
     }
 }
 
