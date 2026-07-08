@@ -546,7 +546,8 @@ impl SelectionService {
         })
     }
 
-    /// Book a request's load against a chosen worker (dict, see `ReservationRequest`).
+    /// Book a request's load (dict, see `ReservationRequest`): replay a cached
+    /// selection via `selection_id`, or book self-contained via `worker_id`.
     fn create_reservation<'p>(
         &self,
         py: Python<'p>,

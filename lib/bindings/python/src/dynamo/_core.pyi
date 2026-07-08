@@ -707,7 +707,14 @@ class SelectionService:
         ...
 
     async def create_reservation(self, request: JsonLike) -> JsonLike:
-        """Book a request's load against a chosen worker."""
+        """Book a request's load against a chosen worker.
+
+        With a ``selection_id``, replays the matching ``select``'s cached
+        selection (same model/tenant), booked under ``reservation_id``; other
+        request fields are ignored. With a ``worker_id`` and the prompt, books
+        explicitly and discards any cached selection for the id. A request with
+        neither raises ``ValueError``.
+        """
         ...
 
     async def prefill_complete(self, reservation_id: str) -> None:
