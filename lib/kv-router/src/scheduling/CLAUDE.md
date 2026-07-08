@@ -51,16 +51,19 @@ sequenceDiagram
 ```text
 PolicyClassQueue("agents")
 ├── pending: BinaryHeap<PolicyQueueEntry>                 # WorkerPlacement::Any
-└── ready_by_worker: HashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry>>
-    ├── Worker(7, dp_rank=0) → heap of requests pinned to that rank
-    └── Worker(9, dp_rank=1) → heap of requests pinned to that rank
+├── ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry>>
+│   ├── Worker(7, dp_rank=0) → heap of requests pinned to that rank
+│   └── Worker(9, dp_rank=1) → heap of requests pinned to that rank
+├── blocked_workers: FxHashSet<WorkerWithDpRank>
+└── candidate_worker_heads: BTreeSet<WorkerLaneHead>       # one head per unblocked lane
 ```
 
 - `pending` is the shared ready heap for requests where the existing selector may choose any eligible worker.
 - `ready_by_worker` is sparse. A worker/rank heap is created only while exact-placement requests exist for it and removed when empty.
+- `candidate_worker_heads` indexes one request head per worker lane by the same queue priority. A blocked head is removed until that worker's next capacity update; periodic or topology-wide updates recheck all blocked lanes.
 - A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. `WorkerWithDpRank` is only the exact-placement lane key; the actor and selector retain worker knowledge.
 - Every heap uses the class's configured priority ordering. `BinaryHeap::peek()` reads its highest-priority root in O(1); push and pop are O(log n).
-- `PolicyClassQueue::next_dispatchable` produces one dispatch candidate by peeking the root of `pending` and every worker heap, ignoring roots that are not currently dispatchable, and comparing the remaining roots. Never scan deeper into a heap.
+- `PolicyClassQueue::next_dispatchable` compares the shared root with the highest indexed worker head. It removes blocked worker heads until it finds a dispatchable one, so each blocked lane is checked once per capacity update rather than once per pop.
 - `round_cursor` marks where the next quantum-granting DRR pass begins. `carry_class` lets one class spend residual deficit before that pass; it is revalidated through `next_dispatchable` and never grants another quantum when the carried candidate is blocked or too expensive.
 - Worker lanes contain head-of-line blocking to one exact worker. A blocked Worker 7 root cannot hide a ready Worker 9 root or an unpinned root.
 

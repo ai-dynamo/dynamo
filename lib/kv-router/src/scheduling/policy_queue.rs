@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeSet, BinaryHeap};
 
 use ordered_float::OrderedFloat;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterQueuePolicy;
@@ -78,6 +78,20 @@ struct QueuePriority {
     policy_score: OrderedFloat<f64>,
 }
 
+#[inline]
+fn cmp_queue_order(
+    lhs_priority: QueuePriority,
+    lhs_enqueue_seq: u64,
+    rhs_priority: QueuePriority,
+    rhs_enqueue_seq: u64,
+) -> Ordering {
+    lhs_priority
+        .strict_priority
+        .cmp(&rhs_priority.strict_priority)
+        .then_with(|| lhs_priority.policy_score.cmp(&rhs_priority.policy_score))
+        .then_with(|| rhs_enqueue_seq.cmp(&lhs_enqueue_seq))
+}
+
 pub struct PolicyQueueEntry<T> {
     class_index: usize,
     priority: QueuePriority,
@@ -138,12 +152,49 @@ struct DispatchCandidate {
     cost: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkerLaneHead {
+    worker: WorkerWithDpRank,
+    priority: QueuePriority,
+    enqueue_seq: u64,
+}
+
+impl WorkerLaneHead {
+    fn new<T>(worker: WorkerWithDpRank, entry: &PolicyQueueEntry<T>) -> Self {
+        Self {
+            worker,
+            priority: entry.priority,
+            enqueue_seq: entry.enqueue_seq,
+        }
+    }
+}
+
+impl Ord for WorkerLaneHead {
+    fn cmp(&self, other: &Self) -> Ordering {
+        cmp_queue_order(
+            self.priority,
+            self.enqueue_seq,
+            other.priority,
+            other.enqueue_seq,
+        )
+        .then_with(|| self.worker.cmp(&other.worker))
+    }
+}
+
+impl PartialOrd for WorkerLaneHead {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
     pending: BinaryHeap<PolicyQueueEntry<T>>,
-    ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
     stats: PolicyQueueStats,
     deficit: usize,
+    ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
+    blocked_workers: FxHashSet<WorkerWithDpRank>,
+    candidate_worker_heads: BTreeSet<WorkerLaneHead>,
 }
 
 impl<T> PolicyClassQueue<T> {
@@ -161,33 +212,115 @@ impl<T> PolicyClassQueue<T> {
         match placement {
             WorkerPlacement::Any => self.pending.push(entry),
             WorkerPlacement::Exact(worker) => {
-                self.ready_by_worker.entry(worker).or_default().push(entry);
+                let ready = self.ready_by_worker.entry(worker).or_default();
+                let old_head = (!self.blocked_workers.contains(&worker))
+                    .then(|| ready.peek().map(|entry| WorkerLaneHead::new(worker, entry)))
+                    .flatten();
+                ready.push(entry);
+                if !self.blocked_workers.contains(&worker) {
+                    let new_head = WorkerLaneHead::new(
+                        worker,
+                        ready.peek().expect("worker lane was just populated"),
+                    );
+                    if old_head != Some(new_head) {
+                        if let Some(old_head) = old_head {
+                            let removed = self.candidate_worker_heads.remove(&old_head);
+                            debug_assert!(removed);
+                        }
+                        self.candidate_worker_heads.insert(new_head);
+                    }
+                }
             }
         }
     }
 
+    #[inline]
     fn next_dispatchable(
-        &self,
+        &mut self,
         class_index: usize,
         is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
     ) -> Option<DispatchCandidate> {
-        let mut best = self
+        if self.ready_by_worker.is_empty() {
+            return self
+                .pending
+                .peek()
+                .filter(|entry| is_dispatchable(class_index, &self.config, entry.payload()))
+                .map(|entry| DispatchCandidate {
+                    placement: WorkerPlacement::Any,
+                    cost: entry.snapshot.scheduling_cost_tokens,
+                });
+        }
+
+        self.next_dispatchable_worker(class_index, is_dispatchable)
+    }
+
+    #[inline(never)]
+    fn next_dispatchable_worker(
+        &mut self,
+        class_index: usize,
+        is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+    ) -> Option<DispatchCandidate> {
+        let shared = self
             .pending
             .peek()
             .filter(|entry| is_dispatchable(class_index, &self.config, entry.payload()))
-            .map(|entry| (WorkerPlacement::Any, entry));
-        for (&worker, ready) in &self.ready_by_worker {
-            if let Some(entry) = ready.peek()
-                && is_dispatchable(class_index, &self.config, entry.payload())
-                && best.is_none_or(|(_, current)| entry > current)
-            {
-                best = Some((WorkerPlacement::Exact(worker), entry));
+            .map(|entry| {
+                (
+                    entry.priority,
+                    entry.enqueue_seq,
+                    entry.snapshot.scheduling_cost_tokens,
+                )
+            });
+
+        loop {
+            let Some(head) = self.candidate_worker_heads.last().copied() else {
+                return shared.map(|(_, _, cost)| DispatchCandidate {
+                    placement: WorkerPlacement::Any,
+                    cost,
+                });
+            };
+            let dispatchable = {
+                let ready = self
+                    .ready_by_worker
+                    .get(&head.worker)
+                    .expect("indexed worker lane vanished");
+                is_dispatchable(
+                    class_index,
+                    &self.config,
+                    ready
+                        .peek()
+                        .expect("indexed worker lane is empty")
+                        .payload(),
+                )
+            };
+            if !dispatchable {
+                let removed = self.candidate_worker_heads.pop_last();
+                debug_assert_eq!(removed, Some(head));
+                self.blocked_workers.insert(head.worker);
+                continue;
             }
+
+            let exact_cost = self.ready_by_worker[&head.worker]
+                .peek()
+                .expect("indexed worker lane is empty")
+                .snapshot
+                .scheduling_cost_tokens;
+            return match shared {
+                Some((priority, enqueue_seq, cost))
+                    if cmp_queue_order(priority, enqueue_seq, head.priority, head.enqueue_seq)
+                        == Ordering::Greater =>
+                {
+                    Some(DispatchCandidate {
+                        placement: WorkerPlacement::Any,
+                        cost,
+                    })
+                }
+                _ => Some(DispatchCandidate {
+                    placement: WorkerPlacement::Exact(head.worker),
+                    cost: exact_cost,
+                }),
+            };
         }
-        best.map(|(placement, entry)| DispatchCandidate {
-            placement,
-            cost: entry.snapshot.scheduling_cost_tokens,
-        })
     }
 
     fn pop_lane(&mut self, placement: WorkerPlacement) -> PolicyQueueEntry<T> {
@@ -198,11 +331,66 @@ impl<T> PolicyClassQueue<T> {
                     .ready_by_worker
                     .get_mut(&worker)
                     .expect("queue admission worker lane vanished");
+                debug_assert!(!self.blocked_workers.contains(&worker));
+                let head = WorkerLaneHead::new(
+                    worker,
+                    ready.peek().expect("queue admission worker head vanished"),
+                );
+                let removed = self.candidate_worker_heads.remove(&head);
+                debug_assert!(removed);
                 let entry = ready.pop().expect("queue admission worker head vanished");
-                if ready.is_empty() {
+                let next_head = ready.peek().map(|entry| WorkerLaneHead::new(worker, entry));
+                if let Some(next_head) = next_head {
+                    self.candidate_worker_heads.insert(next_head);
+                } else {
                     self.ready_by_worker.remove(&worker);
                 }
                 entry
+            }
+        }
+    }
+
+    fn recheck_worker(&mut self, worker: WorkerWithDpRank) {
+        if self.blocked_workers.remove(&worker) {
+            let ready = self
+                .ready_by_worker
+                .get(&worker)
+                .expect("blocked worker lane vanished");
+            self.candidate_worker_heads.insert(WorkerLaneHead::new(
+                worker,
+                ready.peek().expect("blocked worker lane is empty"),
+            ));
+        }
+    }
+
+    fn recheck_all_workers(&mut self) {
+        let Self {
+            ready_by_worker,
+            blocked_workers,
+            candidate_worker_heads,
+            ..
+        } = self;
+        for worker in blocked_workers.drain() {
+            let ready = ready_by_worker
+                .get(&worker)
+                .expect("blocked worker lane vanished");
+            candidate_worker_heads.insert(WorkerLaneHead::new(
+                worker,
+                ready.peek().expect("blocked worker lane is empty"),
+            ));
+        }
+    }
+
+    fn rebuild_worker_heads(&mut self) {
+        self.candidate_worker_heads.clear();
+        self.blocked_workers
+            .retain(|worker| self.ready_by_worker.contains_key(worker));
+        for (&worker, ready) in &self.ready_by_worker {
+            if !self.blocked_workers.contains(&worker) {
+                self.candidate_worker_heads.insert(WorkerLaneHead::new(
+                    worker,
+                    ready.peek().expect("worker lane is empty"),
+                ));
             }
         }
     }
@@ -229,6 +417,8 @@ impl<T> PolicyQueue<T> {
                     config,
                     pending: BinaryHeap::new(),
                     ready_by_worker: FxHashMap::default(),
+                    blocked_workers: FxHashSet::default(),
+                    candidate_worker_heads: BTreeSet::new(),
                     stats: PolicyQueueStats::default(),
                     deficit: 0,
                 })
@@ -257,6 +447,18 @@ impl<T> PolicyQueue<T> {
         self.classes[class_index].stats
     }
 
+    pub(crate) fn recheck_worker(&mut self, worker: WorkerWithDpRank) {
+        for class in &mut self.classes {
+            class.recheck_worker(worker);
+        }
+    }
+
+    pub(crate) fn recheck_all_workers(&mut self) {
+        for class in &mut self.classes {
+            class.recheck_all_workers();
+        }
+    }
+
     pub fn has_backlog(&self, class_index: usize) -> bool {
         !self.classes[class_index].is_empty()
     }
@@ -275,6 +477,7 @@ impl<T> PolicyQueue<T> {
                 ready.retain(|entry| keep(entry.payload()));
                 !ready.is_empty()
             });
+            class.rebuild_worker_heads();
             let mut stats = PolicyQueueStats::default();
             let mut count = 0;
             for entry in class.entries() {
@@ -697,6 +900,115 @@ policy_classes:
             .unwrap();
         assert_eq!(candidate.into_payload(), "ready");
         assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn worker_update_rechecks_only_that_blocked_lane() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let worker_1 = WorkerWithDpRank::new(1, 0);
+        let worker_2 = WorkerWithDpRank::new(2, 0);
+        for (worker, payload) in [(worker_1, "worker-1"), (worker_2, "worker-2")] {
+            queue
+                .enqueue(
+                    0,
+                    2,
+                    QueueSnapshot::new(1, 0),
+                    worker.worker_id as f64,
+                    0.0,
+                    0,
+                    WorkerPlacement::Exact(worker),
+                    payload,
+                )
+                .unwrap();
+        }
+
+        assert!(queue.pop_next(|_, _, _| false).is_none());
+        queue.recheck_worker(worker_1);
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "worker-1"
+        );
+        assert!(queue.pop_next(|_, _, _| true).is_none());
+        queue.recheck_worker(worker_2);
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "worker-2"
+        );
+    }
+
+    #[test]
+    fn exact_lane_index_tracks_a_new_higher_priority_head() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        let worker = WorkerWithDpRank::new(1, 0);
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Exact(worker),
+                "old",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                10.0,
+                0,
+                WorkerPlacement::Exact(worker),
+                "boosted",
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "boosted"
+        );
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "old"
+        );
+    }
+
+    #[test]
+    fn exact_lane_head_index_checks_each_blocked_lane_once() {
+        const LANES: usize = 10_000;
+        let mut queue = PolicyQueue::new(admission_profile());
+        for lane in 0..LANES {
+            queue
+                .enqueue(
+                    0,
+                    LANES,
+                    QueueSnapshot::new(1, 0),
+                    lane as f64,
+                    0.0,
+                    0,
+                    WorkerPlacement::Exact(WorkerWithDpRank::new(lane as u64, 0)),
+                    lane,
+                )
+                .unwrap();
+        }
+
+        let mut checks = 0;
+        let mut popped = 0;
+        while queue
+            .pop_next(|_, _, lane| {
+                checks += 1;
+                !lane.is_multiple_of(2)
+            })
+            .is_some()
+        {
+            popped += 1;
+        }
+
+        assert_eq!(popped, LANES / 2);
+        assert_eq!(checks, LANES);
+        assert_eq!(queue.pending_count(), LANES / 2);
     }
 
     #[test]

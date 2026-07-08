@@ -24,7 +24,9 @@ use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
     SchedulingResponse,
 };
-use crate::protocols::{LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId};
+use crate::protocols::{
+    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
@@ -60,6 +62,7 @@ enum AdmissionCommand {
         ack_tx: oneshot::Sender<()>,
     },
     Update {
+        worker: Option<WorkerWithDpRank>,
         ack_tx: oneshot::Sender<()>,
     },
 }
@@ -380,6 +383,14 @@ impl<
     /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
     /// sees fresh state on the next iteration.
     pub async fn update(&self) {
+        self.update_after(None).await;
+    }
+
+    pub(crate) async fn update_worker(&self, worker: WorkerWithDpRank) {
+        self.update_after(Some(worker)).await;
+    }
+
+    async fn update_after(&self, worker: Option<WorkerWithDpRank>) {
         if !self.queueing_enabled {
             return;
         }
@@ -387,7 +398,7 @@ impl<
         let (ack_tx, ack_rx) = oneshot::channel();
         if self
             .admission_tx
-            .send(AdmissionCommand::Update { ack_tx })
+            .send(AdmissionCommand::Update { worker, ack_tx })
             .await
             .is_ok()
         {
@@ -447,8 +458,8 @@ impl<
                     self.handle_enqueue(request, block_hashes);
                     let _ = ack_tx.send(());
                 }
-                AdmissionCommand::Update { ack_tx } => {
-                    self.handle_update().await;
+                AdmissionCommand::Update { worker, ack_tx } => {
+                    self.handle_update(worker).await;
                     let _ = ack_tx.send(());
                 }
             }
@@ -572,9 +583,17 @@ impl<
         QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
     }
 
-    async fn handle_update(&mut self) {
+    async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
         if self.pending.pending_count() == 0 {
             return;
+        }
+
+        if let Some(worker) = worker {
+            self.pending.recheck_worker(worker);
+        } else {
+            // ponytail: periodic/topology updates use the safe full fallback; thread worker IDs
+            // through replica updates if this scan becomes measurable.
+            self.pending.recheck_all_workers();
         }
 
         // Continuation draining stays actor-local; never self-send through the
@@ -2347,7 +2366,7 @@ policy_classes:
             .mark_prefill_completed(&"pinned-1".to_string(), decay_now())
             .unwrap();
         slots.free(&"pinned-1".to_string(), decay_now()).unwrap();
-        queue.update().await;
+        queue.update_worker(WorkerWithDpRank::new(1, 0)).await;
 
         let second_resp = second_rx
             .try_recv()
