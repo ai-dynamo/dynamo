@@ -288,6 +288,14 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
         default=True,
         description="AutoApply indicates whether to automatically create a DynamoGraphDeployment after profiling completes. If false, the generated spec is stored in status for manual review and application.",
     )
+    envs: Optional[List[corev1.EnvVar]] = Field(
+        default=None,
+        description="Envs are global environment variables propagated to all containers."
+    )
+    workerEnvs: Optional[List[corev1.EnvVar]] = Field(
+        default=None,
+        description="WorkerEnvs are environment variables propagated only to worker containers."
+    )
 
 
 class ParetoConfig(BaseModel):

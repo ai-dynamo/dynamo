@@ -26,7 +26,7 @@ code can access them without ``None`` checks.
 from __future__ import annotations
 
 import logging
-
+from collections.abc import Sequence
 from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
@@ -35,7 +35,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
     WorkloadSpec,
 )
 from dynamo.profiler.utils.profile_common import is_planner_enabled
-
+from typing import Optional
 logger = logging.getLogger(__name__)
 
 
@@ -64,13 +64,54 @@ def valid_dgdr_spec(
     _validate_workload(dgdr.workload)
     _validate_sla(dgdr.sla)
     _validate_parallelization_sweeping_mode(dgdr)
+    _validate_envs(dgdr.envs)
+    _validate_envs(dgdr.workerEnvs)
     return dgdr
 
 
 # ---------------------------------------------------------------------------
-# Internal validators
+# Internal validator functions for different aspects of the spec.  Each should raise ValueError with a clear message if validation fails.
 # ---------------------------------------------------------------------------
 
+def _validate_envs(envs: Optional[Sequence]) -> None:
+    """Validate Kubernetes-style environment variables."""
+
+    if not envs:
+        return
+
+    seen = set()
+
+    for env in envs:
+        if not getattr(env, "name", None):
+            raise ValueError(
+                f"Environment variable must have a non-empty name (got {env})"
+            )
+
+        if env.name in seen:
+            raise ValueError(
+                f"Duplicate environment variable '{env.name}'"
+            )
+
+        seen.add(env.name)
+
+        has_value = getattr(env, "value", None) is not None
+
+        has_value_from = (
+            getattr(env, "valueFrom", None) is not None
+            or getattr(env, "value_from", None) is not None
+        )
+
+        if has_value and has_value_from:
+            raise ValueError(
+                f"Environment variable '{env.name}' cannot define both "
+                "'value' and 'valueFrom'"
+            )
+
+        if not has_value and not has_value_from:
+            raise ValueError(
+                f"Environment variable '{env.name}' must define either "
+                "'value' or 'valueFrom'"
+            )
 
 def _validate_required_fields(dgdr: DynamoGraphDeploymentRequestSpec) -> None:
     """Check fields the profiler treats as required."""
@@ -90,6 +131,11 @@ def _validate_required_fields(dgdr: DynamoGraphDeploymentRequestSpec) -> None:
     if dgdr.sla is None:
         dgdr.sla = SLASpec()
 
+    # Normalize env lists
+    if dgdr.envs is None:
+        dgdr.envs = []
+    if dgdr.workerEnvs is None:
+        dgdr.workerEnvs = []
 
 def _validate_workload(workload: WorkloadSpec) -> None:
     """Concurrency and requestRate are mutually exclusive."""

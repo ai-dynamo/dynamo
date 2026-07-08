@@ -19,6 +19,7 @@ package v1beta1
 
 import (
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -491,6 +492,14 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// +optional
 	// +kubebuilder:default=true
 	AutoApply *bool `json:"autoApply,omitempty"`
+
+	// Envs are global environment variables propagated to all containers.
+	// +optional
+	Envs []corev1.EnvVar `json:"envs,omitempty"`
+
+	// WorkerEnvs are environment variables propagated only to worker containers.
+	// +optional
+	WorkerEnvs []corev1.EnvVar `json:"workerEnvs,omitempty"`
 }
 
 // ParetoConfig is retained for compatibility with status objects produced by
