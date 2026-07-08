@@ -39,6 +39,7 @@ use dynamo_runtime::metrics::frontend_perf::{
     STAGE_DURATION_SECONDS, STAGE_PREPROCESS, StageGuard, TEMPLATE_SECONDS, TOKENIZE_ENCODE_MS,
     TOKENIZE_SECONDS,
 };
+use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -699,7 +700,6 @@ impl OpenAIPreprocessor {
         } else {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
             self.gather_tokens(request, formatted_prompt.as_deref(), tracker)
-                .await
                 .with_context(|| "Failed to gather tokens")?
         };
         if !skip_tokenize {
@@ -1640,7 +1640,7 @@ impl OpenAIPreprocessor {
     /// the caller asked for. The caller owns the result and is responsible for
     /// installing it on the builder via `builder.token_ids(...)` once any
     /// downstream consumers (e.g. MM-routing) have borrowed it.
-    pub async fn gather_tokens<
+    pub fn gather_tokens<
         R: OAIChatLikeRequest
             + AnnotationsProvider
             + SamplingOptionsProvider
@@ -1723,10 +1723,10 @@ impl OpenAIPreprocessor {
                                 tracing::warn!(
                                     "backend_instance_id provided but no token_data; tokenizing prompt"
                                 );
-                                let encoding = self.encode_with_timing(prompt, tracker).await?;
+                                let encoding = self.encode_with_timing(prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             } else {
-                                let encoding = self.encode_with_timing(prompt, tracker).await?;
+                                let encoding = self.encode_with_timing(prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
@@ -1744,7 +1744,7 @@ impl OpenAIPreprocessor {
                         }
                         TextInput::Batch(texts) => {
                             if texts.len() == 1 {
-                                let encoding = self.encode_with_timing(&texts[0], tracker).await?;
+                                let encoding = self.encode_with_timing(&texts[0], tracker)?;
                                 let tokens = encoding.token_ids().to_vec();
                                 token_count = Some(tokens.len());
                                 tokens_out = tokens;
@@ -1791,26 +1791,20 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    async fn encode_with_timing(
+    fn encode_with_timing(
         &self,
         prompt: &str,
         tracker: Option<&RequestTracker>,
     ) -> anyhow::Result<Encoding> {
         let encode_start = Instant::now();
-        // Offload the CPU-heavy BPE encode to the bounded blocking pool instead of running it on
-        // the async event loop. For long prompts at high concurrency, a synchronous encode here
-        // stalls the frontend tokio runtime for seconds, starving the I/O tasks that share the
-        // runtime. Own the prompt + clone the tokenizer (Arc) so the closure is 'static + Send;
-        // mirrors the embedding path's spawn_blocking offload.
-        let owned = if prompt.contains('\0') {
+        let prompt = if prompt.contains('\0') {
             tracing::debug!("Prompt contains null bytes; stripping to avoid tokenizer divergence");
-            prompt.replace('\0', "")
+            Cow::Owned(prompt.replace('\0', ""))
         } else {
-            prompt.to_string()
+            Cow::Borrowed(prompt)
         };
-        let tokenizer = self.tokenizer.clone();
         let tokenizer_call_start = Instant::now();
-        let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
+        let encoding = self.tokenizer.encode(prompt.as_ref())?;
         TOKENIZE_ENCODE_MS.observe(tokenizer_call_start.elapsed().as_secs_f64() * 1000.0);
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
@@ -3077,9 +3071,7 @@ impl
         } else {
             // Normal path: tokenize the prompt; embeddings don't need MM routing,
             // so install tokens on the builder right away.
-            let (token_ids, ann) = self
-                .gather_tokens(&request, None, tracker.as_deref())
-                .await?;
+            let (token_ids, ann) = self.gather_tokens(&request, None, tracker.as_deref())?;
             builder.token_ids(token_ids);
             ann
         };
