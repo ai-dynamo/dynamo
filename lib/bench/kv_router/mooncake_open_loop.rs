@@ -1654,12 +1654,12 @@ pub fn validate_cpu_partition(
             if !allowed.contains(&cpu) {
                 anyhow::bail!("CPU {cpu} is outside the process affinity mask");
             }
-            if let Some(core) = physical_core(cpu)? {
-                if let Some(existing) = selected_cores.insert(core, cpu) {
-                    anyhow::bail!(
-                        "CPUs {existing} and {cpu} are SMT siblings; select one logical CPU per physical core"
-                    );
-                }
+            if let Some(core) = physical_core(cpu)?
+                && let Some(existing) = selected_cores.insert(core, cpu)
+            {
+                anyhow::bail!(
+                    "CPUs {existing} and {cpu} are SMT siblings; select one logical CPU per physical core"
+                );
             }
         }
     }
