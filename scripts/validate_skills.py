@@ -29,9 +29,12 @@ MAX_DESCRIPTION_LENGTH = 1024
 REQUIRED_LICENSE = "Apache-2.0"
 KEBAB_CASE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 SKILLS_HEADING = re.compile(r"^(#{1,6})\s+Skills\s*$", re.IGNORECASE)
-# Index entries look like "- `skill-name` — one-line summary."; the em-dash
-# separator distinguishes them from convention bullets like "- `name` must ...".
-INDEX_ENTRY = re.compile(r"^-\s+`([a-z0-9][a-z0-9-]*)`\s+—")
+# Index entries look like "- `skill-name` — one-line summary." and may list
+# several sibling skills before the em-dash separator, e.g.
+# "- `dep-create` / `dep-status` / `dep-update` — manage DEPs". The em-dash
+# distinguishes them from convention bullets like "- `name` must ...".
+INDEX_ENTRY = re.compile(r"^-\s+(`[^`]+`(?:\s*/\s*`[^`]+`)*)\s+—")
+INDEX_NAME = re.compile(r"`([a-z0-9][a-z0-9-]*)`")
 
 
 def parse_frontmatter(text):
@@ -131,7 +134,11 @@ def check_index(agents_md, skill_names, errors):
     if section is None:
         errors.append(f"{agents_md.name}: no 'Skills' section heading found")
         return
-    listed = {m.group(1) for m in map(INDEX_ENTRY.match, section.splitlines()) if m}
+    listed = set()
+    for line in section.splitlines():
+        match = INDEX_ENTRY.match(line)
+        if match:
+            listed.update(INDEX_NAME.findall(match.group(1)))
     for name in sorted(skill_names - listed):
         errors.append(
             f"{agents_md.name}: skill '{name}' is missing from the Skills index"
