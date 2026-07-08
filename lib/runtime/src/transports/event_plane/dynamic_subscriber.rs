@@ -11,7 +11,7 @@ use bytes::Bytes;
 use futures::stream::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use super::transport::{EventTransportRx, WireStream};
@@ -45,9 +45,10 @@ impl DynamicSubscriber {
         // Bounded merged channel. Many peer publishers (e.g. every other
         // frontend under replica-sync) feed this single-consumer channel; an
         // unbounded channel grows RSS without limit when the consumer can't keep
-        // up (observed ~80 GiB/frontend at 168 frontends). Cap it and drop on
-        // overflow — the event plane is already best-effort/lossy (ZMQ RCVHWM),
-        // so a dropped event costs routing-estimate freshness, not correctness.
+        // up (observed ~80 GiB/frontend at 168 frontends). Cap it and drop the
+        // oldest event on overflow — the event plane is already best-effort/lossy
+        // (ZMQ RCVHWM), so a dropped event costs routing-estimate freshness, not
+        // correctness, and retaining newer events keeps estimates fresher.
         // Configurable via DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY (default
         // 100_000, matching ZMQ_RCVHWM).
         let channel_cap = std::env::var(DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY)
@@ -55,11 +56,12 @@ impl DynamicSubscriber {
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(100_000);
-        let (event_tx, event_rx) = mpsc::channel::<Bytes>(channel_cap);
+        let event_queue = Arc::new(DropOldestQueue::new(channel_cap));
 
         // Track active endpoint connections with instance ID to endpoint mapping
-        let active_endpoints: Arc<RwLock<HashMap<String, (String, CancellationToken)>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let active_endpoints: Arc<
+            RwLock<HashMap<DiscoveryInstanceId, (String, CancellationToken)>>,
+        > = Arc::new(RwLock::new(HashMap::new()));
 
         // Clone self for the spawned task
         let subscriber_clone = Arc::clone(&self);
@@ -71,6 +73,7 @@ impl DynamicSubscriber {
         let zmq_topic = self.topic.clone();
         let cancel_token = self.cancel_token.clone();
         let endpoints = Arc::clone(&active_endpoints);
+        let discovery_event_queue = Arc::clone(&event_queue);
 
         tokio::spawn(async move {
             tracing::debug!(
@@ -87,6 +90,7 @@ impl DynamicSubscriber {
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to start discovery watch");
+                    discovery_event_queue.close().await;
                     return;
                 }
             };
@@ -103,19 +107,19 @@ impl DynamicSubscriber {
                 match event_result {
                     Ok(DiscoveryEvent::Added(instance)) => {
                         tracing::info!(instance = ?instance, "Discovery Added event received");
-                        let instance_id = instance.instance_id().to_string();
+                        let instance_id = instance.id();
 
                         // Extract ZMQ endpoint from the instance
-                        if let Some(endpoint) = Self::extract_zmq_endpoint(&instance) {
+                        if let Some(endpoint) = Self::extract_zmq_endpoint(&instance, &zmq_topic) {
                             let mut endpoints_guard = endpoints.write().await;
 
                             // Skip if instance already tracked
                             if endpoints_guard.contains_key(&instance_id) {
-                                tracing::debug!(endpoint = %endpoint, instance_id = %instance_id, "Already connected to ZMQ publisher");
+                                tracing::debug!(endpoint = %endpoint, ?instance_id, "Already connected to ZMQ publisher");
                                 continue;
                             }
 
-                            tracing::info!(endpoint = %endpoint, instance_id = %instance_id, "Connecting to new ZMQ publisher");
+                            tracing::info!(endpoint = %endpoint, ?instance_id, "Connecting to new ZMQ publisher");
 
                             // Create cancellation token for this endpoint's stream
                             let endpoint_cancel = CancellationToken::new();
@@ -126,7 +130,7 @@ impl DynamicSubscriber {
                             drop(endpoints_guard);
 
                             // Spawn task to handle this endpoint's stream
-                            let event_tx_clone = event_tx.clone();
+                            let event_queue_clone = Arc::clone(&event_queue);
                             let zmq_topic_clone = zmq_topic.clone();
                             let endpoint_clone = endpoint.clone();
                             let endpoints_clone = Arc::clone(&endpoints);
@@ -136,7 +140,7 @@ impl DynamicSubscriber {
                                 if let Err(e) = Self::consume_endpoint_stream(
                                     &endpoint_clone,
                                     &zmq_topic_clone,
-                                    event_tx_clone,
+                                    event_queue_clone,
                                     endpoint_cancel,
                                 )
                                 .await
@@ -151,25 +155,44 @@ impl DynamicSubscriber {
                                 endpoints_clone.write().await.remove(&instance_id_clone);
                             });
                         } else {
-                            tracing::warn!(
+                            tracing::debug!(
                                 instance = ?instance,
-                                "Discovery Added event did not contain a ZMQ endpoint"
+                                expected_topic = %zmq_topic,
+                                "Discovery event is not a matching ZMQ publisher"
                             );
                         }
                     }
                     Ok(DiscoveryEvent::Removed(instance_id)) => {
-                        let id_str = instance_id.instance_id().to_string();
+                        let is_expected_topic = matches!(
+                            &instance_id,
+                            DiscoveryInstanceId::EventChannel(channel_id)
+                                if channel_id.topic == zmq_topic
+                        );
+                        if !is_expected_topic {
+                            tracing::debug!(
+                                ?instance_id,
+                                expected_topic = %zmq_topic,
+                                "Ignoring removal for unrelated event channel"
+                            );
+                            continue;
+                        }
+
                         tracing::info!(
-                            instance_id = %id_str,
+                            ?instance_id,
                             "ZMQ publisher removed from discovery, cancelling endpoint stream"
                         );
 
                         // Cancel the endpoint's stream via its CancellationToken
-                        if let Some((_endpoint, cancel)) = endpoints.write().await.remove(&id_str) {
+                        if let Some((_endpoint, cancel)) =
+                            endpoints.write().await.remove(&instance_id)
+                        {
                             cancel.cancel();
-                            tracing::info!(instance_id = %id_str, "Cancelled endpoint stream");
+                            tracing::info!(?instance_id, "Cancelled endpoint stream");
                         } else {
-                            tracing::warn!(instance_id = %id_str, "No active endpoint found for removed stream instance");
+                            tracing::debug!(
+                                ?instance_id,
+                                "No active endpoint found for removed stream instance"
+                            );
                         }
                     }
                     Err(e) => {
@@ -184,6 +207,7 @@ impl DynamicSubscriber {
             for (_id, (_endpoint, cancel)) in endpoints_guard.iter() {
                 cancel.cancel();
             }
+            discovery_event_queue.close().await;
             tracing::info!("Discovery watch stream ended");
         });
 
@@ -191,8 +215,8 @@ impl DynamicSubscriber {
         let stream = async_stream::stream! {
             // Keep subscriber_clone alive by capturing it in the stream
             let _subscriber = subscriber_clone;
-            let mut rx = event_rx;
-            while let Some(bytes) = rx.recv().await {
+            let queue = event_queue;
+            while let Some(bytes) = queue.pop().await {
                 yield Ok(bytes);
             }
         };
@@ -201,8 +225,11 @@ impl DynamicSubscriber {
     }
 
     /// Extract ZMQ endpoint from a discovery instance.
-    fn extract_zmq_endpoint(instance: &DiscoveryInstance) -> Option<String> {
-        if let DiscoveryInstance::EventChannel { transport, .. } = instance
+    fn extract_zmq_endpoint(instance: &DiscoveryInstance, expected_topic: &str) -> Option<String> {
+        if let DiscoveryInstance::EventChannel {
+            topic, transport, ..
+        } = instance
+            && topic == expected_topic
             && let EventTransport::Zmq { endpoint } = transport
         {
             return Some(endpoint.clone());
@@ -214,7 +241,7 @@ impl DynamicSubscriber {
     async fn consume_endpoint_stream(
         endpoint: &str,
         zmq_topic: &str,
-        event_tx: mpsc::Sender<Bytes>,
+        event_queue: Arc<DropOldestQueue>,
         cancel_token: CancellationToken,
     ) -> Result<()> {
         // Connect to the endpoint
@@ -233,18 +260,11 @@ impl DynamicSubscriber {
                 event = stream.next() => {
                     match event {
                         Some(Ok(bytes)) => {
-                            match event_tx.try_send(bytes) {
-                                Ok(()) => {}
-                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                    // Consumer is behind; drop to bound memory.
-                                    // Best-effort plane — a stale estimate
-                                    // self-corrects on subsequent events.
-                                    tracing::trace!(endpoint = %endpoint, "Event subscriber channel full; dropping event");
-                                }
-                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                    tracing::warn!(endpoint = %endpoint, "Event channel closed, stopping endpoint stream");
-                                    break;
-                                }
+                            if event_queue.push_drop_oldest(bytes).await {
+                                // Consumer is behind; drop the stalest event to
+                                // bound memory. Best-effort plane — a stale
+                                // estimate self-corrects on subsequent events.
+                                tracing::trace!(endpoint = %endpoint, "Event subscriber channel full; dropped oldest event");
                             }
                         }
                         Some(Err(e)) => {
@@ -273,8 +293,134 @@ impl DynamicSubscriber {
     }
 }
 
+struct DropOldestQueue {
+    state: Mutex<DropOldestQueueState>,
+    notify: Notify,
+    capacity: usize,
+}
+
+struct DropOldestQueueState {
+    queue: std::collections::VecDeque<Bytes>,
+    closed: bool,
+}
+
+impl DropOldestQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            state: Mutex::new(DropOldestQueueState {
+                queue: std::collections::VecDeque::with_capacity(capacity),
+                closed: false,
+            }),
+            notify: Notify::new(),
+            capacity,
+        }
+    }
+
+    async fn push_drop_oldest(&self, bytes: Bytes) -> bool {
+        let mut state = self.state.lock().await;
+        if state.closed {
+            return false;
+        }
+
+        let dropped = state.queue.len() == self.capacity;
+        if dropped {
+            state.queue.pop_front();
+        }
+        state.queue.push_back(bytes);
+        drop(state);
+        self.notify.notify_one();
+        dropped
+    }
+
+    async fn pop(&self) -> Option<Bytes> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut state = self.state.lock().await;
+                if let Some(bytes) = state.queue.pop_front() {
+                    return Some(bytes);
+                }
+                if state.closed {
+                    return None;
+                }
+            }
+            notified.as_mut().await;
+        }
+    }
+
+    async fn close(&self) {
+        self.state.lock().await.closed = true;
+        self.notify.notify_waiters();
+    }
+}
+
 impl Drop for DynamicSubscriber {
     fn drop(&mut self) {
         self.cancel_token.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event_channel(topic: &str, transport: EventTransport) -> DiscoveryInstance {
+        DiscoveryInstance::EventChannel {
+            namespace: "test-ns".to_string(),
+            component: "test-component".to_string(),
+            topic: topic.to_string(),
+            instance_id: 1,
+            transport,
+        }
+    }
+
+    #[test]
+    fn extracts_only_matching_zmq_topic() {
+        let matching = event_channel("kv-events", EventTransport::zmq("tcp://127.0.0.1:1"));
+        let wrong_topic = event_channel("kv-metrics", EventTransport::zmq("tcp://127.0.0.1:2"));
+        let wrong_transport = event_channel(
+            "kv-events",
+            EventTransport::nats("namespace.test-ns.component.test-component"),
+        );
+
+        assert_eq!(
+            DynamicSubscriber::extract_zmq_endpoint(&matching, "kv-events").as_deref(),
+            Some("tcp://127.0.0.1:1")
+        );
+        assert_eq!(
+            DynamicSubscriber::extract_zmq_endpoint(&wrong_topic, "kv-events"),
+            None
+        );
+        assert_eq!(
+            DynamicSubscriber::extract_zmq_endpoint(&wrong_transport, "kv-events"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_oldest_queue_keeps_newest_events_when_full() {
+        let queue = DropOldestQueue::new(2);
+
+        assert!(!queue.push_drop_oldest(Bytes::from_static(b"oldest")).await);
+        assert!(!queue.push_drop_oldest(Bytes::from_static(b"middle")).await);
+        assert!(queue.push_drop_oldest(Bytes::from_static(b"newest")).await);
+
+        assert_eq!(queue.pop().await.unwrap(), Bytes::from_static(b"middle"));
+        assert_eq!(queue.pop().await.unwrap(), Bytes::from_static(b"newest"));
+    }
+
+    #[tokio::test]
+    async fn drop_oldest_queue_drains_before_close() {
+        let queue = DropOldestQueue::new(1);
+
+        assert!(!queue.push_drop_oldest(Bytes::from_static(b"event")).await);
+        queue.close().await;
+
+        assert_eq!(queue.pop().await.unwrap(), Bytes::from_static(b"event"));
+        assert!(queue.pop().await.is_none());
+        assert!(!queue.push_drop_oldest(Bytes::from_static(b"late")).await);
+        assert!(queue.pop().await.is_none());
     }
 }
