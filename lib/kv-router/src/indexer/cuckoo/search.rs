@@ -27,6 +27,7 @@ pub(super) struct PrefixSearchResult<const D: usize> {
     pub(super) fallback: FallbackStats,
 }
 
+#[cfg(any(not(feature = "metrics"), test))]
 pub(super) fn find_prefix_depths<const D: usize>(
     sequence_len: usize,
     initial_mask: u16,
