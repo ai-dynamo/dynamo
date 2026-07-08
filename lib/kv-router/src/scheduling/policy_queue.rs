@@ -135,8 +135,8 @@ impl<T> PartialOrd for PolicyQueueEntry<T> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ClassCandidate {
-    intent: WorkerPlacement,
+struct DispatchCandidate {
+    placement: WorkerPlacement,
     cost: usize,
 }
 
@@ -175,7 +175,7 @@ impl<T> PolicyClassQueue<T> {
         &self,
         class_index: usize,
         is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
-    ) -> Option<ClassCandidate> {
+    ) -> Option<DispatchCandidate> {
         let mut best = self
             .pending
             .peek()
@@ -189,8 +189,8 @@ impl<T> PolicyClassQueue<T> {
                 best = Some((WorkerPlacement::Exact(worker), entry));
             }
         }
-        best.map(|(intent, entry)| ClassCandidate {
-            intent,
+        best.map(|(placement, entry)| DispatchCandidate {
+            placement,
             cost: entry.snapshot.scheduling_cost_tokens,
         })
     }
@@ -227,7 +227,7 @@ pub struct PolicyQueue<T> {
     next_class: usize,
     next_enqueue_seq: u64,
     pending_count: usize,
-    candidates: Vec<Option<ClassCandidate>>,
+    candidates: Vec<Option<DispatchCandidate>>,
 }
 
 impl<T> PolicyQueue<T> {
@@ -467,12 +467,12 @@ impl<T> PolicyQueue<T> {
             if candidate.cost <= class.deficit {
                 // Quantum is granted per ring round, not per request. Spend
                 // carried credit before granting this class another quantum.
-                return Some(self.pop_class(class_index, candidate.intent));
+                return Some(self.pop_class(class_index, candidate.placement));
             }
             class.deficit = class.deficit.saturating_add(class.config.quantum);
             if candidate.cost <= class.deficit {
                 // The normal single-round visit made this head affordable.
-                return Some(self.pop_class(class_index, candidate.intent));
+                return Some(self.pop_class(class_index, candidate.placement));
             }
         }
 
@@ -510,7 +510,7 @@ impl<T> PolicyQueue<T> {
             if let Some(candidate) = self.candidates[class_index]
                 && candidate.cost <= class.deficit
             {
-                return Some(self.pop_class(class_index, candidate.intent));
+                return Some(self.pop_class(class_index, candidate.placement));
             }
         }
 

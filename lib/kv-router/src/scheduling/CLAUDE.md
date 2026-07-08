@@ -29,7 +29,7 @@ sequenceDiagram
         H->>A: Update after capacity changes
         A->>P: pop_next()
         P->>C: Get one candidate per dispatchable class
-        C-->>P: Class-local candidates
+        C-->>P: Dispatch candidate
         P-->>A: DRR winner
         A->>S: select_worker(request)
         S-->>A: Selected worker
@@ -60,7 +60,7 @@ PolicyClassQueue("agents")
 - `ready_by_worker` is sparse. A worker/rank heap is created only while exact-placement requests exist for it and removed when empty.
 - A `PolicyClassQueue` does not own worker configuration, capacity, or scoring state. `WorkerWithDpRank` is only the exact-placement lane key; the actor and selector retain worker knowledge.
 - Every heap uses the class's configured priority ordering. `BinaryHeap::peek()` reads its highest-priority root in O(1); push and pop are O(log n).
-- To produce one class candidate, peek the root of `pending` and every worker heap, ignore roots that are not currently dispatchable, compare the remaining roots, and pop from the winning heap. Never scan deeper into a heap.
+- To produce one dispatch candidate, peek the root of `pending` and every worker heap, ignore roots that are not currently dispatchable, compare the remaining roots, and pop from the winning heap. Never scan deeper into a heap.
 - Worker lanes contain head-of-line blocking to one exact worker. A blocked Worker 7 root cannot hide a ready Worker 9 root or an unpinned root.
 
 ## Guardrails
