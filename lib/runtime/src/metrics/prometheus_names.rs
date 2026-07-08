@@ -661,6 +661,10 @@ pub mod frontend_perf {
     pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
     /// L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
     pub const TOKENIZER_CACHE_MISSES_TOTAL: &str = "tokenizer_cache_misses_total";
+    /// Tokens returned from the L1 tokenizer prefix cache (cumulative, labeled by model)
+    pub const TOKENIZER_CACHE_CACHED_TOKENS_TOTAL: &str = "tokenizer_cache_cached_tokens_total";
+    /// Tokens freshly encoded after an L1 tokenizer prefix-cache lookup (cumulative, labeled by model)
+    pub const TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL: &str = "tokenizer_cache_uncached_tokens_total";
     /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
     /// Total tokens detokenized; use rate(total_us)/rate(count) for per-token average

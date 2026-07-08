@@ -343,7 +343,7 @@ All counts are in **matched tokens** (block overlap count × block size).
 | `model_name` | yes | — | Model name (selects the indexer) |
 | `tenant_id` | no | `"default"` | Tenant identifier |
 | `lora_name` | no | — | LoRA adapter (overrides indexer-level lora_name for this query) |
-| `cache_salt` | no | — | Per-request cache salt (Mooncake RFC #1403). Currently parsed for forward compatibility — engines apply their own salting today. |
+| `cache_salt` | no | — | Per-request cache salt (Mooncake RFC #1403). The indexer mixes it into hashes computed from `token_ids`; equal tokens with different salts do not match. |
 
 ### `POST /query_by_hash` — Query overlap for pre-computed hashes
 
@@ -360,7 +360,12 @@ Same response format as `/query`, including the per-instance `instances` map. Sc
 | `block_hashes` | yes | — | Pre-computed block hash array |
 | `model_name` | yes | — | Model name (selects the indexer) |
 | `tenant_id` | no | `"default"` | Tenant identifier |
-| `cache_salt` | no | — | Per-request cache salt (Mooncake RFC #1403). Currently parsed for forward compatibility — engines apply their own salting today. |
+| `cache_salt` | no | — | Must be omitted or `null`. Any string value, including an empty string, returns `400 Bad Request`. |
+
+`block_hashes` are opaque outputs of token hashing, so the indexer cannot apply or verify a salt
+after they have been computed. Callers must precompute these hashes with the intended cache salt
+and omit `cache_salt` from `/query_by_hash`. Use `/query` when the indexer should compute salted
+hashes from tokens server-side.
 
 ### Per-instance tier breakdown
 
