@@ -1055,6 +1055,22 @@ def test_prefill_batch_grid_respects_scheduler_capacity_constraints(
     assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, *point) == expected
 
 
+def test_prefill_batch_grid_uses_live_free_block_count_after_manager_reservations():
+    stub = _prefill_grid_stub(
+        kv_read_granularity=1,
+        batch_granularity=2,
+        block_size=8,
+        num_gpu_blocks=100,
+    )
+    stub.kv_cache_manager = SimpleNamespace(
+        block_pool=SimpleNamespace(get_num_free_blocks=lambda: 7)
+    )
+
+    # A 10-token request consumes two blocks, so the live pool admits at most
+    # three requests despite the configured total reporting 100 blocks.
+    assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, 10, 0) == [1, 3]
+
+
 def test_prefill_kv_read_grid_accounts_for_eagle_cache_block_drop():
     stub = _prefill_grid_stub(kv_read_granularity=3, block_size=8)
     stub.kv_cache_manager = SimpleNamespace(use_eagle=True)

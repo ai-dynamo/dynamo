@@ -731,18 +731,24 @@ class InstrumentedScheduler(AsyncScheduler):
         # (but not yet computed) suffix blocks as cache hits. Size the batch for
         # each request's full KV footprint, including speculative lookahead.
         blocks_per_req = self._bench_prefill_blocks_per_req(isl, kv_read_tokens)
-        # vLLM reserves one physical block as its null-block sentinel.
-        usable_blocks = max(0, self.cache_config.num_gpu_blocks - 1)
+        kv_cache_manager = getattr(self, "kv_cache_manager", None)
+        block_pool = getattr(kv_cache_manager, "block_pool", None)
+        get_num_free_blocks = getattr(block_pool, "get_num_free_blocks", None)
+        if callable(get_num_free_blocks):
+            # The live count excludes the null block and permanent manager
+            # reservations such as sink-attention blocks.
+            available_blocks = max(0, get_num_free_blocks())
+        else:
+            # Compatibility fallback for lightweight test stubs.
+            available_blocks = max(0, self.cache_config.num_gpu_blocks - 1)
         if blocks_per_req > 0:
-            kv_capped_batch = usable_blocks // blocks_per_req
+            kv_capped_batch = available_blocks // blocks_per_req
             # After the first waiting request is admitted, vLLM requires every
             # later request to leave the configured watermark free.
             if kv_capped_batch > 1:
-                watermark_blocks = getattr(
-                    getattr(self, "kv_cache_manager", None), "watermark_blocks", 0
-                )
+                watermark_blocks = getattr(kv_cache_manager, "watermark_blocks", 0)
                 kv_capped_batch = max(
-                    1, (usable_blocks - watermark_blocks) // blocks_per_req
+                    1, (available_blocks - watermark_blocks) // blocks_per_req
                 )
         else:
             kv_capped_batch = self.max_num_running_reqs
