@@ -46,6 +46,75 @@ def test_invalid_environment():
         )
 
 
+# ---------------------------------------------------------------------------
+# Power-awareness validator (Phase 1)
+# ---------------------------------------------------------------------------
+
+
+def test_power_awareness_disabled_by_default_needs_no_budget():
+    """The feature is off by default, so an otherwise-minimal config is valid
+    with the power fields left unset."""
+    config = PlannerConfig(namespace="test-ns")
+    assert config.enable_power_awareness is False
+    assert config.total_gpu_power_limit is None
+    assert config.power_agent_safe_default_watts is None
+
+
+def test_power_awareness_requires_total_gpu_power_limit():
+    """enable_power_awareness=True without total_gpu_power_limit must fail —
+    there is no safe default for the cluster-wide cap."""
+    with pytest.raises(ValidationError, match="total_gpu_power_limit is required"):
+        PlannerConfig(
+            namespace="test-ns",
+            enable_power_awareness=True,
+            power_agent_safe_default_watts=500,
+        )
+
+
+def test_power_awareness_requires_safe_default_watts():
+    """enable_power_awareness=True without power_agent_safe_default_watts must
+    fail — the cold-start fail-closed cap has no safe default either."""
+    with pytest.raises(
+        ValidationError, match="power_agent_safe_default_watts is required"
+    ):
+        PlannerConfig(
+            namespace="test-ns",
+            enable_power_awareness=True,
+            total_gpu_power_limit=5000,
+        )
+
+
+def test_power_awareness_enabled_with_required_fields_ok():
+    """Both required fields present: config validates and round-trips."""
+    config = PlannerConfig(
+        namespace="test-ns",
+        enable_power_awareness=True,
+        total_gpu_power_limit=5000,
+        power_agent_safe_default_watts=500,
+    )
+    assert config.enable_power_awareness is True
+    assert config.total_gpu_power_limit == 5000
+    assert config.power_agent_safe_default_watts == 500
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "prefill_engine_gpu_power_limit",
+        "decode_engine_gpu_power_limit",
+        "total_gpu_power_limit",
+        "power_agent_safe_default_watts",
+    ],
+)
+def test_power_limit_fields_reject_non_positive(field):
+    """Every per-GPU cap and budget field carries a ge=1 constraint, so a
+    zero (or negative) value must be rejected. The field-level constraint
+    fires regardless of enable_power_awareness, so setting the value alone is
+    enough to exercise it."""
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", **{field: 0})
+
+
 def test_all_fields_work():
     """Test that PlannerConfig accepts all fields."""
     config = PlannerConfig(

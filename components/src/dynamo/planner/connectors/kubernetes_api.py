@@ -58,6 +58,7 @@ class KubernetesAPI:
             config.load_kube_config()  # for out-of-cluster deployment
 
         self.custom_api = client.CustomObjectsApi()
+        self.core_api = client.CoreV1Api()
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
     def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:
@@ -287,6 +288,32 @@ class KubernetesAPI:
         is_stable = desired_replicas == updated == traffic_serving_replicas
 
         return traffic_serving_replicas, is_stable
+
+    def patch_pod_annotation(self, pod_name: str, key: str, value: str) -> None:
+        """PATCH a single annotation on a named pod in the current namespace.
+
+        Used by the power-annotation loop to write the per-GPU power-limit
+        annotation so the Power Agent DaemonSet can read and apply it via NVML.
+        Only issues a PATCH when the annotation is missing or has changed
+        (callers do the string-equality check before calling this method).
+        """
+        self.core_api.patch_namespaced_pod(
+            name=pod_name,
+            namespace=self.current_namespace,
+            body={"metadata": {"annotations": {key: value}}},
+        )
+
+    def list_pods_by_label(self, label_selector: str) -> list:
+        """List all pods in the current namespace matching label_selector.
+
+        Returns the `.items` list from the K8s API response.  Used by
+        KubernetesConnector.get_component_pods() to enumerate the worker pods
+        that belong to a specific prefill or decode service.
+        """
+        return self.core_api.list_namespaced_pod(
+            namespace=self.current_namespace,
+            label_selector=label_selector,
+        ).items
 
     async def wait_for_graph_deployment_ready(
         self,

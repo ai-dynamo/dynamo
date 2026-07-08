@@ -614,6 +614,67 @@ class PlannerConfig(BaseModel):
     # Advisory mode: compute and log decisions without executing scaling
     advisory: bool = SLAPlannerDefaults.advisory
 
+    # --- Power-aware annotation and observability (Phase 1) ---
+    enable_power_awareness: bool = Field(
+        default=False,
+        description=(
+            "Enable Phase 1 power-aware pod annotation and budget "
+            "observability: worker pods are annotated with per-GPU caps and "
+            "advisory power-budget gauges are published. Budget-gated replica "
+            "scaling is Phase 2 (PR #9684). Requires total_gpu_power_limit and "
+            "power_agent_safe_default_watts."
+        ),
+    )
+    total_gpu_power_limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Total GPU power budget in watts for this DGD. Required when "
+            "enable_power_awareness=True. Recommended formula: "
+            "(rack_capacity_W × headroom_factor) − non_gpu_overhead with "
+            "headroom_factor ≈ 0.85–0.9. Phase 1 uses this only for the "
+            "advisory power-budget gauges; feasibility gating against it is "
+            "Phase 2 (PR #9684)."
+        ),
+    )
+    prefill_engine_gpu_power_limit: int = Field(
+        default=SLAPlannerDefaults.prefill_engine_gpu_power_limit,
+        ge=1,
+        description="Per-GPU power cap (watts) applied to prefill replicas via NVML.",
+    )
+    decode_engine_gpu_power_limit: int = Field(
+        default=SLAPlannerDefaults.decode_engine_gpu_power_limit,
+        ge=1,
+        description="Per-GPU power cap (watts) applied to decode replicas via NVML.",
+    )
+    power_agent_safe_default_watts: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-GPU fail-closed cap (watts) the Power Agent applies on cold-start "
+            "GPUs (no prior cap) when annotation parsing fails. Required when "
+            "enable_power_awareness=True. Recommended: ~70% of SKU TDP "
+            "(e.g. 500W on H200 SXM, 490W on H100 SXM). NOTE: the planner does "
+            "not transmit this value — the node-level Power Agent enforces it "
+            "from its own Helm config (agent.safeDefaultWatts). This field "
+            "declares the intended cold-start policy and must be kept in sync "
+            "with the agent's; it is validated here but not otherwise consumed "
+            "by the planner."
+        ),
+    )
+    power_annotation_interval_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "Minimum seconds between steady-state power-annotation sweeps. Each "
+            "sweep issues a DGD read plus a pod list per managed component "
+            "(prefill/decode) to reconcile the per-GPU power-limit annotation, so "
+            "running it on every tick multiplies apiserver load. After a scale-up "
+            "the planner ignores this throttle and sweeps every tick for one "
+            "interval so freshly-created pods are annotated promptly."
+        ),
+    )
+
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
         default=24.0,
@@ -645,8 +706,9 @@ class PlannerConfig(BaseModel):
         default=8080,
         description=(
             "Port for the live diagnostics dashboard HTTP server. "
-            "Set to 0 to disable. When enabled, visit http://host:port/ "
-            "to view a real-time Plotly report of accumulated snapshots."
+            "Set to 0 to disable. When enabled, visit "
+            "http://<host>:<port>/ to view a real-time Plotly report of "
+            "accumulated snapshots."
         ),
     )
 
@@ -751,6 +813,24 @@ class PlannerConfig(BaseModel):
                 f"fpm_sample_bucket_size must be a perfect square, "
                 f"got {self.fpm_sample_bucket_size}"
             )
+
+        # Power-awareness validation
+        if self.enable_power_awareness:
+            if self.total_gpu_power_limit is None:
+                raise ValueError(
+                    "total_gpu_power_limit is required when enable_power_awareness=True. "
+                    "Recommended: (rack_capacity_W × headroom_factor) − non_gpu_overhead "
+                    "with headroom_factor ≈ 0.85–0.9. Setting this incorrectly "
+                    "could silently cap your cluster — there is no safe default."
+                )
+            if self.power_agent_safe_default_watts is None:
+                raise ValueError(
+                    "power_agent_safe_default_watts is required when "
+                    "enable_power_awareness=True. This is the cold-start fail-closed cap "
+                    "the Power Agent applies on a fresh GPU (no prior cap) when "
+                    "annotation parsing fails. Recommended: ~70% of SKU TDP "
+                    "(e.g. 500W on H200 SXM)."
+                )
 
         if self.environment == "global-planner" and not self.global_planner_namespace:
             raise ValueError(

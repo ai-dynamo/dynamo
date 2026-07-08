@@ -1418,3 +1418,135 @@ def test_service_get_component_name_from_endpoint_arg_missing_value():
         service=_component("VllmPrefillWorker", args=["--endpoint"]),
     )
     assert service.get_component_name_from_endpoint_arg() is None
+
+
+# ---------------------------------------------------------------------------
+# resolve_frontend_http_port — read the frontend HTTP port from the live pod
+# ---------------------------------------------------------------------------
+
+
+def _make_pod_with_ports(port_specs):
+    """Build a duck-typed V1Pod with one container whose ports == port_specs.
+
+    Each ``port_specs`` element is either ``None`` (no ports list at all) or
+    a list of ``(name, container_port)`` tuples.  We keep the fixture
+    explicit so tests don't accidentally pass through MagicMock auto-spec
+    fluff and silently match on something other than what they meant to.
+    """
+    pod = Mock()
+    container = Mock()
+    if port_specs is None:
+        container.ports = None
+    else:
+        ports = []
+        for name, container_port in port_specs:
+            p = Mock()
+            p.name = name
+            p.container_port = container_port
+            ports.append(p)
+        container.ports = ports
+    pod.spec.containers = [container]
+    return pod
+
+
+class TestResolveFrontendHttpPort:
+    """Pin :meth:`KubernetesConnector.resolve_frontend_http_port` behavior.
+
+    The planner reads the frontend's actual HTTP port from
+    V1Pod.spec.containers[].ports[name=http] and only falls back to the legacy
+    config field when the named port is absent.
+    """
+
+    def test_returns_named_http_port_when_present(self):
+        """Operator-emitted pod with ``http`` named port: resolver wins."""
+        pod = _make_pod_with_ports([("http", 8000)])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=9999) == 8000
+        )
+
+    def test_falls_back_when_no_named_http_port(self):
+        """Legacy/hand-rolled pod with named ports that aren't ``http``."""
+        pod = _make_pod_with_ports([("metrics", 9090), ("admin", 19090)])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8000
+        )
+
+    def test_falls_back_when_ports_list_is_none(self):
+        """Pod spec missing ``ports`` entirely (the kubernetes client returns
+        ``None`` rather than ``[]`` when the field is unset)."""
+        pod = _make_pod_with_ports(None)
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8000
+        )
+
+    def test_falls_back_when_ports_list_is_empty(self):
+        pod = _make_pod_with_ports([])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8000
+        )
+
+    def test_picks_http_among_multiple_named_ports(self):
+        """Multi-port containers must filter by name rather than position —
+        the operator may add extra named ports (e.g. ``debug``) without
+        breaking discovery."""
+        pod = _make_pod_with_ports([("metrics", 9090), ("http", 8001), ("debug", 6060)])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8001
+        )
+
+    def test_honors_operator_port_override(self):
+        """If the DGD overrides the frontend container port, the resolver
+        should follow the live spec rather than mirror the config field."""
+        pod = _make_pod_with_ports([("http", 8443)])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8443
+        )
+
+    def test_string_container_port_is_coerced_to_int(self):
+        """Defensive: the kubernetes client typically yields ``int`` for
+        ``container_port`` but YAML hand-rolls can sneak in strings — the
+        resolver must coerce, not crash."""
+        pod = _make_pod_with_ports([("http", "8000")])
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=9999) == 8000
+        )
+
+    def test_falls_back_on_malformed_pod_without_raising(self):
+        """A malformed pod object (e.g. ``spec is None``) must not bring
+        down the admission-control loop."""
+        pod = Mock()
+        pod.spec = None
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8000
+        )
+
+    def test_falls_back_when_container_ports_attribute_missing(self):
+        """Pod object whose container has no ``ports`` attribute at all
+        (some test stubs forget to set it)."""
+        pod = Mock()
+        container = Mock(spec=[])  # no attributes at all
+        pod.spec.containers = [container]
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=8000) == 8000
+        )
+
+    def test_first_container_with_http_wins_in_multi_container_pod(self):
+        """If a pod has multiple containers (sidecars) and only one has the
+        ``http`` port, the resolver should still find it."""
+        pod = Mock()
+        sidecar = Mock()
+        sidecar_port = Mock()
+        sidecar_port.name = "metrics"
+        sidecar_port.container_port = 9090
+        sidecar.ports = [sidecar_port]
+
+        main = Mock()
+        main_port = Mock()
+        main_port.name = "http"
+        main_port.container_port = 8000
+        main.ports = [main_port]
+
+        pod.spec.containers = [sidecar, main]
+        assert (
+            KubernetesConnector.resolve_frontend_http_port(pod, fallback=9999) == 8000
+        )

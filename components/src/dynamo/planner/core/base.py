@@ -32,7 +32,7 @@ from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.connectors.virtual import VirtualConnector
-from dynamo.planner.core.budget import _initialize_gpu_counts
+from dynamo.planner.core.budget import POWER_ANNOTATION_KEY, _initialize_gpu_counts
 from dynamo.planner.core.engine_protocol import EngineProtocol
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -45,7 +45,7 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
-from dynamo.planner.errors import PlannerError
+from dynamo.planner.errors import DynamoGraphDeploymentNotFoundError, PlannerError
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
@@ -189,6 +189,14 @@ class NativePlannerBase:
         self._last_metrics = Metrics()
         self._cumulative_gpu_hours: float = 0.0
         self._last_gpu_hours_update_ts: Optional[float] = None
+
+        # Power-annotation sweep throttle (Phase 1). The sweep reconciles pod
+        # power-limit annotations against K8s; running it every tick is needless
+        # apiserver load, so run() throttles it to
+        # config.power_annotation_interval_seconds and forces a per-tick sweep
+        # for one interval after each scale-up (when new pods appear).
+        self._last_power_annotation_sweep_s: float = 0.0
+        self._force_power_annotations_until_s: float = 0.0
 
         # Diagnostics recorder
         self._recorder = DiagnosticsRecorder(config=config)
@@ -846,6 +854,232 @@ class NativePlannerBase:
         """Override in subclasses to report metrics and apply scaling."""
         pass
 
+    async def _apply_power_annotations(self) -> None:
+        """Annotate worker pods with per-GPU power limits (Phase 1).
+
+        Reads the actual annotation from each Pod object returned by
+        get_component_pods(). Only PATCHes when annotation is missing or wrong.
+        K8s is the source of truth — no local cache. The DGD is read once per
+        sweep and shared across the prefill/decode pod lookups.
+
+        Performs one full reconcile sweep. The caller
+        (_should_sweep_power_annotations in run()) throttles this to
+        config.power_annotation_interval_seconds in steady state and forces a
+        per-tick sweep for one interval after a scale-up, so newly-created pods
+        pick up the cap promptly while steady-state apiserver load stays
+        bounded. AIC-driven cap changes (Phase 3+) propagate on the next sweep.
+
+        Skipped in advisory mode — annotations are a cluster-visible side
+        effect on customer-owned Pod objects, so advisory runs must observe
+        the contract that ``_apply_scaling_targets`` already follows: log
+        intent, mutate nothing.
+
+        The kubernetes client is synchronous, so the sweep itself runs in a
+        worker thread via ``asyncio.to_thread``. The run loop still waits for
+        the reconcile to finish before the next tick, but a slow apiserver or
+        a large DGD does not block unrelated asyncio tasks such as metrics,
+        diagnostics, and shutdown handling.
+        """
+        if self.config.advisory:
+            return
+        if not self.config.enable_power_awareness:
+            return
+        connector = self.connector
+        if not isinstance(connector, KubernetesConnector):
+            return
+
+        if not (self.require_prefill or self.require_decode):
+            return
+
+        await asyncio.to_thread(self._run_power_annotation_sweep, connector)
+
+    def _run_power_annotation_sweep(self, connector: KubernetesConnector) -> None:
+        """Blocking power-annotation reconcile sweep (runs off the event loop).
+
+        Invoked only via ``asyncio.to_thread`` from
+        ``_apply_power_annotations`` after its guards pass. The connector is
+        passed explicitly so the worker thread uses the locally narrowed
+        ``KubernetesConnector`` rather than relying on a production assert.
+        """
+
+        # One DGD read for the whole sweep: resolving prefill and decode pods
+        # each needs the deployment, so fetch it once and reuse it rather than
+        # letting each get_component_pods() issue its own GET.
+        #
+        # The DGD read and pod listings hit the apiserver and can fail
+        # transiently (ApiException — 5xx/timeout) or when the DGD is
+        # momentarily unresolvable (DynamoGraphDeploymentNotFoundError — a
+        # 404 blip). This reconciliation sweep is optional and idempotent, so
+        # those must not propagate: run() wraps the tick loop in try/finally,
+        # so an escaping exception would shut the engine down and exit the
+        # planner. Log and skip — the next sweep retries. The catch stays
+        # narrow (not the PlannerError base) so unexpected planner errors —
+        # validation, component, model-mismatch — still surface as bugs.
+        try:
+            deployment = connector.kube_api.get_graph_deployment(
+                connector.graph_deployment_name
+            )
+
+            # Fallback component names for the explicit-name resolution path,
+            # so aggregated (mode=agg) DGDs — whose single worker is labelled
+            # ``type: worker`` and thus doesn't match the PREFILL/DECODE role —
+            # still get annotated. For agg the worker is named
+            # ``agg_worker_k8s_name`` (e.g. ``VllmWorker``), NOT
+            # ``decode_worker_k8s_name`` (``VllmDecodeWorker``), so the explicit
+            # name must be the agg one or resolution finds nothing. The fallback
+            # is a no-op for disagg (the role matches by type, so the name is
+            # ignored).
+            defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
+            prefill_name = defaults.prefill_worker_k8s_name if defaults else None
+            decode_name = None
+            if defaults is not None:
+                if self.config.mode == "agg":
+                    decode_name = (
+                        getattr(defaults, "agg_worker_k8s_name", None)
+                        or defaults.decode_worker_k8s_name
+                    )
+                else:
+                    decode_name = defaults.decode_worker_k8s_name
+
+            pods_and_limits: list[tuple] = []
+            if self.require_prefill:
+                for pod in connector.get_component_pods(
+                    SubComponentType.PREFILL,
+                    deployment=deployment,
+                    component_name=prefill_name,
+                ):
+                    pods_and_limits.append(
+                        (pod, str(self.config.prefill_engine_gpu_power_limit))
+                    )
+            if self.require_decode:
+                for pod in connector.get_component_pods(
+                    SubComponentType.DECODE,
+                    deployment=deployment,
+                    component_name=decode_name,
+                ):
+                    pods_and_limits.append(
+                        (pod, str(self.config.decode_engine_gpu_power_limit))
+                    )
+        except (ApiException, DynamoGraphDeploymentNotFoundError) as e:
+            logger.warning(
+                "Power-annotation sweep skipped: failed to read DGD or list "
+                "worker pods (%s); retrying on the next sweep.",
+                e,
+            )
+            return
+
+        for pod, limit_str in pods_and_limits:
+            current = (pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
+            if current == limit_str:
+                continue
+            try:
+                connector.kube_api.patch_pod_annotation(
+                    pod.metadata.name, POWER_ANNOTATION_KEY, limit_str
+                )
+                logger.info(
+                    "Annotated pod %s with %s=%s",
+                    pod.metadata.name,
+                    POWER_ANNOTATION_KEY,
+                    limit_str,
+                )
+            except ApiException as e:
+                logger.warning(
+                    "Failed to patch power annotation on pod %s: %s",
+                    pod.metadata.name,
+                    e,
+                )
+
+    def _current_worker_counts(self) -> tuple[int, int]:
+        """Best-known current (prefill, decode) ready worker counts.
+
+        Reads ``self._last_worker_counts``, cached each tick in ``run()`` from
+        the tick input — the count source the orchestrator engine exposes.
+        Returns ``(0, 0)`` before the first worker-state tick populates it.
+        Shared by ``_scaling_up`` and ``_log_decision_summary`` so the two
+        can't drift.
+        """
+        if self._last_worker_counts is not None:
+            return (
+                self._last_worker_counts.ready_num_prefill or 0,
+                self._last_worker_counts.ready_num_decode or 0,
+            )
+        return 0, 0
+
+    def _scaling_up(self, effects: PlannerEffects) -> bool:
+        """True when this tick's decision raises a managed replica count.
+
+        A scale-up means the operator will create new worker pods, which start
+        without the power-limit annotation; the caller uses this to force a
+        prompt annotation sweep instead of waiting out the steady-state
+        throttle. Reads current counts via ``_current_worker_counts``, the
+        same source ``_log_decision_summary`` uses, so the force decision
+        stays consistent with the logged summary.
+        Scale-downs and holds return False because they create no pods.
+        """
+        decision = effects.scale_to
+        if decision is None:
+            return False
+        current_p, current_d = self._current_worker_counts()
+        if decision.num_prefill is not None and decision.num_prefill > current_p:
+            return True
+        if decision.num_decode is not None and decision.num_decode > current_d:
+            return True
+        return False
+
+    def _should_sweep_power_annotations(
+        self, now_s: float, effects: PlannerEffects
+    ) -> bool:
+        """Decide whether to run a power-annotation sweep this tick.
+
+        Throttles steady-state sweeps to at most one per
+        ``power_annotation_interval_seconds`` (a sweep costs a DGD read + a pod
+        list per managed component, so per-tick sweeps multiply apiserver
+        load). A scale-up (re)opens a force window of one interval during which
+        every tick sweeps, so freshly-created pods are annotated without waiting
+        out the throttle. Updates the sweep bookkeeping as a side effect when it
+        returns True.
+        """
+        if not self.config.enable_power_awareness or self.config.advisory:
+            return False
+        if self._scaling_up(effects):
+            self._force_power_annotations_until_s = (
+                now_s + self.config.power_annotation_interval_seconds
+            )
+        within_force_window = now_s < self._force_power_annotations_until_s
+        throttle_elapsed = (
+            now_s - self._last_power_annotation_sweep_s
+            >= self.config.power_annotation_interval_seconds
+        )
+        if within_force_window or throttle_elapsed:
+            self._last_power_annotation_sweep_s = now_s
+            return True
+        return False
+
+    def _publish_power_budget_metrics(self, num_p: int, num_d: int) -> None:
+        """Emit power budget gauges (Phase 1, dashboard observability only).
+
+        These gauges are advisory: they expose the configured budget and the
+        statically projected draw for dashboards. They do NOT gate scaling —
+        budget enforcement is Phase 2 (PR #9684). Values come from static
+        config, not DCGM, so the gauges stay meaningful even when DCGM is down.
+        """
+        if self.prometheus_port == 0 or not self.config.enable_power_awareness:
+            return
+        if self.config.total_gpu_power_limit is None:
+            return
+
+        p_gpu = self.config.prefill_engine_num_gpu or 0
+        d_gpu = self.config.decode_engine_num_gpu or 0
+        projected = (
+            num_p * self.config.prefill_engine_gpu_power_limit * p_gpu
+            + num_d * self.config.decode_engine_gpu_power_limit * d_gpu
+        )
+        budget = self.config.total_gpu_power_limit
+        pm = self.prometheus_metrics
+        pm.power_budget_total_watts.set(budget)
+        pm.power_projected_watts.set(projected)
+        pm.power_budget_utilization.set(projected / budget if budget > 0 else 0.0)
+
     async def _apply_scaling_targets(
         self, targets: list[TargetReplica], blocking: bool = False
     ) -> None:
@@ -864,18 +1098,15 @@ class NativePlannerBase:
     def _log_decision_summary(self, effects: PlannerEffects) -> None:
         """Log a one-line summary of the scaling decision after each tick.
 
-        Current worker counts come from ``self._last_worker_counts``
-        (cached in ``run()``).
+        Current worker counts come from ``_current_worker_counts`` — the
+        cached ``self._last_worker_counts`` set in ``run()`` — shared with
+        ``_scaling_up`` so the logged summary and the sweep-force decision
+        cannot drift.
         """
         decision = effects.scale_to
         diag = effects.diagnostics
 
-        if self._last_worker_counts is not None:
-            current_p = self._last_worker_counts.ready_num_prefill or 0
-            current_d = self._last_worker_counts.ready_num_decode or 0
-        else:
-            current_p = 0
-            current_d = 0
+        current_p, current_d = self._current_worker_counts()
 
         rec_p = decision.num_prefill if decision else None
         rec_d = decision.num_decode if decision else None
@@ -947,6 +1178,7 @@ class NativePlannerBase:
         self.prometheus_metrics.num_prefill_replicas.set(num_p)
         self.prometheus_metrics.num_decode_replicas.set(num_d)
         self.prometheus_metrics.gpu_hours.set(self._cumulative_gpu_hours)
+        self._publish_power_budget_metrics(num_p, num_d)
 
     @staticmethod
     def _set_if_observed(gauge, value: Optional[float]) -> None:
@@ -1037,13 +1269,20 @@ class NativePlannerBase:
 
                 tick_input = await self._gather_tick_input(next_tick)
                 self._publish_inventory_and_gpu_hours(tick_input)
-                # Cache worker counts for _log_decision_summary (both
-                # engine paths); None when the tick doesn't request them.
+                # Cache worker counts for _log_decision_summary and the
+                # power-annotation sweep; None when the tick doesn't request
+                # them.
                 if tick_input.worker_counts is not None:
                     self._last_worker_counts = tick_input.worker_counts
                 # Drive ticks through the builtin orchestrator EngineProtocol.
                 effects = await engine.tick(next_tick, tick_input)
                 await self._apply_effects(effects)
+                # Phase 1: reconcile per-GPU power-limit annotations, throttled
+                # in steady state and forced for one interval after a scale-up.
+                # Runs independently of diagnostic emission — annotations are a
+                # cluster-side effect, not an operator-diagnostics signal.
+                if self._should_sweep_power_annotations(now, effects):
+                    await self._apply_power_annotations()
                 emit_diagnostics = self._should_emit_tick_diagnostics(
                     next_tick, effects
                 )
