@@ -28,15 +28,15 @@ Dynamo turns a model's raw tool-call and reasoning markup into structured `tool_
 - The **bare `--tool-call-parser` / `--reasoning-parser` flags pair with `vllm` / `sglang`** and normally go on the **frontend**.
 
 > [!TIP]
-> For guided decoding and structured outputs, the engine itself needs to be 
+> For guided decoding and structured outputs, the engine itself needs to be
 > aware of which tokens are reasoning or not so that it can only start enforcing the
 > grammar after reasoning is complete. For example, the model should be able to
 > reason freely before it needs to start outputting structured JSON content to the user.
 > Similarly, for reasoning/thinking related settings like a thinking token budget, the engine
 > needs to be aware of when reasoning is done independent of the frontend parsing the
-> reasoning tokens. Therefore, both the `--reasoning-parser` (engine reasoning awareness) 
+> reasoning tokens. Therefore, both the `--reasoning-parser` (engine reasoning awareness)
 > and the `--dyn-reasoning-parser` (frontend response parsing) flags should be set when using
-> `--dyn-chat-processor dynamo` (default). 
+> `--dyn-chat-processor dynamo` (default).
 > Native and Dynamo tool-call parsers remain mutually exclusive.
 
 ## What does NOT make sense
