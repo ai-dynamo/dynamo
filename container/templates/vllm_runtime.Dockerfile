@@ -7,32 +7,6 @@
 ########## Runtime Image #########
 ##################################
 
-# aiperf depends on crick==0.0.8, which has no manylinux aarch64 wheel.
-# Build it from source on arm64 in a disposable stage so the compiler and
-# headers do not reach the runtime image. On amd64, /wheels stays empty and
-# uv resolves crick from its published PyPI wheel.
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS crick_builder
-ARG PYTHON_VERSION
-ARG TARGETARCH
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    mkdir -p /wheels \
-    && if [ "$TARGETARCH" = "arm64" ]; then \
-        apt-get update -y \
-        && apt-get install -y --no-install-recommends \
-            ca-certificates \
-            gcc \
-            libc6-dev \
-            python${PYTHON_VERSION}-dev \
-            python${PYTHON_VERSION}-venv \
-        && apt-get clean \
-        && rm -rf /var/lib/apt/lists/*; \
-    fi
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        python${PYTHON_VERSION} -m venv /tmp/buildenv \
-        && /tmp/buildenv/bin/pip install --no-cache-dir --upgrade pip wheel \
-        && /tmp/buildenv/bin/pip wheel --no-cache-dir --no-deps crick==0.0.8 -w /wheels; \
-    fi
-
 {% if platform == "multi" %}
 FROM --platform=linux/amd64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_amd64
 FROM --platform=linux/arm64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_arm64
@@ -295,17 +269,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.txt
-
-{% if target not in ("dev", "local-dev") %}
-# Install the benchmark CLI used by the in-cluster benchmark Job. UV_FIND_LINKS
-# supplies the arm64 crick wheel built above while remaining empty on amd64.
-COPY --chown=dynamo:0 --from=crick_builder /wheels/ /opt/dynamo/wheelhouse/extra/
-RUN --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
-    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    export UV_CACHE_DIR=/root/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
-    uv pip install {{ pip_target }} --requirement /tmp/requirements.benchmark.txt && \
-    aiperf --version
-{% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
