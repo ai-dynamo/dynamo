@@ -8,15 +8,9 @@
 
 name: On-Demand Release
 
+# workflow_dispatch is capped at 10 inputs by GitHub — this block is at 10;
+# fold any new knob into an existing input.
 on:
-  # TEMPORARY: push to the dev branch runs the throwaway test flow — push events
-  # have no inputs, so prepare-branch falls back to creating release/0.0.0test
-  # (stamped 0.0.0). That branch matches release/*.*.* so post-merge + the other
-  # release-branch checks run on it; this workflow's publish jobs skip (they're
-  # gated on workflow_dispatch + a real release/X.Y.Z branch). Remove before merging.
-  push:
-    branches:
-      - pvijayakrish/on-demand-release
   workflow_dispatch:
     inputs:
       source_ref:
@@ -34,15 +28,10 @@ on:
         type: string
         default: ''
       rc_round:
-        description: 'Internal staging RC round (the rc suffix on the NGC/helm/crate staging versions + wheel subpath, so re-stages do not collide on the immutable registries). NO GitHub tag is created. Default 5.'
+        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). Re-stages of the same version need a distinct value (immutable registries). NO GitHub tag is created. Default 5.'
         required: false
         type: string
         default: '5'
-      rc_sub:
-        description: 'Sub-increment within the RC round (0 = none). >0 appends a second dotted level, e.g. round 2 + sub 1 -> rc.2.1 (a numerically-ordered SemVer pre-release). Default 0.'
-        required: false
-        type: string
-        default: '0'
       containers:
         description: 'Containers to release: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,snapshot.'
         required: false
@@ -63,11 +52,6 @@ on:
         required: false
         type: string
         default: all
-      selection:
-        description: 'Optional JSON overriding the four fields, e.g. {"containers":["vllm:runtime"],"wheels":"all","crates":"none","helm":[]}. When non-empty it takes precedence.'
-        required: false
-        type: string
-        default: ''
       dry_run:
         description: 'Create the branch + version bump only; skip staging and the GitLab trigger.'
         required: false
@@ -106,13 +90,19 @@ jobs:
     steps:
       - name: Validate inputs
         env:
-          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
-          SOURCE_REF: ${{ inputs.source_ref || 'main' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0' || '') }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          RC_ROUND: ${{ inputs.rc_round || '5' }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
             echo "::error::release_version must be X.Y.Z[.devN|.postN] (got '${RELEASE_VERSION}')"
+            exit 1
+          fi
+          # Validated before the branch cut — a typo caught after the push wastes hours of CI.
+          if ! [[ "${RC_ROUND}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::rc_round must be '<round>' or '<round>.<sub>' (non-negative integers; got '${RC_ROUND}')"
             exit 1
           fi
           if [[ -n "${RELEASE_BRANCH}" && ! "${RELEASE_BRANCH}" =~ ^release/[A-Za-z0-9._-]+$ ]]; then
@@ -124,14 +114,14 @@ jobs:
             exit 1
           fi
 
-      # Normalize the per-type fields (or the JSON override) into canonical subset
-      # strings (all|none|csv of normalized tokens) consumed by the bump, release.yml,
-      # and the GitLab trigger. The container grammar expands <fw>[:runtime|:efa]
-      # (bare fw = both) and validates every token; unknown tokens fail fast.
+      # Normalize the per-type fields into canonical subset strings (all|none|csv
+      # of normalized tokens) consumed by the bump, release.yml, and the GitLab
+      # trigger. The container grammar expands <fw>[:runtime|:efa] (bare fw = both)
+      # and validates every token; unknown tokens fail fast.
       - name: Resolve artifact selection
         id: resolve
         env:
-          SELECTION: ${{ inputs.selection }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
           CONTAINERS: ${{ inputs.containers || 'all' }}
           WHEELS: ${{ inputs.wheels || 'all' }}
           # Stage ALL publishable workspace crates ('all' = the max). A hardcoded
@@ -147,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 <<'PY' > "${RUNNER_TEMP}/selection.env"
-          import json, os, sys
+          import os, re, sys
 
           FRAMEWORKS = {"vllm", "sglang", "trtllm"}
           VARIANTS = {"runtime", "efa"}
@@ -165,12 +155,6 @@ jobs:
                   if x not in seen:
                       seen.append(x)
               return seen
-
-          def as_spec(v):
-              # A JSON value: list -> csv ('none' if empty); scalar -> str.
-              if isinstance(v, list):
-                  return ",".join(str(x) for x in v) if v else "none"
-              return str(v).strip()
 
           def norm_containers(spec):
               spec = (spec or "all").strip()
@@ -212,28 +196,30 @@ jobs:
                   return "all"
               if spec in ("", "none"):
                   return "none"
-              # Crate names are validated (and closure-checked) by stage_crates.py.
-              return ",".join(dedupe(t.strip() for t in spec.split(",") if t.strip()))
+              # Closure is checked by stage_crates.py; the charset gate keeps
+              # arbitrary text out of $GITHUB_OUTPUT and the GitLab variables.
+              sel = dedupe(t.strip() for t in spec.split(",") if t.strip())
+              bad = [t for t in sel if not re.fullmatch(r"[A-Za-z0-9_-]+", t)]
+              if bad:
+                  fail(f"invalid crate token(s) {bad}; crate names are [A-Za-z0-9_-]+")
+              return ",".join(sel)
 
-          sel = os.environ.get("SELECTION", "").strip()
-          if sel:
-              try:
-                  d = json.loads(sel)
-              except Exception as e:
-                  fail(f"selection is not valid JSON: {e}")
-              if not isinstance(d, dict):
-                  fail("selection JSON must be an object")
-              c, w, cr, h = (as_spec(d.get(k, "all")) for k in ("containers", "wheels", "crates", "helm"))
-          else:
-              c = os.environ.get("CONTAINERS", "all")
-              w = os.environ.get("WHEELS", "all")
-              cr = os.environ.get("CRATES", "all")
-              h = os.environ.get("HELM", "all")
+          c = norm_containers(os.environ.get("CONTAINERS", "all"))
+          w = norm_simple(os.environ.get("WHEELS", "all"), WHEEL_TOKENS, "wheel")
+          cr = norm_crates(os.environ.get("CRATES", "all"))
+          h = norm_simple(os.environ.get("HELM", "all"), HELM_TOKENS, "helm")
 
-          print(f"containers={norm_containers(c)}")
-          print(f"wheels={norm_simple(w, WHEEL_TOKENS, 'wheel')}")
-          print(f"crates={norm_crates(cr)}")
-          print(f"helm={norm_simple(h, HELM_TOKENS, 'helm')}")
+          # SemVer has no post-release form: .postN would sort before X.Y.Z or
+          # collide on crates.io — post releases ship containers/wheels only.
+          if re.search(r"\.post[0-9]+$", os.environ.get("RELEASE_VERSION", "")):
+              if cr != "none" or h != "none":
+                  fail("post releases (X.Y.Z.postN) cannot ship crates or helm charts "
+                       "(no SemVer post-release form); re-run with crates=none and helm=none")
+
+          print(f"containers={c}")
+          print(f"wheels={w}")
+          print(f"crates={cr}")
+          print(f"helm={h}")
           PY
           echo "Resolved selection:"
           cat "${RUNNER_TEMP}/selection.env"
@@ -249,15 +235,15 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ inputs.source_ref || 'main' }}
+          ref: ${{ inputs.source_ref }}
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Set version and create branch
         id: bump
         env:
-          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0' || '') }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CONTAINERS: ${{ steps.resolve.outputs.containers }}
@@ -350,27 +336,20 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           RC_ROUND: ${{ inputs.rc_round || '5' }}
-          RC_SUB: ${{ inputs.rc_sub || '0' }}
         run: |
           set -euo pipefail
           # Internal staging registries (crates/helm/wheels) are immutable, so each
           # (re-)stage of the same version needs a distinct rc. We take the rc as an
-          # INPUT (no GitHub tag is created): a round plus an optional sub-increment.
+          # INPUT (no GitHub tag is created): '<round>' or '<round>.<sub>'.
           # Downstream builds X.Y.Z-rc.<round>[.<sub>] — a SemVer pre-release whose
           # dot-separated numeric identifiers order correctly (rc.2.9 < rc.2.10 <
           # rc.10.0). GA promotion (GitLab) still uses the clean version.
-          if ! [[ "${RC_ROUND}" =~ ^[0-9]+$ ]]; then
-            echo "::error::rc_round must be a non-negative integer (got '${RC_ROUND}')"
+          if ! [[ "${RC_ROUND}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::rc_round must be '<round>' or '<round>.<sub>' (non-negative integers; got '${RC_ROUND}')"
             exit 1
           fi
-          if ! [[ "${RC_SUB}" =~ ^[0-9]+$ ]]; then
-            echo "::error::rc_sub must be a non-negative integer (got '${RC_SUB}')"
-            exit 1
-          fi
-          # sub 0 = no sub-increment (RC = "<round>"); sub >0 => RC = "<round>.<sub>".
-          if [ "${RC_SUB}" -eq 0 ]; then RC="${RC_ROUND}"; else RC="${RC_ROUND}.${RC_SUB}"; fi
-          echo "rc_number=${RC}" >> "$GITHUB_OUTPUT"
-          echo "Internal staging rc=${RC} (no GitHub tag created)"
+          echo "rc_number=${RC_ROUND}" >> "$GITHUB_OUTPUT"
+          echo "Internal staging rc=${RC_ROUND} (no GitHub tag created)"
 
   # ============================================================================
   # WAIT FOR POST-MERGE BUILDS (not tests)
@@ -384,9 +363,9 @@ jobs:
   await-post-merge:
     name: Wait for post-merge builds
     needs: [prepare-branch]
-    # TEMPORARY(test): run the full chain on push/test runs too, so the await->approval->release linkage executes on release/0.0.0test. REVERT to the commented line.
-    if: ${{ !inputs.dry_run }}
-    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    # Test branches (is_test) stop at the branch cut: post-merge + release-branch
+    # checks still run on them, but nothing is staged or published.
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     runs-on: prod-tester-amd-v1
     environment: automated-release
     permissions:
@@ -435,7 +414,11 @@ jobs:
           fi
 
           echo "Waiting for post-merge builds to publish ${#TAGS[@]} ECR tag(s): ${TAGS[*]}"
-          deadline=$(( $(date +%s) + 7200 ))
+          # 3h budget (runtime builds alone get 120 min); 15-min fast-fail if
+          # post-merge never started for the bump SHA.
+          start=$(date +%s)
+          deadline=$(( start + 10800 ))
+          start_deadline=$(( start + 900 ))
           while :; do
             missing=()
             for TAG in "${TAGS[@]}"; do
@@ -450,16 +433,27 @@ jobs:
             fi
             echo "still missing ${#missing[@]}/${#TAGS[@]}: ${missing[*]}"
 
-            # Fast-fail: if post-merge has finished and the images still aren't here,
-            # the builds we need failed/were skipped — don't burn the full timeout.
-            RUNS=$(curl -fsSL \
+            # Fast-fail if post-merge finished (or never started) — but only on a
+            # successful API response, so a transient curl/JSON failure can't
+            # masquerade as "post-merge never ran".
+            API_OK=true
+            RUNS=$(curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${REPO}/actions/workflows/post-merge-ci.yml/runs?head_sha=${SHA}&per_page=1" || echo '{}')
-            STATUS=$(echo "${RUNS}" | jq -r '.workflow_runs[0].status // "pending"')
-            if [ "${STATUS}" = "completed" ]; then
-              echo "::error::post-merge CI completed but required image(s) still missing: ${missing[*]}"
-              exit 1
+              "https://api.github.com/repos/${REPO}/actions/workflows/post-merge-ci.yml/runs?head_sha=${SHA}&per_page=1") || { API_OK=false; RUNS='{}'; }
+            COUNT=$(echo "${RUNS}" | jq -r '.workflow_runs | length' 2>/dev/null || { API_OK=false; echo 0; })
+            STATUS=$(echo "${RUNS}" | jq -r '.workflow_runs[0].status // "pending"' 2>/dev/null || { API_OK=false; echo pending; })
+            if [ "${API_OK}" = "true" ]; then
+              if [ "${COUNT}" = "0" ] && [ "$(date +%s)" -ge "${start_deadline}" ]; then
+                echo "::error::post-merge CI never started for ${SHA} (branch push may not have triggered it); required image(s) missing: ${missing[*]}"
+                exit 1
+              fi
+              if [ "${COUNT}" != "0" ] && [ "${STATUS}" = "completed" ]; then
+                echo "::error::post-merge CI completed but required image(s) still missing: ${missing[*]}"
+                exit 1
+              fi
+            else
+              echo "workflow-runs API probe failed (transient); skipping fast-fail checks this round"
             fi
 
             if [ "$(date +%s)" -ge "${deadline}" ]; then
@@ -475,16 +469,17 @@ jobs:
   release-approval:
     name: Release approval gate
     needs: [prepare-branch, await-post-merge]
-    # TEMPORARY(test): run the full chain on push/test runs too, so the await->approval->release linkage executes on release/0.0.0test. REVERT to the commented line.
-    if: ${{ !inputs.dry_run }}
-    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     runs-on: prod-default-small-v2
     environment: manual-release-approval
     permissions:
       contents: read
     steps:
       - name: Record approval
-        run: echo "On-demand release ${{ needs.prepare-branch.outputs.branch }} approved by ${{ github.actor }}"
+        env:
+          BRANCH: ${{ needs.prepare-branch.outputs.branch }}
+          ACTOR: ${{ github.actor }}
+        run: echo "On-demand release ${BRANCH} approved by ${ACTOR}"
 
   # ============================================================================
   # STAGE ARTIFACTS + TRIGGER GITLAB (release.yml in on-demand mode)
@@ -492,18 +487,15 @@ jobs:
   invoke-release:
     name: Stage release
     needs: [prepare-branch, await-post-merge, release-approval]
-    # TEMPORARY(test): run the full chain on push/test runs too, so the await->approval->release linkage executes on release/0.0.0test. REVERT to the commented line.
-    if: ${{ !inputs.dry_run }}
-    # if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && needs.prepare-branch.outputs.is_test != 'true' }}
     uses: ./.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
       on_demand: true
-      # TEMPORARY(test): || default lets push/test runs (no inputs) reach release.yml. REVERT to bare inputs.release_version .
-      release_version: ${{ inputs.release_version || '1.3.0' }}
-      # Auto-incrementing internal-staging rc (immutable registries can't be overwritten).
+      release_version: ${{ inputs.release_version }}
+      # Operator-chosen internal-staging rc (immutable registries can't be overwritten).
       rc_number: ${{ needs.prepare-branch.outputs.rc_number }}
-      # Normalized subsets from resolve-selection (always set, even on push/test).
+      # Normalized subsets from resolve-selection.
       containers: ${{ needs.prepare-branch.outputs.containers }}
       wheels: ${{ needs.prepare-branch.outputs.wheels }}
       crates: ${{ needs.prepare-branch.outputs.crates }}

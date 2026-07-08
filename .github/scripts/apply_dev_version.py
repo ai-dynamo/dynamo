@@ -240,24 +240,46 @@ def set_cargo(path: Path, old: str, new: str) -> None:
 
 
 def set_helm(path: Path, old: str, new: str) -> None:
-    pat = re.compile(
-        r'^(?P<pre>\s*(?:appVersion|version)\s*:\s*)(?P<q>"?)'
-        + re.escape(old)
-        + r'(?P=q)(?P<post>\s*)$',
+    text = path.read_text()
+
+    # Top-level version/appVersion set unconditionally: a rewrite keyed on `old`
+    # leaves stale values when a reused branch widens the helm subset.
+    top = re.compile(
+        r'^(?P<pre>(?:appVersion|version)\s*:\s*)(?P<q>"?)[^"\n]*(?P=q)(?P<post>\s*)$',
         re.MULTILINE,
     )
-    text = pat.sub(
-        lambda m: f"{m.group('pre')}{m.group('q')}{new}{m.group('q')}{m.group('post')}",
-        path.read_text(),
+    text, n_top = top.subn(
+        lambda m: f"{m.group('pre')}{m.group('q')}{new}{m.group('q')}{m.group('post')}", text
     )
+    if n_top == 0:
+        raise RuntimeError(f"no top-level version/appVersion in {path}")
+
+    # dynamo-operator (file:// subchart) pin always rides the workspace version;
+    # the hop is bounded to the entry so it can't reach nats/etcd/....
+    text = re.sub(
+        r'(?m)^(\s*-\s+name:\s*dynamo-operator\s*\n'
+        r'(?:(?!\s*-\s)[^\n]*\n)*?'
+        r'\s*version\s*:\s*)("?)[^"\n]*\2(\s*)$',
+        lambda m: f"{m.group(1)}{m.group(2)}{new}{m.group(2)}{m.group(3)}",
+        text,
+    )
+
+    # Deliberately no generic indented-version rewrite: dynamo-operator is the
+    # only first-party dep pin, and a keyed catch-all would clobber a foreign
+    # pin that equals the workspace version (nats is pinned 1.3.2).
     path.write_text(text)
+
+
+# Bounds the repository->tag hop at the next `repository:` line, so a block
+# with no tag fails loudly instead of rewriting another image's tag.
+_TAG_HOP = r'(?:(?![^\n]*repository:)[^\n]*\n)*?'
 
 
 def set_helm_values_tag(path: Path, repo: str, new: str) -> None:
     # Set the `tag:` that follows the image `repository: <repo>` line to `new`,
     # regardless of its current value (the published image tag is the release tag).
     pat = re.compile(
-        r'(repository:\s*"?' + re.escape(repo) + r'"?\s*\n(?:[^\n]*\n)*?\s*tag:\s*)"?[^"\n]*"?',
+        r'(repository:\s*"?' + re.escape(repo) + r'"?\s*\n' + _TAG_HOP + r'\s*tag:\s*)"?[^"\n]*"?',
         re.MULTILINE,
     )
     text, n = pat.subn(lambda m: f"{m.group(1)}{new}", path.read_text(), count=1)
@@ -266,15 +288,15 @@ def set_helm_values_tag(path: Path, repo: str, new: str) -> None:
     path.write_text(text)
 
 
-def _current_image_tag(path: Path, repo: str, fallback: str) -> str:
-    # The tag currently set for `repo` in values.yaml. An empty tag ('' inherits the
-    # chart appVersion) resolves to the pre-bump workspace version `fallback`.
+def _current_image_tag(path: Path, repo: str) -> str:
+    # The tag currently set for `repo` in values.yaml ('' if unset/missing —
+    # an empty tag inherits the chart appVersion at deploy time, so there is no
+    # recorded last-published tag to pin to).
     m = re.search(
-        r'repository:\s*"?' + re.escape(repo) + r'"?\s*\n(?:[^\n]*\n)*?\s*tag:\s*"?([^"\n]*)"?',
+        r'repository:\s*"?' + re.escape(repo) + r'"?\s*\n' + _TAG_HOP + r'\s*tag:\s*"?([^"\n]*)"?',
         path.read_text(),
     )
-    cur = m.group(1).strip() if m else ""
-    return cur or fallback
+    return m.group(1).strip() if m else ""
 
 
 def _parse_subset(spec: str, universe: set[str]) -> set[str]:
@@ -293,24 +315,43 @@ def _parse_subset(spec: str, universe: set[str]) -> set[str]:
 def set_release_version(root: Path, new_version: str, containers: set[str], helm: set[str]) -> None:
     old = _workspace_version(root)
     semver = _semver_form(new_version)
+
+    def _exists(rel: str) -> bool:
+        # source_ref may predate a target (older release branches / main SHAs);
+        # a path that doesn't exist there has nothing to stamp.
+        if (root / rel).exists():
+            return True
+        print(f"set_release_version: skip {rel} (absent at this source ref)", file=sys.stderr)
+        return False
+
     # Package identity -- always bumped (the version wheels/crates/images carry).
     for rel in PYPROJECT_TARGETS:
-        set_pyproject(root / rel, old, new_version, is_root=(rel == "pyproject.toml"))
+        if rel == "pyproject.toml" or _exists(rel):
+            set_pyproject(root / rel, old, new_version, is_root=(rel == "pyproject.toml"))
     set_cargo(root / "Cargo.toml", old, semver)
     for rel in SUBCRATE_CARGO_TARGETS:
-        set_cargo(root / rel, old, semver)
+        if _exists(rel):
+            set_cargo(root / rel, old, semver)
     # Chart identity -- only for charts in the --helm subset.
     for token, rel in HELM_CHART_TARGETS:
-        if token in helm:
+        if token in helm and _exists(rel):
             set_helm(root / rel, old, semver)
-    # First-party image reference tags: published image -> new version (NGC tag
-    # form == new_version, not SemVer); chart published but image excluded -> pin to
-    # last-published; chart not published -> untouched.
+    # First-party image tags: published image -> new_version (NGC tag form, not
+    # SemVer); published chart with excluded image -> pin to the recorded tag; no
+    # recorded tag (''/'my-tag') -> fail at cut time, the chart could never resolve.
     for ctoken, htoken, rel, repo in HELM_IMAGE_TAG_SITES:
-        if htoken not in helm:
+        if htoken not in helm or not _exists(rel):
             continue
         path = root / rel
-        tag = new_version if ctoken in containers else _current_image_tag(path, repo, old)
+        if ctoken in containers:
+            tag = new_version
+        else:
+            tag = _current_image_tag(path, repo)
+            if tag in ("", "my-tag"):
+                raise RuntimeError(
+                    f"chart '{htoken}' is selected but its image '{ctoken}' is excluded and "
+                    f"{rel} records no previously published tag for {repo}; either add "
+                    f"'{ctoken}' to the container selection or drop '{htoken}' from the helm selection")
         set_helm_values_tag(path, repo, tag)
     print(f"set_release_version: {old} -> py={new_version} semver={semver} "
           f"containers={sorted(containers)} helm={sorted(helm)}", file=sys.stderr)
