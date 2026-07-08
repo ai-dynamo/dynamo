@@ -1,174 +1,38 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: DynamoGraphDeploymentRequest (DGDR) Reference
-subtitle: Field reference and lifecycle for the DynamoGraphDeploymentRequest custom resource — Dynamo's deploy-by-intent generator.
+title: Planner Configuration (PlannerConfig)
+subtitle: Field reference for the PlannerConfig JSON/YAML object consumed by the Dynamo Planner service.
 ---
 
-A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's deploy-by-intent generator for [`DynamoGraphDeployment`](dgd-reference.mdx) (DGD) resources. You describe what you want to run and your performance targets; the profiler determines a configuration and produces the DGD that serves traffic.
+`PlannerConfig` is the configuration object for the Dynamo Planner. The Planner service parses it with [Pydantic](https://docs.pydantic.dev/), so every field, type, default, and constraint on this page comes from the [`PlannerConfig` model](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/planner_config.py). For the deployment workflow and scaling-mode concepts, see the [Planner Guide](planner-guide.md); for the autoscaler overview, see the [Planner overview](README.md).
 
-For the task-oriented walkthrough — authoring a request step by step — see [Auto Deploy with DGDR](dgdr-guide.md). For ready-to-copy manifests, see [DGDR Examples](dgdr-examples.md).
+## How the config is loaded
 
-This page documents the `nvidia.com/v1beta1` API — the served, storage version.
+The Planner process takes a single command-line flag:
 
-## Spec reference
+```bash
+python -m dynamo.planner --config <value>
+```
 
-Only `model` is required; every other field has a default or is auto-detected.
+`--config` is **required**. `<value>` is either a path to a `.json`, `.yaml`, or `.yml` file, or an inline JSON string. The service auto-detects which, loads it, and validates it against the `PlannerConfig` model. A value that is neither a readable file nor valid JSON fails at startup.
 
-<ParamField path="model" type="string" required={true}>
-  Model to deploy — a HuggingFace ID (for example `Qwen/Qwen3-0.6B`, `meta-llama/Llama-3-70b`) or a private model name. Must be non-empty.
-</ParamField>
+On Kubernetes, set the object under `spec.features.planner` in a [DynamoGraphDeploymentRequest](../../kubernetes/dgdr-reference.mdx) (DGDR). DGDR passes it through without field-level validation and mounts it as a `planner-config-*` ConfigMap; the Planner validates it when it starts. Every field below can be set there.
 
-<ParamField path="image" type="string">
-  Container image for the profiling job (the planner image), for example `nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1`. For Dynamo < 1.1.0, use `dynamo-frontend`.
-</ParamField>
-
-<ParamField path="backend" type="string" default="auto">
-  Inference backend used for profiling and deployment.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
-</ParamField>
-
-<ParamField path="searchStrategy" type="string" default="rapid">
-  Profiling depth. `rapid` performs a fast, AIC-backed sweep (~30s); `thorough` explores more configurations on real GPUs (2–4h).
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>rapid</Badge> <Badge intent="note" minimal>thorough</Badge></span>
-</ParamField>
-
-<ParamField path="autoApply" type="boolean" default="true">
-  Automatically create a DGD after profiling completes. When `false`, the generated spec is stored in `status` for manual review instead of being applied.
-</ParamField>
-
-<ParamField path="workload" type="WorkloadSpec">
-  Expected workload characteristics for SLA-based profiling.
-</ParamField>
-
-<Indent>
-  <ParamField path="isl" type="integer" default="4000">
-    Input Sequence Length — expected average input tokens.
-  </ParamField>
-  <ParamField path="osl" type="integer" default="1000">
-    Output Sequence Length — expected average output tokens.
-  </ParamField>
-  <ParamField path="concurrency" type="number">
-    Target concurrency level. Required (or `requestRate`) when the planner is disabled.
-  </ParamField>
-  <ParamField path="requestRate" type="number">
-    Target request rate in requests per second. Required (or `concurrency`) when the planner is disabled.
-  </ParamField>
-</Indent>
-
-<ParamField path="sla" type="SLASpec">
-  Service-level agreement targets that drive profiling optimization.
-</ParamField>
-
-<Indent>
-  <ParamField path="ttft" type="number">
-    Time To First Token target, in milliseconds.
-  </ParamField>
-  <ParamField path="itl" type="number">
-    Inter-Token Latency target, in milliseconds.
-  </ParamField>
-  <ParamField path="e2eLatency" type="number">
-    End-to-end request latency target, in milliseconds. An alternative to specifying `ttft` + `itl`; cannot be combined with them.
-  </ParamField>
-  <ParamField path="optimizationType" type="OptimizationType">
-    Optimization target for SLA profiling.
-
-    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>latency</Badge> <Badge intent="note" minimal>throughput</Badge></span>
-  </ParamField>
-</Indent>
-
-
-<ParamField path="hardware" type="HardwareSpec">
-  GPU hardware for profiling and deployment.
-</ParamField>
-
-<Indent>
-  <ParamField path="gpuSku" type="GPUSKUType">
-    GPU type to target (see [SKU format](#sku-format)). When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose the GPU type; discovery and `totalGpus` are then restricted to matching nodes.
-  </ParamField>
-  <ParamField path="vramMb" type="number">
-    VRAM per GPU in MiB. Auto-detected from cluster GPU nodes when omitted.
-  </ParamField>
-  <ParamField path="totalGpus" type="integer">
-    GPU budget for profiling and deployment; the profiler uses it to determine parallelism and replica count. When omitted, computed by counting GPUs on discovered nodes (filtered by `gpuSku` when set), temporarily capped at 32 to limit the profiler search space. Set explicitly to override the cap.
-  </ParamField>
-  <ParamField path="numGpusPerNode" type="integer">
-    GPUs per node. Auto-detected when omitted.
-  </ParamField>
-  <ParamField path="interconnect" type="string">
-    Primary GPU-to-GPU interconnect within a node, for example `nvlink` or `pcie`. Capability metadata for profiling and planning only — it does not enable any interconnect. Best-effort discovery distinguishes `nvlink` from `pcie` when omitted. An over-optimistic value can lead the planner to overestimate intra-node bandwidth and pick overly aggressive parallelism.
-  </ParamField>
-  <ParamField path="rdma" type="boolean">
-    Whether the cluster has RDMA-capable networking for Dynamo data movement. Capability metadata only — it does not install or configure RDMA. Best-effort discovery via node labels when omitted. A false positive can cause transports to assume RDMA is usable and fail to connect; a false negative falls back to non-RDMA transports.
-  </ParamField>
-</Indent>
-
-<ParamField path="modelCache" type="ModelCacheSpec">
-  Optional PVC configuration for pre-downloaded model weights. When set, weights are loaded from the PVC instead of downloading from HuggingFace.
-</ParamField>
-
-<Indent>
-  <ParamField path="pvcName" type="string">
-    Name of a `ReadWriteMany` PVC containing cached model weights. The PVC must exist in the same namespace as the DGDR.
-  </ParamField>
-  <ParamField path="pvcModelPath" type="string">
-    Path to the model checkpoint directory within the PVC, for example `deepseek-r1` or `models/Llama-3.1-405B-FP8`.
-  </ParamField>
-  <ParamField path="pvcMountPath" type="string" default="/opt/model-cache">
-    Mount path for the PVC inside the container.
-  </ParamField>
-</Indent>
-
-<ParamField path="features" type="FeaturesSpec">
-  Optional Dynamo platform features in the generated deployment.
-</ParamField>
-
-<Indent>
-  <ParamField path="planner" type="runtime.RawExtension">
-    A `PlannerConfig` object passed to the Planner service. The presence of this field (non-null) enables the planner in the generated DGD. DGDR passes it through without field-level validation; the Planner service validates it at startup. See [Planner](#planner) for the full field list.
-
-    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
-  </ParamField>
-  <ParamField path="mocker" type="MockerSpec">
-    Configures the simulated (mocker) backend for testing without GPUs.
-  </ParamField>
-  <Indent>
-    <ParamField path="enabled" type="boolean">
-      Deploy mocker workers instead of real inference workers.
-    </ParamField>
-  </Indent>
-</Indent>
+```yaml
+spec:
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+      # optimization_target defaults to "throughput" — works with no further config
+```
 
 <Note>
-  DGDR does not currently expose a `features.kvRouter` field. To configure router mode or KV-aware routing, use a direct DGD, a tuned recipe, or `overrides.dgd` (see [Generated DGD overrides](#generated-dgd-overrides)).
+  Several Prometheus fields default from environment variables and are excluded when the config is serialized back out. Set them either in the config object or through the environment variable noted on each field. See [Environment variables](#environment-variables).
 </Note>
 
-### Overrides
-
-<ParamField path="overrides" type="OverridesSpec">
-  Customizes the profiling job and the generated DGD.
-</ParamField>
-
-<Indent>
-  <ParamField path="profilingJob" type="batch/v1.JobSpec">
-    Overrides merged into the controller-generated profiling Job spec (for example, tolerations or node selectors). Only customizes the profiling Job — not the deployed worker pods.
-
-    <a href="https://pkg.go.dev/k8s.io/api/batch/v1#JobSpec" target="_blank">batch/v1.JobSpec</a>
-  </ParamField>
-  <ParamField path="dgd" type="runtime.RawExtension">
-    A full or partial `nvidia.com/v1alpha1` DGD used as the base for the generated deployment; see the [DGD Reference](dgd-reference.mdx) for its fields. Values from profiling results are merged on top. See [Generated DGD overrides](#generated-dgd-overrides).
-
-    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
-  </ParamField>
-</Indent>
-
-## Planner
-
-`spec.features.planner` is a `PlannerConfig` object, passed through to the Planner service without field-level validation; the Planner validates it at startup. Setting it (non-null) enables the planner in the generated DGD. The same object is documented standalone at [Planner Configuration](../components/planner/planner-config-reference.mdx); its fields are reproduced here. Nested list-and-object types are expanded under [Additional Types](#additional-types). All fields are optional.
-
-### Core settings
+## Core settings
 
 <ParamField path="mode" type="string" default="disagg">
   Planner operating mode, matching the deployment topology.
@@ -197,20 +61,22 @@ Only `model` is required; every other field has a default or is auto-detected.
 </ParamField>
 
 <ParamField path="global_planner_namespace" type="string" default="null">
-  Namespace where the GlobalPlanner runs. Required when `environment` is `global-planner`.
+  Namespace where the GlobalPlanner runs. **Required** when `environment` is `global-planner`. See the [Global Planner Guide](global-planner.md).
 </ParamField>
 
 <ParamField path="log_dir" type="string" default="null">
   Optional directory for Planner log output.
 </ParamField>
 
-### Optimization target
+## Optimization target
 
 <ParamField path="optimization_target" type="string" default="throughput">
-  Scaling strategy. `throughput` and `latency` use static thresholds on queue depth and KV cache utilization — no SLA targets or profiling required. `load` uses user-defined prefill queue-token and decode KV-utilization thresholds. `sla` uses the Rust engine performance model to target specific `ttft_ms` / `itl_ms` values. Under any target other than `sla`, the Planner forces load scaling on, throughput scaling off, and ignores `ttft_ms` / `itl_ms`.
+  Scaling strategy. `throughput` and `latency` use static thresholds on queue depth and KV cache utilization — no SLA targets or profiling required. `load` uses user-defined prefill queue-token and decode KV-utilization thresholds. `sla` uses the Rust engine performance model to target specific `ttft_ms` / `itl_ms` values.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>throughput</Badge> <Badge intent="note" minimal>latency</Badge> <Badge intent="note" minimal>load</Badge> <Badge intent="note" minimal>sla</Badge></span>
 </ParamField>
+
+When `optimization_target` is `throughput`, `latency`, or `load`, the Planner forces load-based scaling on and throughput-based scaling off, and it ignores `ttft_ms` / `itl_ms`. The two scaling-mode flags below apply only when `optimization_target` is `sla`.
 
 <ParamField path="enable_throughput_scaling" type="boolean" default="true">
   Enable predictive, traffic-based scaling. Only honored when `optimization_target` is `sla`.
@@ -228,7 +94,7 @@ Only `model` is required; every other field has a default or is auto-detected.
   Inter-Token Latency SLA target, in milliseconds. Also accepts the alias `itl`. Used only under `optimization_target: sla`.
 </ParamField>
 
-### Performance model and pre-deployment sweeping
+## Performance model and pre-deployment sweeping
 
 <ParamField path="pre_deployment_sweeping_mode" type="string" default="rapid">
   How to generate optional bootstrap performance data. `none` skips bootstrap data; `rapid` uses AIConfigurator to simulate engine performance (~30s); `thorough` measures on real GPUs (several hours).
@@ -284,7 +150,7 @@ Only `model` is required; every other field has a default or is auto-detected.
   AIConfigurator interpolation spec. Populated by the profiler in rapid mode and written onto the Planner ConfigMap; you do not normally set this by hand. When present, the Planner runs the AIC sweep in-process at bootstrap to seed the performance model. See [AICInterpolationSpec](#aicinterpolationspec).
 </ParamField>
 
-### GPU budget
+## GPU budget
 
 <ParamField path="max_gpu_budget" type="integer" default="8">
   Maximum total GPUs the Planner may allocate across worker types.
@@ -306,7 +172,7 @@ Only `model` is required; every other field has a default or is auto-detected.
   GPUs per prefill engine replica. Auto-detected from the deployment when unset.
 </ParamField>
 
-### Throughput-based scaling
+## Throughput-based scaling
 
 <ParamField path="throughput_adjustment_interval_seconds" type="integer" default="180">
   Seconds between throughput-based scaling decisions. Also accepts the alias `throughput_adjustment_interval`.
@@ -318,7 +184,7 @@ Only `model` is required; every other field has a default or is auto-detected.
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>frontend</Badge> <Badge intent="note" minimal>router</Badge></span>
 </ParamField>
 
-### Load-based scaling
+## Load-based scaling
 
 <ParamField path="load_adjustment_interval_seconds" type="integer" default="5">
   Seconds between FPM tuning updates and load-based scaling decisions. Even when only throughput scaling is enabled, live FPM observations feed the performance model at this interval. Also accepts the alias `load_adjustment_interval`. Must be greater than 0 and, when both scaling modes are on, shorter than `throughput_adjustment_interval_seconds`.
@@ -360,7 +226,7 @@ Only `model` is required; every other field has a default or is auto-detected.
   Manual fallback speculative-decoding depth. A worker's published `runtime_config.runtime_data.spec_decode.nextn` takes precedence when present. Must be 0 or greater.
 </ParamField>
 
-### Load prediction
+## Load prediction
 
 <ParamField path="load_predictor" type="string" default="arima">
   Prediction method for request count, ISL, and OSL.
@@ -396,12 +262,12 @@ Only `model` is required; every other field has a default or is auto-detected.
   Minimum data points before Kalman predictions activate.
 </ParamField>
 
-### Prometheus metrics
+## Prometheus metrics
 
-These fields default from environment variables and are excluded from serialized output.
+These fields default from environment variables and are excluded from serialized output. Set them in the config object or through the noted environment variable.
 
 <ParamField path="metric_pulling_prometheus_endpoint" type="string" default="env PROMETHEUS_ENDPOINT">
-  Prometheus endpoint the Planner queries for traffic metrics. Defaults to `PROMETHEUS_ENDPOINT`, else the in-cluster `kube-prometheus` service URL.
+  Prometheus endpoint the Planner queries for traffic metrics. Defaults to `PROMETHEUS_ENDPOINT`, else `http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090`.
 </ParamField>
 
 <ParamField path="metric_pulling_prometheus_token" type="string" default="env PROMETHEUS_TOKEN">
@@ -428,11 +294,13 @@ These fields default from environment variables and are excluded from serialized
   Port on which the Planner exposes its own `dynamo_planner_*` metrics. Defaults from `PLANNER_PROMETHEUS_PORT`. `0` disables.
 </ParamField>
 
-### Advisory and diagnostics
+## Advisory mode
 
 <ParamField path="advisory" type="boolean" default="false">
   Suggestion-only mode. The Planner computes, logs, exports, and reports recommended replica counts without executing scaling actions or changing the deployment. Use it to evaluate a new configuration or validate SLA targets against production traffic.
 </ParamField>
+
+## Diagnostics and reporting
 
 <ParamField path="report_interval_hours" type="number" default="24.0">
   Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable. Must be a positive finite number or `null`.
@@ -454,7 +322,9 @@ These fields default from environment variables and are excluded from serialized
   Port for the live diagnostics dashboard HTTP server. `0` disables. When enabled, visit `http://host:port/` for a real-time Plotly report.
 </ParamField>
 
-### Scheduling and plugin pipeline
+## Scheduling and plugin pipeline
+
+The Planner runs the builtin plugin pipeline by default. `scheduling` controls pipeline cadence; `plugin_registration` controls how plugins register, authenticate, and communicate. For the pipeline model, see the [Planner Guide](planner-guide.md#scheduling--plugin-pipeline).
 
 <ParamField path="scheduling" type="SchedulingConfig">
   Plugin-pipeline scheduling. Rejects unknown fields.
@@ -546,133 +416,13 @@ These fields default from environment variables and are excluded from serialized
   </Indent>
 </Indent>
 
-<Note>
-  `spec.overrides.dgd` is not required to enable the Planner. Use `spec.features.planner` for Planner enablement and configuration; use `spec.overrides.dgd` only to customize the generated DGD after DGDR assembles it. For the deployment workflow, scaling-mode concepts, and cross-field validation rules, see the [Planner Configuration reference](../components/planner/planner-config-reference.mdx) and [Planner Guide](../components/planner/planner-guide.md).
-</Note>
+## Additional types
 
-## Generated DGD overrides
-
-`spec.overrides.dgd` is a partial `nvidia.com/v1alpha1` DGD object merged into the profiler-generated deployment after Dynamo selects a configuration. Use it when the generated DGD needs a field that DGDR does not expose directly — including router mode, KV-event publication, and other frontend or worker settings, since DGDR does not yet expose first-class router or EPP features. `overrides.dgd` only patches components that already exist in the generated DGD; it cannot add a missing component (such as an `Epp`). Component names depend on the selected backend and topology, so inspect the generated DGD first, especially when `autoApply: false`.
-
-```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: qwen3-sglang
-spec:
-  model: Qwen/Qwen3-30B-A3B
-  backend: sglang
-  overrides:
-    dgd:
-      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
-      kind: DynamoGraphDeployment
-      spec:
-        envs:
-          - name: TRITON_PTXAS_PATH
-            value: /usr/local/cuda/bin/ptxas
-```
-
-<Note>
-  `overrides.profilingJob` only customizes the profiling Job. Use `overrides.dgd` for settings that must appear on the deployed worker pods.
-</Note>
-
-For worked examples — per-component env overrides, enabling KV-aware routing on the generated frontend, worker KV-event publication, and EPP/gateway topologies — see [DGDR Examples](dgdr-examples.md), [Router Guide](../components/router/router-guide.md), and [Gateway API Inference Extension](inference-gateway.md).
-
-## SKU format
-
-`hardware.gpuSku` uses lowercase underscore format (`h100_sxm`, not `H100-SXM5-80GB`).
-
-<span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>gb200_sxm</Badge> <Badge intent="note" minimal>gb10</Badge> <Badge intent="note" minimal>b200_sxm</Badge> <Badge intent="note" minimal>h200_sxm</Badge> <Badge intent="note" minimal>h100_sxm</Badge> <Badge intent="note" minimal>h100_pcie</Badge> <Badge intent="note" minimal>a100_sxm</Badge> <Badge intent="note" minimal>a100_pcie</Badge> <Badge intent="note" minimal>a30</Badge> <Badge intent="note" minimal>l40s</Badge> <Badge intent="note" minimal>l40</Badge> <Badge intent="note" minimal>l4</Badge> <Badge intent="note" minimal>v100_sxm</Badge> <Badge intent="note" minimal>v100_pcie</Badge> <Badge intent="note" minimal>t4</Badge> <Badge intent="note" minimal>mi200</Badge> <Badge intent="note" minimal>mi300</Badge></span>
-
-<Note>
-  Not all SKUs are supported by the AIC profiler for `rapid` mode.
-</Note>
-
-<Warning>
-  **PCIe variants not yet supported by the profiler.** The CRD admits PCIe SKUs (`h100_pcie`, `a100_pcie`, `v100_pcie`), but the profiler does not currently ship training data for them. You can submit a DGDR with a PCIe value; the operator accepts it but profiler-assisted sizing falls back to defaults. Profiler support for PCIe SKUs is tracked as an engineering follow-up.
-</Warning>
-
-## Status
-
-The operator maintains observed state under `status`. See [Lifecycle](#lifecycle) for how `phase` and `profilingPhase` progress, and for the full condition-type list.
-
-<ParamField path="status.phase" type="DGDRPhase">
-  High-level lifecycle phase of the deployment request.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Pending</Badge> <Badge intent="note" minimal>Profiling</Badge> <Badge intent="note" minimal>Ready</Badge> <Badge intent="note" minimal>Deploying</Badge> <Badge intent="note" minimal>Deployed</Badge> <Badge intent="note" minimal>Failed</Badge></span>
-</ParamField>
-
-<ParamField path="status.profilingPhase" type="ProfilingPhase">
-  Current sub-phase of the profiling pipeline. Only meaningful while `phase` is `Profiling`; cleared when profiling completes or fails.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Initializing</Badge> <Badge intent="note" minimal>SweepingPrefill</Badge> <Badge intent="note" minimal>SweepingDecode</Badge> <Badge intent="note" minimal>SelectingConfig</Badge> <Badge intent="note" minimal>BuildingCurves</Badge> <Badge intent="note" minimal>GeneratingDGD</Badge> <Badge intent="note" minimal>Done</Badge></span>
-</ParamField>
-
-<ParamField path="status.dgdName" type="string">
-  Name of the generated or created `DynamoGraphDeployment`.
-</ParamField>
-
-<ParamField path="status.profilingJobName" type="string">
-  Name of the Kubernetes Job running the profiler.
-</ParamField>
-
-<ParamField path="status.conditions" type="[]metav1.Condition">
-  Latest observed conditions. Standard types include `Succeeded`, `Validation`, `Profiling`, `SpecGenerated`, and `DeploymentReady` — see [Conditions](#conditions).
-
-  <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/apis/meta/v1#Condition" target="_blank">metav1.Condition</a>
-</ParamField>
-
-<ParamField path="status.profilingResults" type="ProfilingResultsStatus">
-  Output of the profiling process — Pareto-optimal configurations and the selected deployment configuration.
-</ParamField>
-
-<Indent>
-  <ParamField path="pareto" type="[]ParetoConfig">
-    Pareto-optimal deployment configurations discovered during profiling. Each entry represents a different cost/performance trade-off.
-
-    See: [ParetoConfig](#paretoconfig)
-  </ParamField>
-  <ParamField path="selectedConfig" type="runtime.RawExtension">
-    Recommended configuration chosen by the profiler based on the SLA targets. This is the configuration used for deployment when `autoApply` is `true`.
-
-    <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
-  </ParamField>
-</Indent>
-
-<ParamField path="status.deploymentInfo" type="DeploymentInfoStatus">
-  State of the deployed `DynamoGraphDeployment`. Populated once a DGD has been created (via `autoApply` or manually).
-</ParamField>
-
-<Indent>
-  <ParamField path="replicas" type="integer">
-    Desired number of replicas.
-  </ParamField>
-  <ParamField path="availableReplicas" type="integer">
-    Number of replicas that are available and ready.
-  </ParamField>
-</Indent>
-
-<ParamField path="status.observedGeneration" type="integer">
-  Most recent `metadata.generation` observed by the controller.
-</ParamField>
-
-## Additional Types
-
-Nested struct types referenced by the fields above, broken out here to keep the field lists shallow. Types prefixed `batch/v1.`, `metav1.`, or `runtime.` are standard Kubernetes types and link to their Go package documentation instead of being expanded.
-
-### ParetoConfig
-
-A single Pareto-optimal deployment configuration discovered during profiling. Referenced by `status.profilingResults.pareto`.
-
-<ParamField path="config" type="runtime.RawExtension">
-  Full deployment configuration for this Pareto point.
-
-  <a href="https://pkg.go.dev/k8s.io/apimachinery/pkg/runtime#RawExtension" target="_blank">runtime.RawExtension</a>
-</ParamField>
+Nested object types referenced above, broken out to keep the field lists shallow.
 
 ### PickedParallelConfig
 
-A parallelism pick emitted by AIConfigurator. Referenced by `features.planner.aic_perf_model.prefill_pick` / `decode_pick` and by [AICInterpolationSpec](#aicinterpolationspec).
+A parallelism pick emitted by AIConfigurator. Referenced by `aic_perf_model.prefill_pick` / `decode_pick` and by `AICInterpolationSpec`.
 
 <ParamField path="tp" type="integer" default="1">
   Tensor-parallel size.
@@ -692,7 +442,7 @@ A parallelism pick emitted by AIConfigurator. Referenced by `features.planner.ai
 
 ### AICInterpolationSpec
 
-Everything the Planner needs to reproduce a rapid-mode AIC sweep. Written by the profiler onto the Planner ConfigMap; not normally hand-authored. Referenced by `features.planner.aic_interpolation`.
+Everything the Planner needs to reproduce a rapid-mode AIC sweep. Written by the profiler onto the Planner ConfigMap; not normally hand-authored.
 
 <ParamField path="hf_id" type="string" required={true}>
   HuggingFace model id.
@@ -727,7 +477,7 @@ Everything the Planner needs to reproduce a rapid-mode AIC sweep. Written by the
 
 ### ExternalPluginEntry
 
-One static external-plugin registration under `features.planner.scheduling.external_plugins`. Rejects unknown fields.
+One static external-plugin registration under `scheduling.external_plugins`. Rejects unknown fields.
 
 <ParamField path="plugin_id" type="string" required={true}>
   Unique identifier. Must not collide with a builtin plugin id.
@@ -772,7 +522,7 @@ One static external-plugin registration under `features.planner.scheduling.exter
 
 ### InProcessPluginSpec
 
-One in-process plugin under `features.planner.plugin_registration.in_process_plugins`. Rejects unknown fields.
+One in-process plugin under `plugin_registration.in_process_plugins`. Rejects unknown fields.
 
 <ParamField path="module" type="string" required={true}>
   Python module path containing the plugin class.
@@ -810,80 +560,53 @@ One in-process plugin under `features.planner.plugin_registration.in_process_plu
   Keyword arguments passed to the plugin class constructor.
 </ParamField>
 
-## Lifecycle
+## Environment variables
 
-When you create a DGDR, it progresses through these phases (`status.phase`):
+The Planner reads these environment variables. The Prometheus and namespace variables set the defaults for the config fields noted above; the rest control runtime behavior for specific environments.
 
-| Phase | What is happening |
-|---|---|
-| `Pending` | Spec validated; operator is discovering GPU hardware and preparing the profiling job |
-| `Profiling` | Profiling job running — sub-phases in `status.profilingPhase`: `Initializing`, `SweepingPrefill`, `SweepingDecode`, `SelectingConfig`, `BuildingCurves`, `GeneratingDGD`, `Done` |
-| `Ready` | Profiling complete; optimal config stored in `status.profilingResults.selectedConfig`. Terminal state when `autoApply: false`. |
-| `Deploying` | Creating the DGD (only when `autoApply: true`) |
-| `Deployed` | DGD is running and healthy |
-| `Failed` | Unrecoverable error — profiling failures are not retried (`backoffLimit: 0`); check events and conditions for details |
+| Variable | Effect | Default |
+|---|---|---|
+| `DYN_NAMESPACE` | Default for `namespace`. Operator injects `{k8s_namespace}-{dgd_name}`. | `dynamo` |
+| `PROMETHEUS_ENDPOINT` | Default for `metric_pulling_prometheus_endpoint`. | in-cluster URL |
+| `PROMETHEUS_TOKEN` | Default for `metric_pulling_prometheus_token`. | unset |
+| `PROMETHEUS_TOKEN_FILE` | Default for `metric_pulling_prometheus_token_file`. | unset |
+| `PROMETHEUS_SSL_VERIFY` | Default for `metric_pulling_prometheus_ssl_verify` (`1`/`true`/`yes`). | `false` |
+| `PROMETHEUS_EXTRA_QUERY_PARAMS` | Default for `metric_pulling_prometheus_extra_query_params` (URL query string). | unset |
+| `PROMETHEUS_CA_BUNDLE` | Default for `metric_pulling_prometheus_ca_bundle`. | unset |
+| `PLANNER_PROMETHEUS_PORT` | Default for `metric_reporting_prometheus_port`. | `0` |
+| `DYN_PARENT_DGD_K8S_NAME` | Parent DGD name for the GlobalPlanner connector (`environment: global-planner`). | required |
+| `POD_NAMESPACE` | Kubernetes namespace for the GlobalPlanner connector. | required |
+| `SCALING_CHECK_INTERVAL` | Poll interval (seconds) for the virtual environment connector (`environment: virtual`). | `10` |
+| `SCALING_MAX_WAIT_TIME` | Maximum wait (seconds) for a scaling action in the virtual environment. | `1800` |
+| `DYNAMO_PLANNER_TEST` | Test-only. Must be `1` to allow the virtual clock. Not for production. | unset |
 
-### Conditions
+## Validation rules
 
-The operator maintains these conditions on `status.conditions`:
+The Planner enforces these cross-field rules at startup and rejects a config that violates any of them:
 
-| Condition | Meaning |
-|---|---|
-| `Validation` | Spec validation passed or failed |
-| `Profiling` | Profiling job is running, succeeded, or failed |
-| `SpecGenerated` | Generated DGD spec is available |
-| `DeploymentReady` | DGD is deployed and healthy |
-| `Succeeded` | Aggregate condition — true when the DGDR has reached its target state |
-
-### Monitoring
-
-```bash
-# Watch phase transitions
-kubectl get dgdr my-model -n $NAMESPACE -w
-
-# Detailed status, conditions, and events
-kubectl describe dgdr my-model -n $NAMESPACE
-
-# Profiling sub-phase
-kubectl get dgdr my-model -n $NAMESPACE -o jsonpath='{.status.profilingPhase}'
-
-# Profiling job logs
-kubectl get pods -n $NAMESPACE -l nvidia.com/dgdr-name=my-model
-kubectl logs -f <profiling-pod-name> -n $NAMESPACE
-
-# View generated DGD spec (when autoApply: false)
-kubectl get dgdr my-model -n $NAMESPACE \
-  -o jsonpath='{.status.profilingResults.selectedConfig}' | python3 -m json.tool
-
-# View Pareto-optimal configs from profiling
-kubectl get dgdr my-model -n $NAMESPACE \
-  -o jsonpath='{.status.profilingResults.pareto}'
-```
-
-### Resource ownership
-
-- The DGDR does **not** set an owner reference on the DGD it creates. Deleting a DGDR does not delete the DGD — it persists independently so it can continue serving traffic.
-- The relationship is tracked via labels: `dgdr.nvidia.com/name` and `dgdr.nvidia.com/namespace`.
-- Additional resources (planner ConfigMaps) are created in the same namespace and labeled with `dgdr.nvidia.com/name`.
-
-## Known issues
-
-- **`pareto_analysis.py` produces NaN for some configurations.** Tracked as an engineering follow-up. Workaround: re-run with a narrower sweep; narrow sweeps bypass the NaN path in practice.
-- **PCIe profiler data not yet available.** See the PCIe callout under [SKU format](#sku-format).
+- `ttft_ms` must be greater than 0.
+- `report_interval_hours` must be a positive finite number or `null`.
+- `fpm_sample_bucket_size` must be a perfect square.
+- `global_planner_namespace` is required when `environment` is `global-planner`.
+- Under `optimization_target: load`, prefill modes require `prefill_scale_up_queue_tokens` > `prefill_scale_down_queue_tokens`, and decode modes require `decode_scale_up_kv_rate` > `decode_scale_down_kv_rate`.
+- At least one scaling mode must be enabled. Under any `optimization_target` other than `sla`, the Planner forces load scaling on and throughput scaling off and ignores `ttft_ms` / `itl_ms`.
+- When `aic_perf_model` is set, `prefill_pick` is required for `mode` `disagg`/`prefill` and `decode_pick` for `mode` `disagg`/`decode`/`agg`.
+- `scheduling.scale_interval_seconds` must evenly divide `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`.
+- When both scaling modes are enabled, `load_adjustment_interval_seconds` must be shorter than `throughput_adjustment_interval_seconds`.
 
 ## Related pages
 
 <CardGroup cols={2}>
-  <Card title="Auto Deploy with DGDR" icon="wand-magic-sparkles" href="dgdr-guide.md">
-    Step-by-step walkthrough of authoring a request.
+  <Card title="Planner Guide" icon="book" href="planner-guide.md">
+    Deployment workflow, scaling modes, and profiler integration.
   </Card>
-  <Card title="DGDR Examples" icon="file-code" href="dgdr-examples.md">
-    Ready-to-copy manifests for SLA targets, private models, MoE, and overrides.
+  <Card title="Planner Overview" icon="circle-info" href="README.md">
+    Why LLM inference needs a different autoscaler.
   </Card>
-  <Card title="DGD Reference" icon="diagram-project" href="dgd-reference.mdx">
-    The resource DGDR generates.
+  <Card title="DGDR Reference" icon="diagram-project" href="../../kubernetes/dgdr-reference.mdx">
+    The custom resource whose `spec.features.planner` carries this config.
   </Card>
-  <Card title="Profiler Guide" icon="magnifying-glass-chart" href="../components/profiler/profiler-guide.md">
-    Profiling algorithms, modes, and gate checks.
+  <Card title="Environment Variables" icon="terminal" href="../../reference/observability/environment-variables.mdx">
+    Observability environment variables shared across Dynamo processes.
   </Card>
 </CardGroup>

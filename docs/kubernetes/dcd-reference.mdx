@@ -176,7 +176,7 @@ Nested struct types referenced by the fields above, broken out here to keep the 
 
 ### ExperimentalSpec
 
-Groups opt-in preview features for a component. Referenced by `experimental`.
+Groups opt-in preview features for a component. Referenced by `experimental`. Nested types (`GMSClientPodSpec`, `ComponentCheckpointJobConfig`, `DynamoCheckpointIdentity`) are expanded inline under the field that references them.
 
 <Warning>
   These preview features can change or disappear between `v1beta1` releases without a name-preserving graduation path. They are excluded from the `v1beta1` deprecation policy — do not rely on them for production workloads.
@@ -184,175 +184,124 @@ Groups opt-in preview features for a component. Referenced by `experimental`.
 
 <ParamField path="gpuMemoryService" type="GPUMemoryServiceSpec">
   Configures the GPU Memory Service (GMS). When set, GPU access for GMS clients is managed through Dynamic Resource Allocation (DRA), and the operator replaces the `main` container's GPU resources with a DRA `ResourceClaim`.
-
-  See: [GPUMemoryServiceSpec](#gpumemoryservicespec)
 </ParamField>
+
+<Indent>
+  <ParamField path="mode" type="GPUMemoryServiceMode" default="IntraPod">
+    Selects the GMS deployment topology.
+
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>IntraPod</Badge> <Badge intent="note" minimal>InterPod</Badge></span>
+  </ParamField>
+  <ParamField path="deviceClassName" type="string" default="gpu.nvidia.com">
+    The DRA `DeviceClass` to request GPUs from.
+  </ParamField>
+  <ParamField path="extraClientContainers" type="[]string">
+    Additional user-declared containers that should be wired as GMS clients in service pods. Checkpoint Job clients are declared under the checkpoint job's `gmsClientContainers` instead. In each rendered pod, only matching container names are wired; absent names are ignored. Each name must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
+  </ParamField>
+  <ParamField path="extraClientPods" type="[]GMSClientPodSpec">
+    Additional GMS client pods for inter-pod GMS. Reserved for future use and rejected until inter-pod client orchestration is wired.
+  </ParamField>
+  <Indent>
+    <ParamField path="name" type="string" required={true}>
+      Identifies this client pod. Must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
+    </ParamField>
+    <ParamField path="podTemplate" type="core/v1.PodTemplateSpec" required={true}>
+      Configures the pod to run as a GMS client.
+
+      <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
+    </ParamField>
+  </Indent>
+</Indent>
 
 <ParamField path="failover" type="FailoverSpec">
   Configures active-passive GPU failover for a worker component. The `main` container is cloned into two engine containers (active + standby) sharing GPUs via DRA, and the standby acquires the flock when the active engine fails. Requires `gpuMemoryService` to be set, `failover.mode` to match `gpuMemoryService.mode`, and the `nvidia.com/dynamo-kube-discovery-mode: container` annotation on the DGD.
-
-  See: [FailoverSpec](#failoverspec)
 </ParamField>
+
+<Indent>
+  <ParamField path="mode" type="GPUMemoryServiceMode" default="IntraPod">
+    Failover deployment topology. Must match the GMS `mode` on the same component.
+
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>IntraPod</Badge> <Badge intent="note" minimal>InterPod</Badge></span>
+  </ParamField>
+  <ParamField path="numShadows" type="integer" default="1">
+    Number of shadow (standby) engine containers per rank. Reserved for future use; the operator currently creates exactly one shadow. Minimum `1`, maximum `1`.
+  </ParamField>
+</Indent>
 
 <ParamField path="checkpoint" type="ComponentCheckpointConfig">
   Configures container-image snapshotting and restore for the component. Set `checkpoint.enabled: true` to opt in; omit `checkpointRef` for a DGD-managed automatic checkpoint, or set it to restore an existing [DynamoCheckpoint](snapshot.md).
-
-  See: [ComponentCheckpointConfig](#componentcheckpointconfig)
 </ParamField>
 
-### GPUMemoryServiceSpec
+<Indent>
+  <ParamField path="enabled" type="boolean" required={true}>
+    Whether checkpointing is enabled for this component. When `true`, omit `checkpointRef` for a DGD-managed automatic checkpoint, or set `checkpointRef` to restore an existing checkpoint. Omit the `checkpoint` block, or set `enabled: false`, to disable checkpointing.
+  </ParamField>
+  <ParamField path="startupPolicy" type="CheckpointStartupPolicy" default="Immediate">
+    When normal worker replicas are started relative to automatic checkpoint readiness. `Immediate` starts workers cold immediately, and later pods restore from the checkpoint once it is Ready. `WaitForCheckpoint` keeps worker replicas at zero until the checkpoint is Ready, then starts them from it.
 
-Configures the GPU Memory Service (GMS) for a worker component. Referenced by `experimental.gpuMemoryService`.
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Immediate</Badge> <Badge intent="note" minimal>WaitForCheckpoint</Badge></span>
+  </ParamField>
+  <ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
+    Whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit `checkpointRef` checkpoints are never owned or deleted by the DGD.
 
-<ParamField path="mode" type="GPUMemoryServiceMode" default="IntraPod">
-  Selects the GMS deployment topology.
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Delete</Badge> <Badge intent="note" minimal>Retain</Badge></span>
+  </ParamField>
+  <ParamField path="checkpointRef" type="string">
+    References an existing `DynamoCheckpoint` CR by `metadata.name`. When set, this component's `identity` is ignored and the referenced checkpoint is used directly.
+  </ParamField>
+  <ParamField path="targetContainerName" type="string" default="main">
+    The workload container to snapshot and restore. Must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
+  </ParamField>
+  <ParamField path="job" type="ComponentCheckpointJobConfig">
+    Customizes the DGD-managed checkpoint Job.
+  </ParamField>
+  <Indent>
+    <ParamField path="gmsClientContainers" type="[]string">
+      Checkpoint Job containers that should receive GMS client wiring. Requires `gpuMemoryService` on the component. Each name must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
+    </ParamField>
+    <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
+      Customizes the checkpoint Job pod. The operator starts from the selected workload container and merges this template, so you can add helper containers such as `gms-saver`.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>IntraPod</Badge> <Badge intent="note" minimal>InterPod</Badge></span>
-</ParamField>
+      <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
+    </ParamField>
+  </Indent>
+  <ParamField path="mode" type="CheckpointMode" deprecated={true}>
+    Deprecated: omit `mode`. Use `enabled: true` without `checkpointRef` for a DGD-managed automatic checkpoint, or use `checkpointRef` to restore a named checkpoint.
 
-<ParamField path="deviceClassName" type="string" default="gpu.nvidia.com">
-  The DRA `DeviceClass` to request GPUs from.
-</ParamField>
+    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Auto</Badge> <Badge intent="note" minimal>Manual</Badge></span>
+  </ParamField>
+  <ParamField path="identity" type="DynamoCheckpointIdentity" deprecated={true}>
+    Deprecated: omit for DGD-managed checkpoints; no action is needed. Use `checkpointRef` to restore an existing checkpoint. Legacy checkpoint identity duplicated from `v1alpha1`; `DynamoCheckpoint` itself remains `v1alpha1`.
+  </ParamField>
+  <Indent>
+    <ParamField path="model" type="string" required={true} deprecated={true}>
+      Model identifier, for example `meta-llama/Llama-3-70B`.
+    </ParamField>
+    <ParamField path="backendFramework" type="string" required={true} deprecated={true}>
+      Runtime framework.
 
-<ParamField path="extraClientContainers" type="[]string">
-  Additional user-declared containers that should be wired as GMS clients in service pods. Checkpoint Job clients are declared under [ComponentCheckpointJobConfig](#componentcheckpointjobconfig) `gmsClientContainers` instead. In each rendered pod, only matching container names are wired; absent names are ignored. Each name must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
-</ParamField>
-
-<ParamField path="extraClientPods" type="[]GMSClientPodSpec">
-  Additional GMS client pods for inter-pod GMS. Reserved for future use and rejected until inter-pod client orchestration is wired.
-
-  See: [GMSClientPodSpec](#gmsclientpodspec)
-</ParamField>
-
-### FailoverSpec
-
-Configures active-passive failover for a worker component. Referenced by `experimental.failover`.
-
-<ParamField path="mode" type="GPUMemoryServiceMode" default="IntraPod">
-  Failover deployment topology. Must match the GMS `mode` on the same component.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>IntraPod</Badge> <Badge intent="note" minimal>InterPod</Badge></span>
-</ParamField>
-
-<ParamField path="numShadows" type="integer" default="1">
-  Number of shadow (standby) engine containers per rank. Reserved for future use; the operator currently creates exactly one shadow. Minimum `1`, maximum `1`.
-</ParamField>
-
-### ComponentCheckpointConfig
-
-Configures checkpointing for a DGD component. Referenced by `experimental.checkpoint`.
-
-<ParamField path="enabled" type="boolean" required={true}>
-  Whether checkpointing is enabled for this component. When `true`, omit `checkpointRef` for a DGD-managed automatic checkpoint, or set `checkpointRef` to restore an existing checkpoint. Omit the `checkpoint` block, or set `enabled: false`, to disable checkpointing.
-</ParamField>
-
-<ParamField path="startupPolicy" type="CheckpointStartupPolicy" default="Immediate">
-  When normal worker replicas are started relative to automatic checkpoint readiness. `Immediate` starts workers cold immediately, and later pods restore from the checkpoint once it is Ready. `WaitForCheckpoint` keeps worker replicas at zero until the checkpoint is Ready, then starts them from it.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Immediate</Badge> <Badge intent="note" minimal>WaitForCheckpoint</Badge></span>
-</ParamField>
-
-<ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
-  Whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit `checkpointRef` checkpoints are never owned or deleted by the DGD.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Delete</Badge> <Badge intent="note" minimal>Retain</Badge></span>
-</ParamField>
-
-<ParamField path="checkpointRef" type="string">
-  References an existing `DynamoCheckpoint` CR by `metadata.name`. When set, this component's `identity` is ignored and the referenced checkpoint is used directly.
-</ParamField>
-
-<ParamField path="targetContainerName" type="string" default="main">
-  The workload container to snapshot and restore. Must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
-</ParamField>
-
-<ParamField path="job" type="ComponentCheckpointJobConfig">
-  Customizes the DGD-managed checkpoint Job.
-
-  See: [ComponentCheckpointJobConfig](#componentcheckpointjobconfig)
-</ParamField>
-
-<ParamField path="mode" type="CheckpointMode" deprecated={true}>
-  Deprecated: omit `mode`. Use `enabled: true` without `checkpointRef` for a DGD-managed automatic checkpoint, or use `checkpointRef` to restore a named checkpoint.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Auto</Badge> <Badge intent="note" minimal>Manual</Badge></span>
-</ParamField>
-
-<ParamField path="identity" type="DynamoCheckpointIdentity" deprecated={true}>
-  Deprecated: omit for DGD-managed checkpoints; no action is needed. Use `checkpointRef` to restore an existing checkpoint.
-
-  See: [DynamoCheckpointIdentity](#dynamocheckpointidentity)
-</ParamField>
-
-### GMSClientPodSpec
-
-Declares an additional GMS client pod for inter-pod GMS. Referenced by [GPUMemoryServiceSpec](#gpumemoryservicespec) `extraClientPods`.
-
-<ParamField path="name" type="string" required={true}>
-  Identifies this client pod. Must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
-</ParamField>
-
-<ParamField path="podTemplate" type="core/v1.PodTemplateSpec" required={true}>
-  Configures the pod to run as a GMS client.
-
-  <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
-</ParamField>
-
-### ComponentCheckpointJobConfig
-
-Customizes the checkpoint Job created for a DGD component. Referenced by [ComponentCheckpointConfig](#componentcheckpointconfig) `job`.
-
-<ParamField path="gmsClientContainers" type="[]string">
-  Checkpoint Job containers that should receive GMS client wiring. Requires `gpuMemoryService` on the component. Each name must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
-</ParamField>
-
-<ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
-  Customizes the checkpoint Job pod. The operator starts from the selected workload container and merges this template, so you can add helper containers such as `gms-saver`.
-
-  <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
-</ParamField>
-
-### DynamoCheckpointIdentity
-
-<Warning>
-  Deprecated. Omit in DGD component checkpoint configs — `Auto` needs no replacement; use `checkpointRef` for explicit restores. Duplicated from `v1alpha1`; `DynamoCheckpoint` itself remains `v1alpha1`.
-</Warning>
-
-Legacy checkpoint identity, referenced by [ComponentCheckpointConfig](#componentcheckpointconfig) `identity`.
-
-<ParamField path="model" type="string" required={true} deprecated={true}>
-  Model identifier, for example `meta-llama/Llama-3-70B`.
-</ParamField>
-
-<ParamField path="backendFramework" type="string" required={true} deprecated={true}>
-  Runtime framework.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
-</ParamField>
-
-<ParamField path="dynamoVersion" type="string" deprecated={true}>
-  Dynamo platform version.
-</ParamField>
-
-<ParamField path="tensorParallelSize" type="integer" default="1" deprecated={true}>
-  Tensor parallel configuration. Deprecated: checkpoint launch uses the pod template instead. Minimum `1`.
-</ParamField>
-
-<ParamField path="pipelineParallelSize" type="integer" default="1" deprecated={true}>
-  Pipeline parallel configuration. Deprecated: checkpoint launch uses the pod template instead. Minimum `1`.
-</ParamField>
-
-<ParamField path="dtype" type="string" deprecated={true}>
-  Data type, for example `fp16`, `bf16`, or `fp8`.
-</ParamField>
-
-<ParamField path="maxModelLen" type="integer" deprecated={true}>
-  Maximum sequence length. Minimum `1`.
-</ParamField>
-
-<ParamField path="extraParameters" type="map[string]string" deprecated={true}>
-  Additional parameters that affect the checkpoint hash.
-</ParamField>
+      <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
+    </ParamField>
+    <ParamField path="dynamoVersion" type="string" deprecated={true}>
+      Dynamo platform version.
+    </ParamField>
+    <ParamField path="tensorParallelSize" type="integer" default="1" deprecated={true}>
+      Tensor parallel configuration. Deprecated: checkpoint launch uses the pod template instead. Minimum `1`.
+    </ParamField>
+    <ParamField path="pipelineParallelSize" type="integer" default="1" deprecated={true}>
+      Pipeline parallel configuration. Deprecated: checkpoint launch uses the pod template instead. Minimum `1`.
+    </ParamField>
+    <ParamField path="dtype" type="string" deprecated={true}>
+      Data type, for example `fp16`, `bf16`, or `fp8`.
+    </ParamField>
+    <ParamField path="maxModelLen" type="integer" deprecated={true}>
+      Maximum sequence length. Minimum `1`.
+    </ParamField>
+    <ParamField path="extraParameters" type="map[string]string" deprecated={true}>
+      Additional parameters that affect the checkpoint hash.
+    </ParamField>
+  </Indent>
+</Indent>
 
 ## Inspect a DCD
 

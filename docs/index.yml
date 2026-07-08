@@ -648,8 +648,16 @@ navigation:
             path: kubernetes/dgdr-reference.mdx
           - page: DynamoComponentDeployment (DCD)
             path: kubernetes/dcd-reference.mdx
-          - page: Full API Reference (Fern Preview)
+          - page: Full API Reference
             path: kubernetes/api-reference-fern.mdx
+          - page: Planner Configuration
+            path: components/planner/planner-config-reference.mdx
+      # # ==================== Component Configuration ====================
+      # - section: Component Configuration
+      #   icon: sliders
+      #   contents:
+      #     - page: Planner Configuration
+      #       path: components/planner/planner-config-reference.mdx
 
       # ==================== Observability ====================
       - section: Observability

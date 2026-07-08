@@ -35,6 +35,9 @@ profiler, place this under `spec.features.planner` in the DGDR spec. Any
 PlannerConfig field listed below can be set there; DGDR passes that object to
 the Planner service for validation.
 
+> [!NOTE]
+> This section covers the most common fields. For every field, sub-object, default, and validation rule, see the [Planner Configuration reference](planner-config-reference.mdx).
+
 ```yaml
 spec:
   features:

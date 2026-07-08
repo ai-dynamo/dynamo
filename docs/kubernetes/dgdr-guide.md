@@ -280,7 +280,7 @@ spec:
                 value: kv
 ```
 
-DGDR does not yet expose first-class router or EPP/Gateway features, so routing is configured this way. Service names depend on the selected backend and topology — inspect the generated DGD first, especially when `autoApply: false`. For the full routing, worker KV-event, and override patterns, see [DGDR Reference — Routing](dgdr-reference.mdx#routing) and [Generated DGD Overrides](dgdr-reference.mdx#generated-dgd-overrides).
+DGDR does not yet expose first-class router or EPP/Gateway features, so routing is configured this way. Service names depend on the selected backend and topology — inspect the generated DGD first, especially when `autoApply: false`. For the full routing, worker KV-event, and override patterns, see [DGDR Reference — Generated DGD Overrides](dgdr-reference.mdx#generated-dgd-overrides) and the [Router Guide](../components/router/router-guide.md).
 
 > [!IMPORTANT]
 > `overrides.dgd` only patches services that already exist in the generated DGD — it cannot add a missing service (for example an `Epp` service for Gateway routing). For EPP/Gateway topologies, author a direct DGD or use a GAIE recipe; see [Inference Gateway](inference-gateway.md).
