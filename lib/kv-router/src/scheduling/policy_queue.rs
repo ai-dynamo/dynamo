@@ -277,9 +277,9 @@ impl<T> PolicyQueue<T> {
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
         self.pending_count = 0;
         for class in &mut self.classes {
-            retain_heap(&mut class.pending, &mut keep);
+            class.pending.retain(|entry| keep(entry.payload()));
             class.ready_by_worker.retain(|_, ready| {
-                retain_heap(ready, &mut keep);
+                ready.retain(|entry| keep(entry.payload()));
                 !ready.is_empty()
             });
             let mut stats = PolicyQueueStats::default();
@@ -495,14 +495,6 @@ fn make_entry<T>(
         snapshot,
         payload,
     }
-}
-
-fn retain_heap<T>(
-    pending: &mut BinaryHeap<PolicyQueueEntry<T>>,
-    keep: &mut impl FnMut(&T) -> bool,
-) {
-    let entries = std::mem::take(pending);
-    pending.extend(entries.into_iter().filter(|entry| keep(entry.payload())));
 }
 
 fn queue_rejection<T>(class: &PolicyClassQueue<T>, worker_count: usize) -> Option<QueueRejection> {
