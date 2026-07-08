@@ -11,6 +11,10 @@ homepage.workspace = true
 repository.workspace = true
 description = "Dynamo SGLang sidecar backend — drives an out-of-process SGLang engine over its native gRPC service through the backend-common LLMEngine trait."
 
+[package.metadata.cargo-machete]
+# Referenced by the protobuf client generated into OUT_DIR at build time.
+ignored = ["prost"]
+
 [[bin]]
 name = "dynamo-sglang-sidecar"
 path = "src/main.rs"
