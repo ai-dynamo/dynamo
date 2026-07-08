@@ -238,6 +238,7 @@ This creates a declarative way to manage LoRA adapters in your cluster.
 | `AWS_ALLOW_HTTP` | Allow HTTP connections | `true` |
 | `DYN_LORA_ENABLED` | Enable LoRA support | `true` |
 | `DYN_LORA_PATH` | Local cache path for LoRA files | `/tmp/dynamo_loras_minio` |
+| `LORA_DOWNLOAD_TIMEOUT_SECS` | Timeout for each remote LoRA file download | `3600` |
 | `BUCKET_NAME` | MinIO bucket name | `my-loras` |
 | `HF_HOME` | Hugging Face cache root used by direct `hf://` sources | `~/.cache/huggingface` |
 | `HF_HUB_CACHE` | Override for the Hugging Face repository cache | `$HF_HOME/hub` |
