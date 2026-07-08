@@ -153,7 +153,6 @@ def _test_router_basic(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     router_mode: str = "kv",
-    enforce_disagg: bool = False,
     min_initial_workers: int | None = None,
 ):
     """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
@@ -177,7 +176,6 @@ def _test_router_basic(
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: Request plane to use ("nats", "tcp"). Defaults to "nats".
         router_mode: Router mode ("kv", "round-robin", "random", "power-of-two", "direct"). Defaults to "kv".
-        enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
         min_initial_workers: Optional frontend startup worker gate. Defaults to None.
 
     Raises:
@@ -190,7 +188,6 @@ def _test_router_basic(
         frontend_port,
         engine_workers.namespace,
         store_backend,
-        enforce_disagg=enforce_disagg,
         request_plane=request_plane,
         router_mode=router_mode,
         min_initial_workers=min_initial_workers,
@@ -1120,8 +1117,8 @@ def _probe_overload_529_and_assert(
     """Send staggered streaming requests until the router rejects with 529.
 
     Shared core for the aggregated and disaggregated overload tests. The caller
-    is responsible for starting the frontend (with the desired thresholds and,
-    for disagg, ``enforce_disagg=True``) and for waiting until it is ready.
+    is responsible for starting the frontend with the desired thresholds and
+    waiting until it is ready.
 
     Sends unique (shuffled) prompts 0.1s apart until the router rejects, then
     asserts:
@@ -1335,11 +1332,10 @@ def _test_disagg_router_overload_529(
     """Verify disaggregated load-shedding: clients get 529 when the gated pool is busy.
 
     Assumes the prefill and decode workers are already running (kept alive by the
-    caller); this function owns the frontend (router) lifecycle. The frontend is
-    started with ``--enforce-disagg`` so prefill and decode are routed by separate
-    pools — and so the model only becomes ready (listed in ``/v1/models``) once the
-    prefill router has activated, meaning the readiness wait below already gates on
-    prefill registration.
+    caller); this function owns the frontend (router) lifecycle. Registered
+    prefill and decode worker types establish separate pools. The model only
+    becomes ready (listed in ``/v1/models``) once both worker types are available,
+    so the readiness wait below gates on prefill registration.
 
     Two configurations exercise the two pools (driven by the thresholds the
     caller passes):
@@ -1362,7 +1358,6 @@ def _test_disagg_router_overload_529(
         frontend_port=frontend_port,
         namespace=decode_workers.namespace,
         store_backend=store_backend,
-        enforce_disagg=True,
         blocks_threshold=blocks_threshold,
         tokens_threshold=tokens_threshold,
         tokens_threshold_frac=tokens_threshold_frac,
@@ -2183,7 +2178,6 @@ def _test_router_decisions_disagg(
         frontend_port,
         decode_workers.namespace,
         store_backend,
-        enforce_disagg=True,
         request_plane=request_plane,
         durable_kv_events=durable_kv_events,
         min_initial_workers=decode_workers.num_workers,
@@ -2383,7 +2377,6 @@ def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
         block_size,
         frontend_port,
         namespace=decode_workers.namespace,
-        enforce_disagg=True,
         request_plane=request_plane,
         min_initial_workers=decode_workers.num_workers,
     ):
@@ -2513,7 +2506,6 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
         frontend_port,
         decode_workers.namespace,
         store_backend,
-        enforce_disagg=True,
         request_plane=request_plane,
         router_mode="round-robin",
         min_initial_workers=decode_workers.num_workers,
@@ -3354,7 +3346,6 @@ def _test_disagg_direct_mode(
         BLOCK_SIZE,
         frontend_port,
         decode_workers.namespace,
-        enforce_disagg=True,
         request_plane=request_plane,
         router_mode="direct",
     ):

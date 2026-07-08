@@ -593,7 +593,7 @@ func (v *dynamoGraphDeploymentValidation) shouldValidateGroveClusterTopology(err
 }
 
 func (v *dynamoGraphDeploymentValidation) readGroveClusterTopology(ctx context.Context, name string) (*clusterTopologyInfo, error) {
-	ct := &grovev1alpha1.ClusterTopology{}
+	ct := &grovev1alpha1.ClusterTopologyBinding{}
 	if err := v.mgr.GetClient().Get(ctx, types.NamespacedName{Name: name}, ct); err != nil {
 		return nil, err
 	}
@@ -623,10 +623,10 @@ func (v *dynamoGraphDeploymentValidation) validateTopologyDomainsAgainstGroveClu
 	info, err := v.readGroveClusterTopology(ctx, profileName)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			return fmt.Errorf("topology-aware scheduling requires a ClusterTopology resource %q but it was not found; "+
+			return fmt.Errorf("topology-aware scheduling requires a ClusterTopologyBinding resource %q but it was not found; "+
 				"ensure the cluster topology is configured per the framework documentation", profileName)
 		}
-		return fmt.Errorf("failed to read ClusterTopology %q for topology validation: %w", profileName, err)
+		return fmt.Errorf("failed to read ClusterTopologyBinding %q for topology validation: %w", profileName, err)
 	}
 	if info == nil {
 		return nil
@@ -656,7 +656,7 @@ func (v *dynamoGraphDeploymentValidation) validateTopologyDomainsAgainstGroveClu
 	var errs []error
 	for _, c := range checks {
 		if _, ok := info.domainIndex[string(c.domain)]; !ok {
-			errs = append(errs, fmt.Errorf("%s: domain %q does not exist in ClusterTopology %q; "+
+			errs = append(errs, fmt.Errorf("%s: domain %q does not exist in ClusterTopologyBinding %q; "+
 				"available domains: %v", c.fieldPath, c.domain, profileName, info.domains))
 		}
 	}
@@ -824,10 +824,10 @@ func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicyAgainstGroveCl
 	info, err := v.readGroveClusterTopology(ctx, kvt.ClusterTopologyName)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			return fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopology resource that was not found",
+			return fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopologyBinding resource that was not found",
 				kvt.ClusterTopologyName)
 		}
-		return fmt.Errorf("failed to read ClusterTopology %q for kvTransferPolicy validation: %w", kvt.ClusterTopologyName, err)
+		return fmt.Errorf("failed to read ClusterTopologyBinding %q for kvTransferPolicy validation: %w", kvt.ClusterTopologyName, err)
 	}
 	if info == nil {
 		return nil
@@ -835,7 +835,7 @@ func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicyAgainstGroveCl
 	if _, ok := info.domainIndex[string(kvt.Domain)]; ok {
 		return nil
 	}
-	return fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopology %q; available domains: %v",
+	return fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopologyBinding %q; available domains: %v",
 		kvt.Domain, kvt.ClusterTopologyName, info.domains)
 }
 

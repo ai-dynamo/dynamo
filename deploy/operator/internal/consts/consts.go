@@ -192,6 +192,11 @@ const (
 	KaiSchedulerName                = "kai-scheduler"                  // Scheduler name for kai-scheduler
 	DefaultKaiSchedulerQueue        = "dynamo"                         // Default queue name when none specified
 
+	// Volcano scheduler related constants
+	KubeAnnotationVolcanoQueue  = "nvidia.com/volcano-queue" // User-provided annotation to specify Volcano queue name
+	GroveAnnotationVolcanoQueue = "scheduling.grove.io/volcano-queue"
+	VolcanoSchedulerName        = "volcano"
+
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"

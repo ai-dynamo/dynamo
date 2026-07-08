@@ -439,6 +439,23 @@ func main() {
 		runtimeConfig.LWSEnabled = false
 	}
 
+	switch {
+	case operatorCfg.Orchestrators.VolcanoScheduler.Enabled == nil:
+		runtimeConfig.VolcanoSchedulerEnabled = false
+	case *operatorCfg.Orchestrators.VolcanoScheduler.Enabled:
+		if !volcanoDetected {
+			setupLog.Error(nil,
+				"Volcano scheduler integration is explicitly enabled in config but "+
+					"the Volcano API group was not detected in the cluster",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.VolcanoSchedulerEnabled = true
+	default:
+		setupLog.Info("Volcano scheduler integration is explicitly disabled via config override")
+		runtimeConfig.VolcanoSchedulerEnabled = false
+	}
+
 	// Detect Kai-scheduler availability using discovery client
 	setupLog.Info("Detecting Kai-scheduler availability...")
 	kaiSchedulerDetected := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
@@ -478,15 +495,34 @@ func main() {
 	}
 
 	setupLog.Info("Detecting Istio availability...")
-	runtimeConfig.IstioAvailable = commonController.DetectIstioAvailability(mainCtx, mgr)
+	switch {
+	case operatorCfg.ServiceMesh.Enabled == nil:
+		setupLog.Info("Auto-detecting Istio availability")
+		runtimeConfig.IstioEnabled = commonController.DetectIstioDestinationRuleAvailability(mainCtx, mgr)
+	case *operatorCfg.ServiceMesh.Enabled:
+		setupLog.Info("Istio service mesh is explicitly enabled; verifying availability")
+		istioDetected := commonController.DetectIstioDestinationRuleAvailability(mainCtx, mgr)
+		if !istioDetected {
+			setupLog.Error(nil,
+				"Service mesh is explicitly enabled but the networking.istio.io"+
+					" DestinationRule API group was not detected in the cluster",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.IstioEnabled = true
+	default:
+		setupLog.Info("Istio service mesh is explicitly disabled via config override")
+		runtimeConfig.IstioEnabled = false
+	}
 
 	setupLog.Info("Detected orchestrators availability",
 		"grove", runtimeConfig.GroveEnabled,
 		"lws", runtimeConfig.LWSEnabled,
 		"volcano", volcanoDetected,
+		"volcano-scheduler", runtimeConfig.VolcanoSchedulerEnabled,
 		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
 		"dra", runtimeConfig.DRAEnabled,
-		"istio", runtimeConfig.IstioAvailable,
+		"istio", runtimeConfig.IstioEnabled,
 	)
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
@@ -674,6 +710,7 @@ func registerControllers(
 		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
 		Config:                operatorCfg,
 		RuntimeConfig:         runtimeConfig,
+		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: dockerSecretRetriever,
 		ScaleClient:           scaleClient,
 		SSHKeyManager:         sshKeyManager,

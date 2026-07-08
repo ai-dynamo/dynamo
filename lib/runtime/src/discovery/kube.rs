@@ -115,11 +115,11 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let instance_id = self.instance_id();
-        let instance = spec.with_instance_id(instance_id);
+        let instance = spec.into_instance(self.instance_id());
+        let instance_id = instance.instance_id();
 
         tracing::debug!(
-            "Registering instance: {:?} with instance_id={:x}",
+            "Registering discovery instance: {:?}, instance_id={:x}",
             instance,
             instance_id
         );
@@ -200,7 +200,7 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
-        let instance_id = self.instance_id();
+        let instance_id = instance.instance_id();
 
         // Write to local metadata and persist to CR
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions

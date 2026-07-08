@@ -450,8 +450,6 @@ module = [
     "zmq.*",
     "safetensors",
     "safetensors.*",
-    "gradio",
-    "gradio.*",
     "kubernetes_asyncio",
     "kubernetes_asyncio.*",
     "ray",

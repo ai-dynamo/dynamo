@@ -247,7 +247,10 @@ rules:
   - patch
   - update
   - watch
-{{- if or .Values.istioVirtualServiceEnabled (and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled) }}
+{{- $serviceMesh := .Values.dynamo.serviceMesh | default dict }}
+{{- $hasServiceMesh := and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh }}
+{{- $serviceMeshProviderIstio := and $hasServiceMesh (eq ($serviceMesh.provider | default "istio") "istio") }}
+{{- if or .Values.istioVirtualServiceEnabled $serviceMeshProviderIstio }}
 - apiGroups:
   - networking.istio.io
   resources:
@@ -491,12 +494,12 @@ subjects:
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
   namespace: '{{ .Release.Namespace }}'
 ---
-# ClusterRole for Grove ClusterTopology access
-# This is always a ClusterRole since ClusterTopology resources are cluster-scoped
+# ClusterRole for Grove ClusterTopologyBinding access
+# This is always a ClusterRole since ClusterTopologyBinding resources are cluster-scoped
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopology-reader
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopologybinding-reader
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: dynamo-operator
@@ -506,17 +509,17 @@ rules:
 - apiGroups:
   - grove.io
   resources:
-  - clustertopologies
+  - clustertopologybindings
   verbs:
   - get
   - list
   - watch
 ---
-# ClusterRoleBinding for Grove ClusterTopology access
+# ClusterRoleBinding for Grove ClusterTopologyBinding access
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopology-reader-binding
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopologybinding-reader-binding
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: dynamo-operator
@@ -525,7 +528,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopology-reader
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopologybinding-reader
 subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'

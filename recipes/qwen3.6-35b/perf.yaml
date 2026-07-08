@@ -37,7 +37,9 @@ spec:
           ulimit -n 1048576
           ulimit -u 65536
 
-          apt update && apt install -y --no-install-recommends curl jq git
+          # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
+          # GB200 benchmark pods need build tools to compile it from source.
+          apt update && apt install -y --no-install-recommends curl jq git build-essential
 
           pip install --no-cache-dir "aiperf==0.10.0"
           python -c "import aiperf; print('aiperf', aiperf.__version__, 'OK')"

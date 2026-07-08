@@ -60,25 +60,6 @@ MODEL_NAME = ROUTER_MODEL_NAME
 COUNTER_WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "counter_worker.py")
 
 
-@pytest.fixture(autouse=True)
-def _pin_nats_event_plane_for_mocker(request, monkeypatch):
-    """Pin the NATS event plane for etcd-backed mocker tests.
-
-    The mock engine publishes KV cache events instantly -- before the in-process
-    router's ZMQ subscription has connected (ZMQ slow-joiner) -- so on the (now
-    default) ZMQ event plane the router observes zero events and the routing
-    assertions fail. Real engines start slowly enough to avoid this, so the
-    vLLM/SGLang router e2e tests cover the ZMQ default; only the fast mocker needs
-    NATS here. file-backed variants keep the ZMQ default, and an explicitly set
-    DYN_EVENT_PLANE (e.g. via durable_kv_events) is left untouched.
-    """
-    callspec = getattr(request.node, "callspec", None)
-    store_backend = callspec.params.get("store_backend", "etcd") if callspec else "etcd"
-    if store_backend != "file" and not os.environ.get("DYN_EVENT_PLANE"):
-        monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
-    yield
-
-
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
@@ -136,10 +117,10 @@ _FAST_SPEEDUP = 100.0
 ROUTER_DISAGG_OVERLOAD_529_CASES = (
     pytest.param(
         {
-            # A single prefill worker is sufficient to verify
-            # overloaded -> no free prefill worker -> 529, and --enforce-disagg
-            # means the model only lists once the prefill router has activated,
-            # so frontend readiness already gates on prefill registration.
+            # A single prefill worker is sufficient to verify overloaded -> no
+            # free prefill worker -> 529. Registered worker types make the model
+            # list only after the prefill router activates, so frontend readiness
+            # already gates on prefill registration.
             "num_prefill": 1,
             "num_decode": 1,
             "max_tokens": 1,

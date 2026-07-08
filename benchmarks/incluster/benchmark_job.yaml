@@ -16,8 +16,12 @@ spec:
         fsGroup: 1000
       containers:
       - name: benchmark-runner
+        # aiperf only talks HTTP to the frontend service, so this CPU-only Job
+        # runs on the frontend image, which ships the benchmarks package (incl.
+        # aiperf, with the prebuilt arm64 crick wheel). Backend runtime images
+        # deliberately do not carry benchmark tooling.
         # TODO: update to latest public image in next release
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+        image: nvcr.io/nvidia/ai-dynamo/frontend:1.3.0
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
