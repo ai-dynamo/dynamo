@@ -22,6 +22,7 @@ from tests.router.helper import (
     _nats_server,
     assert_event_dumps_equal,
     get_runtime,
+    managed_runtime,
     poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
@@ -1869,7 +1870,7 @@ def _test_router_indexers_sync(
         raise ValueError("nats_server is required when test_nats_interruption=True")
 
     # Use async to manage the test flow
-    async def test_sync():
+    async def run_test(runtime_stack):
         # Create KvRouterConfig with lower snapshot threshold for testing
         kv_router_config = KvRouterConfig(
             router_snapshot_threshold=20,
@@ -1881,8 +1882,8 @@ def _test_router_indexers_sync(
         # If standalone indexer mode, launch workers one-by-one and register.
         # We need to create a temporary endpoint just to discover worker IDs.
         if standalone_indexer_url:
-            tmp_runtime = get_runtime(
-                store_backend, request_plane, event_plane=event_plane
+            tmp_runtime = runtime_stack.enter_context(
+                managed_runtime(store_backend, request_plane, event_plane=event_plane)
             )
             tmp_endpoint = tmp_runtime.endpoint(
                 f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
@@ -1979,7 +1980,9 @@ def _test_router_indexers_sync(
 
         # Create first runtime and endpoint for router 1
         logger.info("Creating first KV router with its own runtime")
-        runtime1 = get_runtime(store_backend, request_plane, event_plane=event_plane)
+        runtime1 = runtime_stack.enter_context(
+            managed_runtime(store_backend, request_plane, event_plane=event_plane)
+        )
         endpoint1 = runtime1.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
@@ -2091,7 +2094,9 @@ def _test_router_indexers_sync(
 
         # Create second runtime and endpoint for router 2
         logger.info("Creating second KV router with its own runtime")
-        runtime2 = get_runtime(store_backend, request_plane, event_plane=event_plane)
+        runtime2 = runtime_stack.enter_context(
+            managed_runtime(store_backend, request_plane, event_plane=event_plane)
+        )
         endpoint2 = runtime2.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
@@ -2284,7 +2289,10 @@ def _test_router_indexers_sync(
                 "Skipping NATS consumers verification (local indexer uses NATS Core, not JetStream)"
             )
 
-    # Run the async test
+    async def test_sync():
+        with contextlib.ExitStack() as runtime_stack:
+            await run_test(runtime_stack)
+
     asyncio.run(test_sync())
 
     logger.info("Indexers sync test completed successfully")
@@ -2673,7 +2681,7 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
             frontend_port,
         )
 
-        async def test_sync():
+        async def run_test(runtime):
             frontend_url = f"http://localhost:{frontend_port}"
             chat_url = f"{frontend_url}/v1/chat/completions"
             await wait_for_frontend_ready(
@@ -2687,9 +2695,6 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
                 request_plane=request_plane,
             )
 
-            runtime = get_runtime(
-                store_backend=store_backend, request_plane=request_plane
-            )
             prefill_endpoint = runtime.endpoint(
                 f"{prefill_workers.namespace}.prefill.generate"
             )
@@ -2766,6 +2771,12 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
             await asyncio.sleep(2.0)
             final_counts = stored_blocks_by_dp_rank(await observer_router.dump_events())
             return prefill_worker_id, baseline_counts, final_counts
+
+        async def test_sync():
+            with managed_runtime(
+                store_backend=store_backend, request_plane=request_plane
+            ) as runtime:
+                return await run_test(runtime)
 
         prefill_worker_id, baseline_counts, final_counts = asyncio.run(test_sync())
 
