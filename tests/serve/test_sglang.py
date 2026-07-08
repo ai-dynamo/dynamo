@@ -167,6 +167,38 @@ sglang_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_router": SGLangConfig(
+        # Disaggregated serving with KV-aware routing (2 prefill + 2 decode).
+        # Uses disagg_router.sh; the frontend runs in --router-mode kv and
+        # activates its internal prefill router automatically.
+        name="disaggregated_router",
+        directory=sglang_dir,
+        script_name="disagg_router.sh",
+        marks=[
+            pytest.mark.router,
+            pytest.mark.gpu_2,
+            pytest.mark.profiled_vram_gib(
+                13.0
+            ),  # parity with sglang disaggregated (disagg_same_gpu) configs
+            pytest.mark.timeout(470),  # parity with sglang disaggregated configs
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            # Disagg workers expose fewer sglang:* metrics (~14 vs ~25 for
+            # aggregated); validate the prefill worker's metrics endpoint
+            # (mirrors disaggregated_same_gpu).
+            metric_payload_default(
+                min_num_requests=6,
+                backend="sglang_disagg",
+                port=DefaultPort.SYSTEM1.value,
+            ),
+        ],
+    ),
     "disaggregated_same_gpu": SGLangConfig(
         # Uses disagg_same_gpu.sh for single-GPU disaggregated testing
         # Validates metrics from both prefill (DefaultPort.SYSTEM1) and decode
