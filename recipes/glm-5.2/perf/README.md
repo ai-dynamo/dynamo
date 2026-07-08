@@ -9,10 +9,10 @@ A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
 [`perf.yaml`](perf.yaml) — covers both GLM-5.2 DGDs. The benchmark is identical
 across variants; only `ENDPOINT` needs to change.
 
-The Job waits for `GET /v1/models` on the DGD frontend to return
-`nvidia/GLM-5.2-NVFP4`, runs a short warmup, replays the configured trace at one
-`CONCURRENCY` value, and writes raw artifacts to the shared `model-cache` PVC.
-The benchmark pod is co-located with a DGD frontend through `podAffinity`.
+The Job waits for the target model on the DGD frontend, runs a short warmup,
+replays the configured trace at one `CONCURRENCY` value, and writes raw
+artifacts to the shared `model-cache` PVC. The benchmark pod is co-located with
+a DGD frontend through `podAffinity`.
 
 ## Targeting a variant
 
@@ -34,11 +34,9 @@ The benchmark replays a
 `--custom-dataset-type mooncake_trace`. Each JSONL line describes one request
 with `input_length`, `output_length`, and `hash_ids`.
 
-The recipe includes full, 30%, and 15% agentic traces under [`traces`](traces):
+The recipe includes the 15% agentic trace under [`traces`](traces):
 
 ```text
-traces/64k_400_90kv_agent_new_noschedule.jsonl
-traces/64k_400_90kv_agent_new_noschedule_short_30perc.jsonl
 traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
 ```
 
@@ -61,7 +59,7 @@ Materialize the Git LFS trace files, then copy them through a helper pod that
 mounts `model-cache`:
 
 ```bash
-git lfs pull --include='recipes/glm-5.2/perf/traces/*.jsonl'
+git lfs pull --include='recipes/glm-5.2/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
 
 kubectl run pvc-helper -n ${NAMESPACE} \
   --image=busybox:1.36 --restart=Never \
@@ -82,9 +80,8 @@ kubectl wait --for=condition=Complete job/glm52-bench \
   -n ${NAMESPACE} --timeout=10800s
 ```
 
-The Job creates a tokenizer-only local snapshot and applies the AIPerf 0.10.0
-local-tokenizer-path fix required by multiprocessing dataset workers. This is
-the GLM-specific client setup that differs from the Kimi-K2.6 template.
+The Job uses `nvcr.io/nvstaging/ai-dynamo/aiperf:0.11.0rc1` directly and does
+not install or patch AIPerf at runtime.
 
 ### 4. Fetch artifacts
 
@@ -130,9 +127,9 @@ errored, and unfinished requests before reporting aggregate throughput.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `ENDPOINT` | `glm52-agg-b200-agentic-frontend:8000` | Change per DGD variant |
-| `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | Use the full or 30% trace for longer runs |
+| `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request 15% agent trace |
 | `CONCURRENCY` | `64` | Single value; reset server state between values |
-| `TARGET_MODEL` | `nvidia/GLM-5.2-NVFP4` | Must match `--served-model-name` |
+| `TARGET_MODEL` | `zai-org/GLM-5.2` | Must match `--served-model-name` |
 
 ## Artifacts
 
@@ -141,8 +138,8 @@ Results are written to:
 ```text
 /model-cache/perf/<epoch>_<job-name>/
   warmup/
-  GLM-5.2-NVFP4_trace_c<concurrency>_<timestamp>/
-    profile_export.json
+  GLM-5.2_trace_c<concurrency>_<timestamp>/
+    profile_export_aiperf.json
     inputs.json
     ...
 ```

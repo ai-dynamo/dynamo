@@ -15,9 +15,49 @@
 #
 # GLM-5.2 NVFP4 aggregated serving on one B200x4 node via SGLang + Dynamo.
 #
-# The worker intentionally simulates MTP acceptance length 2.69 for performance
-# benchmarking. Remove the SGLANG_SIMULATE_ACC_* variables for quality
-# evaluation.
+# For synthetic MTP acceptance-length benchmarking, uncomment the
+# SGLANG_SIMULATE_ACC_* environment variables below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glm52-agg-b200-agentic-sglang-config
+  labels:
+    app.kubernetes.io/name: glm52-agg-b200-agentic
+    app.kubernetes.io/part-of: dynamo
+data:
+  agg.yaml: |-
+    model-path: nvidia/GLM-5.2-NVFP4
+    served-model-name: zai-org/GLM-5.2
+    trust-remote-code: true
+    tensor-parallel-size: 4
+    data-parallel-size: 4
+    enable-dp-attention: true
+    moe-runner-backend: flashinfer_trtllm
+    moe-a2a-backend: none
+    fp4-gemm-backend: flashinfer_trtllm
+    enable-symm-mem: true
+    speculative-attention-mode: decode
+    quantization: modelopt_fp4
+    kv-cache-dtype: fp8_e4m3
+    context-length: 500000
+    speculative-algorithm: EAGLE
+    speculative-num-steps: 3
+    speculative-eagle-topk: 1
+    speculative-num-draft-tokens: 4
+    max-running-requests: 128
+    cuda-graph-max-bs: 128
+    mem-fraction-static: 0.93
+    enable-dp-lm-head: true
+    enable-metrics: true
+    speculative-moe-runner-backend: flashinfer_cutlass
+    speculative-moe-a2a-backend: none
+    enable-flashinfer-allreduce-fusion: true
+    hicache-size: 200
+    enable-hierarchical-cache: true
+    model-loader-extra-config:
+      enable_multithread_load: true
+      num_threads: 32
+---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -44,7 +84,7 @@ spec:
                       fieldPath: metadata.uid
                 - name: DYN_ROUTER_MODE
                   value: kv
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2
               resources: {}
       replicas: 1
 
@@ -65,35 +105,8 @@ spec:
           containers:
             - name: main
               args:
-                - --model-path=nvidia/GLM-5.2-NVFP4
-                - --served-model-name=nvidia/GLM-5.2-NVFP4
-                - --trust-remote-code
-                - --tp-size=4
-                - --dp-size=4
-                - --enable-dp-attention
-                - --moe-runner-backend=flashinfer_trtllm
-                - --moe-a2a-backend=none
-                - --fp4-gemm-backend=flashinfer_trtllm
-                - --enable-symm-mem
-                - --speculative-attention-mode=decode
-                - --quantization=modelopt_fp4
-                - --kv-cache-dtype=fp8_e4m3
-                - --context-length=500000
-                - --speculative-algorithm=EAGLE
-                - --speculative-num-steps=3
-                - --speculative-eagle-topk=1
-                - --speculative-num-draft-tokens=4
-                - --max-running-requests=128
-                - --cuda-graph-max-bs=128
-                - --mem-fraction-static=0.93
-                - --enable-dp-lm-head
-                - --enable-metrics
-                - --speculative-moe-runner-backend=flashinfer_cutlass
-                - --speculative-moe-a2a-backend=none
-                - --enable-flashinfer-allreduce-fusion
-                - --hicache-size=200
-                - --enable-hierarchical-cache
-                - '--model-loader-extra-config={"enable_multithread_load": true, "num_threads": 32}'
+                - --config
+                - /etc/sglang/agg.yaml
                 - --dyn-tool-call-parser
                 - glm47
                 - --dyn-reasoning-parser
@@ -109,40 +122,21 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
-                - name: HF_HUB_CACHE
-                  value: /model-cache/hub
-                - name: CUDA_CACHE_PATH
-                  value: /tmp/compilation-cache/cuda
-                - name: CUDA_CACHE_MAXSIZE
-                  value: "4294967296"
-                - name: FLASHINFER_CACHE_DIR
-                  value: /tmp/compilation-cache/flashinfer
-                - name: SGLANG_CACHE_DIR
-                  value: /tmp/compilation-cache/sglang
-                - name: SGLANG_DG_CACHE_DIR
-                  value: /tmp/compilation-cache/deepgemm
-                - name: TRITON_CACHE_DIR
-                  value: /tmp/compilation-cache/triton
-                - name: TORCHINDUCTOR_CACHE_DIR
-                  value: /tmp/compilation-cache/torchinductor
-                - name: TORCH_EXTENSIONS_DIR
-                  value: /tmp/compilation-cache/torch-extensions
-                - name: XDG_CACHE_HOME
-                  value: /tmp/compilation-cache/xdg
-                - name: SGLANG_SIMULATE_ACC_LEN
-                  value: "2.69"
-                - name: SGLANG_SIMULATE_ACC_METHOD
-                  value: match-expected
-                - name: SGLANG_SIMULATE_ACC_TOKEN_ID
-                  value: "32"
+                # Synthetic MTP acceptance length for performance benchmarking.
+                # - name: SGLANG_SIMULATE_ACC_LEN
+                #   value: "2.69"
+                # - name: SGLANG_SIMULATE_ACC_METHOD
+                #   value: match-expected
+                # - name: SGLANG_SIMULATE_ACC_TOKEN_ID
+                #   value: "32"
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:20260701-5245c0f
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2
               resources:
                 requests:
                   nvidia.com/gpu: "4"
-                  memory: 900Gi
+                  memory: 1Ti
                 limits:
                   nvidia.com/gpu: "4"
                   memory: 1Ti
@@ -151,6 +145,7 @@ spec:
                 capabilities:
                   add:
                     - IPC_LOCK
+                    - SYS_PTRACE
                     - SYS_RESOURCE
               startupProbe:
                 failureThreshold: 120
@@ -160,10 +155,16 @@ spec:
                 periodSeconds: 60
                 timeoutSeconds: 20
               volumeMounts:
+                - mountPath: /etc/sglang
+                  name: sglang-config
+                  readOnly: true
                 - mountPath: /model-cache
                   name: model-cache
               workingDir: /workspace/
           volumes:
+            - name: sglang-config
+              configMap:
+                name: glm52-agg-b200-agentic-sglang-config
             - name: model-cache
               persistentVolumeClaim:
                 claimName: model-cache
