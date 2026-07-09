@@ -178,7 +178,7 @@ sglang_configs = {
             pytest.mark.router,
             pytest.mark.gpu_2,
             pytest.mark.timeout(470),  # parity with sglang disaggregated configs
-            pytest.mark.pre_merge,
+            pytest.mark.nightly,  # heavy e2e launch scenario; runs on nightly multi-gpu lane
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
