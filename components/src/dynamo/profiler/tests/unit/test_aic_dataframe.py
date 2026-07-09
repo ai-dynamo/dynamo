@@ -12,19 +12,16 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from dynamo.profiler.utils.aic_dataframe import make_parallel_label
+
 pytestmark = [
+    pytest.mark.aiconfigurator,
     pytest.mark.gpu_0,
     # TODO: revert to pytest.mark.post_merge after pre_merge validation on this PR
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.planner,
 ]
-
-try:
-    from dynamo.profiler.utils.aic_dataframe import make_parallel_label
-except ImportError as e:
-    pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
-
 
 _NUM_GPUS = [1, 2, 4, 8, 16]
 

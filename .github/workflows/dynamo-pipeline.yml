@@ -54,6 +54,11 @@ on:
       cpu_sequential_test_markers:
         required: true
         type: string
+      cpu_test_ignore_paths:
+        description: 'Whitespace-separated repository paths excluded from CPU pytest collection'
+        required: false
+        type: string
+        default: ''
       gpu_test_markers:
         required: true
         type: string
@@ -200,6 +205,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers }}
       arm_cpu_only_test_markers: ${{ format('({0}) and not aic_full', inputs.cpu_parallel_test_markers) }}
+      cpu_only_test_ignore_paths: ${{ inputs.cpu_test_ignore_paths }}
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
@@ -222,6 +228,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
       arm_cpu_only_test_markers: ${{ format('({0}) and not aic_full', inputs.cpu_sequential_test_markers) }}
+      cpu_only_test_ignore_paths: ${{ inputs.cpu_test_ignore_paths }}
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: 'none'
       run_gpu_tests: false

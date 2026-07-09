@@ -5,30 +5,29 @@
 
 import pytest
 
-try:
-    from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
-    from dynamo.planner.config.parallelization import PickedParallelConfig
-    from dynamo.planner.config.planner_config import (
-        PlannerConfig,
-        PlannerPreDeploymentSweepMode,
-    )
-    from dynamo.profiler.utils.dgd_generation import (
-        _build_planner_config,
-        _inject_mocker_aic_args,
-        build_aic_interpolation_spec,
-        build_aic_perf_model_spec,
-        enable_vllm_benchmark_mode,
-    )
-    from dynamo.profiler.utils.dgdr_v1beta1_types import (
-        DynamoGraphDeploymentRequestSpec,
-        FeaturesSpec,
-        MockerSpec,
-    )
-except ImportError as e:
-    pytest.skip(f"Missing dependency: {e}", allow_module_level=True)
+from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
+from dynamo.planner.config.parallelization import PickedParallelConfig
+from dynamo.planner.config.planner_config import (
+    PlannerConfig,
+    PlannerPreDeploymentSweepMode,
+)
+from dynamo.profiler.utils.dgd_generation import (
+    _build_planner_config,
+    _inject_mocker_aic_args,
+    build_aic_interpolation_spec,
+    build_aic_perf_model_spec,
+    enable_vllm_benchmark_mode,
+)
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DynamoGraphDeploymentRequestSpec,
+    FeaturesSpec,
+    MockerSpec,
+)
 
 pytestmark = [
+    pytest.mark.aiconfigurator,
     pytest.mark.gpu_0,
+    pytest.mark.planner,
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]

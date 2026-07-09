@@ -241,6 +241,14 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+    - name: Run Mocker AIC feature clippy
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --locked --no-deps -p dynamo-mocker --features aic-forward-pass --all-targets -- -D warnings
+    - name: Run Python bindings AIC feature clippy
+      if: matrix.dir == 'lib/bindings/python'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --locked --no-deps --features aic-forward-pass --all-targets -- -D warnings
     - name: Run KVBM offload Mooncake trace clippy
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

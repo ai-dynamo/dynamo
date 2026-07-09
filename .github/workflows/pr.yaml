@@ -657,8 +657,11 @@ jobs:
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm or planner) and (gpu_0)'
+      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm or planner) and (gpu_0)'
+      # Marker deselection happens after collection/import. Ignore these paths as well
+      # so the runtime job does not import Planner/Profiler or AIC-upper contracts.
+      cpu_test_ignore_paths: 'components/src/dynamo/planner components/src/dynamo/profiler'
       gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 

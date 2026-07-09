@@ -199,6 +199,7 @@ impl EngineCapacityRequest {
         optimization_target=OptimizationTarget::Throughput,
         accept_length=1.0,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         isl: u32,
         osl: u32,

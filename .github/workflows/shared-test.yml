@@ -64,6 +64,11 @@ on:
         required: false
         type: string
         default: ''
+      cpu_only_test_ignore_paths:
+        description: 'Whitespace-separated repository paths excluded from CPU pytest collection'
+        required: false
+        type: string
+        default: ''
       cpu_only_test_timeout_minutes:
         description: 'Timeout in minutes for CPU tests'
         required: false
@@ -211,6 +216,7 @@ jobs:
         with:
           container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ matrix.platform == 'arm64' && inputs.arm_cpu_only_test_markers != '' && inputs.arm_cpu_only_test_markers || inputs.cpu_only_test_markers }}
+          pytest_ignore_paths: ${{ inputs.cpu_only_test_ignore_paths }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.platform }}
