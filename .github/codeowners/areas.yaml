@@ -66,7 +66,7 @@ areas:
   - tests/router/configs/
   - examples/router/policy-class-queues.yaml
 - label: backend-vllm
-  github_team: '@ai-dynamo/dynamo-vllm-codeowners'
+  github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
   path_globs:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
@@ -74,7 +74,7 @@ areas:
   - lib/vllm-rs-backend/Cargo.toml
   - lib/vllm-rs-backend/src/
 - label: backend-trtllm
-  github_team: '@ai-dynamo/dynamo-trtllm-codeowners'
+  github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
   - components/src/dynamo/trtllm/
   - components/src/dynamo/trtllm/configs/
@@ -86,7 +86,7 @@ areas:
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
 - label: backend-sglang
-  github_team: '@ai-dynamo/dynamo-sglang-codeowners'
+  github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
   - components/src/dynamo/sglang/
   - components/src/dynamo/sglang/request_handlers/
@@ -466,7 +466,7 @@ areas:
   path_globs:
   - components/src/dynamo/tokenspeed/
   - components/src/dynamo/tokenspeed/tests/
-- label: RL
+- label: rl
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
   path_globs:
   - components/src/dynamo/common/rl/
