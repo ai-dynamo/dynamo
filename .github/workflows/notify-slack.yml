@@ -38,6 +38,11 @@ jobs:
     permissions:
       contents: read
       actions: read   # required to list this run's jobs via the Actions API
+    env:
+      # Bind the optional secret to an env var so the Notify Slack step can guard
+      # on it: the `secrets` context is unavailable in step `if` conditions, but
+      # `env` is. Absent secret -> empty string -> step is skipped, not failed.
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
     steps:
       - name: Get Failed jobs
         id: failed-jobs
@@ -87,10 +92,12 @@ jobs:
             echo "has_failures=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Notify Slack
-        if: steps.failed-jobs.outputs.has_failures == 'true'
+        # Also require a non-empty webhook: with the secret optional, an absent
+        # webhook would otherwise fail this step (the Slack action rejects an empty URL).
+        if: steps.failed-jobs.outputs.has_failures == 'true' && env.SLACK_WEBHOOK_URL != ''
         uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
         with:
-          webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          webhook: ${{ env.SLACK_WEBHOOK_URL }}
           webhook-type: incoming-webhook
           payload: |
             blocks:
