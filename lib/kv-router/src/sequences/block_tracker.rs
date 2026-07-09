@@ -78,6 +78,12 @@ pub(super) struct BlockTracker {
 impl BlockTracker {
     /// Acquire one strong tail for a prompt and return the first newly present
     /// prompt index, if any.
+    ///
+    /// # Lineage contract
+    ///
+    /// Each [`SequenceHash`] must identify exactly one prefix ancestry and
+    /// depth. As with the KV indexer, this tracker trusts callers to maintain
+    /// that invariant and does not validate the hash recurrence in production.
     pub(super) fn acquire_prompt(
         &mut self,
         sequence: &[SequenceHash],
@@ -124,7 +130,10 @@ impl BlockTracker {
     /// Append a unique output block to an existing request chain.
     pub(super) fn append_output(&mut self, chain: &mut RequestBlockChain, hash: SequenceHash) {
         debug_assert!(
-            self.upgrade_live_node(hash).is_none(),
+            self.unique_blocks
+                .get(&hash)
+                .and_then(Weak::upgrade)
+                .is_none(),
             "random output hash unexpectedly collided with a live block"
         );
 
@@ -288,6 +297,25 @@ mod tests {
 
         assert_eq!(tracker.release(chain), vec![1, 2]);
         assert!(tracker.fractional_blocks.is_empty());
+        assert_eq!(tracker.active_blocks(), 0);
+    }
+
+    #[test]
+    fn release_cleans_fractional_unique_suffix_above_shared_prefix() {
+        let mut tracker = BlockTracker::default();
+        let (longer, _) = tracker.acquire_prompt(&[1, 2, 3]);
+        let (shared_prefix, _) = tracker.acquire_prompt(&[1, 2]);
+
+        tracker.set_unique_suffix_fractional(&longer, 0.5);
+        assert_eq!(tracker.fractional_blocks.get(&3), Some(&0.5));
+        assert!(!tracker.fractional_blocks.contains_key(&1));
+        assert!(!tracker.fractional_blocks.contains_key(&2));
+
+        assert_eq!(tracker.release(longer), vec![3]);
+        assert!(tracker.fractional_blocks.is_empty());
+        assert_eq!(tracker.active_blocks(), 2);
+
+        assert_eq!(tracker.release(shared_prefix), vec![1, 2]);
         assert_eq!(tracker.active_blocks(), 0);
     }
 
