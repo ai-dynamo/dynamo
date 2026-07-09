@@ -497,6 +497,7 @@ fn make_text_chunk(
                     tool_calls: None,
                     function_call: None,
                     refusal: None,
+                    reasoning: None,
                     reasoning_content: None,
                 },
                 finish_reason: if finish {

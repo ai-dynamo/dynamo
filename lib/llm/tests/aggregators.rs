@@ -169,6 +169,7 @@ fn make_stream_delta(
                         tool_calls: None,
                         role: Some(Role::Assistant),
                         refusal: None,
+                        reasoning: None,
                         reasoning_content: None,
                     },
                     finish_reason: None,

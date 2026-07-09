@@ -208,13 +208,29 @@ pub fn final_response_to_one_chunk_stream(
         });
 
         #[allow(deprecated)]
+        // Emit one of {reasoning, reasoning_content} per
+        // DYN_REASONING_FIELD_NAME (default: reasoning_content).
+        // Coalesce both message fields first — if the response was already
+        // built in reasoning mode, `reasoning_content` is None and the data
+        // lives in `reasoning`. Splitting only from `reasoning_content` would
+        // emit an empty delta.
+        let crate::reasoning_field::RoutedReasoning {
+            reasoning,
+            reasoning_content,
+        } = crate::reasoning_field::route_reasoning(
+            ch.message
+                .reasoning_content
+                .clone()
+                .or_else(|| ch.message.reasoning.clone()),
+        );
         let delta = ChatCompletionStreamResponseDelta {
             role: Some(ch.message.role),
             content: ch.message.content.clone(),
             tool_calls,
             function_call,
             refusal: ch.message.refusal.clone(),
-            reasoning_content: ch.message.reasoning_content.clone(),
+            reasoning,
+            reasoning_content,
         };
 
         let choice = ChatChoiceStream {
@@ -275,6 +291,7 @@ mod tests {
                 tool_calls: None,
                 function_call: None,
                 refusal: None,
+                reasoning: None,
                 reasoning_content: None,
             },
             finish_reason: None,
@@ -316,6 +333,7 @@ mod tests {
                 tool_calls: None,
                 function_call: None,
                 refusal: None,
+                reasoning: None,
                 reasoning_content: None,
             },
             finish_reason: Some(FinishReason::Stop),
@@ -458,6 +476,7 @@ mod tests {
                                 tool_calls: None,
                                 function_call: None,
                                 refusal: None,
+                                reasoning: None,
                                 reasoning_content: None,
                             },
                             finish_reason: None,

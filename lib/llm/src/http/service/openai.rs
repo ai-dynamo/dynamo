@@ -1476,6 +1476,7 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 tool_calls,
                 role: _,
                 refusal,
+                reasoning,
                 reasoning_content,
             } = &c.delta;
             // `Text("")` happens during multi-byte UTF-8 token assembly;
@@ -1491,6 +1492,10 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 && function_call.is_none()
                 && tool_calls.is_none()
                 && refusal.is_none()
+                // Reasoning-only chunks arrive on either wire
+                // field depending on DYN_REASONING_FIELD_NAME. Require both
+                // empty so a populated reasoning-only chunk isn't dropped.
+                && reasoning.is_none()
                 && reasoning_content.is_none()
         })
 }
@@ -4848,6 +4853,7 @@ mod tests {
                 tool_calls: None,
                 role: None,
                 refusal: None,
+                reasoning: None,
                 reasoning_content: reasoning.map(|s| s.to_string()),
             },
             finish_reason: finish,
@@ -4879,6 +4885,7 @@ mod tests {
                 tool_calls: Some(vec![tool_call]),
                 role: None,
                 refusal: None,
+                reasoning: None,
                 reasoning_content: None,
             },
             finish_reason: None,
@@ -4980,6 +4987,7 @@ mod tests {
                 tool_calls: Some(vec![tc1, tc2]),
                 role: None,
                 refusal: None,
+                reasoning: None,
                 reasoning_content: None,
             },
             finish_reason: None,
@@ -5051,6 +5059,7 @@ mod tests {
                 tool_calls: Some(vec![complete, incomplete]),
                 role: None,
                 refusal: None,
+                reasoning: None,
                 reasoning_content: None,
             },
             finish_reason: None,
@@ -5087,6 +5096,7 @@ mod tests {
                 tool_calls: Some(vec![tool_call]),
                 role: None,
                 refusal: None,
+                reasoning: None,
                 reasoning_content: None,
             },
             finish_reason: None,
@@ -5422,6 +5432,7 @@ mod tests {
                 tool_calls,
                 role,
                 refusal: refusal.map(|s| s.to_string()),
+                reasoning: None,
                 reasoning_content: reasoning.map(|s| s.to_string()),
             },
             finish_reason: finish,

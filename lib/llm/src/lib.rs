@@ -30,6 +30,7 @@ pub mod namespace;
 pub mod perf;
 pub mod preprocessor;
 pub mod protocols;
+pub mod reasoning_field;
 pub mod recorder;
 pub mod request_template;
 pub mod request_trace;

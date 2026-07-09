@@ -282,11 +282,22 @@ impl DeltaAggregator {
                             }
                         }
 
-                        if let Some(reasoning_content) = &choice.delta.reasoning_content {
+                        // Coalesce both wire fields — an upstream stage
+                        // (preprocessor / jail) may have routed reasoning to
+                        // delta.reasoning when DYN_REASONING_FIELD_NAME=reasoning.
+                        // The internal DeltaChoice accumulator tracks reasoning
+                        // as a single `reasoning_content` field regardless of
+                        // which output wire field ends up selected.
+                        if let Some(reasoning) = choice
+                            .delta
+                            .reasoning_content
+                            .as_ref()
+                            .or(choice.delta.reasoning.as_ref())
+                        {
                             state_choice
                                 .reasoning_content
                                 .get_or_insert_with(String::new)
-                                .push_str(reasoning_content);
+                                .push_str(reasoning);
                         }
 
                         // #8640: streaming producers split a single tool call across
@@ -480,6 +491,16 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
             None
         };
 
+        // Emit one of {reasoning, reasoning_content} per
+        // DYN_REASONING_FIELD_NAME (default: reasoning_content).
+        // DeltaChoice accumulates all incoming reasoning (from either wire
+        // field) into a single `reasoning_content` during the fold — see the
+        // fold body's coalesce read — so no further merging is needed here.
+        let crate::reasoning_field::RoutedReasoning {
+            reasoning,
+            reasoning_content,
+        } = crate::reasoning_field::route_reasoning(delta.reasoning_content);
+
         dynamo_protocols::types::ChatChoice {
             message: dynamo_protocols::types::ChatCompletionResponseMessage {
                 role: delta
@@ -490,7 +511,8 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
                 refusal: None,
                 function_call: None,
                 audio: None,
-                reasoning_content: delta.reasoning_content,
+                reasoning,
+                reasoning_content,
             },
             index: delta.index,
             finish_reason,
@@ -590,6 +612,7 @@ mod tests {
             tool_calls: tool_call_chunks,
             role,
             refusal: None,
+            reasoning: None,
             reasoning_content: None,
         };
         let logprobs = logprob.map(|lp| {
@@ -652,6 +675,7 @@ mod tests {
             tool_calls: Some(tool_chunks),
             role,
             refusal: None,
+            reasoning: None,
             reasoning_content: None,
         };
         let choice = dynamo_protocols::types::ChatChoiceStream {
@@ -1164,6 +1188,7 @@ mod tests {
                             function_call: None,
                             tool_calls: None,
                             refusal: None,
+                            reasoning: None,
                             reasoning_content: None,
                         },
                         finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
@@ -1179,6 +1204,7 @@ mod tests {
                             function_call: None,
                             tool_calls: None,
                             refusal: None,
+                            reasoning: None,
                             reasoning_content: None,
                         },
                         finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),

@@ -145,6 +145,7 @@ fn create_choice_stream(
             tool_calls,
             function_call: None,
             refusal: None,
+            reasoning: None,
             reasoning_content: None,
         },
         finish_reason,
@@ -516,12 +517,16 @@ impl ChoiceJailState {
             final_choice.logprobs = self.take_accumulated_logprobs();
 
             // Preserve any pending reasoning content collected while jailed.
+            // Use merge_and_route_stream_delta_reasoning so
+            // any reasoning already on the delta (from either wire field) is
+            // combined with the pending content, then routed via the
+            // DYN_REASONING_FIELD_NAME selector. This keeps live-streaming
+            // and non-streaming responses aligned on a single output field.
             if let Some(pending_reasoning) = self.pending_reasoning_content.take() {
-                if let Some(existing_reasoning) = final_choice.delta.reasoning_content.as_mut() {
-                    existing_reasoning.push_str(&pending_reasoning);
-                } else {
-                    final_choice.delta.reasoning_content = Some(pending_reasoning);
-                }
+                crate::reasoning_field::merge_and_route_stream_delta_reasoning(
+                    &mut final_choice.delta,
+                    Some(pending_reasoning),
+                );
             }
 
             if let Some(ref tool_calls) = final_choice.delta.tool_calls {
@@ -716,7 +721,13 @@ impl JailedStream {
                                     && let Some(reasoning) = choice_state.pending_reasoning_content.take()
                                     && let Some(first) = emissions.first_mut()
                                 {
-                                    first.choice_mut().delta.reasoning_content = Some(reasoning);
+                                    // Route reasoning to the field
+                                    // chosen by DYN_REASONING_FIELD_NAME for live-stream
+                                    // deltas, same treatment as final responses.
+                                    crate::reasoning_field::merge_and_route_stream_delta_reasoning(
+                                        &mut first.choice_mut().delta,
+                                        Some(reasoning),
+                                    );
                                 }
                                 all_emissions.extend(emissions);
                             }
@@ -1747,6 +1758,7 @@ mod tests {
                 tool_calls: None,
                 function_call: None,
                 refusal: None,
+                reasoning: None,
                 reasoning_content: None,
             },
             finish_reason: None,
@@ -1848,6 +1860,7 @@ mod tests {
                 tool_calls: None,
                 function_call: None,
                 refusal: None,
+                reasoning: None,
                 reasoning_content: None,
             },
             finish_reason: None,

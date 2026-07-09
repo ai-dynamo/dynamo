@@ -159,6 +159,7 @@ impl DeltaGenerator {
                 None
             },
             refusal: None,
+            reasoning: None,
             reasoning_content: None,
         };
 

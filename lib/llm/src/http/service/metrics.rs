@@ -3165,6 +3165,7 @@ mod tests {
                 tool_calls: None,
                 role: None,
                 refusal: None,
+                reasoning: None,
                 reasoning_content: None,
             },
             finish_reason: None,

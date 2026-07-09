@@ -2728,7 +2728,13 @@ impl OpenAIPreprocessor {
                                 choice.delta.content = parser_result
                                     .get_some_normal_text()
                                     .map(ChatCompletionMessageContent::Text);
-                                choice.delta.reasoning_content = parser_result.get_some_reasoning();
+                                // Route the parsed reasoning to the wire
+                                // field chosen by DYN_REASONING_FIELD_NAME so live-stream
+                                // deltas match the field name emitted on final responses.
+                                crate::reasoning_field::merge_and_route_stream_delta_reasoning(
+                                    &mut choice.delta,
+                                    parser_result.get_some_reasoning(),
+                                );
                             }
                             // For multimodal content, pass through unchanged
                         }
