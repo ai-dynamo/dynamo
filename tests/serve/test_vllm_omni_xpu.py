@@ -50,7 +50,8 @@ vllm_omni_configs = {
             "--vae-use-tiling",
         ],
         marks=[
-            pytest.mark.gpu_1,
+
+            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.skip(
@@ -60,7 +61,7 @@ vllm_omni_configs = {
         model="Qwen/Qwen-Image",
         request_payloads=[
             ImageGenerationPayload(
-                body={
+                body={。
                     "prompt": "A red apple on a table",
                     "size": "512x512",
                     "num_inference_steps": 20,
@@ -83,7 +84,7 @@ vllm_omni_configs = {
             "--enable-cpu-offload",
         ],
         marks=[
-            pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
         ],
@@ -114,7 +115,7 @@ vllm_omni_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_omni_audio_xpu.sh",
         marks=[
-            pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
             pytest.mark.skip(
@@ -149,7 +150,7 @@ vllm_omni_configs = {
             "--enforce-eager",
         ],
         marks=[
-            pytest.mark.gpu_1,
+            pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
         ],

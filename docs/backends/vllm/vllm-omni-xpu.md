@@ -17,7 +17,7 @@ Dynamo container images include vLLM-Omni pre-installed. If you are using `pip i
 ```bash
 uv pip uninstall vllm-omni
 
-git clone -b release/v0.21.0rc1 https://github.com/vllm-project/vllm-omni
+git clone -b release/v0.24.0 https://github.com/vllm-project/vllm-omni
 cd vllm-omni
 
 uv pip install --no-cache-dir ".[dev]" --no-build-isolation
@@ -32,7 +32,6 @@ The XPU launch scripts set the runtime environment before starting the vLLM-Omni
 
 ```bash
 export VLLM_OMNI_TARGET_DEVICE=xpu
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
 ```
 
 Set the same environment variables when you run `python -m dynamo.vllm.omni` directly instead of using the scripts under `examples/backends/vllm/launch/xpu/`.
@@ -53,40 +52,17 @@ The `--output-modalities` flag determines which endpoint(s) the worker registers
 
 | Modality | Models |
 |---|---|
-| Realtime Speech-to-Speech | `Qwen/Qwen3-Omni-30B-A3B-Instruct` |
-| Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
+| Text-to-Image | `Qwen/Qwen-Image` |
 | Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` |
 | Image-to-Video | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` |
-| Text-to-Audio (TTS) | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` |
+| Text-to-Audio (TTS) | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` |
 
 To run a non-default model, pass `--model` to any launch script:
 
 ```bash
-bash examples/backends/vllm/launch/xpu/agg_omni_realtime_xpu.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
-bash examples/backends/vllm/launch/xpu/agg_omni_image_xpu.sh --model AIDC-AI/Ovis-Image-7B
-bash examples/backends/vllm/launch/xpu/agg_omni_video_xpu.sh --model Wan-AI/Wan2.2-T2V-A14B-Diffusers
+bash examples/backends/vllm/launch/xpu/agg_omni_image_xpu.sh --model Qwen/Qwen-Image
+bash examples/backends/vllm/launch/xpu/agg_omni_video_xpu.sh --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers
 ```
-
-## Realtime Speech-to-Speech
-
-Launch an aggregated deployment (frontend + omni worker):
-
-```bash
-bash examples/backends/vllm/launch/xpu/agg_omni_realtime_xpu.sh
-```
-
-This starts `Qwen/Qwen3-Omni-30B-A3B-Instruct` with the realtime endpoint enabled on one XPU.
-
-Verify the deployment:
-
-```bash
-python examples/backends/vllm/launch/realtime_omni_client.py \
-  --url ws://localhost:8000/v1/realtime \
-  --model Qwen/Qwen3-Omni-30B-A3B-Instruct \
-  --output-dir dynamo-realtime
-```
-
-The client sends OpenAI Realtime WebSocket events and writes generated audio chunks under `dynamo-realtime`.
 
 ## Text-to-Image
 
