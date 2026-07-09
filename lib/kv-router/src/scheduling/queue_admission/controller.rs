@@ -59,7 +59,7 @@ impl PolicyClassAdmissionController {
         let id = AdmissionId::new(self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
         let ticket = AdmissionTicket { class_index, id };
-        let decision = strategy.admit(AdmissionRequest::with_worker_eligibility(
+        let decision = strategy.admit(AdmissionRequest::new(
             id,
             session_id,
             input_tokens,
@@ -103,18 +103,11 @@ impl PolicyClassAdmissionController {
     ) -> Vec<ClassAdmissionAction> {
         self.event(
             ticket,
-            AdmissionEvent::Progress {
+            AdmissionEvent::OutputTokens {
                 id: ticket.id,
-                output_tokens,
+                cumulative: output_tokens,
             },
         )
-    }
-
-    pub fn next_reconcile_at(&self) -> Option<std::time::Instant> {
-        self.strategies
-            .iter()
-            .filter_map(|strategy| strategy.as_ref()?.next_reconcile_at())
-            .min()
     }
 
     pub fn reconcile(&mut self) -> Vec<ClassAdmissionAction> {

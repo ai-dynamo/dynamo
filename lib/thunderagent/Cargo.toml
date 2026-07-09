@@ -18,3 +18,4 @@ serde = { workspace = true }
 serde_yaml = "0.9.34"
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }

@@ -254,7 +254,7 @@ where
                         break;
                     }
                     _ = recheck_interval.tick() => {
-                        queue_periodic_updates.update().await;
+                        queue_periodic_updates.reconcile().await;
                     }
                 }
             }
@@ -487,6 +487,17 @@ where
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.finish(request_id, 0).await
+    }
+
+    pub async fn free_without_admission(&self, request_id: &str) -> Result<(), SequenceError> {
+        let request_id = request_id.to_string();
+        let worker = self.slots.request_worker(&request_id);
+        let result = self.slots.free(&request_id, Instant::now());
+        match worker {
+            Some(worker) => self.queue.update_worker(worker).await,
+            None => self.queue.update().await,
+        }
+        result
     }
 
     pub async fn mark_dispatched(&self, request_id: &str) {

@@ -851,6 +851,13 @@ where
         self.scheduler.free(request_id).await
     }
 
+    pub(crate) async fn free_without_admission(
+        &self,
+        request_id: &str,
+    ) -> Result<(), SequenceError> {
+        self.scheduler.free_without_admission(request_id).await
+    }
+
     pub async fn finish(&self, request_id: &str, total_tokens: usize) -> Result<(), SequenceError> {
         self.scheduler.finish(request_id, total_tokens).await
     }

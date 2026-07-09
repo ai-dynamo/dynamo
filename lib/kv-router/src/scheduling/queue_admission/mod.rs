@@ -195,8 +195,9 @@ pub enum AdmissionAction {
 
 /// Policy-class admission behavior.
 ///
-/// The host calls [`Self::admit`] exactly once for each tracked request, using
-/// a unique ID. A bypassed request receives no lifecycle events. A ready
+/// The host calls [`Self::admit`] exactly once for each tracked scheduling
+/// request, using a unique ID. Query-only selection bypasses admission. A
+/// bypassed request receives no lifecycle events. A ready
 /// request may receive one `Dispatched` event and every tracked request
 /// receives exactly one terminal `Completed` or `Aborted` event while the host
 /// remains alive. A deferred request receives no `Dispatched` event until the

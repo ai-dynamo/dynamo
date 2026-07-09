@@ -478,27 +478,7 @@ impl<T> PolicyQueue<T> {
     /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
     /// accounting while preserving each retained entry's scheduling key.
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
-        self.pending_count = 0;
-        for class in &mut self.classes {
-            class.pending.retain(|entry| keep(entry.payload()));
-            class.deferred.retain(|_, entry| keep(entry.payload()));
-            class.ready_by_worker.retain(|_, ready| {
-                ready.retain(|entry| keep(entry.payload()));
-                !ready.is_empty()
-            });
-            class.rebuild_worker_heads();
-            let mut stats = PolicyQueueStats::default();
-            let mut count = 0;
-            for entry in class.entries() {
-                add_stats(&mut stats, entry.snapshot);
-                count += 1;
-            }
-            class.stats = stats;
-            self.pending_count += count;
-            if class.ready_is_empty() {
-                class.deficit = 0;
-            }
-        }
+        drop(self.take_if(|payload| !keep(payload)));
     }
 
     #[allow(clippy::too_many_arguments)]

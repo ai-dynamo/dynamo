@@ -69,20 +69,14 @@ impl ThunderAgentConfig {
                 "resume_hysteresis must not exceed pause_threshold",
             ));
         }
-        if self.resume_timeout_seconds <= 0.0
-            || Duration::try_from_secs_f64(self.resume_timeout_seconds).is_err()
-        {
-            return Err(ConfigError::Invalid(
-                "resume_timeout_seconds must be a positive duration",
-            ));
-        }
-        if self.scheduler_interval_seconds <= 0.0
-            || Duration::try_from_secs_f64(self.scheduler_interval_seconds).is_err()
-        {
-            return Err(ConfigError::Invalid(
-                "scheduler_interval_seconds must be a positive duration",
-            ));
-        }
+        validate_positive_duration(
+            self.resume_timeout_seconds,
+            "resume_timeout_seconds must be a positive duration",
+        )?;
+        validate_positive_duration(
+            self.scheduler_interval_seconds,
+            "scheduler_interval_seconds must be a positive duration",
+        )?;
         if !self.acting_token_weight.is_finite() || self.acting_token_weight <= 0.0 {
             return Err(ConfigError::Invalid(
                 "acting_token_weight must be finite and positive",
@@ -102,6 +96,13 @@ fn validate_fraction(value: f64, message: &'static str) -> Result<(), ConfigErro
         Ok(())
     } else {
         Err(ConfigError::Invalid(message))
+    }
+}
+
+fn validate_positive_duration(value: f64, message: &'static str) -> Result<(), ConfigError> {
+    match Duration::try_from_secs_f64(value) {
+        Ok(duration) if !duration.is_zero() => Ok(()),
+        _ => Err(ConfigError::Invalid(message)),
     }
 }
 
@@ -145,6 +146,14 @@ mod tests {
             },
             ThunderAgentConfig {
                 scheduler_interval_seconds: 0.0,
+                ..Default::default()
+            },
+            ThunderAgentConfig {
+                scheduler_interval_seconds: 1e-20,
+                ..Default::default()
+            },
+            ThunderAgentConfig {
+                resume_timeout_seconds: 1e-20,
                 ..Default::default()
             },
         ] {

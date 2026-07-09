@@ -69,9 +69,11 @@ enum AdmissionCommand {
         worker: Option<WorkerWithDpRank>,
         ack_tx: oneshot::Sender<()>,
     },
+    Reconcile {
+        ack_tx: oneshot::Sender<()>,
+    },
     Dispatched {
         request_id: String,
-        ack_tx: oneshot::Sender<()>,
     },
     Progress {
         request_id: String,
@@ -80,7 +82,6 @@ enum AdmissionCommand {
     Finished {
         request_id: String,
         total_tokens: usize,
-        ack_tx: oneshot::Sender<()>,
     },
 }
 
@@ -468,18 +469,12 @@ impl<
         if !self.admission_enabled {
             return;
         }
-        let (ack_tx, ack_rx) = oneshot::channel();
-        if self
+        let _ = self
             .admission_tx
             .send(AdmissionCommand::Dispatched {
                 request_id: request_id.to_owned(),
-                ack_tx,
             })
-            .await
-            .is_ok()
-        {
-            let _ = ack_rx.await;
-        }
+            .await;
     }
 
     pub(crate) fn progress(&self, request_id: &str, output_tokens: usize) {
@@ -496,14 +491,25 @@ impl<
         if !self.admission_enabled {
             return;
         }
-        let (ack_tx, ack_rx) = oneshot::channel();
-        if self
+        let _ = self
             .admission_tx
             .send(AdmissionCommand::Finished {
                 request_id: request_id.to_owned(),
                 total_tokens,
-                ack_tx,
             })
+            .await;
+    }
+
+    pub(crate) async fn reconcile(&self) {
+        if !self.admission_enabled {
+            self.update().await;
+            return;
+        }
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self
+            .admission_tx
+            .send(AdmissionCommand::Reconcile { ack_tx })
             .await
             .is_ok()
         {
@@ -553,68 +559,47 @@ impl<
 > SchedulerQueueActor<P, C, Sel, RF>
 {
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
-        let mut suppress_expired_deadline = false;
-        loop {
-            let command = match (
-                suppress_expired_deadline,
-                self.admission.next_reconcile_at(),
-            ) {
-                (true, _) => rx.recv().await,
-                (false, Some(deadline)) => {
-                    tokio::select! {
-                        biased;
-                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                            self.handle_update(None).await;
-                            suppress_expired_deadline = self
-                                .admission
-                                .next_reconcile_at()
-                                .is_some_and(|next| next <= std::time::Instant::now());
-                            if suppress_expired_deadline {
-                                tracing::warn!(
-                                    "Admission strategy retained an expired reconcile deadline; waiting for the next host event"
-                                );
-                            }
-                            continue;
-                        }
-                        command = rx.recv() => command,
-                    }
-                }
-                (false, None) => rx.recv().await,
-            };
-            let Some(command) = command else {
-                break;
-            };
-            suppress_expired_deadline = false;
+        while let Some(command) = rx.recv().await {
             match command {
                 AdmissionCommand::Enqueue {
                     request,
                     block_hashes,
                     ack_tx,
                 } => {
-                    self.handle_enqueue(request, block_hashes);
+                    let made_ready = self.handle_enqueue(request, block_hashes);
                     let _ = ack_tx.send(());
+                    if made_ready {
+                        self.handle_update(None).await;
+                    }
                 }
                 AdmissionCommand::Update { worker, ack_tx } => {
                     self.handle_update(worker).await;
                     let _ = ack_tx.send(());
                 }
-                AdmissionCommand::Dispatched { request_id, ack_tx } => {
-                    self.handle_dispatched(&request_id);
+                AdmissionCommand::Reconcile { ack_tx } => {
+                    self.handle_reconcile().await;
                     let _ = ack_tx.send(());
+                }
+                AdmissionCommand::Dispatched { request_id } => {
+                    if self.handle_dispatched(&request_id) {
+                        self.handle_update(None).await;
+                    }
                 }
                 AdmissionCommand::Progress {
                     request_id,
                     output_tokens,
                 } => {
-                    self.handle_progress(&request_id, output_tokens);
+                    if self.handle_progress(&request_id, output_tokens) {
+                        self.handle_update(None).await;
+                    }
                 }
                 AdmissionCommand::Finished {
                     request_id,
                     total_tokens,
-                    ack_tx,
                 } => {
-                    self.handle_finished(&request_id, total_tokens);
-                    let _ = ack_tx.send(());
+                    if self.handle_finished(&request_id, total_tokens) {
+                        self.handle_update(None).await;
+                    }
                 }
             }
         }
@@ -644,7 +629,7 @@ impl<
         &mut self,
         mut request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
-    ) {
+    ) -> bool {
         let decay_now = Instant::now();
         // Synthetic and explicit selections avoid cache work. Family classification
         // samples overlap once and reuses it if the request enters queue storage.
@@ -662,7 +647,8 @@ impl<
             (class_index, Some(snapshot))
         };
 
-        let admission = if request.mode.is_tracked() && self.admission.has_strategy(class_index) {
+        let mut admission = if request.mode.is_tracked() && self.admission.has_strategy(class_index)
+        {
             let allowed_worker_ids = request.allowed_worker_ids.clone();
             let pinned_worker = request.pinned_worker;
             let routing_constraints = request.routing_constraints.clone();
@@ -673,17 +659,23 @@ impl<
                 let overloaded_worker_ids = overloaded_worker_provider
                     .as_ref()
                     .and_then(|provider| provider());
-                let eligibility = RoutingEligibility::new(
+                let structural_eligibility = RoutingEligibility::new(
                     allowed_worker_ids.as_ref(),
-                    overloaded_worker_ids.as_ref(),
+                    None,
                     pinned_worker,
                     &routing_constraints,
                 );
-                let mut eligible_workers = HashSet::new();
-                eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
-                    eligible_workers.insert(worker);
+                let mut structural_workers = HashSet::new();
+                structural_eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
+                    structural_workers.insert(worker);
                 });
-                WorkerEligibilitySnapshot::from_set(eligible_workers)
+                let Some(overloaded_worker_ids) = overloaded_worker_ids.as_ref() else {
+                    return WorkerEligibilitySnapshot::new(structural_workers);
+                };
+                let mut available_workers = structural_workers.clone();
+                available_workers
+                    .retain(|worker| !overloaded_worker_ids.contains(&worker.worker_id));
+                WorkerEligibilitySnapshot::with_availability(structural_workers, available_workers)
             });
             self.admission.admit(
                 class_index,
@@ -697,11 +689,11 @@ impl<
         let mut deferred = false;
         if let Some((ticket, decision)) = admission {
             match decision {
+                AdmissionDecision::Bypass => admission = None,
                 AdmissionDecision::Ready(placement) => {
                     if let Err(error) = apply_admission_placement(&mut request, placement) {
                         request.respond(Err(error));
-                        self.finish_admission(ticket, 0);
-                        return;
+                        return self.finish_admission(ticket, 0);
                     }
                 }
                 AdmissionDecision::Defer => deferred = true,
@@ -714,8 +706,7 @@ impl<
                 self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
             });
         if !should_queue {
-            self.admit_one(request, decay_now, admission.map(|(ticket, _)| ticket));
-            return;
+            return self.admit_one(request, decay_now, admission.map(|(ticket, _)| ticket));
         }
 
         let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
@@ -756,17 +747,18 @@ impl<
             ),
         };
         if let Err((rejection, queued)) = enqueue {
-            if let Some(ticket) = queued.admission {
-                self.finish_admission(ticket, 0);
-            }
+            let made_ready = queued
+                .admission
+                .is_some_and(|ticket| self.finish_admission(ticket, 0));
             let mut request = queued.request;
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
-            return;
+            return made_ready;
         }
         self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
         self.pending_isl_tokens
             .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.add_class_counters(class_index, snapshot);
+        false
     }
 
     fn should_queue(
@@ -795,38 +787,39 @@ impl<
         QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
     }
 
-    fn handle_dispatched(&mut self, request_id: &str) {
+    fn handle_dispatched(&mut self, request_id: &str) -> bool {
         let Some(active) = self.active_admissions.get(request_id).copied() else {
-            return;
+            return false;
         };
         let actions = self.admission.dispatched(active.ticket, active.worker);
-        self.apply_admission_actions(actions);
+        self.apply_admission_actions(actions)
     }
 
-    fn handle_progress(&mut self, request_id: &str, output_tokens: usize) {
+    fn handle_progress(&mut self, request_id: &str, output_tokens: usize) -> bool {
         let Some(active) = self.active_admissions.get(request_id).copied() else {
-            return;
+            return false;
         };
         let actions = self.admission.progress(active.ticket, output_tokens);
-        self.apply_admission_actions(actions);
+        self.apply_admission_actions(actions)
     }
 
-    fn handle_finished(&mut self, request_id: &str, total_tokens: usize) {
+    fn handle_finished(&mut self, request_id: &str, total_tokens: usize) -> bool {
         let Some(active) = self.active_admissions.remove(request_id) else {
-            return;
+            return false;
         };
-        self.finish_admission(active.ticket, total_tokens);
+        self.finish_admission(active.ticket, total_tokens)
     }
 
-    fn finish_admission(&mut self, ticket: AdmissionTicket, total_tokens: usize) {
+    fn finish_admission(&mut self, ticket: AdmissionTicket, total_tokens: usize) -> bool {
         let actions = self.admission.finished(ticket, total_tokens);
-        self.apply_admission_actions(actions);
+        self.apply_admission_actions(actions)
     }
 
     fn apply_admission_actions(
         &mut self,
         actions: impl IntoIterator<Item = super::queue_admission::ClassAdmissionAction>,
-    ) {
+    ) -> bool {
+        let mut made_ready = false;
         let mut actions: VecDeque<_> = actions.into_iter().collect();
         while let Some(class_action) = actions.pop_front() {
             let AdmissionAction::MakeReady { id, placement } = class_action.action;
@@ -859,16 +852,24 @@ impl<
                 continue;
             }
 
-            if !self
+            let effective_placement = self
                 .pending
-                .make_ready(class_action.class_index, id, placement)
+                .deferred_payload_mut(class_action.class_index, id)
+                .and_then(|queued| queued.request.pinned_worker)
+                .map_or(placement, WorkerPlacement::Exact);
+            if self
+                .pending
+                .make_ready(class_action.class_index, id, effective_placement)
             {
+                made_ready = true;
+            } else {
                 tracing::debug!(
                     admission_id = id.get(),
                     "Ignoring duplicate make-ready action"
                 );
             }
         }
+        made_ready
     }
 
     fn subtract_pending_counters(&self, class_index: usize, snapshot: QueueSnapshot) {
@@ -878,7 +879,7 @@ impl<
         self.subtract_class_counters(class_index, snapshot);
     }
 
-    async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
+    async fn handle_reconcile(&mut self) {
         let cancelled = self
             .pending
             .take_if(|queued| queued.admission.is_some() && queued.request.response_is_closed());
@@ -893,7 +894,10 @@ impl<
         }
         actions.extend(self.admission.reconcile());
         self.apply_admission_actions(actions);
+        self.handle_update(None).await;
+    }
 
+    async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
         if self.pending.pending_count() == 0 {
             return;
         }
@@ -988,7 +992,7 @@ impl<
         mut request: SchedulingRequest,
         decay_now: Instant,
         admission: Option<AdmissionTicket>,
-    ) {
+    ) -> bool {
         request.worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
@@ -1018,10 +1022,7 @@ impl<
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
                 request.respond(Err(e));
-                if let Some(ticket) = admission {
-                    self.finish_admission(ticket, 0);
-                }
-                return;
+                return admission.is_some_and(|ticket| self.finish_admission(ticket, 0));
             }
         };
 
@@ -1039,7 +1040,7 @@ impl<
                 admission.is_none(),
                 "query-only selection bypasses admission"
             );
-            return;
+            return false;
         }
 
         let request_id = request
@@ -1075,9 +1076,10 @@ impl<
                     },
                 );
             } else {
-                self.finish_admission(ticket, 0);
+                return self.finish_admission(ticket, 0);
             }
         }
+        false
     }
 
     /// Completes the tracked-admission ownership handoff.
@@ -1843,7 +1845,7 @@ mod tests {
                     state.dispatched.push(worker);
                     Vec::new()
                 }
-                AdmissionEvent::Progress { .. } => Vec::new(),
+                AdmissionEvent::OutputTokens { .. } => Vec::new(),
                 AdmissionEvent::Finished { id, total_tokens } => {
                     if state.deferred == Some(id) {
                         state.deferred = None;
@@ -1871,6 +1873,16 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
+        make_queue_with_admission_strategy_and_workers(strategy, 1)
+    }
+
+    fn make_queue_with_admission_strategy_and_workers(
+        strategy: Box<dyn PolicyClassAdmissionStrategy>,
+        worker_count: u64,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
         let profile = policy_profile(
             r#"
 default_policy_family: standard
@@ -1892,18 +1904,24 @@ policy_classes:
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             16,
-            HashMap::from([(0, (0, 1))]),
+            (0..worker_count).map(|worker| (worker, (0, 1))).collect(),
             false,
             0,
             "test",
         ));
-        let (_cfg_tx, cfg_rx) = watch::channel(HashMap::from([(
-            0,
-            SimpleWorkerConfig {
-                max_num_batched_tokens: Some(1_000),
-                ..Default::default()
-            },
-        )]));
+        let (_cfg_tx, cfg_rx) = watch::channel(
+            (0..worker_count)
+                .map(|worker| {
+                    (
+                        worker,
+                        SimpleWorkerConfig {
+                            max_num_batched_tokens: Some(1_000),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+        );
         let mut strategies = PolicyClassAdmissionStrategies::new();
         strategies.insert("agents".to_owned(), strategy);
         let queue = Arc::new(
@@ -1941,12 +1959,13 @@ policy_classes:
             assert!(state.dispatched.is_empty());
         }
 
-        queue.update().await;
+        queue.reconcile().await;
         let selected = response.await.unwrap().unwrap();
         assert_eq!(selected.best_worker, WorkerWithDpRank::new(0, 0));
         assert_eq!(queue.pending_count(), 0);
         queue.dispatched("deferred").await;
         queue.finish("deferred", 17).await;
+        queue.update().await;
         {
             let state = state.lock().unwrap();
             assert_eq!(state.dispatched, vec![WorkerWithDpRank::new(0, 0)]);
@@ -1968,7 +1987,7 @@ policy_classes:
 
         queue.enqueue(request).await;
         drop(response);
-        queue.update().await;
+        queue.reconcile().await;
 
         assert_eq!(queue.pending_count(), 0);
         let state = state.lock().unwrap();
@@ -1992,10 +2011,192 @@ policy_classes:
                 AdmissionEvent::Finished { total_tokens, .. } => {
                     state.finished_total_tokens.push(total_tokens);
                 }
-                AdmissionEvent::Progress { .. } | AdmissionEvent::Reconcile => {}
+                AdmissionEvent::OutputTokens { .. } | AdmissionEvent::Reconcile => {}
             }
             Vec::new()
         }
+    }
+
+    struct BypassGate {
+        events: Arc<AtomicUsize>,
+    }
+
+    impl PolicyClassAdmissionStrategy for BypassGate {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Bypass
+        }
+
+        fn on_event(&mut self, _event: AdmissionEvent) -> Vec<AdmissionAction> {
+            self.events.fetch_add(1, Ordering::Relaxed);
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn bypassed_request_has_no_admission_lifecycle() {
+        let events = Arc::new(AtomicUsize::new(0));
+        let (queue, slots) = make_queue_with_admission_strategy(Box::new(BypassGate {
+            events: Arc::clone(&events),
+        }));
+        let (mut request, response) = make_request("bypassed", 64);
+        request.policy_class = Some("agents".to_owned());
+        let response = {
+            queue.enqueue(request).await;
+            response.await.unwrap().unwrap()
+        };
+        assert!(!response.admission_managed);
+
+        queue.dispatched("bypassed").await;
+        queue.finish("bypassed", 64).await;
+        queue.update().await;
+        assert_eq!(events.load(Ordering::Relaxed), 0);
+        slots.free(&"bypassed".to_owned(), decay_now()).unwrap();
+    }
+
+    #[derive(Default)]
+    struct FinishReleaseGate {
+        first: Option<AdmissionId>,
+        deferred: Option<AdmissionId>,
+    }
+
+    impl PolicyClassAdmissionStrategy for FinishReleaseGate {
+        fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
+            if self.first.is_none() {
+                self.first = Some(request.id());
+                AdmissionDecision::Ready(WorkerPlacement::Any)
+            } else {
+                self.deferred = Some(request.id());
+                AdmissionDecision::Defer
+            }
+        }
+
+        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
+            let AdmissionEvent::Finished { id, .. } = event else {
+                return Vec::new();
+            };
+            if self.first != Some(id) {
+                return Vec::new();
+            }
+            self.deferred
+                .take()
+                .map(|id| {
+                    vec![AdmissionAction::MakeReady {
+                        id,
+                        placement: WorkerPlacement::Any,
+                    }]
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_action_drains_without_an_unrelated_update() {
+        let (queue, slots) =
+            make_queue_with_admission_strategy(Box::<FinishReleaseGate>::default());
+        let (mut first, first_response) = make_request("first-admitted", 64);
+        first.policy_class = Some("agents".to_owned());
+        queue.enqueue(first).await;
+        first_response.await.unwrap().unwrap();
+
+        let (mut second, second_response) = make_request("second-deferred", 64);
+        second.policy_class = Some("agents".to_owned());
+        queue.enqueue(second).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        slots
+            .free(&"first-admitted".to_owned(), decay_now())
+            .unwrap();
+        queue.finish("first-admitted", 64).await;
+        tokio::time::timeout(Duration::from_secs(1), second_response)
+            .await
+            .expect("finish action did not drain the queue")
+            .unwrap()
+            .unwrap();
+        assert_eq!(queue.pending_count(), 0);
+        slots
+            .free(&"second-deferred".to_owned(), decay_now())
+            .unwrap();
+    }
+
+    #[derive(Default)]
+    struct PreservePinGate {
+        deferred: Option<AdmissionId>,
+    }
+
+    impl PolicyClassAdmissionStrategy for PreservePinGate {
+        fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
+            if self.deferred.is_none() {
+                self.deferred = Some(request.id());
+                AdmissionDecision::Defer
+            } else {
+                AdmissionDecision::Ready(WorkerPlacement::Any)
+            }
+        }
+
+        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
+            if !matches!(event, AdmissionEvent::Reconcile) {
+                return Vec::new();
+            }
+            self.deferred
+                .take()
+                .map(|id| {
+                    vec![AdmissionAction::MakeReady {
+                        id,
+                        placement: WorkerPlacement::Any,
+                    }]
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    #[tokio::test]
+    async fn make_ready_any_preserves_existing_exact_worker_lane() {
+        let (queue, slots) =
+            make_queue_with_admission_strategy_and_workers(Box::<PreservePinGate>::default(), 2);
+        for worker_id in 0..2 {
+            let (mut blocker, response) = make_request(&format!("blocker-{worker_id}"), 64);
+            blocker.pinned_worker = Some(WorkerWithDpRank::new(worker_id, 0));
+            queue.enqueue(blocker).await;
+            assert_eq!(
+                response.await.unwrap().unwrap().best_worker,
+                WorkerWithDpRank::new(worker_id, 0)
+            );
+        }
+
+        let (mut pinned, pinned_response) = make_request("pinned-deferred", 64);
+        pinned.policy_class = Some("agents".to_owned());
+        pinned.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        queue.enqueue(pinned).await;
+
+        let (mut runnable, runnable_response) = make_request("runnable-shared", 64);
+        runnable.policy_class = Some("agents".to_owned());
+        queue.enqueue(runnable).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        slots.free(&"blocker-1".to_owned(), decay_now()).unwrap();
+        queue.reconcile().await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), runnable_response)
+                .await
+                .expect("pinned lane blocked shared work")
+                .unwrap()
+                .unwrap()
+                .best_worker,
+            WorkerWithDpRank::new(1, 0)
+        );
+
+        slots.free(&"blocker-0".to_owned(), decay_now()).unwrap();
+        queue.update().await;
+        assert_eq!(
+            pinned_response.await.unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(0, 0)
+        );
+        slots
+            .free(&"runnable-shared".to_owned(), decay_now())
+            .unwrap();
+        slots
+            .free(&"pinned-deferred".to_owned(), decay_now())
+            .unwrap();
     }
 
     #[tokio::test]
@@ -2015,7 +2216,7 @@ policy_classes:
         assert_eq!(queue.pending_count(), 1);
         drop(cancelled_response);
 
-        queue.update().await;
+        queue.reconcile().await;
 
         assert_eq!(queue.pending_count(), 0);
         let state = state.lock().unwrap();
@@ -2034,101 +2235,16 @@ policy_classes:
         request.policy_class = Some("agents".to_owned());
 
         queue.enqueue(request).await;
-        queue.update().await;
+        queue.reconcile().await;
         response.await.unwrap().unwrap();
         queue.finish("backend-abort", 64).await;
+        queue.update().await;
 
         let state = state.lock().unwrap();
         assert!(state.dispatched.is_empty());
         assert_eq!(state.finished_total_tokens, vec![64]);
         slots
             .free(&"backend-abort".to_owned(), decay_now())
-            .unwrap();
-    }
-
-    struct DeadlineGate {
-        deferred: Option<AdmissionId>,
-        deadline: Option<std::time::Instant>,
-    }
-
-    impl PolicyClassAdmissionStrategy for DeadlineGate {
-        fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
-            self.deferred = Some(request.id());
-            self.deadline = Some(std::time::Instant::now() + Duration::from_millis(10));
-            AdmissionDecision::Defer
-        }
-
-        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
-            if !matches!(event, AdmissionEvent::Reconcile) {
-                return Vec::new();
-            }
-            self.deadline = None;
-            self.deferred
-                .take()
-                .map(|id| {
-                    vec![AdmissionAction::MakeReady {
-                        id,
-                        placement: WorkerPlacement::Any,
-                    }]
-                })
-                .unwrap_or_default()
-        }
-
-        fn next_reconcile_at(&self) -> Option<std::time::Instant> {
-            self.deadline
-        }
-    }
-
-    #[tokio::test]
-    async fn strategy_deadline_reconciles_without_router_activity() {
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(DeadlineGate {
-            deferred: None,
-            deadline: None,
-        }));
-        let (mut request, response) = make_request("deadline", 64);
-        request.policy_class = Some("agents".to_owned());
-        queue.enqueue(request).await;
-
-        let selected = tokio::time::timeout(Duration::from_secs(1), response)
-            .await
-            .expect("strategy deadline did not wake the queue")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(selected.best_worker, WorkerWithDpRank::new(0, 0));
-        queue.finish("deadline", 64).await;
-        slots.free(&"deadline".to_owned(), decay_now()).unwrap();
-    }
-
-    struct FixedPastDeadline;
-
-    impl PolicyClassAdmissionStrategy for FixedPastDeadline {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
-            AdmissionDecision::Ready(WorkerPlacement::Any)
-        }
-
-        fn next_reconcile_at(&self) -> Option<std::time::Instant> {
-            Some(std::time::Instant::now() - Duration::from_secs(1))
-        }
-    }
-
-    #[tokio::test]
-    async fn unchanged_expired_deadline_does_not_starve_commands() {
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(FixedPastDeadline));
-        tokio::task::yield_now().await;
-        let (mut request, response) = make_request("past-deadline", 64);
-        request.policy_class = Some("agents".to_owned());
-
-        queue.enqueue(request).await;
-        tokio::time::timeout(Duration::from_secs(1), response)
-            .await
-            .expect("expired strategy deadline starved enqueue")
-            .unwrap()
-            .unwrap();
-
-        queue.finish("past-deadline", 64).await;
-        slots
-            .free(&"past-deadline".to_owned(), decay_now())
             .unwrap();
     }
 

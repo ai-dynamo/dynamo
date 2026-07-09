@@ -124,6 +124,13 @@ where
             block_size,
             provided_strategies,
         )?;
+        let strategy_recheck_interval = strategy_recheck_interval(&admission_strategies)?;
+        let queue_recheck_interval = strategy_recheck_interval.map_or_else(
+            || kv_router_config.router_queue_recheck_interval(),
+            |strategy_interval| {
+                strategy_interval.min(kv_router_config.router_queue_recheck_interval())
+            },
+        );
         let metric_model = model_name.unwrap_or("unknown");
         let queue_metrics = profile
             .classes()
@@ -147,7 +154,7 @@ where
                 prefill_load_estimator,
                 overlap_scores_refresh,
                 overloaded_worker_provider,
-                kv_router_config.router_queue_recheck_interval(),
+                queue_recheck_interval,
                 kv_router_config.router_track_prefill_tokens,
                 component.drt().child_token(),
                 worker_type,
@@ -377,7 +384,15 @@ where
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.finish(request_id, 0).await
+        self.inner.free(request_id).await?;
+        self.update_queue_metrics();
+        Ok(())
+    }
+
+    pub async fn free_without_admission(&self, request_id: &str) -> Result<(), SequenceError> {
+        self.inner.free_without_admission(request_id).await?;
+        self.update_queue_metrics();
+        Ok(())
     }
 
     pub async fn mark_dispatched(&self, request_id: &str) {
@@ -486,6 +501,24 @@ fn build_admission_strategies(
     Ok(strategies)
 }
 
+fn strategy_recheck_interval(
+    strategies: &PolicyClassAdmissionStrategies,
+) -> Result<Option<Duration>, KvSchedulerError> {
+    let mut minimum = None;
+    for interval in strategies
+        .values()
+        .filter_map(|strategy| strategy.reconcile_interval())
+    {
+        if interval.is_zero() {
+            return Err(KvSchedulerError::InitFailed(
+                "admission strategy reconcile interval must be positive".to_owned(),
+            ));
+        }
+        minimum = Some(minimum.map_or(interval, |current: Duration| current.min(interval)));
+    }
+    Ok(minimum)
+}
+
 fn update_queue_metrics(
     handles: &[RouterQueueMetricHandles],
     mut stats_for: impl FnMut(usize) -> Option<dynamo_kv_router::queue::ClassQueueStats>,
@@ -534,6 +567,18 @@ mod tests {
     impl PolicyClassAdmissionStrategy for CustomStrategy {
         fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
+        }
+    }
+
+    struct ZeroIntervalStrategy;
+
+    impl PolicyClassAdmissionStrategy for ZeroIntervalStrategy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Bypass
+        }
+
+        fn reconcile_interval(&self) -> Option<Duration> {
+            Some(Duration::ZERO)
         }
     }
 
@@ -596,6 +641,10 @@ policy_classes:
             build_admission_strategies(&profile, rx, 16, PolicyClassAdmissionStrategies::new())
                 .unwrap();
         assert!(strategies.contains_key("agents"));
+        assert_eq!(
+            strategies["agents"].reconcile_interval(),
+            Some(Duration::from_secs(5))
+        );
     }
 
     #[test]
@@ -660,6 +709,18 @@ policy_classes:
         let strategies = build_admission_strategies(&profile, rx, 16, provided).unwrap();
 
         assert!(strategies.contains_key("agents"));
+        assert_eq!(strategies["agents"].reconcile_interval(), None);
+    }
+
+    #[test]
+    fn rejects_zero_strategy_reconcile_interval() {
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        strategies.insert("agents".to_owned(), Box::new(ZeroIntervalStrategy));
+        assert!(matches!(
+            strategy_recheck_interval(&strategies),
+            Err(KvSchedulerError::InitFailed(message))
+                if message.contains("reconcile interval must be positive")
+        ));
     }
 
     #[tokio::test]
