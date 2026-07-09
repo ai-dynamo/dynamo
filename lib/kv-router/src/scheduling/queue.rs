@@ -94,10 +94,11 @@ struct DispatchAvailability {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkerAvailabilityState {
+enum WorkerDispatchDisposition {
     Ineligible,
-    Unavailable,
-    Available,
+    Wait,
+    Reject,
+    Ready,
 }
 
 impl DispatchAvailability {
@@ -527,11 +528,6 @@ impl<
     }
 
     pub(crate) async fn reconcile(&self) {
-        if !self.admission_enabled {
-            self.update().await;
-            return;
-        }
-
         let (ack_tx, ack_rx) = oneshot::channel();
         if self
             .admission_tx
@@ -696,18 +692,24 @@ impl<
             .pinned_worker
             .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
         let dispatch_availability = self.dispatch_availability_for(class, decay_now);
+        let disposition = if dispatch_availability.filters_workers(class) {
+            let workers = self.workers_with_configs.borrow();
+            worker_dispatch_disposition(
+                request.eligibility(),
+                class,
+                &workers,
+                dispatch_availability.overloaded_worker_ids.as_ref(),
+                dispatch_availability.active_tokens.as_ref(),
+            )
+        } else {
+            WorkerDispatchDisposition::Ready
+        };
+        if disposition == WorkerDispatchDisposition::Reject {
+            return self.reject_overloaded(request, admission.map(|(ticket, _)| ticket));
+        }
         let should_queue = deferred
             || self.pending.has_backlog(class_index)
-            || (dispatch_availability.filters_workers(class) && {
-                let workers = self.workers_with_configs.borrow();
-                worker_availability_state(
-                    request.eligibility(),
-                    class,
-                    &workers,
-                    dispatch_availability.overloaded_worker_ids.as_ref(),
-                    dispatch_availability.active_tokens.as_ref(),
-                ) == WorkerAvailabilityState::Unavailable
-            });
+            || disposition == WorkerDispatchDisposition::Wait;
         if !should_queue {
             return self.admit_one(
                 request,
@@ -927,7 +929,7 @@ impl<
     async fn handle_reconcile(&mut self) {
         let cancelled = self
             .pending
-            .take_if(|queued| queued.admission.is_some() && queued.request.response_is_closed());
+            .take_if(|queued| queued.request.response_is_closed());
         let mut actions = Vec::new();
         for entry in cancelled {
             let class_index = entry.class_index();
@@ -971,18 +973,33 @@ impl<
                     .as_ref()
                     .and_then(|provider| provider()),
             };
-            let popped = {
+            let (popped, disposition) = {
                 let workers = self.workers_with_configs.borrow();
-                self.pending.pop_next(|_, class, queued| {
+                let popped = self.pending.pop_next(|_, class, queued| {
                     !dispatch_availability.filters_workers(class)
-                        || worker_availability_state(
+                        || worker_dispatch_disposition(
                             queued.request.eligibility(),
                             class,
                             &workers,
                             dispatch_availability.overloaded_worker_ids.as_ref(),
                             dispatch_availability.active_tokens.as_ref(),
-                        ) != WorkerAvailabilityState::Unavailable
-                })
+                        ) != WorkerDispatchDisposition::Wait
+                });
+                let disposition = popped.as_ref().map(|entry| {
+                    let class = self.profile.class(entry.class_index());
+                    if dispatch_availability.filters_workers(class) {
+                        worker_dispatch_disposition(
+                            entry.payload().request.eligibility(),
+                            class,
+                            &workers,
+                            dispatch_availability.overloaded_worker_ids.as_ref(),
+                            dispatch_availability.active_tokens.as_ref(),
+                        )
+                    } else {
+                        WorkerDispatchDisposition::Ready
+                    }
+                });
+                (popped, disposition)
             };
             let Some(mut popped) = popped else {
                 break;
@@ -1004,6 +1021,11 @@ impl<
             self.pending_isl_tokens
                 .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
             self.subtract_class_counters(popped.class_index(), snapshot);
+            if disposition == Some(WorkerDispatchDisposition::Reject) {
+                let queued = popped.into_payload();
+                self.reject_overloaded(queued.request, queued.admission);
+                continue;
+            }
             let queued = popped.payload_mut();
             // Busy thresholds guide admission, not reservation. Rechecking after
             // this await would require restoring counters, heap state, and DRR credit.
@@ -1138,6 +1160,21 @@ impl<
         false
     }
 
+    fn reject_overloaded(
+        &mut self,
+        mut request: SchedulingRequest,
+        admission: Option<AdmissionTicket>,
+    ) -> bool {
+        let error = request.pinned_worker.map_or(
+            KvSchedulerError::AllEligibleWorkersOverloaded,
+            |worker| KvSchedulerError::PinnedWorkerOverloaded {
+                worker_id: worker.worker_id,
+            },
+        );
+        request.respond(Err(error));
+        admission.is_some_and(|ticket| self.abort_admission(ticket))
+    }
+
     /// Completes the tracked-admission ownership handoff.
     ///
     /// A closed receiver means the actor-owned request was abandoned before
@@ -1237,22 +1274,34 @@ impl<
     }
 }
 
-fn worker_availability_state<C: WorkerConfigLike>(
+fn worker_dispatch_disposition<C: WorkerConfigLike>(
     eligibility: RoutingEligibility<'_>,
     class: &PolicyClassConfig,
     workers: &HashMap<WorkerId, C>,
     overloaded_worker_ids: Option<&HashSet<WorkerId>>,
     active_tokens: Option<&HashMap<WorkerWithDpRank, usize>>,
-) -> WorkerAvailabilityState {
-    let mut has_eligible_worker = false;
-    let has_available_worker = eligibility.any_eligible_worker_rank(workers, |worker, config| {
-        has_eligible_worker = true;
-        worker_is_available(worker, config, class, overloaded_worker_ids, active_tokens)
+) -> WorkerDispatchDisposition {
+    let mut has_waiting_worker = false;
+    let mut has_overloaded_worker = false;
+    let has_ready_worker = eligibility.any_eligible_worker_rank(workers, |worker, config| {
+        if overloaded_worker_ids.is_some_and(|workers| workers.contains(&worker.worker_id)) {
+            has_overloaded_worker = true;
+            return false;
+        }
+        if worker_is_prefill_busy(worker, config, class, active_tokens) {
+            has_waiting_worker = true;
+            return false;
+        }
+        true
     });
-    match (has_eligible_worker, has_available_worker) {
-        (false, _) => WorkerAvailabilityState::Ineligible,
-        (true, false) => WorkerAvailabilityState::Unavailable,
-        (true, true) => WorkerAvailabilityState::Available,
+    if has_ready_worker {
+        WorkerDispatchDisposition::Ready
+    } else if has_waiting_worker {
+        WorkerDispatchDisposition::Wait
+    } else if has_overloaded_worker {
+        WorkerDispatchDisposition::Reject
+    } else {
+        WorkerDispatchDisposition::Ineligible
     }
 }
 
@@ -1288,7 +1337,16 @@ fn worker_is_available<C: WorkerConfigLike>(
     if overloaded_worker_ids.is_some_and(|worker_ids| worker_ids.contains(&worker.worker_id)) {
         return false;
     }
-    !active_tokens.is_some_and(|active_tokens| {
+    !worker_is_prefill_busy(worker, config, class, active_tokens)
+}
+
+fn worker_is_prefill_busy<C: WorkerConfigLike>(
+    worker: WorkerWithDpRank,
+    config: &C,
+    class: &PolicyClassConfig,
+    active_tokens: Option<&HashMap<WorkerWithDpRank, usize>>,
+) -> bool {
+    active_tokens.is_some_and(|active_tokens| {
         let max_batched = config
             .max_num_batched_tokens()
             .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
@@ -1318,7 +1376,7 @@ fn apply_admission_placement(
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
 
@@ -1643,6 +1701,7 @@ mod tests {
         num_workers: usize,
         block_size: u32,
         isl: usize,
+        threshold_frac: Option<f64>,
         overloaded_worker_provider: OverloadedWorkerProvider,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
@@ -1675,7 +1734,7 @@ mod tests {
         let queue = Arc::new(SchedulerQueue::new_with_overload_provider(
             Arc::clone(&slots),
             cfg_rx,
-            None,
+            threshold_frac,
             block_size,
             selector,
             RouterQueuePolicy::Fcfs,
@@ -2317,6 +2376,25 @@ policy_classes:
         assert_eq!(state.available_at_admission, vec![false]);
         assert!(state.dispatched.is_empty());
         assert_eq!(state.aborted, vec![AdmissionId::new(0)]);
+        slots.free(&"blocker".to_owned(), decay_now()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_ordinary_request_is_removed_while_worker_stays_busy() {
+        let (queue, slots) = make_queue(1, 16, 64, Some(0.0));
+
+        let (blocker, blocker_response) = make_request("blocker", 64);
+        queue.enqueue(blocker).await;
+        blocker_response.await.unwrap().unwrap();
+
+        let (cancelled, cancelled_response) = make_request("cancelled", 64);
+        queue.enqueue(cancelled).await;
+        assert_eq!(queue.pending_count(), 1);
+        drop(cancelled_response);
+
+        queue.reconcile().await;
+
+        assert_eq!(queue.pending_count(), 0);
         slots.free(&"blocker".to_owned(), decay_now()).unwrap();
     }
 
@@ -2965,31 +3043,53 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn overloaded_worker_waits_until_available() {
-        let overloaded = Arc::new(AtomicBool::new(true));
-        let provider_state = Arc::clone(&overloaded);
-        let overloaded_worker_provider: OverloadedWorkerProvider = Arc::new(move || {
-            provider_state
-                .load(Ordering::Relaxed)
-                .then(|| HashSet::from([0]))
-        });
+    async fn overloaded_constrained_request_is_rejected_without_blocking_healthy_work() {
+        let overloaded_worker_provider: OverloadedWorkerProvider =
+            Arc::new(|| Some(HashSet::from([0])));
         let (queue, slots) =
-            make_queue_with_overload_provider(1, 16, 256, overloaded_worker_provider);
+            make_queue_with_overload_provider(2, 16, 256, None, overloaded_worker_provider);
 
-        let (req, mut rx) = make_request("overloaded", 256);
-        queue.enqueue(req).await;
+        let (mut overloaded, overloaded_rx) = make_request("overloaded", 256);
+        overloaded.allowed_worker_ids = Some(HashSet::from([0]));
+        queue.enqueue(overloaded).await;
+        assert!(matches!(
+            overloaded_rx.await.unwrap(),
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+        assert_eq!(queue.pending_count(), 0);
+
+        let (mut healthy, healthy_rx) = make_request("healthy", 256);
+        healthy.allowed_worker_ids = Some(HashSet::from([1]));
+        queue.enqueue(healthy).await;
+        assert_eq!(healthy_rx.await.unwrap().unwrap().best_worker.worker_id, 1);
+        slots.free(&"healthy".to_owned(), decay_now()).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prefill_busy_worker_takes_queue_precedence_over_overloaded_worker() {
+        let overloaded_worker_provider: OverloadedWorkerProvider =
+            Arc::new(|| Some(HashSet::from([0])));
+        let (queue, slots) =
+            make_queue_with_overload_provider(2, 16, 256, Some(0.0), overloaded_worker_provider);
+
+        let (mut blocker, blocker_rx) = make_request("blocker", 256);
+        blocker.allowed_worker_ids = Some(HashSet::from([1]));
+        queue.enqueue(blocker).await;
+        blocker_rx.await.unwrap().unwrap();
+
+        let (request, mut response) = make_request("mixed", 256);
+        queue.enqueue(request).await;
         assert_eq!(queue.pending_count(), 1);
         assert!(matches!(
-            rx.try_recv(),
+            response.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         ));
 
-        overloaded.store(false, Ordering::Relaxed);
+        slots.free(&"blocker".to_owned(), decay_now()).unwrap();
         queue.update().await;
-
-        assert_eq!(rx.await.unwrap().unwrap().best_worker.worker_id, 0);
+        assert_eq!(response.await.unwrap().unwrap().best_worker.worker_id, 1);
         assert_eq!(queue.pending_count(), 0);
-        slots.free(&"overloaded".to_owned(), decay_now()).unwrap();
+        slots.free(&"mixed".to_owned(), decay_now()).unwrap();
     }
 
     /// Simulates the EPP path: router starts with zero workers (skip_initial_worker_wait),
