@@ -1,13 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from dynamo.common.constants import DisaggregationMode
-from dynamo.vllm.multimodal_utils.request_processor import PreparedMultimodalPrompt
+pytest.importorskip("vllm.v1.engine.async_llm")
+pytest.importorskip("vllm.usage.usage_lib")
+
+from dynamo.common.constants import DisaggregationMode  # noqa: E402
+from dynamo.vllm import llm_engine as llm_engine_mod  # noqa: E402
+from dynamo.vllm.constants import EmbeddingTransferMode  # noqa: E402
+from dynamo.vllm.multimodal_utils import (  # noqa: E402
+    prefill_worker_utils as prefill_worker_utils_mod,
+)
+from dynamo.vllm.multimodal_utils.prefill_worker_utils import (  # noqa: E402
+    EncoderResultEmbeddingLoader,
+)
+from dynamo.vllm.multimodal_utils.request_processor import (  # noqa: E402
+    PreparedMultimodalPrompt,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -45,9 +59,7 @@ class _EngineClient:
 
 
 def _engine(mode=DisaggregationMode.AGGREGATED, responses=()):
-    from dynamo.vllm import llm_engine as mod
-
-    engine = mod.VllmLLMEngine(
+    engine = llm_engine_mod.VllmLLMEngine(
         SimpleNamespace(model="Qwen/Qwen3-VL-2B-Instruct"),
         mode,
         served_model_name="Qwen/Qwen3-VL-2B-Instruct",
@@ -67,8 +79,6 @@ def _sampling_params():
 
 @pytest.mark.asyncio
 async def test_generate_submits_prepared_multimodal_prompt(monkeypatch):
-    from dynamo.vllm import llm_engine as mod
-
     engine = _engine()
     prompt = {
         "prompt_token_ids": [1, 2, 3],
@@ -85,7 +95,7 @@ async def test_generate_submits_prepared_multimodal_prompt(monkeypatch):
     )
     engine._multimodal_request_processor = processor
     build_sampling_params = MagicMock(return_value=_sampling_params())
-    monkeypatch.setattr(mod, "build_sampling_params", build_sampling_params)
+    monkeypatch.setattr(llm_engine_mod, "build_sampling_params", build_sampling_params)
 
     chunks = [
         chunk
@@ -108,8 +118,6 @@ async def test_generate_submits_prepared_multimodal_prompt(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prefill_terminal_adds_embedding_handoff(monkeypatch):
-    from dynamo.vllm import llm_engine as mod
-
     output = SimpleNamespace(
         index=0,
         token_ids=[42],
@@ -142,7 +150,9 @@ async def test_prefill_terminal_adds_embedding_handoff(monkeypatch):
     )
     engine._multimodal_request_processor = processor
     monkeypatch.setattr(
-        mod, "build_sampling_params", lambda *args, **kwargs: _sampling_params()
+        llm_engine_mod,
+        "build_sampling_params",
+        lambda *args, **kwargs: _sampling_params(),
     )
 
     chunks = [
@@ -173,37 +183,24 @@ async def test_prefill_terminal_adds_embedding_handoff(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "route_to_encoder", "message"),
-    [
-        (DisaggregationMode.ENCODE, False, "ENCODE is not supported"),
-        (DisaggregationMode.AGGREGATED, True, "--route-to-encoder is not supported"),
-    ],
-)
-async def test_from_args_rejects_unsupported_multimodal_topologies(
-    monkeypatch, mode, route_to_encoder, message
-):
-    from dynamo.vllm import llm_engine as mod
-
+async def test_llm_engine_rejects_encode_role(monkeypatch):
     config = SimpleNamespace(
-        disaggregation_mode=mode,
-        route_to_encoder=route_to_encoder,
+        disaggregation_mode=DisaggregationMode.ENCODE,
+        route_to_encoder=False,
         headless=False,
     )
     monkeypatch.setattr(
-        mod,
+        llm_engine_mod,
         "parse_args",
         lambda argv, fpm_trace_relay_supported=False: config,
     )
 
-    with pytest.raises(NotImplementedError, match=message):
-        await mod.VllmLLMEngine.from_args([])
+    with pytest.raises(ValueError, match="VllmEncodeEngine"):
+        await llm_engine_mod.VllmLLMEngine.from_args([])
 
 
 @pytest.mark.asyncio
 async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
-    from dynamo.vllm import llm_engine as mod
-
     config = SimpleNamespace(
         disaggregation_mode=DisaggregationMode.AGGREGATED,
         route_to_encoder=False,
@@ -216,6 +213,7 @@ async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
         enable_multimodal=True,
         frontend_decoding=True,
         multimodal_embedding_cache_capacity_gb=2.5,
+        embedding_transfer_mode=llm_engine_mod.EmbeddingTransferMode.LOCAL,
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
         engine_args=SimpleNamespace(
@@ -225,23 +223,172 @@ async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
     worker_config = object()
     from_runtime_config = MagicMock(return_value=worker_config)
     monkeypatch.setattr(
-        mod,
+        llm_engine_mod,
         "parse_args",
         lambda argv, fpm_trace_relay_supported=False: config,
     )
     monkeypatch.setattr(
-        mod.WorkerConfig,
+        llm_engine_mod.WorkerConfig,
         "from_runtime_config",
         from_runtime_config,
     )
 
-    engine, actual_worker_config = await mod.VllmLLMEngine.from_args([])
+    engine, actual_worker_config = await llm_engine_mod.VllmLLMEngine.from_args([])
 
     assert actual_worker_config is worker_config
     assert engine.enable_multimodal is True
     assert engine.frontend_decoding is True
     assert engine.multimodal_embedding_cache_capacity_gb == 2.5
     assert engine._namespace == "deployment"
+    assert engine.route_to_encoder is False
+    assert engine.embedding_transfer_mode == llm_engine_mod.EmbeddingTransferMode.LOCAL
     worker_overrides = from_runtime_config.call_args.kwargs
     assert worker_overrides["media_decoder"] is not None
     assert worker_overrides["media_fetcher"] is not None
+
+
+@pytest.mark.asyncio
+async def test_from_args_accepts_separate_encoder_routing(monkeypatch):
+    config = SimpleNamespace(
+        disaggregation_mode=DisaggregationMode.PREFILL,
+        route_to_encoder=True,
+        headless=False,
+        served_model_name="model",
+        model="model",
+        component="prefill",
+        namespace="deployment",
+        enable_rl=False,
+        enable_multimodal=True,
+        frontend_decoding=False,
+        multimodal_embedding_cache_capacity_gb=0.0,
+        embedding_transfer_mode=llm_engine_mod.EmbeddingTransferMode.NIXL_WRITE,
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
+        engine_args=SimpleNamespace(
+            model="model", served_model_name=["model"], logprobs_mode="raw_logprobs"
+        ),
+    )
+    monkeypatch.setattr(
+        llm_engine_mod,
+        "parse_args",
+        lambda argv, fpm_trace_relay_supported=False: config,
+    )
+    monkeypatch.setattr(
+        llm_engine_mod.WorkerConfig,
+        "from_runtime_config",
+        MagicMock(return_value=object()),
+    )
+
+    engine, _ = await llm_engine_mod.VllmLLMEngine.from_args([])
+
+    assert engine.route_to_encoder is True
+    assert (
+        engine.embedding_transfer_mode
+        == llm_engine_mod.EmbeddingTransferMode.NIXL_WRITE
+    )
+
+
+@pytest.mark.asyncio
+async def test_encoder_result_loader_validates_schema():
+    loader = EncoderResultEmbeddingLoader(AsyncMock())
+    with pytest.raises(ValueError, match="schema_version"):
+        await loader.load_encoder_result(
+            {"schema_version": 2, "multimodal_inputs": []},
+            model="model",
+            request_id="request",
+        )
+
+
+def test_encoder_result_loader_selects_matching_receiver(monkeypatch):
+    receiver = object()
+    constructor = MagicMock(return_value=receiver)
+    monkeypatch.setattr(
+        prefill_worker_utils_mod, "NixlWriteEmbeddingReceiver", constructor
+    )
+
+    loader = EncoderResultEmbeddingLoader.from_transfer_mode(
+        EmbeddingTransferMode.NIXL_WRITE
+    )
+
+    assert loader._receiver is receiver
+
+
+def _encoder_result(*serialized_requests):
+    return {
+        "schema_version": 1,
+        "multimodal_inputs": [
+            {
+                "serialized_request": {
+                    "embeddings_shape": [1, 1],
+                    "embedding_dtype_str": "float32",
+                    "serialized_request": serialized_request,
+                }
+            }
+            for serialized_request in serialized_requests
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_encoder_result_loader_releases_partial_receive_successes():
+    class PartiallyFailingReceiver:
+        def __init__(self):
+            self.received = asyncio.Event()
+            self.released = []
+
+        async def receive_embeddings(self, request):
+            if request.serialized_request == "success":
+                self.received.set()
+                return 7, prefill_worker_utils_mod.torch.ones((1, 1))
+            await self.received.wait()
+            raise RuntimeError("receive failed")
+
+        def release_tensor(self, tensor_id):
+            self.released.append(tensor_id)
+
+    receiver = PartiallyFailingReceiver()
+    loader = EncoderResultEmbeddingLoader(receiver)
+
+    with pytest.raises(RuntimeError, match="receive failed"):
+        await loader.load_encoder_result(
+            _encoder_result("success", "failure"),
+            model="model",
+            request_id="request",
+        )
+
+    assert receiver.released == [7]
+
+
+@pytest.mark.asyncio
+async def test_encoder_result_loader_releases_local_transfer(monkeypatch):
+    class RecordingLocalReceiver(prefill_worker_utils_mod.LocalEmbeddingReceiver):
+        def __init__(self):
+            self.embedding = prefill_worker_utils_mod.torch.ones((1, 1))
+            self.released = []
+
+        async def receive_embeddings(self, request):
+            return 11, self.embedding
+
+        def release_tensor(self, tensor_id):
+            self.released.append(tensor_id)
+
+    receiver = RecordingLocalReceiver()
+    ensure_owned = MagicMock()
+    monkeypatch.setattr(prefill_worker_utils_mod, "_ensure_owned_tensors", ensure_owned)
+    monkeypatch.setattr(
+        prefill_worker_utils_mod,
+        "_accumulate_embeddings",
+        lambda output, model, dtype, embedding, image_grid_thw: output.update(
+            image=embedding
+        ),
+    )
+
+    result = await EncoderResultEmbeddingLoader(receiver).load_encoder_result(
+        _encoder_result("local"),
+        model="model",
+        request_id="request",
+    )
+
+    assert result["image"] is receiver.embedding
+    assert receiver.released == [11]
+    ensure_owned.assert_not_called()

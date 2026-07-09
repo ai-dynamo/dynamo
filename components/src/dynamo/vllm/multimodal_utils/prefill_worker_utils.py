@@ -16,10 +16,13 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 from dynamo.common.multimodal.embedding_transfer import (
     AbstractEmbeddingReceiver,
     LocalEmbeddingReceiver,
+    NixlReadEmbeddingReceiver,
+    NixlWriteEmbeddingReceiver,
 )
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import Client
 
+from ..constants import EmbeddingTransferMode
 from .encode_utils import get_embedding_hash
 from .model import construct_mm_data
 from .protocol import (
@@ -38,12 +41,11 @@ SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
 
 
 class _PendingRelease:
-    """Tracks NIXL tensor buffers that should be released after consumption.
+    """Tracks transferred tensors that should be released after consumption.
 
-    For NIXL receivers, embeddings are views into pre-allocated reusable
-    buffers.  Instead of cloning each embedding eagerly, we defer the
-    release until the caller has consumed the tensors (e.g. via
-    ``_accumulate_embeddings`` which copies data through ``torch.cat``).
+    NIXL releases return reusable buffers, while local releases remove the
+    temporary safetensors file. Instead of cloning every embedding eagerly,
+    release is deferred until the caller has consumed the tensors.
     """
 
     __slots__ = ("_receiver", "_tensor_ids")
@@ -349,3 +351,93 @@ class MultiModalEmbeddingLoader:
             pending.release_all()
 
         return multi_modal_data
+
+
+class EncoderResultEmbeddingLoader:
+    """Receive embeddings described by a unified ``encoder_result`` handoff."""
+
+    SCHEMA_VERSION = 1
+
+    def __init__(self, receiver: AbstractEmbeddingReceiver):
+        self._receiver = receiver
+
+    @classmethod
+    def from_transfer_mode(
+        cls, transfer_mode: EmbeddingTransferMode
+    ) -> "EncoderResultEmbeddingLoader":
+        if transfer_mode == EmbeddingTransferMode.LOCAL:
+            receiver: AbstractEmbeddingReceiver = LocalEmbeddingReceiver()
+        elif transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
+            receiver = NixlWriteEmbeddingReceiver()
+        elif transfer_mode == EmbeddingTransferMode.NIXL_READ:
+            # Match the shared receiver factory and legacy vLLM path. Image
+            # embedding shapes vary, so fixed-size pre-registered descriptors
+            # cannot be reused safely; the default pool would also reserve
+            # roughly 8 GiB before the first request.
+            receiver = NixlReadEmbeddingReceiver(max_items=0)
+        else:
+            raise ValueError(f"Invalid embedding transfer mode: {transfer_mode}")
+        return cls(receiver)
+
+    async def load_encoder_result(
+        self,
+        encoder_result: dict[str, Any],
+        *,
+        model: str,
+        request_id: str,
+    ) -> Dict[str, Any]:
+        version = encoder_result.get("schema_version")
+        if version != self.SCHEMA_VERSION:
+            raise ValueError(
+                "Unsupported vLLM encoder_result schema_version "
+                f"{version!r}; expected {self.SCHEMA_VERSION}"
+            )
+        raw_groups = encoder_result.get("multimodal_inputs")
+        if not isinstance(raw_groups, list):
+            raise ValueError("encoder_result.multimodal_inputs must be a list")
+
+        groups = [MultiModalGroup.model_validate(group) for group in raw_groups]
+        receive_groups = [
+            group for group in groups if group.serialized_request is not None
+        ]
+        pending = _PendingRelease(self._receiver)
+        is_local = isinstance(self._receiver, LocalEmbeddingReceiver)
+
+        async def receive_group(group: MultiModalGroup) -> None:
+            assert group.serialized_request is not None
+            tensor_id, embedding = await self._receiver.receive_embeddings(
+                group.serialized_request
+            )
+            pending.track(tensor_id)
+            group.loaded_embedding = embedding
+
+        multi_modal_data: Dict[str, Any] = {}
+        try:
+            receive_results = await asyncio.gather(
+                *(receive_group(group) for group in receive_groups),
+                return_exceptions=True,
+            )
+            for result in receive_results:
+                if isinstance(result, BaseException):
+                    raise result
+
+            with time_and_log_code_section(
+                f"[PREFILL] request: {request_id} accumulate encoder_result"
+            ):
+                for group in groups:
+                    if group.loaded_embedding is None:
+                        raise ValueError(
+                            "encoder_result multimodal input is missing transfer metadata"
+                        )
+                    _accumulate_embeddings(
+                        multi_modal_data,
+                        model,
+                        group.loaded_embedding.dtype,
+                        group.loaded_embedding,
+                        group.image_grid_thw,
+                    )
+            if not is_local and len(groups) == 1:
+                _ensure_owned_tensors(multi_modal_data)
+            return multi_modal_data
+        finally:
+            pending.release_all()

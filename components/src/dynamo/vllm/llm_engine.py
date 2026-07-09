@@ -70,6 +70,7 @@ from dynamo.vllm.cache_info import (
 )
 from dynamo.vllm.capacity import per_rank_kv_blocks
 
+from .constants import EmbeddingTransferMode
 from .handlers import (
     VllmEnginePauseController,
     _apply_nvext_cache_salt,
@@ -84,12 +85,14 @@ from .logits_processing import (
 )
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
+from .multimodal_utils.prefill_worker_utils import EncoderResultEmbeddingLoader
 from .multimodal_utils.request_processor import VllmMultimodalRequestProcessor
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
+_ENCODER_RESULT_HANDOFF_CAPABILITY = "encoder_result_handoff"
 
 
 class _UnifiedStatLogger(StatLoggerBase):
@@ -183,6 +186,8 @@ class VllmLLMEngine(LLMEngine):
         frontend_decoding: bool = False,
         multimodal_embedding_cache_capacity_gb: float = 0.0,
         namespace: str = "dynamo",
+        route_to_encoder: bool = False,
+        embedding_transfer_mode: EmbeddingTransferMode = EmbeddingTransferMode.LOCAL,
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
@@ -197,6 +202,8 @@ class VllmLLMEngine(LLMEngine):
             multimodal_embedding_cache_capacity_gb
         )
         self._namespace = namespace
+        self.route_to_encoder = route_to_encoder
+        self.embedding_transfer_mode = embedding_transfer_mode
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -252,9 +259,8 @@ class VllmLLMEngine(LLMEngine):
             config = parse_args(argv, fpm_trace_relay_supported=False)
 
         if config.disaggregation_mode == DisaggregationMode.ENCODE:
-            raise NotImplementedError(
-                "ENCODE is not supported by the unified vLLM entry point; "
-                "use `python -m dynamo.vllm` for multimodal encode workers"
+            raise ValueError(
+                "VllmLLMEngine cannot run in encode mode; use VllmEncodeEngine"
             )
 
         # Headless is handled by unified_main before engine construction; a
@@ -268,13 +274,6 @@ class VllmLLMEngine(LLMEngine):
                 "driving the unified Worker directly"
             )
 
-        if config.route_to_encoder:
-            raise NotImplementedError(
-                "--route-to-encoder is not supported by the unified vLLM entry "
-                "point yet; use `python -m dynamo.vllm` until the separate "
-                "unified encode worker is available"
-            )
-
         if not config.served_model_name:
             config.served_model_name = (
                 config.engine_args.served_model_name
@@ -282,11 +281,13 @@ class VllmLLMEngine(LLMEngine):
 
         configure_rl_logprobs_mode(config)
 
-        # _resolve_disaggregation_mode() in DynamoVllmConfig has already
-        # promoted the field to a DisaggregationMode enum; the field type
-        # is still the input union, so narrow it here for mypy (cast
-        # rather than assert so `-O` builds don't drop the narrowing).
+        # Config validation has already promoted both input unions to enums;
+        # narrow their declared field types for mypy (cast rather than assert
+        # so `-O` builds don't drop the narrowing).
         mode = cast(DisaggregationMode, config.disaggregation_mode)
+        embedding_transfer_mode = cast(
+            EmbeddingTransferMode, config.embedding_transfer_mode
+        )
         engine = cls(
             config.engine_args,
             mode,
@@ -301,6 +302,8 @@ class VllmLLMEngine(LLMEngine):
                 config.multimodal_embedding_cache_capacity_gb
             ),
             namespace=config.namespace,
+            route_to_encoder=config.route_to_encoder,
+            embedding_transfer_mode=embedding_transfer_mode,
         )
         media_decoder, media_fetcher = create_frontend_media_config(
             config.frontend_decoding
@@ -337,7 +340,7 @@ class VllmLLMEngine(LLMEngine):
 
         configure_multimodal_embedding_cache(
             self.engine_args,
-            route_to_encoder=False,
+            route_to_encoder=self.route_to_encoder,
             capacity_gb=self.multimodal_embedding_cache_capacity_gb,
             namespace=self._namespace,
             component=self._component,
@@ -359,11 +362,19 @@ class VllmLLMEngine(LLMEngine):
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[self._stat_logger_factory],
         )
+        embedding_loader = (
+            EncoderResultEmbeddingLoader.from_transfer_mode(
+                self.embedding_transfer_mode
+            )
+            if self.route_to_encoder
+            else None
+        )
         self._multimodal_request_processor = VllmMultimodalRequestProcessor(
             model=self.engine_args.model,
             engine_client=self.engine_client,
             enable_multimodal=self.enable_multimodal,
             enable_frontend_decoding=self.frontend_decoding,
+            embedding_loader=embedding_loader,
         )
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._multimodal_request_processor.initialize_prefill_handoff()
@@ -392,6 +403,11 @@ class VllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.engine_args.model,
             served_model_name=self._served_model_name,
+            runtime_data=(
+                {_ENCODER_RESULT_HANDOFF_CAPABILITY: True}
+                if self.route_to_encoder
+                else None
+            ),
             llm=LlmRegistration(
                 context_length=self._model_max_len,
                 kv_cache_block_size=block_size,

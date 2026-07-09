@@ -321,11 +321,35 @@ class VllmMultimodalRequestProcessor:
                 return None
 
             vllm_mm_data: dict[str, Any] = {}
+            encoder_result = request.get("encoder_result")
 
             # A separate encoder currently supports URL-based images only. Keep
             # processing other modalities locally so mixed image/video requests
             # preserve all of their inputs.
-            if self.embedding_loader is not None:
+            if encoder_result is not None:
+                if not isinstance(encoder_result, dict):
+                    raise ValueError("encoder_result must be a JSON object")
+                load_result = getattr(
+                    self.embedding_loader, "load_encoder_result", None
+                )
+                if load_result is None:
+                    raise ValueError(
+                        "Received encoder_result but no compatible embedding receiver "
+                        "is configured"
+                    )
+                vllm_mm_data = await load_result(
+                    encoder_result,
+                    model=self.model,
+                    request_id=request_id,
+                )
+            elif self.embedding_loader is not None:
+                load_multimodal_embeddings = getattr(
+                    self.embedding_loader, "load_multimodal_embeddings", None
+                )
+                if load_multimodal_embeddings is None:
+                    raise ValueError(
+                        "Received multimodal data but no encoder_result was provided"
+                    )
                 image_urls: list[str] = []
                 supported = True
                 for item in mm_map.get(IMAGE_URL_KEY, []):
@@ -334,18 +358,16 @@ class VllmMultimodalRequestProcessor:
                     elif isinstance(item, dict) and "Decoded" in item:
                         supported = False
                 if supported:
-                    vllm_mm_data = (
-                        await self.embedding_loader.load_multimodal_embeddings(
-                            image_urls,
-                            request_id,
-                            model=self.model,
-                            context=context,
-                        )
+                    vllm_mm_data = await load_multimodal_embeddings(
+                        image_urls,
+                        request_id,
+                        model=self.model,
+                        context=context,
                     )
 
             image_items = mm_map.get(IMAGE_URL_KEY, [])
             image_key = "vision_chunk" if self.use_unified_vision_chunk else "image"
-            if image_key not in vllm_mm_data and image_items:
+            if encoder_result is None and image_key not in vllm_mm_data and image_items:
                 with _nvtx.annotate("mm_backend:image_download", color="green"):
                     images = await self.image_loader.load_image_batch(image_items)
                 if images:

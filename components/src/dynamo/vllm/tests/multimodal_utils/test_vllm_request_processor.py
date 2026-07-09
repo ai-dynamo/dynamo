@@ -115,6 +115,59 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
 
 @pytest.mark.asyncio
+async def test_consumes_unified_encoder_result_and_keeps_video_local():
+    processor = _processor()
+    encoded_image = {"image_embeds": object()}
+    video = object()
+    processor.embedding_loader = SimpleNamespace(
+        load_encoder_result=AsyncMock(return_value={"image": encoded_image})
+    )
+    processor.video_loader.load_video_batch.return_value = [video]
+    handoff = {"schema_version": 1, "multimodal_inputs": []}
+
+    result = await processor.extract_multimodal_data(
+        {
+            "encoder_result": handoff,
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}],
+                "video_url": [{"Url": "https://example.com/video.mp4"}],
+            },
+        },
+        "request-unified-encoder",
+        None,
+    )
+
+    assert result == {"image": encoded_image, "video": video}
+    processor.embedding_loader.load_encoder_result.assert_awaited_once_with(
+        handoff,
+        model=processor.model,
+        request_id="request-unified-encoder",
+    )
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.video_loader.load_video_batch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unified_embedding_loader_requires_encoder_result():
+    processor = _processor()
+    processor.embedding_loader = SimpleNamespace(load_encoder_result=AsyncMock())
+
+    with pytest.raises(ValueError, match="no encoder_result was provided"):
+        await processor.extract_multimodal_data(
+            {
+                "multi_modal_data": {
+                    "image_url": [{"Url": "https://example.com/image.png"}]
+                }
+            },
+            "request-missing-encoder-result",
+            None,
+        )
+
+    processor.embedding_loader.load_encoder_result.assert_not_awaited()
+    processor.image_loader.load_image_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_rejects_media_when_multimodal_is_disabled():
     processor = _processor(enabled=False)
 
