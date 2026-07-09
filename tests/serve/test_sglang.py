@@ -808,9 +808,10 @@ sglang_configs = {
             # (not the ~32 GiB transient peak), so co-packing another large test
             # is correctly prevented.
             pytest.mark.profiled_vram_gib(56.0),
-            # Diffusion decoding is iterative; the 32-token H100 smoke runs ~135s.
-            # Keep generous headroom for cold starts / model download.
-            pytest.mark.timeout(900),
+            # Diffusion decoding is iterative; the 32-token H100 smoke runs ~135s
+            # (aws-dev-02, warm HF cache). ~4.4x headroom covers diffusion
+            # variance and a cold model pull without a 15-min hang window.
+            pytest.mark.timeout(600),
             # Runs on the nightly H100 lane (sglang-h100-test in nightly-ci.yml),
             # not PR/post-merge: the model needs >24 GiB so it can't use the
             # standard gpu_1 lanes.
