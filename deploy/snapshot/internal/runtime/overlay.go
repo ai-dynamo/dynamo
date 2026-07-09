@@ -56,6 +56,20 @@ func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlayS
 	}
 
 	rootfsDiffPath := filepath.Join(checkpointDir, rootfsDiffFilename)
+	tmpFile, err := os.CreateTemp(checkpointDir, rootfsDiffFilename+".*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temporary rootfs diff: %w", err)
+	}
+	tmpRootfsDiffPath := tmpFile.Name()
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpRootfsDiffPath)
+		return "", fmt.Errorf("failed to close temporary rootfs diff: %w", err)
+	}
+	defer func() {
+		if tmpRootfsDiffPath != "" {
+			_ = os.Remove(tmpRootfsDiffPath)
+		}
+	}()
 
 	tarArgs := []string{"--xattrs"}
 	for _, excl := range buildExclusions(exclusions) {
@@ -64,13 +78,24 @@ func CaptureRootfsDiff(upperDir, checkpointDir string, exclusions types.OverlayS
 	for _, dest := range bindMountDests {
 		tarArgs = append(tarArgs, "--exclude=."+dest)
 	}
-	tarArgs = append(tarArgs, "-C", upperDir, "-cf", rootfsDiffPath, ".")
+	tarArgs = append(tarArgs, "-C", upperDir, "-cf", tmpRootfsDiffPath, ".")
 
 	cmd := exec.Command("tar", tarArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("tar failed: %w (output: %s)", err, string(output))
 	}
+	info, err := os.Stat(tmpRootfsDiffPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat temporary rootfs diff: %w", err)
+	}
+	if info.Size() == 0 {
+		return "", fmt.Errorf("tar produced empty rootfs diff")
+	}
+	if err := os.Rename(tmpRootfsDiffPath, rootfsDiffPath); err != nil {
+		return "", fmt.Errorf("failed to publish rootfs diff: %w", err)
+	}
+	tmpRootfsDiffPath = ""
 
 	return rootfsDiffPath, nil
 }
@@ -120,8 +145,16 @@ func CaptureDeletedFiles(upperDir, checkpointDir string) (bool, error) {
 // ApplyRootfsDiff extracts rootfs-diff.tar into the target root.
 func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
-	if _, err := os.Stat(rootfsDiffPath); os.IsNotExist(err) {
+	info, err := os.Stat(rootfsDiffPath)
+	if os.IsNotExist(err) {
 		log.V(1).Info("No rootfs-diff.tar, skipping")
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to stat rootfs diff: %w", err)
+	}
+	if info.Size() == 0 {
+		log.Info("Empty rootfs-diff.tar, skipping")
 		return nil
 	}
 
