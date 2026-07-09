@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{EppConfig, EppMode, ExtProcServer, Router};
+use dynamo_ext_proc::{EppStandaloneConfig, EppMode, ExtProcServer, Router};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -123,7 +123,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    // Fail fast on an unknown DYN_EPP_MODE rather than silently booting full mode.
     let standalone = matches!(EppMode::from_env()?, EppMode::Standalone);
 
     let config = Config::from_env();
@@ -137,12 +136,9 @@ async fn main() -> Result<()> {
         "Starting Dynamo Rust EPP"
     );
 
-    // Standalone (selector) mode fronts raw vLLM pods with no Dynamo runtime and
-    // delegates KV-aware selection to the standalone selection service. The
-    // config surface is validated here; the runtime wiring lands in a follow-up
-    // (see crate::selector_router).
+    // Standalone (selector) mode to be supported in a follow-up PR.
     if standalone {
-        let selector_cfg = EppConfig::from_env()?;
+        let selector_cfg = EppStandaloneConfig::from_env()?;
         tracing::info!(
             pool_name = %selector_cfg.pool_name,
             model_name = %selector_cfg.model_name,
@@ -150,8 +146,7 @@ async fn main() -> Result<()> {
             "Parsed standalone selector configuration"
         );
         anyhow::bail!(
-            "DYN_EPP_MODE=standalone is not yet wired; selector runtime assembly lands in a \
-             follow-up change"
+            "DYN_EPP_MODE=standalone is not yet supported"
         );
     }
 
