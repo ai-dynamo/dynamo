@@ -12,7 +12,9 @@ use dynamo_kv_router::{
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
 use crate::{
-    kv_router::{FindBestMatchOutcome, push_router::KvPushRouter},
+    kv_router::{
+        FindBestMatchOutcome, indexer::valkey::ValkeyReservationLease, push_router::KvPushRouter,
+    },
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -28,6 +30,10 @@ pub(super) struct WorkerSelection {
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) scheduler_tracked: bool,
+    /// Present only when the replicated Valkey module atomically selected and
+    /// reserved this tracked request.  `RequestGuard` takes lifecycle
+    /// ownership before dispatch.
+    pub(super) reservation: Option<ValkeyReservationLease>,
 }
 
 #[derive(Clone, Copy)]
@@ -73,6 +79,43 @@ struct BestMatchArgs<'a> {
 
 impl KvPushRouter {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<WorkerSelection, Error> {
+        if args.scheduler_tracked
+            && self
+                .chooser
+                .kv_router_config()
+                .valkey
+                .authoritative_admission
+        {
+            let reserved = self
+                .chooser
+                .reserve_best_match_with_policy_class(
+                    args.context_id,
+                    args.routing_parts.token_ids,
+                    args.routing_parts.block_mm_infos,
+                    args.router_config_override,
+                    args.lora_name,
+                    args.cache_namespace,
+                    args.priority_jump,
+                    args.strict_priority,
+                    args.policy_class,
+                    args.expected_output_tokens,
+                    args.pinned_worker,
+                    args.allowed_worker_ids,
+                    args.routing_constraints,
+                )
+                .await?;
+            return Ok(WorkerSelection {
+                instance_id: reserved.worker.worker_id,
+                dp_rank: reserved.worker.dp_rank,
+                overlap_amount: reserved.overlap_blocks,
+                effective_overlap_blocks: reserved.effective_overlap_blocks,
+                cached_tokens: reserved.cached_tokens,
+                routing_hashes: None,
+                scheduler_tracked: true,
+                reservation: Some(reserved.reservation),
+            });
+        }
+
         let outcome = self
             .chooser
             .find_best_match_details_with_policy_class(
@@ -110,6 +153,7 @@ impl KvPushRouter {
                 cached_tokens,
                 routing_hashes,
                 scheduler_tracked: args.scheduler_tracked,
+                reservation: None,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }

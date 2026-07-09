@@ -340,7 +340,12 @@ impl WorkerQueryClient {
         }
     }
 
-    async fn apply_worker_clear_locked(&self, worker_state: &mut WorkerState, event: RouterEvent) {
+    async fn apply_worker_clear_locked(
+        &self,
+        worker_state: &mut WorkerState,
+        event: RouterEvent,
+        live_event: bool,
+    ) {
         let worker_id = event.worker_id;
         let clear_dp_rank = event.event.dp_rank;
         let clear_event_id = event.event.event_id;
@@ -351,7 +356,11 @@ impl WorkerQueryClient {
             "Applying clear barrier for worker {worker_id}; invalidating recovery across {} dp_ranks",
             worker_state.ranks.len()
         );
-        self.indexer.apply_event(event).await;
+        if live_event {
+            self.indexer.apply_live_event(event).await;
+        } else {
+            self.indexer.apply_event(event).await;
+        }
     }
 
     async fn apply_tree_dump_replace_locked(
@@ -359,11 +368,10 @@ impl WorkerQueryClient {
         worker_id: WorkerId,
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
-    ) {
-        self.indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
-        for event in events {
-            self.indexer.apply_event(event).await;
-        }
+    ) -> Result<bool> {
+        self.indexer
+            .replace_worker_dp_rank_from_tree_dump(worker_id, dp_rank, &events)
+            .await
     }
 
     pub(crate) async fn handle_live_event(self: &Arc<Self>, event: RouterEvent) {
@@ -376,11 +384,8 @@ impl WorkerQueryClient {
             let mut worker_state = worker_state.lock().await;
             match worker_state.observe_live_event(event) {
                 LiveEventAction::ApplyClear(event) => {
-                    tracing::info!(
-                        "Applying clear barrier for worker {worker_id}; invalidating recovery across {} dp_ranks",
-                        worker_state.ranks.len()
-                    );
-                    self.indexer.apply_event(event).await;
+                    self.apply_worker_clear_locked(&mut worker_state, event, true)
+                        .await;
                     return;
                 }
                 action => action,
@@ -390,7 +395,7 @@ impl WorkerQueryClient {
         match action {
             LiveEventAction::Ignore => {}
             LiveEventAction::ApplyDirect(event) => {
-                self.indexer.apply_event(event).await;
+                self.indexer.apply_live_event(event).await;
             }
             LiveEventAction::ApplyClear(_) => unreachable!("clear is applied under worker lock"),
             LiveEventAction::SpawnFullRestore { epoch } => {
@@ -519,6 +524,7 @@ impl WorkerQueryClient {
         };
 
         let mut successful_response = false;
+        let mut retry_full_restore = false;
 
         match result {
             Ok(WorkerKvQueryResponse::Events {
@@ -534,7 +540,7 @@ impl WorkerQueryClient {
                 for event in events {
                     let event_id = event.event.event_id;
                     if matches!(&event.event.data, KvCacheEventData::Cleared) {
-                        self.apply_worker_clear_locked(&mut worker_state, event)
+                        self.apply_worker_clear_locked(&mut worker_state, event, false)
                             .await;
                         new_cursor = new_cursor.apply_barrier(event_id);
                         continue;
@@ -564,10 +570,31 @@ impl WorkerQueryClient {
                     last_event_id,
                     "Got tree dump (range too old or unspecified)"
                 );
-                self.apply_tree_dump_replace_locked(key.0, key.1, events)
-                    .await;
-                new_cursor = new_cursor.advance_to(last_event_id);
-                successful_response = true;
+                match self
+                    .apply_tree_dump_replace_locked(key.0, key.1, events)
+                    .await
+                {
+                    Ok(true) => {
+                        new_cursor = new_cursor.advance_to(last_event_id);
+                        successful_response = true;
+                    }
+                    Ok(false) => {
+                        retry_full_restore = true;
+                        tracing::info!(
+                            worker_id = key.0,
+                            dp_rank = key.1,
+                            "Tree dump raced a newer Valkey generation; fetching a fresh full snapshot"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            worker_id = key.0,
+                            dp_rank = key.1,
+                            error = %error,
+                            "Failed to atomically replace recovered rank snapshot"
+                        );
+                    }
+                }
             }
             Ok(WorkerKvQueryResponse::TooNew {
                 newest_available, ..
@@ -604,6 +631,7 @@ impl WorkerQueryClient {
         }
 
         let mut follow_up_start = None;
+        let mut full_restore_epoch = None;
         if successful_response {
             worker_state.begin_successful_recovery_drain(key.1, new_cursor);
             loop {
@@ -620,11 +648,16 @@ impl WorkerQueryClient {
             }
         } else {
             worker_state.finish_failed_recovery(key.1);
+            if retry_full_restore {
+                full_restore_epoch = worker_state.begin_full_restore_retry(key.1);
+            }
         }
         let follow_up_epoch = worker_state.epoch;
         drop(worker_state);
 
-        if let Some(start_event_id) = follow_up_start {
+        if let Some(epoch) = full_restore_epoch {
+            self.spawn_recovery_task(key, epoch, None, None);
+        } else if let Some(start_event_id) = follow_up_start {
             self.spawn_recovery_task(key, follow_up_epoch, Some(start_event_id), None);
         }
     }

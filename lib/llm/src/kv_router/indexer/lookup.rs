@@ -11,7 +11,9 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::pipeline::async_trait;
 
-use super::{Indexer, SideIndexer, TieredMatchDetails, remote::RemoteIndexer};
+use super::{
+    Indexer, SideIndexer, TieredMatchDetails, remote::RemoteIndexer, valkey::ValkeyIndexer,
+};
 
 pub(super) enum HashInput<'a> {
     Borrowed(&'a [LocalBlockHash]),
@@ -43,6 +45,7 @@ pub(super) enum PrimaryLookup<'a> {
     KvIndexer(&'a KvIndexer),
     Concurrent(&'a ThreadPoolIndexer<ConcurrentRadixTreeCompressed>),
     Remote(&'a RemoteIndexer),
+    Valkey(&'a ValkeyIndexer),
     None,
 }
 
@@ -81,6 +84,16 @@ impl Indexer {
             } => LookupPipeline {
                 primary: PrimaryLookup::Remote(primary.as_ref()),
                 lower_tier: None,
+                side: approx.as_ref(),
+            },
+            Self::Valkey {
+                primary,
+                lower_tier,
+                approx,
+                ..
+            } => LookupPipeline {
+                primary: PrimaryLookup::Valkey(primary.as_ref()),
+                lower_tier: Some(lower_tier),
                 side: approx.as_ref(),
             },
             Self::None => LookupPipeline {
@@ -174,7 +187,9 @@ impl<'a> LookupPipeline<'a> {
         sequence: HashInput<'_>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
         match self.primary {
-            PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
+            PrimaryLookup::KvIndexer(_)
+            | PrimaryLookup::Concurrent(_)
+            | PrimaryLookup::Valkey(_) => {
                 let Some(lower_tier) = self.lower_tier else {
                     return Ok(TieredMatchDetails::default());
                 };
@@ -221,7 +236,9 @@ impl<'a> LookupPipeline<'a> {
         sequence: HashInput<'_>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
         match self.primary {
-            PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
+            PrimaryLookup::KvIndexer(_)
+            | PrimaryLookup::Concurrent(_)
+            | PrimaryLookup::Valkey(_) => {
                 let Some(lower_tier) = self.lower_tier else {
                     return Ok(TieredMatchDetails::default());
                 };
@@ -268,6 +285,7 @@ impl<'a> PrimaryLookup<'a> {
                     })?;
                 tiered.device
             }
+            Self::Valkey(primary) => primary.find_match_details(sequence.as_slice()).await?,
             Self::None => return Ok(MatchDetails::new()),
         };
 
@@ -297,6 +315,7 @@ impl<'a> PrimaryLookup<'a> {
                     })?;
                 tiered.device
             }
+            Self::Valkey(primary) => primary.find_match_details(sequence.as_slice()).await?,
             Self::None => return Ok(MatchDetails::new()),
         };
 

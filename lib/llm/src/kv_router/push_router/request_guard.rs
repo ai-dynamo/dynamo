@@ -9,7 +9,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{KvRouter, indexer::valkey::ValkeyReservationLease, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -26,15 +26,22 @@ struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
     scheduler_tracked: bool,
+    reservation: Option<ValkeyReservationLease>,
     freed: bool,
 }
 
 impl RequestCleanup {
-    fn new(chooser: Arc<KvRouter>, context_id: String, scheduler_tracked: bool) -> Self {
+    fn new(
+        chooser: Arc<KvRouter>,
+        context_id: String,
+        scheduler_tracked: bool,
+        reservation: Option<ValkeyReservationLease>,
+    ) -> Self {
         Self {
             chooser,
             context_id,
             scheduler_tracked,
+            reservation,
             freed: false,
         }
     }
@@ -48,6 +55,12 @@ impl RequestCleanup {
                 %error,
                 "Failed to free request"
             );
+        }
+        if let Some(reservation) = self.reservation.take() {
+            // Never make a completed backend response wait behind a failed
+            // primary/replica quorum. The detached lease state machine retries
+            // the release; expiry remains the hard failure backstop.
+            reservation.release_detached();
         }
         self.freed = true;
     }
@@ -260,6 +273,7 @@ impl RequestGuard {
         context_id: String,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
+        reservation: Option<ValkeyReservationLease>,
     ) -> Self {
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
@@ -273,9 +287,12 @@ impl RequestGuard {
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
         let request_metrics =
             RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+        if let Some(reservation) = reservation.as_ref() {
+            reservation.start_renewal();
+        }
 
         Self {
-            cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked),
+            cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked, reservation),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,

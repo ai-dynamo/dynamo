@@ -15,8 +15,8 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
-        ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RoutingEligibility,
+        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
@@ -68,6 +68,7 @@ use crate::{
     },
     local_model::runtime_config::ModelRuntimeConfig,
 };
+use indexer::valkey::{ValkeyReservationCandidate, ValkeyReservationLease};
 use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
 
 pub enum FindBestMatchOutcome {
@@ -81,6 +82,17 @@ pub enum FindBestMatchOutcome {
     QueueRejected {
         rejection: scheduling::QueueRejection,
     },
+}
+
+/// A tracked routing result whose global admission has already been committed
+/// by the replicated Valkey module.  Kept crate-private so callers cannot
+/// accidentally route without transferring lease ownership into RequestGuard.
+pub(crate) struct ReservedMatch {
+    pub(crate) worker: WorkerWithDpRank,
+    pub(crate) overlap_blocks: u32,
+    pub(crate) effective_overlap_blocks: f64,
+    pub(crate) cached_tokens: usize,
+    pub(crate) reservation: ValkeyReservationLease,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -252,9 +264,9 @@ where
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
+        let component = endpoint.component();
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
-        let component = endpoint.component();
         // Router-owned tasks derive from this token so a rebuild cannot cancel the runtime.
         let cancellation_token = component.drt().child_token();
         let cancellation_guard = cancellation_token.clone().drop_guard();
@@ -324,9 +336,10 @@ where
             .await?;
         } else {
             tracing::info!(
-                "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",
+                "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={}, valkey_worker_events={})",
                 kv_router_config.use_kv_events,
                 kv_router_config.overlap_score_credit,
+                kv_router_config.valkey.worker_events,
             );
         }
 
@@ -431,7 +444,7 @@ where
     ///   LoRA replica set (the worker lazy-loads the adapter).
     /// - If narrowing would exclude every candidate, falls back to the original set so the
     ///   request stays routable (lazy-load path) rather than failing.
-    fn narrow_allowed_by_lora(
+    fn candidate_worker_ids_for_request(
         &self,
         lora_name: Option<&str>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -618,7 +631,7 @@ where
         // LoRA-aware candidate narrowing: restrict to this LoRA's allocated/loaded replicas,
         // strictly within the existing candidate universe (never widening). Covers both the
         // decode and prefill routers, since both flow through this method.
-        let allowed_worker_ids = self.narrow_allowed_by_lora(
+        let allowed_worker_ids = self.candidate_worker_ids_for_request(
             lora_name.as_deref(),
             allowed_worker_ids,
             pinned_worker.as_ref(),
@@ -696,6 +709,160 @@ where
             effective_overlap_blocks: response.effective_overlap_blocks,
             cached_tokens: response.cached_tokens,
             routing_hashes,
+        })
+    }
+
+    /// Atomically choose and reserve one worker in the replicated Valkey
+    /// module, then mirror that exact booking locally for request lifetime
+    /// bookkeeping.  This bypasses the local selector and queue entirely;
+    /// configuration validation limits the mode to inputs that the module
+    /// owns globally.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn reserve_best_match_with_policy_class(
+        &self,
+        context_id: &str,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<ReservedMatch> {
+        if !self.kv_router_config.valkey.authoritative_admission {
+            anyhow::bail!("Valkey authoritative admission is not enabled");
+        }
+        if router_config_override.is_some() {
+            anyhow::bail!(
+                "Valkey authoritative admission does not support per-request router configuration overrides"
+            );
+        }
+        if priority_jump != 0.0 || strict_priority != 0 || policy_class.is_some() {
+            anyhow::bail!(
+                "Valkey authoritative admission does not support frontend-local priority or policy queues"
+            );
+        }
+
+        let valkey = self.indexer.valkey_indexer().ok_or_else(|| {
+            anyhow::anyhow!("Valkey authoritative admission requires the persistent Valkey indexer")
+        })?;
+        let hash_options = BlockHashOptions {
+            block_mm_infos,
+            lora_name: lora_name.as_deref(),
+            cache_namespace: cache_namespace.as_deref(),
+            is_eagle: Some(self.is_eagle),
+        };
+        let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
+            .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, hash_options));
+        log_routing_input_hashes(Some(context_id), self.block_size, tokens, &block_hashes);
+
+        let allowed_worker_ids = self.candidate_worker_ids_for_request(
+            lora_name.as_deref(),
+            allowed_worker_ids,
+            pinned_worker.as_ref(),
+        );
+        let candidates = {
+            let worker_configs = self.workers_with_configs.borrow();
+            let overloaded_worker_ids = self.scheduler.overloaded_worker_ids();
+            let eligibility = RoutingEligibility::new(
+                allowed_worker_ids.as_ref(),
+                overloaded_worker_ids.as_ref(),
+                pinned_worker,
+                &routing_constraints,
+            );
+            let mut candidates = Vec::new();
+            let mut capacity_error = None;
+            eligibility.for_each_eligible_worker_rank(&worker_configs, |worker, config| {
+                let capacity = config.max_num_seqs.and_then(|capacity| {
+                    u32::try_from(capacity)
+                        .ok()
+                        .filter(|capacity| *capacity > 0)
+                });
+                match capacity {
+                    Some(capacity) => candidates.push(ValkeyReservationCandidate { worker, capacity }),
+                    None => {
+                        capacity_error.get_or_insert_with(|| {
+                            format!(
+                                "worker {} dp_rank {} lacks a valid max_num_seqs capacity required by Valkey authoritative admission",
+                                worker.worker_id, worker.dp_rank
+                            )
+                        });
+                    }
+                }
+            });
+            if let Some(error) = capacity_error {
+                anyhow::bail!(error);
+            }
+            candidates
+        };
+        if candidates.is_empty() {
+            return Err(map_scheduler_error(
+                KvSchedulerError::AllEligibleWorkersOverloaded,
+            ));
+        }
+
+        let pending = valkey.begin_reservation(
+            self.worker_type(),
+            &block_hashes,
+            candidates,
+            self.kv_router_config.valkey.admission_lease_ms,
+        )?;
+        let Some(reservation) = pending.resolve().await? else {
+            return Err(map_scheduler_error(
+                KvSchedulerError::AllEligibleWorkersOverloaded,
+            ));
+        };
+        let worker = reservation.worker();
+        let overlap_blocks = reservation.matched_blocks();
+        let cached_tokens = overlap_blocks as usize * self.block_size as usize;
+
+        let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
+            tokens,
+            self.block_size,
+            None,
+            hash_options,
+            Some(&block_hashes),
+        );
+        let local_mirror = SequenceRequest {
+            request_id: context_id.to_string(),
+            token_sequence: maybe_seq_hashes,
+            // Validation forbids local prefill accounting in authoritative
+            // mode; the module's live reservation count is the load signal.
+            track_prefill_tokens: false,
+            expected_output_tokens,
+            prefill_load_hint: None,
+            worker,
+            lora_name,
+        };
+        if let Err(error) = self.scheduler.mirror_reservation(local_mirror).await {
+            reservation.release_detached();
+            return Err(anyhow::anyhow!(
+                "failed to mirror Valkey-authoritative reservation for worker {} dp_rank {}: {error}",
+                worker.worker_id,
+                worker.dp_rank
+            ));
+        }
+
+        tracing::debug!(
+            request_id = %context_id,
+            worker_id = worker.worker_id,
+            dp_rank = worker.dp_rank,
+            matched_blocks = overlap_blocks,
+            active_reservations = reservation.active_reservations_at_grant(),
+            "Valkey atomically selected and reserved worker"
+        );
+
+        Ok(ReservedMatch {
+            worker,
+            overlap_blocks,
+            effective_overlap_blocks: overlap_blocks as f64,
+            cached_tokens,
+            reservation,
         })
     }
 
@@ -1092,6 +1259,11 @@ where
                 lora_name,
                 cache_namespace,
             } => {
+                if self.kv_router_config.valkey.authoritative_admission {
+                    return Err(anyhow::anyhow!(
+                        "RouterRequest::New is not supported with Valkey authoritative admission; use KvPushRouter so request cleanup owns the reservation lease"
+                    ));
+                }
                 let request_context = ctx.context();
                 let mut schedule = Box::pin(self.find_best_match_details_with_policy_class(
                     Some(&context_id),
@@ -1214,6 +1386,13 @@ mod tests {
 
     use crate::kv_router::scheduler::KvSchedulerError;
     use crate::local_model::runtime_config::ModelRuntimeConfig;
+    use crate::lora::{
+        LoraFilter,
+        routing::table::{LoraReplicaConfig, LoraRoutingTable},
+        state_tracker::LoraStateTracker,
+    };
+    use crate::model_card::LoraInfo;
+    use std::time::Instant;
 
     #[test]
     fn weighted_cache_hit_estimates_include_lower_tiers() {
@@ -1339,7 +1518,20 @@ mod tests {
     ) -> KvRouter<
         impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
     > {
-        let component = make_test_component("shared-cache-router").await;
+        make_test_router_with_lora_filter(selector, shared_cache, None).await
+    }
+
+    async fn make_test_router_with_lora_filter(
+        selector: impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>
+        + Send
+        + Sync
+        + 'static,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<LoraFilter>>,
+    ) -> KvRouter<
+        impl dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + Sync + 'static,
+    > {
+        let component = make_test_component("shared-cache-router-with-lora").await;
         let endpoint = component.endpoint("backend");
         let client = endpoint.client().await.unwrap();
 
@@ -1370,10 +1562,64 @@ mod tests {
             None,
             false,
             shared_cache,
-            None,
+            lora_filter,
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn authoritative_and_local_selection_share_lora_candidate_universe() {
+        let routing_table = LoraRoutingTable::new();
+        routing_table.update_allocation(
+            "adapter".to_string(),
+            LoraReplicaConfig {
+                lora_name: "adapter".to_string(),
+                replica_factor: 2,
+                replica_set: vec![WorkerWithDpRank::new(0, 0), WorkerWithDpRank::new(1, 0)],
+                updated_at: Instant::now(),
+                is_active: true,
+            },
+        );
+        let state_tracker = LoraStateTracker::new();
+        state_tracker.handle_mdc_addition(
+            WorkerWithDpRank::new(1, 0),
+            &LoraInfo {
+                name: "adapter".to_string(),
+                max_gpu_lora_count: Some(2),
+            },
+        );
+        let router = make_test_router_with_lora_filter(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::new(1, 0),
+            },
+            None,
+            Some(Arc::new(LoraFilter::new(routing_table, state_tracker))),
+        )
+        .await;
+        let allowed = HashSet::from([0, 1]);
+
+        assert_eq!(
+            router.candidate_worker_ids_for_request(Some("adapter"), Some(allowed.clone()), None,),
+            Some(HashSet::from([1])),
+        );
+        assert_eq!(
+            router.candidate_worker_ids_for_request(
+                Some("adapter"),
+                Some(allowed),
+                Some(&WorkerWithDpRank::new(0, 0)),
+            ),
+            Some(HashSet::from([0, 1])),
+        );
+        assert_eq!(
+            router.candidate_worker_ids_for_request(
+                Some("adapter"),
+                Some(HashSet::from([0])),
+                None,
+            ),
+            Some(HashSet::from([0])),
+        );
     }
 
     #[tokio::test]

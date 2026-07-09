@@ -45,6 +45,9 @@ impl Indexer {
                 );
                 RouteRecordingTarget::SideOverlay(side)
             }
+            Self::Valkey {
+                approx: Some(side), ..
+            } => RouteRecordingTarget::SideOverlay(side),
             Self::KvIndexer {
                 primary,
                 primary_records_routing_decisions: true,
@@ -60,9 +63,11 @@ impl Indexer {
                 primary_records_routing_decisions: true,
                 ..
             } => RouteRecordingTarget::PrimaryRemote(primary.as_ref()),
-            Self::KvIndexer { .. } | Self::Concurrent { .. } | Self::Remote { .. } | Self::None => {
-                RouteRecordingTarget::Disabled
-            }
+            Self::KvIndexer { .. }
+            | Self::Concurrent { .. }
+            | Self::Remote { .. }
+            | Self::Valkey { .. }
+            | Self::None => RouteRecordingTarget::Disabled,
         }
     }
 

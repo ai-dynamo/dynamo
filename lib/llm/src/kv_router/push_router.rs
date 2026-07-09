@@ -206,11 +206,13 @@ impl KvPushRouter {
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
         let block_size = self.chooser.block_size() as usize;
+        let reservation = selection.reservation.take();
         let mut guard = RequestGuard::new(
             self.chooser.clone(),
             context_id.clone(),
             request,
             selection.scheduler_tracked,
+            reservation,
         );
 
         let record_result: Result<(), Error> = async {

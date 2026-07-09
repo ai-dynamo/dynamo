@@ -272,6 +272,18 @@ impl WorkerState {
         rank_state.recovery_inflight = false;
         rank_state.clear_pending_live_events();
     }
+
+    /// Restart with a full dump after an external generation fence rejects a
+    /// stale snapshot. Pending events were observed against the rejected dump;
+    /// discard them because the fresh tree dump becomes the new base and new
+    /// arrivals will be buffered behind this in-flight marker.
+    pub(super) fn begin_full_restore_retry(&mut self, dp_rank: DpRank) -> Option<u64> {
+        let rank_state = self.ranks.get_mut(&dp_rank)?;
+        rank_state.cursor = CursorState::Initial;
+        rank_state.clear_pending_live_events();
+        rank_state.recovery_inflight = true;
+        Some(self.epoch)
+    }
 }
 
 #[cfg(test)]
@@ -344,5 +356,28 @@ mod tests {
         }
         assert!(rank_state.pending_live_events.is_empty());
         assert!(!rank_state.recovery_inflight);
+    }
+
+    #[test]
+    fn stale_external_generation_restarts_a_clean_full_restore() {
+        let mut worker = WorkerState {
+            epoch: 7,
+            ..Default::default()
+        };
+        worker.ranks.insert(
+            3,
+            RankState {
+                cursor: CursorState::Live(10),
+                recovery_inflight: false,
+                pending_live_events: VecDeque::from([make_store_event(11)]),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(worker.begin_full_restore_retry(3), Some(7));
+        let rank = worker.ranks.get(&3).unwrap();
+        assert!(matches!(rank.cursor, CursorState::Initial));
+        assert!(rank.recovery_inflight);
+        assert!(rank.pending_live_events.is_empty());
     }
 }

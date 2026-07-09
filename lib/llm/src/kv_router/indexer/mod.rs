@@ -30,11 +30,14 @@ mod recording;
 mod recovery;
 pub mod remote;
 mod side;
+pub mod valkey;
 
 pub use self::embedding_cache::{EmbeddingCacheIndexer, try_build_cache_indexer};
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
+use self::valkey::ValkeyIndexer;
+use crate::valkey_transport::ValkeySentinelConfig;
 pub(crate) use recovery::{start_subscriber, start_worker_kv_query_endpoint};
 
 /// `approx` is the optional predict-on-route side indexer. It is always local
@@ -65,10 +68,38 @@ pub enum Indexer {
         approx: Option<SideIndexer>,
         primary_records_routing_decisions: bool,
     },
+    Valkey {
+        primary: Arc<ValkeyIndexer>,
+        lower_tier: LowerTierIndexers,
+        approx: Option<SideIndexer>,
+        primary_records_routing_decisions: bool,
+        /// Workers write device-tier events directly to the shared module.
+        /// Event-plane subscribers still observe those events for recovery and
+        /// lower tiers, but must not replay the same GPU mutation to Valkey.
+        direct_worker_events: bool,
+    },
     None,
 }
 
+fn skip_direct_valkey_gpu_replay(
+    direct_worker_events: bool,
+    live_event: bool,
+    event: &RouterEvent,
+) -> bool {
+    direct_worker_events && live_event && event.storage_tier.is_gpu()
+}
+
 impl Indexer {
+    /// Return the persistent module client when this router is backed by
+    /// Valkey.  Authoritative admission deliberately uses this live client,
+    /// never the short-lived frontend MATCH cache.
+    pub(crate) fn valkey_indexer(&self) -> Option<Arc<ValkeyIndexer>> {
+        match self {
+            Self::Valkey { primary, .. } => Some(Arc::clone(primary)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn supports_overlap_refresh(&self) -> bool {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
     }
@@ -89,6 +120,73 @@ impl Indexer {
                 "router_predicted_ttl_secs requires use_kv_events=true; \
                  do not combine a primary approximate indexer with a side approximate indexer"
             );
+        }
+
+        if let Some(urls) = kv_router_config.valkey.urls.as_deref() {
+            let indexer_component_name = component.name();
+            let namespace = component.namespace().name();
+            tracing::info!(
+                indexer_component = %indexer_component_name,
+                urls,
+                "Using persistent Valkey KV indexer"
+            );
+            let valkey = if let (Some(sentinel_urls), Some(master_name)) = (
+                kv_router_config.valkey.sentinel_urls.as_deref(),
+                kv_router_config.valkey.sentinel_master_name.as_deref(),
+            ) {
+                let sentinel = ValkeySentinelConfig::new(
+                    sentinel_urls,
+                    master_name,
+                    kv_router_config
+                        .valkey
+                        .sentinel_quorum
+                        .map(|value| value as usize),
+                )?;
+                ValkeyIndexer::new_with_sentinel(
+                    urls,
+                    kv_router_config.valkey.connection_pool_size,
+                    kv_router_config.valkey.required_replica_acks,
+                    &namespace,
+                    indexer_component_name,
+                    kv_router_config.valkey.index_scope.as_deref(),
+                    model_name,
+                    block_size,
+                    cancellation_token.child_token(),
+                    sentinel,
+                    kv_router_config.valkey.allow_degraded_writes,
+                )
+                .await?
+            } else {
+                ValkeyIndexer::new(
+                    urls,
+                    kv_router_config.valkey.connection_pool_size,
+                    kv_router_config.valkey.required_replica_acks,
+                    &namespace,
+                    indexer_component_name,
+                    kv_router_config.valkey.index_scope.as_deref(),
+                    model_name,
+                    block_size,
+                    cancellation_token.child_token(),
+                )?
+            };
+            let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
+            let approx = SideIndexer::new_predict_on_route(
+                component,
+                kv_router_config,
+                block_size,
+                cancellation_token.child_token(),
+            );
+            return Ok(Self::Valkey {
+                primary: Arc::new(valkey),
+                lower_tier: LowerTierIndexers::new_with_metrics(
+                    kv_router_config.router_event_threads as usize,
+                    block_size,
+                    Some(kv_indexer_metrics),
+                ),
+                approx,
+                primary_records_routing_decisions: false,
+                direct_worker_events: kv_router_config.valkey.worker_events,
+            });
         }
 
         if kv_router_config.use_remote_indexer {
@@ -207,7 +305,7 @@ impl Indexer {
         match self {
             Self::KvIndexer { primary, .. } => primary.dump_events().await,
             Self::Concurrent { primary, .. } => primary.dump_events().await,
-            Self::Remote { .. } => Ok(Vec::new()),
+            Self::Remote { .. } | Self::Valkey { .. } => Ok(Vec::new()),
             Self::None => {
                 panic!(
                     "Cannot dump events: indexer does not exist (is overlap_score_credit set to 0?)"
@@ -216,7 +314,26 @@ impl Indexer {
         }
     }
 
+    /// Apply an event obtained through recovery or a non-direct source.
+    ///
+    /// For a Valkey indexer this is intentionally allowed to update the
+    /// device-tier primary: tree-dump recovery must be able to rehydrate a
+    /// lost or replaced persistent index.
     pub(crate) async fn apply_event(&self, event: RouterEvent) {
+        self.apply_event_internal(event, false).await;
+    }
+
+    /// Apply a live event received from the worker event plane.
+    ///
+    /// When direct worker writes are enabled, the worker is the sole
+    /// device-tier writer. We still consume the event for lifecycle/recovery
+    /// cursors and lower-tier state, but avoid replaying it from every
+    /// frontend as a duplicate `DYNKV.APPLY`.
+    pub(crate) async fn apply_live_event(&self, event: RouterEvent) {
+        self.apply_event_internal(event, true).await;
+    }
+
+    async fn apply_event_internal(&self, event: RouterEvent, live_event: bool) {
         match self {
             Self::KvIndexer {
                 primary,
@@ -267,6 +384,48 @@ impl Indexer {
                 }
             },
             Self::Remote { .. } | Self::None => {}
+            Self::Valkey {
+                primary,
+                lower_tier,
+                direct_worker_events,
+                ..
+            } => match &event.event.data {
+                dynamo_kv_router::protocols::KvCacheEventData::Cleared => {
+                    let skip_direct_gpu_replay =
+                        skip_direct_valkey_gpu_replay(*direct_worker_events, live_event, &event);
+                    if skip_direct_gpu_replay {
+                        tracing::trace!(
+                            worker_id = event.worker_id,
+                            dp_rank = event.event.dp_rank,
+                            event_id = event.event.event_id,
+                            "Skipping duplicate live GPU clear already owned by direct Valkey worker writer"
+                        );
+                    } else if let Err(error) = primary.apply_event(&event).await {
+                        tracing::warn!(error = %error, "Failed to apply Valkey clear event");
+                    }
+                    for indexer in lower_tier.all() {
+                        indexer.apply_event(event.clone()).await;
+                    }
+                }
+                _ if event.storage_tier.is_gpu() => {
+                    if skip_direct_valkey_gpu_replay(*direct_worker_events, live_event, &event) {
+                        tracing::trace!(
+                            worker_id = event.worker_id,
+                            dp_rank = event.event.dp_rank,
+                            event_id = event.event.event_id,
+                            "Skipping duplicate live GPU event already owned by direct Valkey worker writer"
+                        );
+                    } else if let Err(error) = primary.apply_event(&event).await {
+                        tracing::warn!(error = %error, "Failed to apply Valkey KV event");
+                    }
+                }
+                _ => {
+                    lower_tier
+                        .get_or_create(event.storage_tier)
+                        .apply_event(event)
+                        .await;
+                }
+            },
         }
     }
 
@@ -303,6 +462,22 @@ impl Indexer {
                 }
             }
             Self::Remote { approx, .. } => {
+                if let Some(approx) = approx {
+                    approx.remove_worker(worker_id).await;
+                }
+            }
+            Self::Valkey {
+                primary,
+                lower_tier,
+                approx,
+                ..
+            } => {
+                for indexer in lower_tier.all() {
+                    indexer.remove_worker(worker_id).await;
+                }
+                if let Err(error) = primary.remove_worker_all(worker_id).await {
+                    tracing::warn!(error = %error, "Failed to remove worker from Valkey index");
+                }
                 if let Some(approx) = approx {
                     approx.remove_worker(worker_id).await;
                 }
@@ -347,8 +522,50 @@ impl Indexer {
                     approx.remove_worker_dp_rank(worker_id, dp_rank).await;
                 }
             }
+            Self::Valkey {
+                primary,
+                lower_tier,
+                approx,
+                ..
+            } => {
+                for indexer in lower_tier.all() {
+                    KvIndexerInterface::remove_worker_dp_rank(&*indexer, worker_id, dp_rank).await;
+                }
+                if let Err(error) = primary.reset_worker(worker_id, dp_rank).await {
+                    tracing::warn!(error = %error, "Failed to reset worker rank in Valkey index");
+                }
+                if let Some(approx) = approx {
+                    approx.remove_worker_dp_rank(worker_id, dp_rank).await;
+                }
+            }
             Self::None => {}
         }
+    }
+
+    /// Replace one recovered worker/rank snapshot without erasing a live
+    /// mutation that raced the dump. The Valkey module performs this as one
+    /// generation-fenced command; local indexers retain their serialized
+    /// reset-and-replay behavior under the recovery coordinator lock.
+    ///
+    /// `Ok(false)` means the Valkey generation changed after the dump was
+    /// captured and the caller must fetch a fresh full snapshot.
+    pub(crate) async fn replace_worker_dp_rank_from_tree_dump(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        events: &[RouterEvent],
+    ) -> Result<bool> {
+        if let Self::Valkey { primary, .. } = self {
+            return primary
+                .replace_rank_snapshot_if_current(worker_id, dp_rank, events)
+                .await;
+        }
+
+        self.remove_worker_dp_rank(worker_id, dp_rank).await;
+        for event in events {
+            self.apply_event(event.clone()).await;
+        }
+        Ok(true)
     }
 
     pub(crate) async fn get_workers(&self) -> Vec<WorkerId> {
@@ -363,7 +580,7 @@ impl Indexer {
                 resp_rx.await.unwrap_or_default()
             }
             Self::Concurrent { primary, .. } => primary.get_workers().await,
-            Self::Remote { .. } | Self::None => Vec::new(),
+            Self::Remote { .. } | Self::Valkey { .. } | Self::None => Vec::new(),
         }
     }
 }
@@ -433,7 +650,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::test_util::store_event;
-    use super::{Indexer, LowerTierIndexers};
+    use super::{Indexer, LowerTierIndexers, skip_direct_valkey_gpu_replay};
     use dynamo_kv_router::{
         ConcurrentRadixTreeCompressed, ThreadPoolIndexer,
         approx::PruneConfig,
@@ -493,6 +710,17 @@ mod tests {
         assert!(!Indexer::None.supports_overlap_refresh());
     }
 
+    #[test]
+    fn direct_worker_events_skip_only_live_gpu_replay() {
+        let gpu_event = store_event(7, 0, 1, &[], &[11], StorageTier::Device);
+        let host_event = store_event(7, 0, 2, &[], &[11], StorageTier::HostPinned);
+
+        assert!(skip_direct_valkey_gpu_replay(true, true, &gpu_event));
+        assert!(!skip_direct_valkey_gpu_replay(false, true, &gpu_event));
+        assert!(!skip_direct_valkey_gpu_replay(true, false, &gpu_event));
+        assert!(!skip_direct_valkey_gpu_replay(true, true, &host_event));
+    }
+
     async fn flush_indexer(indexer: &Indexer) {
         match indexer {
             Indexer::KvIndexer {
@@ -515,7 +743,7 @@ mod tests {
                     let _ = indexer.dump_events().await.unwrap();
                 }
             }
-            Indexer::Remote { .. } | Indexer::None => {}
+            Indexer::Remote { .. } | Indexer::Valkey { .. } | Indexer::None => {}
         }
     }
 

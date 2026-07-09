@@ -93,6 +93,16 @@ pub(crate) struct KvPublisherMetrics {
     pub zmq_conversion_issues_total: IntCounterVec,
     /// Total number of suspicious-but-forwarded ZMQ KV events.
     pub zmq_suspicious_events_total: IntCounterVec,
+    /// Total number of events rejected by the bounded direct-Valkey ingress.
+    pub input_dropped_events_total: IntCounterVec,
+    /// Total number of integrity faults which fence direct-Valkey publishing.
+    pub integrity_faults_total: IntCounterVec,
+    /// Total number of permanent worker fence attempts.
+    pub integrity_fences_total: IntCounterVec,
+    /// Total number of authoritative direct-Valkey publish failures.
+    pub publish_errors_total: IntCounterVec,
+    /// Total number of direct-Valkey lifecycle GC ticks by outcome.
+    pub lifecycle_gc_steps_total: IntCounterVec,
 }
 
 static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
@@ -145,6 +155,46 @@ impl KvPublisherMetrics {
                         &[],
                     )
                     .expect("failed to create kv_publisher_zmq_suspicious_events_total");
+                let input_dropped_events_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::INPUT_DROPPED_EVENTS_TOTAL,
+                        "Total number of events rejected by the bounded direct-Valkey publisher ingress",
+                        &["reason"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_input_dropped_events_total");
+                let integrity_faults_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::INTEGRITY_FAULTS_TOTAL,
+                        "Total number of direct-Valkey publisher integrity faults",
+                        &["reason"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_integrity_faults_total");
+                let integrity_fences_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::INTEGRITY_FENCES_TOTAL,
+                        "Total number of direct-Valkey permanent worker fence attempts",
+                        &["outcome"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_integrity_fences_total");
+                let publish_errors_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::PUBLISH_ERRORS_TOTAL,
+                        "Total number of authoritative direct-Valkey publish failures",
+                        &["reason"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_publish_errors_total");
+                let lifecycle_gc_steps_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::LIFECYCLE_GC_STEPS_TOTAL,
+                        "Total number of direct-Valkey lifecycle GC ticks by outcome",
+                        &["outcome"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_lifecycle_gc_steps_total");
 
                 Arc::new(Self {
                     engines_dropped_events_total,
@@ -152,6 +202,11 @@ impl KvPublisherMetrics {
                     zmq_filtered_events_total,
                     zmq_conversion_issues_total,
                     zmq_suspicious_events_total,
+                    input_dropped_events_total,
+                    integrity_faults_total,
+                    integrity_fences_total,
+                    publish_errors_total,
+                    lifecycle_gc_steps_total,
                 })
             })
             .clone()
@@ -183,6 +238,34 @@ impl KvPublisherMetrics {
     pub fn increment_zmq_suspicious_event(&self, event_type: &'static str, reason: &'static str) {
         self.zmq_suspicious_events_total
             .with_label_values(&[event_type, reason])
+            .inc();
+    }
+
+    pub fn increment_input_dropped_event(&self, reason: &'static str) {
+        self.input_dropped_events_total
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    pub fn increment_integrity_fault(&self, reason: &'static str) {
+        self.integrity_faults_total
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    pub fn increment_integrity_fence(&self, outcome: &'static str) {
+        self.integrity_fences_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    pub fn increment_publish_error(&self, reason: &'static str) {
+        self.publish_errors_total.with_label_values(&[reason]).inc();
+    }
+
+    pub fn increment_lifecycle_gc_step(&self, outcome: &'static str) {
+        self.lifecycle_gc_steps_total
+            .with_label_values(&[outcome])
             .inc();
     }
 }

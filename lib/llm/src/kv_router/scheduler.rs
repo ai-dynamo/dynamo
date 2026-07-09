@@ -40,6 +40,7 @@ where
     inner: Arc<LocalScheduler<RuntimeSequencePublisher, ModelRuntimeConfig, Sel, RF>>,
     queue_metrics: Vec<RouterQueueMetricHandles>,
     queue_metric_indices: HashMap<String, usize>,
+    overloaded_worker_provider: Option<OverloadedWorkerProvider>,
 }
 
 impl<Sel, RF> KvScheduler<Sel, RF>
@@ -107,7 +108,7 @@ where
             selector,
             prefill_load_estimator,
             overlap_scores_refresh,
-            overloaded_worker_provider,
+            overloaded_worker_provider.clone(),
             kv_router_config.router_queue_recheck_interval(),
             kv_router_config.router_track_prefill_tokens,
             cancellation_token.child_token(),
@@ -149,6 +150,7 @@ where
             inner,
             queue_metrics,
             queue_metric_indices,
+            overloaded_worker_provider,
         })
     }
 
@@ -327,6 +329,22 @@ where
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         self.inner.add_request(req).await
+    }
+
+    /// Mirror a selection already atomically admitted by Valkey.  This keeps
+    /// request lifetime accounting and metrics local without re-running the
+    /// local selector or queue.
+    pub async fn mirror_reservation(&self, req: SequenceRequest) -> Result<(), SequenceError> {
+        self.inner.book_preselected_if_registered(req).await
+    }
+
+    /// Snapshot the existing health-based overload filter so external
+    /// admission honours the same discovery-level availability signal as the
+    /// local scheduler.  Module-held reservation count remains the load rank.
+    pub fn overloaded_worker_ids(&self) -> Option<HashSet<WorkerId>> {
+        self.overloaded_worker_provider
+            .as_ref()
+            .and_then(|provider| provider())
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
