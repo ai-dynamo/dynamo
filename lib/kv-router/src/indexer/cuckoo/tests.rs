@@ -21,13 +21,14 @@ use super::bucket::{CuckooBucketStore, PackedBucket, TransposedCkfTable};
 use super::event_indexer::bucket_count;
 use super::mutator::{CuckooMutator, DcWriterState};
 use super::search::{
-    SearchPhase, SearchTraceEvent, SearchTraceKind, find_prefix_depths,
-    find_prefix_depths_with_test_stats, find_prefix_depths_with_test_trace,
-    fixed_window_prefix_depths, linear_prefix_depths,
+    SearchPhase, SearchTraceEvent, SearchTraceKind, find_max_depth_matches,
+    find_max_depth_matches_with_test_trace, find_prefix_depths, find_prefix_depths_with_test_stats,
+    find_prefix_depths_with_test_trace, fixed_window_prefix_depths, linear_prefix_depths,
+    refine_binary_level_with_test_trace,
 };
 use super::{
-    CkfBuildError, CkfConfig, DC_COUNT, EventTransposedCkfIndexer, RelayLaneConfig, RelayManifest,
-    RouterLocalCkfPipeline,
+    CkfBuildError, CkfConfig, CkfMatchMode, DC_COUNT, EventTransposedCkfIndexer, RelayLaneConfig,
+    RelayManifest, RouterLocalCkfPipeline,
 };
 
 const TEST_SEED: u64 = 0x1234_5678_9ABC_DEF0;
@@ -68,6 +69,11 @@ fn sequential_probe_events(phase: SearchPhase, groups: &[(usize, u16)]) -> Vec<S
             ]
         })
         .collect()
+}
+
+fn max_depth_projection<const D: usize>(depths: [u32; D]) -> [u32; D] {
+    let best = depths.into_iter().max().unwrap_or(0);
+    depths.map(|depth| u32::from(depth == best && best > 0) * depth)
 }
 
 fn single_lane_manifest(
@@ -854,6 +860,260 @@ fn divergent_lanes_group_binary_midpoints_once_per_level() {
     );
 }
 
+#[test]
+fn max_depth_terminal_demotion_allows_the_challenger_to_win() {
+    let membership = |position: usize| {
+        u16::from(position < 58 || position == 64) | (u16::from(position < 60) << 1)
+    };
+    let (result, trace) =
+        find_max_depth_matches_with_test_trace::<2>(65, 0b11, 8, |_| {}, membership);
+    let leader_miss = trace
+        .iter()
+        .position(|event| {
+            event.phase == SearchPhase::Verification
+                && event.kind == SearchTraceKind::Probe
+                && event.position == 58
+                && event.lanes == 0b01
+        })
+        .unwrap();
+    let challenger_verification = trace
+        .iter()
+        .rposition(|event| {
+            event.phase == SearchPhase::Verification
+                && event.kind == SearchTraceKind::Probe
+                && event.lanes & 0b10 != 0
+        })
+        .unwrap();
+
+    assert_eq!(result.depths, [0, 60]);
+    assert!(leader_miss < challenger_verification);
+}
+
+#[test]
+fn max_depth_provenance_demotion_reopens_the_frontier() {
+    let membership = |position: usize| {
+        u16::from(position < 20 || position == 32) | (u16::from(position < 28) << 1)
+    };
+    let (result, trace) =
+        find_max_depth_matches_with_test_trace::<2>(65, 0b11, 2, |_| {}, membership);
+    let repaired_leader = trace
+        .iter()
+        .position(|event| {
+            event.phase == SearchPhase::Fallback
+                && event.kind == SearchTraceKind::Probe
+                && event.position == 20
+                && event.lanes == 0b01
+        })
+        .unwrap();
+    let challenger_verification = trace
+        .iter()
+        .rposition(|event| {
+            event.phase == SearchPhase::Verification
+                && event.kind == SearchTraceKind::Probe
+                && event.lanes & 0b10 != 0
+        })
+        .unwrap();
+
+    assert_eq!(result.depths, [0, 28]);
+    assert_eq!(result.fallback.left_edge_lanes, 1);
+    assert_eq!(result.fallback.activated_lanes, 1);
+    assert!(repaired_leader < challenger_verification);
+}
+
+#[test]
+fn max_depth_matches_full_projection_for_second_order_provenance() {
+    let membership = |position: usize| {
+        u16::from(position < 20 || position == 32 || position == 48)
+            | (u16::from(position < 30) << 1)
+    };
+    let full = find_prefix_depths::<2>(65, 0b11, 8, |_| {}, membership);
+    let best = find_max_depth_matches::<2>(65, 0b11, 8, |_| {}, membership);
+
+    assert_eq!(full, [33, 30]);
+    assert_eq!(best, max_depth_projection(full));
+}
+
+#[test]
+fn max_depth_reuses_full_schedule_when_exponential_ceilings_match() {
+    let membership =
+        |position: usize| u16::from(position < 7) | (u16::from(position < 5 || position == 6) << 1);
+    let (full, full_trace) =
+        find_prefix_depths_with_test_trace::<2>(8, 0b11, 2, |_| {}, membership);
+    let (best, best_trace) =
+        find_max_depth_matches_with_test_trace::<2>(8, 0b11, 2, |_| {}, membership);
+
+    assert_eq!(best.depths, max_depth_projection(full.depths));
+    assert_eq!(best.fallback, full.fallback);
+    assert_eq!(best_trace, full_trace);
+}
+
+#[test]
+fn max_depth_mixed_d16_frontier_matches_full_projection() {
+    const PREFIX_DEPTHS: [usize; 16] = [
+        8, 12, 20, 20, 28, 36, 44, 52, 60, 24, 40, 16, 48, 56, 32, 18,
+    ];
+    let membership = |position: usize| {
+        PREFIX_DEPTHS
+            .iter()
+            .enumerate()
+            .fold(0u16, |mask, (lane, &depth)| {
+                let present = if lane == 15 {
+                    position < depth || matches!(position, 32 | 64)
+                } else {
+                    position < depth
+                };
+                mask | (u16::from(present) << lane)
+            })
+    };
+    let full = find_prefix_depths::<16>(65, u16::MAX, 2, |_| {}, membership);
+    let (best, trace) =
+        find_max_depth_matches_with_test_trace::<16>(65, u16::MAX, 2, |_| {}, membership);
+    let false_leader_fallback = trace
+        .iter()
+        .position(|event| {
+            event.phase == SearchPhase::Fallback
+                && event.kind == SearchTraceKind::Probe
+                && event.position == 33
+                && event.lanes == 1 << 15
+        })
+        .unwrap();
+    let winner_verification = trace
+        .iter()
+        .rposition(|event| {
+            event.phase == SearchPhase::Verification
+                && event.kind == SearchTraceKind::Probe
+                && event.lanes & (1 << 8) != 0
+        })
+        .unwrap();
+
+    assert_eq!(full[15], 33);
+    assert_eq!(best.depths, max_depth_projection(full));
+    assert_eq!(best.depths[8], 60);
+    assert!(false_leader_fallback < winner_verification);
+}
+
+#[test]
+fn max_depth_prunes_only_strictly_lower_ceilings() {
+    let membership = |position: usize| u16::from(position < 40) | (u16::from(position < 24) << 1);
+    let (result, trace) =
+        find_max_depth_matches_with_test_trace::<2>(65, 0b11, 2, |_| {}, membership);
+
+    assert_eq!(result.depths, [40, 0]);
+    assert!(trace.iter().all(|event| {
+        matches!(event.phase, SearchPhase::Initial | SearchPhase::Exponential)
+            || event.lanes & 0b10 == 0
+    }));
+}
+
+#[test]
+fn max_depth_retains_every_equal_ceiling_until_ties_are_resolved() {
+    const PREFIX_DEPTHS: [usize; 4] = [40, 40, 24, 0];
+    let membership = |position: usize| {
+        PREFIX_DEPTHS
+            .iter()
+            .enumerate()
+            .fold(0u16, |mask, (lane, &depth)| {
+                mask | (u16::from(position < depth) << lane)
+            })
+    };
+    let result = find_max_depth_matches::<4>(65, 0b1111, 2, |_| {}, membership);
+
+    assert_eq!(result, [40, 40, 0, 0]);
+}
+
+#[test]
+fn max_depth_midpoint_probe_advances_every_eligible_free_rider() {
+    let (lower, upper, trace) =
+        refine_binary_level_with_test_trace([32, 40], [64, 56], 0b01, 0b11, |position| {
+            assert_eq!(position, 48);
+            0b01
+        });
+
+    assert_eq!(lower, [48, 40]);
+    assert_eq!(upper, [64, 48]);
+    assert_eq!(
+        trace,
+        grouped_level_events(SearchPhase::Binary, &[(48, 0b11)])
+    );
+}
+
+#[test]
+fn max_depth_handles_empty_zero_single_and_all_lane_results() {
+    assert_eq!(
+        find_max_depth_matches::<4>(0, 0b1111, 2, |_| {}, |_| 0),
+        [0; 4]
+    );
+    assert_eq!(
+        find_max_depth_matches::<4>(8, 0b1111, 2, |_| {}, |_| 0),
+        [0; 4]
+    );
+
+    let single = find_max_depth_matches::<4>(
+        8,
+        0b1111,
+        2,
+        |_| {},
+        |position| u16::from(position < 5) | (u16::from(position < 3) << 1),
+    );
+    assert_eq!(single, [5, 0, 0, 0]);
+
+    let all = find_max_depth_matches::<16>(
+        8,
+        u16::MAX,
+        2,
+        |_| {},
+        |position| {
+            if position < 7 { u16::MAX } else { 0 }
+        },
+    );
+    assert_eq!(all, [7; 16]);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn max_depth_uses_saturated_score_bounds_when_preserving_ties() {
+    let boundary = u32::MAX as usize;
+    let sequence_len = boundary + 9;
+    let membership = |position: usize| 0b01 | (u16::from(position < boundary + 4) << 1);
+    let full = find_prefix_depths::<2>(sequence_len, 0b11, 2, |_| {}, membership);
+    let best = find_max_depth_matches::<2>(sequence_len, 0b11, 2, |_| {}, membership);
+
+    assert_eq!(full, [u32::MAX, u32::MAX]);
+    assert_eq!(best, full);
+}
+
+#[test]
+fn max_depth_matches_full_projection_for_every_small_stable_mask() {
+    const D: usize = 2;
+    const QUERY_LEN: usize = 8;
+
+    for verification_window in 1..=8 {
+        for pattern in 0..=u16::MAX {
+            let membership = |position: usize| {
+                (0..D).fold(0u16, |mask, lane| {
+                    let pattern_bit = position * D + lane;
+                    mask | ((((u32::from(pattern) >> pattern_bit) & 1) as u16) << lane)
+                })
+            };
+            let full =
+                find_prefix_depths::<D>(QUERY_LEN, 0b11, verification_window, |_| {}, membership);
+            let best = find_max_depth_matches::<D>(
+                QUERY_LEN,
+                0b11,
+                verification_window,
+                |_| {},
+                membership,
+            );
+
+            assert_eq!(
+                best,
+                max_depth_projection(full),
+                "pattern={pattern:#06x} verification_window={verification_window}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn thread_pool_uses_external_hashes_returns_full_map_and_clears_all_ranks() {
     let workers = workers_with_shared_worker();
@@ -903,6 +1163,36 @@ async fn thread_pool_uses_external_hashes_returns_full_map_and_clears_all_ranks(
     assert_eq!(stats.block_count_for_worker(workers[0]), None);
     assert_eq!(stats.block_count_for_worker(workers[1]), None);
     index.shutdown();
+}
+
+#[test]
+fn max_depth_adapter_returns_exact_tied_worker_identities() {
+    let workers = workers();
+    let index = EventTransposedCkfIndexer::new_with_match_mode(
+        workers,
+        CkfConfig::new(32),
+        CkfMatchMode::MaxDepthMatches,
+    )
+    .unwrap();
+    let query = vec![LocalBlockHash(11), LocalBlockHash(22), LocalBlockHash(33)];
+    let sequence_hashes = compute_seq_hash_for_block(&query);
+
+    index
+        .apply_event(store_event(workers[0], &sequence_hashes, 10_000), None)
+        .unwrap();
+    index
+        .apply_event(store_event(workers[1], &sequence_hashes, 20_000), None)
+        .unwrap();
+    index
+        .apply_event(store_event(workers[2], &sequence_hashes[..1], 30_000), None)
+        .unwrap();
+
+    let scores = index.find_matches(&query, false);
+    assert_eq!(scores.scores.len(), 2);
+    assert_eq!(scores.scores.get(&workers[0]), Some(&3));
+    assert_eq!(scores.scores.get(&workers[1]), Some(&3));
+    assert!(!scores.scores.contains_key(&workers[2]));
+    assert!(scores.frequencies.is_empty());
 }
 
 #[tokio::test]
@@ -1395,7 +1685,12 @@ fn store_remove_churn_drains_every_physical_slot() {
 async fn concurrent_queries_and_mutations_stay_bounded_and_drain_consistently() {
     let workers = workers();
     let index = Arc::new(ThreadPoolIndexer::new(
-        EventTransposedCkfIndexer::new(workers, CkfConfig::new(128)).unwrap(),
+        EventTransposedCkfIndexer::new_with_match_mode(
+            workers,
+            CkfConfig::new(128),
+            CkfMatchMode::MaxDepthMatches,
+        )
+        .unwrap(),
         2,
         32,
     ));

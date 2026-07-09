@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::cuckoo::{CkfConfig, EventTransposedCkfIndexer};
+use dynamo_kv_router::indexer::cuckoo::{CkfConfig, CkfMatchMode, EventTransposedCkfIndexer};
 use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier, WorkerWithDpRank};
@@ -38,6 +38,7 @@ pub struct MooncakeIndexerConfig {
     pub prefix_depth: usize,
     pub expected_blocks_per_dc: usize,
     pub publish_every_n_events: usize,
+    pub ckf_match_mode: CkfMatchMode,
 }
 
 #[allow(dead_code)]
@@ -52,6 +53,7 @@ impl MooncakeIndexerConfig {
             prefix_depth: 2,
             expected_blocks_per_dc: 16_384,
             publish_every_n_events: 1,
+            ckf_match_mode: CkfMatchMode::FullMap,
         }
     }
 
@@ -94,11 +96,20 @@ impl MooncakeIndexerConfig {
         self
     }
 
+    pub fn with_ckf_match_mode(mut self, ckf_match_mode: CkfMatchMode) -> Self {
+        self.ckf_match_mode = ckf_match_mode;
+        self
+    }
+
     pub(crate) fn build_transposed_ckf_backend(&self) -> anyhow::Result<EventTransposedCkfIndexer> {
         let workers = std::array::from_fn(|lane| WorkerWithDpRank::new(lane as u64, 0));
         let mut config = CkfConfig::new(self.expected_blocks_per_dc);
         config.publish_every_n_events = self.publish_every_n_events;
-        Ok(EventTransposedCkfIndexer::new(workers, config)?)
+        Ok(EventTransposedCkfIndexer::new_with_match_mode(
+            workers,
+            config,
+            self.ckf_match_mode,
+        )?)
     }
 
     pub fn branch_sharded_crtc(
@@ -123,7 +134,10 @@ impl MooncakeIndexerConfig {
             MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
                 "concurrent-radix-tree-compressed"
             }
-            MooncakeIndexerKind::TransposedCkf => "transposed-ckf",
+            MooncakeIndexerKind::TransposedCkf => match self.ckf_match_mode {
+                CkfMatchMode::FullMap => "transposed-ckf",
+                CkfMatchMode::MaxDepthMatches => "transposed-ckf-max-depth",
+            },
             MooncakeIndexerKind::BranchShardedCrtc => "branch-sharded-crtc",
         }
     }

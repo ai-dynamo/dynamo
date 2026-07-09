@@ -26,6 +26,7 @@ use dynamo_bench::kv_router_common::replay::{
     generate_replay_artifacts_with_args_and_visibility, process_mooncake_trace,
 };
 use dynamo_kv_router::LocalBlockHash;
+use dynamo_kv_router::indexer::cuckoo::CkfMatchMode;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{
     KvIndexerInterface, KvIndexerMetrics, METRIC_EVENT_CLEARED, METRIC_EVENT_REMOVED,
@@ -557,6 +558,50 @@ fn best_configured_lane(
         .map(|(lane, _)| lane)
 }
 
+fn max_depth_tie_projection(
+    scores: &NormalizedOverlapScores,
+    workers: &[WorkerWithDpRank; CKF_PARITY_WORKERS],
+) -> NormalizedOverlapScores {
+    let best = workers
+        .iter()
+        .filter_map(|worker| scores.get(worker).copied())
+        .max()
+        .unwrap_or(0);
+    if best == 0 {
+        return NormalizedOverlapScores::new();
+    }
+
+    workers
+        .iter()
+        .filter_map(|worker| (scores.get(worker).copied() == Some(best)).then_some((*worker, best)))
+        .collect()
+}
+
+fn assert_max_depth_matches_project_full_ckf(
+    engine_name: &str,
+    actual: &[ComparableOverlapScores],
+    full: &[ComparableOverlapScores],
+) {
+    assert_eq!(
+        actual.len(),
+        full.len(),
+        "{engine_name} maximum-depth CKF produced a different number of query results"
+    );
+    let workers = ckf_workers();
+    for (query_idx, (actual, full)) in actual.iter().zip(full).enumerate() {
+        assert_eq!(actual.query_len, full.query_len);
+        assert!(
+            actual.frequencies.is_empty(),
+            "{engine_name} maximum-depth CKF frequencies must remain empty at query {query_idx}"
+        );
+        assert_eq!(
+            actual.scores,
+            max_depth_tie_projection(&full.scores, &workers),
+            "{engine_name} maximum-depth CKF diverged from the full CKF tie-set projection at query {query_idx}"
+        );
+    }
+}
+
 fn compare_ckf_scores(
     engine_name: &str,
     actual: &[ComparableOverlapScores],
@@ -710,6 +755,9 @@ async fn measure_ckf_parity(
     let exact = MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS);
     let ckf = MooncakeIndexerConfig::transposed_ckf(NUM_EVENT_WORKERS, NUM_GPU_BLOCKS)
         .with_publish_every_n_events(publish_every_n_events);
+    let max_depth_ckf = ckf
+        .clone()
+        .with_ckf_match_mode(CkfMatchMode::MaxDepthMatches);
     assert_eq!(ckf.kind, MooncakeIndexerKind::TransposedCkf);
     let mut global = CkfParityStats::default();
 
@@ -740,6 +788,33 @@ async fn measure_ckf_parity(
             "{} CKF parity replay recorded event errors",
             artifact_set.engine_name
         );
+
+        support::reset_warning_count(warning_count);
+        let (max_depth, max_depth_metrics) = collect_prepared_corpus_overlap_scores_with_metrics(
+            &max_depth_ckf,
+            &artifact_set.artifacts,
+        )
+        .await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            warning_count.load(Ordering::Relaxed),
+            0,
+            "{} maximum-depth CKF parity replay emitted warning/error logs",
+            artifact_set.engine_name
+        );
+        assert_eq!(
+            support::duplicate_store_warning_count(max_depth_metrics.as_ref()),
+            0,
+            "{} maximum-depth CKF parity replay recorded duplicate-store warnings",
+            artifact_set.engine_name
+        );
+        assert_eq!(
+            indexer_error_metric_count(max_depth_metrics.as_ref()),
+            0,
+            "{} maximum-depth CKF parity replay recorded event errors",
+            artifact_set.engine_name
+        );
+        assert_max_depth_matches_project_full_ckf(artifact_set.engine_name, &max_depth, &actual);
 
         let stats = compare_ckf_scores(artifact_set.engine_name, &actual, &expected);
         println!(

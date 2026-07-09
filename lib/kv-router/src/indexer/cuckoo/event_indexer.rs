@@ -21,14 +21,15 @@ use crate::protocols::{KvCacheEventError, LocalBlockHash, OverlapScores, WorkerW
 use super::CkfDeltaBatch;
 #[cfg(feature = "bench")]
 use super::relay::CkfBenchLocalTelemetry;
-#[cfg(not(feature = "metrics"))]
-use super::search::find_prefix_depths;
-#[cfg(feature = "metrics")]
-use super::search::find_prefix_depths_with_stats;
 #[cfg(any(test, feature = "bench"))]
 use super::search::linear_prefix_depths;
+#[cfg(not(feature = "metrics"))]
+use super::search::{find_max_depth_matches, find_prefix_depths};
+#[cfg(feature = "metrics")]
+use super::search::{find_max_depth_matches_with_stats, find_prefix_depths_with_stats};
 use super::{
-    CkfBuildError, CkfConfig, CkfEventOutcome, DC_COUNT, RelayManifest, RouterLocalCkfPipeline,
+    CkfBuildError, CkfConfig, CkfEventOutcome, CkfMatchMode, DC_COUNT, RelayManifest,
+    RouterLocalCkfPipeline,
 };
 
 #[cfg(test)]
@@ -39,6 +40,7 @@ pub(super) use super::bucket_count;
 pub struct EventTransposedCkfIndexer {
     pub(super) pipeline: RouterLocalCkfPipeline,
     workers: [WorkerWithDpRank; DC_COUNT],
+    match_mode: CkfMatchMode,
     #[cfg(feature = "metrics")]
     search_counters: Option<PreBoundCkfSearchCounters>,
 }
@@ -49,10 +51,20 @@ impl EventTransposedCkfIndexer {
         workers: [WorkerWithDpRank; DC_COUNT],
         config: CkfConfig,
     ) -> Result<Self, CkfBuildError> {
+        Self::new_with_match_mode(workers, config, CkfMatchMode::FullMap)
+    }
+
+    /// Construct the normal one-worker/rank-per-lane specialization with an output mode.
+    pub fn new_with_match_mode(
+        workers: [WorkerWithDpRank; DC_COUNT],
+        config: CkfConfig,
+        match_mode: CkfMatchMode,
+    ) -> Result<Self, CkfBuildError> {
         let manifest = RelayManifest::one_worker_per_lane(workers, config.expected_blocks_per_dc)?;
         Ok(Self {
             pipeline: RouterLocalCkfPipeline::new(manifest, config)?,
             workers,
+            match_mode,
             #[cfg(feature = "metrics")]
             search_counters: None,
         })
@@ -235,22 +247,40 @@ impl SyncIndexer for EventTransposedCkfIndexer {
         let replica = self.pipeline.replica();
         let probes = replica.prepared_probes(sequence);
         #[cfg(not(feature = "metrics"))]
-        let depths = find_prefix_depths::<DC_COUNT>(
-            probes.len(),
-            u16::MAX,
-            replica.config.search.verification_window,
-            |position| replica.table.prefetch_probe(probes[position]),
-            |position| replica.table.probe(probes[position]),
-        );
-        #[cfg(feature = "metrics")]
-        let depths = {
-            let result = find_prefix_depths_with_stats::<DC_COUNT>(
+        let depths = match self.match_mode {
+            CkfMatchMode::FullMap => find_prefix_depths::<DC_COUNT>(
                 probes.len(),
                 u16::MAX,
                 replica.config.search.verification_window,
                 |position| replica.table.prefetch_probe(probes[position]),
                 |position| replica.table.probe(probes[position]),
-            );
+            ),
+            CkfMatchMode::MaxDepthMatches => find_max_depth_matches::<DC_COUNT>(
+                probes.len(),
+                u16::MAX,
+                replica.config.search.verification_window,
+                |position| replica.table.prefetch_probe(probes[position]),
+                |position| replica.table.probe(probes[position]),
+            ),
+        };
+        #[cfg(feature = "metrics")]
+        let depths = {
+            let result = match self.match_mode {
+                CkfMatchMode::FullMap => find_prefix_depths_with_stats::<DC_COUNT>(
+                    probes.len(),
+                    u16::MAX,
+                    replica.config.search.verification_window,
+                    |position| replica.table.prefetch_probe(probes[position]),
+                    |position| replica.table.probe(probes[position]),
+                ),
+                CkfMatchMode::MaxDepthMatches => find_max_depth_matches_with_stats::<DC_COUNT>(
+                    probes.len(),
+                    u16::MAX,
+                    replica.config.search.verification_window,
+                    |position| replica.table.prefetch_probe(probes[position]),
+                    |position| replica.table.probe(probes[position]),
+                ),
+            };
             if let Some(counters) = &self.search_counters {
                 counters.record(
                     result.fallback.left_edge_lanes,

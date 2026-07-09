@@ -28,6 +28,16 @@ const DEFAULT_EXPECTED_BLOCKS_PER_DC: usize = 1;
 const DEFAULT_VERIFICATION_WINDOW: usize = 2;
 const DEFAULT_PUBLISH_EVERY_N_EVENTS: usize = 1;
 
+/// Output shape for CKF prefix lookups through [`EventTransposedCkfIndexer`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CkfMatchMode {
+    /// Return every positive DC-lane depth.
+    #[default]
+    FullMap,
+    /// Return every positive lane tied at the greatest verified depth.
+    MaxDepthMatches,
+}
+
 /// Search behavior for CKF prefix lookups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrefixSearchConfig {
