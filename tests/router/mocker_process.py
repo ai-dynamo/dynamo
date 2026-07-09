@@ -68,6 +68,10 @@ def _build_mocker_command(
         command.extend(["--speedup-ratio", str(mocker_args["speedup_ratio"])])
     if "block_size" in mocker_args:
         command.extend(["--block-size", str(mocker_args["block_size"])])
+    if "kv_bytes_per_token" in mocker_args:
+        command.extend(
+            ["--kv-bytes-per-token", str(mocker_args["kv_bytes_per_token"])]
+        )
     if "num_gpu_blocks" in mocker_args:
         command.extend(
             ["--num-gpu-blocks-override", str(mocker_args["num_gpu_blocks"])]
@@ -140,6 +144,7 @@ class MockerProcess:
         standalone_selector: bool = False,
         model_name: str = "mocker",
         zmq_replay: bool = False,
+        extra_env: Optional[Dict[str, str]] = None,
     ):
         if standalone_selector and not standalone_indexer:
             raise ValueError("standalone_selector requires standalone_indexer=True")
@@ -164,6 +169,7 @@ class MockerProcess:
         self._request = request
         self._store_backend = store_backend
         self._request_plane = request_plane
+        self._extra_env = (extra_env or {}).copy()
         self._mocker_args_orig: Dict[str, Any] = (mocker_args or {}).copy()
         self.worker_id_to_zmq_ports: dict[int, dict[int, str]] = {}
 
@@ -220,6 +226,7 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = request_plane
+            env.update(self._extra_env)
             self._process = ManagedProcess(
                 command=command,
                 env=env,
@@ -334,6 +341,7 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = self._request_plane
+            env.update(self._extra_env)
             proc = ManagedProcess(
                 command=command,
                 env=env,

@@ -611,13 +611,10 @@ pub mod tcp_response_stream {
 
 /// Event Plane transport environment variables
 pub mod event_plane {
-    /// Event transport selection: "zmq" or "nats".
+    /// Event-plane selection: "zmq" or "nats".
     ///
-    /// When unset the default depends on the discovery backend:
-    /// - `file` / `mem` backends: defaults to `zmq` (no external services required).
-    /// - `etcd` / `kubernetes` backends: defaults to `nats`.
-    ///
-    /// Set this explicitly to override the context-aware default.
+    /// When unset, the default is `zmq`. Valkey routing metadata is configured
+    /// independently and is not a generic event-plane transport.
     pub const DYN_EVENT_PLANE: &str = "DYN_EVENT_PLANE";
 
     /// Event plane codec selection: "json" or "msgpack".

@@ -192,6 +192,10 @@ impl KvCacheEventSink for TestKvEventSink {
             .map_err(|_| anyhow!("router test event channel closed"))
     }
 
+    fn is_closed(&self) -> bool {
+        self.event_tx.is_closed()
+    }
+
     fn publish_with_storage_tier(
         &self,
         event: KvCacheEvent,

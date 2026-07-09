@@ -296,9 +296,9 @@ pub struct EventPublisher {
 impl EventPublisher {
     /// Create a publisher for a component-scoped topic.
     ///
-    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
-    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
-    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// The generic event transport is chosen from the runtime's resolved event-plane
+    /// mode. NATS and ZMQ map directly; the KV-specific Valkey mode uses ZMQ for
+    /// unrelated generic event channels.
     /// Use [`for_component_with_transport`](Self::for_component_with_transport) to
     /// override explicitly.
     pub async fn for_component(comp: &Component, topic: impl Into<String>) -> Result<Self> {
@@ -322,9 +322,9 @@ impl EventPublisher {
 
     /// Create a publisher for a namespace-scoped topic.
     ///
-    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
-    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
-    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// The generic event transport is chosen from the runtime's resolved event-plane
+    /// mode. NATS and ZMQ map directly; the KV-specific Valkey mode uses ZMQ for
+    /// unrelated generic event channels.
     /// Use [`for_namespace_with_transport`](Self::for_namespace_with_transport) to
     /// override explicitly.
     pub async fn for_namespace(ns: &Namespace, topic: impl Into<String>) -> Result<Self> {
@@ -601,9 +601,9 @@ pub struct EventSubscriber {
 impl EventSubscriber {
     /// Create a subscriber for a component-scoped topic.
     ///
-    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
-    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
-    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// The generic event transport is chosen from the runtime's resolved event-plane
+    /// mode. NATS and ZMQ map directly; the KV-specific Valkey mode uses ZMQ for
+    /// unrelated generic event channels.
     /// Use [`for_component_with_transport`](Self::for_component_with_transport) to
     /// override explicitly.
     pub async fn for_component(comp: &Component, topic: impl Into<String>) -> Result<Self> {
@@ -627,9 +627,9 @@ impl EventSubscriber {
 
     /// Create a subscriber for a namespace-scoped topic.
     ///
-    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
-    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
-    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// The generic event transport is chosen from the runtime's resolved event-plane
+    /// mode. NATS and ZMQ map directly; the KV-specific Valkey mode uses ZMQ for
+    /// unrelated generic event channels.
     /// Use [`for_namespace_with_transport`](Self::for_namespace_with_transport) to
     /// override explicitly.
     pub async fn for_namespace(ns: &Namespace, topic: impl Into<String>) -> Result<Self> {

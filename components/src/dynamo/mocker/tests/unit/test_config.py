@@ -465,6 +465,20 @@ def test_replay_engine_args_preserves_explicit_max_model_len():
     assert engine_args.max_model_len == 32768
 
 
+def test_mocker_cli_rejects_valkey_event_plane(monkeypatch):
+    with pytest.raises(SystemExit):
+        parse_args(["--event-plane", "valkey"])
+
+    monkeypatch.setenv("DYN_EVENT_PLANE", "valkey")
+    with pytest.raises(SystemExit):
+        parse_args([])
+
+
+@pytest.mark.parametrize("model_path", ["/models/Qwen3-0.6B", "Qwen/Qwen3-0.6B"])
+def test_mocker_cli_accepts_model_paths(model_path):
+    assert parse_args(["--model-path", model_path]).model_path == model_path
+
+
 def test_replay_engine_args_compute_kv_bytes_for_g3_before_validation(monkeypatch):
     import dynamo.replay.main as replay_main
 

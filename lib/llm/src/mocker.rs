@@ -14,11 +14,15 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::backend::ExecutionContext;
-use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher};
+use crate::kv_router::publisher::{
+    KvEventPublisher, KvEventPublisherShutdown, KvEventPublisherShutdownOutcome,
+    KvEventSourceConfig, ValkeyWorkerEventLease, ValkeyWorkerRegistration, WorkerMetricsPublisher,
+    shutdown_publishers_and_wait,
+};
 use crate::protocols::TokenIdType;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
@@ -49,7 +53,7 @@ use dynamo_runtime::{
 use futures::StreamExt;
 use rand::Rng;
 use serde::Deserialize;
-use tokio::sync::{Notify, OnceCell, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, OnceCell, Semaphore, mpsc, oneshot, watch};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -165,13 +169,40 @@ impl ResponseReplayTable {
 }
 
 /// Wrapper to adapt KvEventPublisher to the KvCacheEventSink trait
-struct KvEventSinkAdapter(KvEventPublisher);
+struct KvEventSinkAdapter {
+    publisher: KvEventPublisher,
+    terminal: AtomicBool,
+}
+
+impl KvEventSinkAdapter {
+    fn new(publisher: KvEventPublisher) -> Self {
+        Self {
+            publisher,
+            terminal: AtomicBool::new(false),
+        }
+    }
+
+    fn record_result(&self, result: anyhow::Result<()>) -> anyhow::Result<()> {
+        if result.is_err() {
+            // KvEventPublisher only rejects input after its channel closes or
+            // its direct-Valkey integrity gate permanently fences the worker.
+            self.terminal.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+}
 
 impl KvCacheEventSink for KvEventSinkAdapter {
     fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
-        self.0
-            .publish(event)
-            .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e))
+        self.record_result(
+            self.publisher
+                .publish(event)
+                .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e)),
+        )
+    }
+
+    fn is_closed(&self) -> bool {
+        self.terminal.load(Ordering::Relaxed)
     }
 
     fn publish_with_storage_tier(
@@ -179,9 +210,11 @@ impl KvCacheEventSink for KvEventSinkAdapter {
         event: KvCacheEvent,
         storage_tier: StorageTier,
     ) -> anyhow::Result<()> {
-        self.0
-            .publish_with_storage_tier(event, storage_tier)
-            .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e))
+        self.record_result(
+            self.publisher
+                .publish_with_storage_tier(event, storage_tier)
+                .map_err(|e| anyhow::anyhow!("Failed to send KV event: {}", e)),
+        )
     }
 }
 
@@ -235,11 +268,30 @@ pub struct MockEngine {
     _schedulers: OnceCell<Vec<Box<dyn SchedulerHandle>>>,
     /// Forward pass metrics publisher (kept alive for the engine lifetime).
     _fpm_publisher: OnceCell<crate::fpm_publisher::FpmDirectPublisher>,
+    /// One process-level owner lease shared by every DP-rank publisher.
+    _valkey_registration: Arc<Mutex<Option<ValkeyWorkerRegistration>>>,
 }
 
 struct PreparedBootstrap {
     server: Arc<BootstrapServer>,
     max_sessions: usize,
+}
+
+struct PreparedSchedulers {
+    schedulers: Vec<Box<dyn SchedulerHandle>>,
+    kv_publisher_shutdowns: Vec<KvEventPublisherShutdown>,
+    request_senders: Vec<mpsc::UnboundedSender<DirectRequest>>,
+    command_senders: Vec<mpsc::Sender<SchedulerCommandEnvelope>>,
+    handoff_session_permits: Vec<Arc<Semaphore>>,
+}
+
+struct MockerSchedulerStartupFailure {
+    error: anyhow::Error,
+    publisher_outcome: KvEventPublisherShutdownOutcome,
+}
+
+fn startup_rollback_can_unregister(outcome: KvEventPublisherShutdownOutcome) -> bool {
+    outcome == KvEventPublisherShutdownOutcome::Drained
 }
 
 impl MockEngine {
@@ -283,6 +335,7 @@ impl MockEngine {
             native_metrics,
             _schedulers: OnceCell::new(),
             _fpm_publisher: OnceCell::new(),
+            _valkey_registration: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -349,6 +402,46 @@ impl MockEngine {
         );
     }
 
+    async fn rollback_registration(
+        &self,
+        registration: &mut Option<ValkeyWorkerRegistration>,
+        publisher_outcome: KvEventPublisherShutdownOutcome,
+    ) {
+        let Some(mut registration) = registration.take() else {
+            return;
+        };
+        if startup_rollback_can_unregister(publisher_outcome) {
+            if let Err(error) = registration.shutdown().await {
+                tracing::warn!(
+                    error = %error,
+                    "Failed to roll back mocker Valkey registration; lease expiry remains the backstop"
+                );
+            }
+        } else {
+            tracing::warn!(
+                ?publisher_outcome,
+                "Skipping explicit Valkey unregister after ambiguous startup drain; lease expiry remains the backstop"
+            );
+        }
+    }
+
+    async fn rollback_uncommitted_bootstrap(&self, prepared: Option<&PreparedBootstrap>) {
+        self.handoff_shutdown.cancel();
+        if let Some(prepared) = prepared {
+            prepared.server.wait_closed().await;
+        }
+    }
+
+    async fn rollback_prepared_schedulers(
+        &self,
+        publishers: &[KvEventPublisherShutdown],
+    ) -> KvEventPublisherShutdownOutcome {
+        self.scheduler_shutdown.cancel();
+        self.scheduler_tasks.close();
+        self.scheduler_tasks.wait().await;
+        shutdown_publishers_and_wait(publishers).await
+    }
+
     pub async fn start(&self, component: Component) -> Result<()> {
         // Use primary_token() instead of child_token() so the mocker continues running
         // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
@@ -375,47 +468,110 @@ impl MockEngine {
         } else {
             None
         };
-        let prepared_bootstrap = self.prepare_bootstrap().await?;
+        let registration_ranks = (0..self.engine_args.dp_size).collect::<Vec<_>>();
+        let mut valkey_registration = ValkeyWorkerRegistration::register_from_env(
+            &component,
+            None,
+            self.engine_args.block_size as u32,
+            &registration_ranks,
+        )
+        .await?;
+        let valkey_event_lease = valkey_registration
+            .as_ref()
+            .map(ValkeyWorkerRegistration::event_lease);
+        let prepared_bootstrap = match self.prepare_bootstrap().await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.rollback_registration(
+                    &mut valkey_registration,
+                    KvEventPublisherShutdownOutcome::Drained,
+                )
+                .await;
+                return Err(error.context("failed to prepare mocker bootstrap service"));
+            }
+        };
 
         // Create FPM publisher upfront and get per-dp-rank sink handles.
         let worker_id = component.drt().connection_id().to_string();
-        let fpm_sinks = match crate::fpm_publisher::FpmDirectPublisher::new(
+        let (fpm_publisher, fpm_sinks) = match crate::fpm_publisher::FpmDirectPublisher::new(
             component.clone(),
             worker_id,
             self.engine_args.dp_size,
         )
         .await
         {
-            Ok((publisher, sinks)) => {
-                let _ = self._fpm_publisher.set(publisher);
-                sinks
-            }
+            Ok((publisher, sinks)) => (Some(publisher), sinks),
             Err(e) => {
                 tracing::error!("Failed to start FPM publisher: {e}");
-                (0..self.engine_args.dp_size)
-                    .map(|_| dynamo_mocker::common::protocols::FpmPublisher::default())
-                    .collect()
+                (
+                    None,
+                    (0..self.engine_args.dp_size)
+                        .map(|_| dynamo_mocker::common::protocols::FpmPublisher::default())
+                        .collect(),
+                )
             }
         };
 
-        let schedulers = self
-            .start_schedulers(kv_component, self.scheduler_shutdown.clone(), fpm_sinks)
-            .await;
+        let prepared_schedulers = match self
+            .start_schedulers(
+                kv_component,
+                self.scheduler_shutdown.clone(),
+                fpm_sinks,
+                valkey_event_lease,
+            )
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                self.rollback_uncommitted_bootstrap(prepared_bootstrap.as_ref())
+                    .await;
+                self.rollback_registration(&mut valkey_registration, failure.publisher_outcome)
+                    .await;
+                return Err(failure.error.context("failed to start mocker schedulers"));
+            }
+        };
 
-        if let Some(prepared) = prepared_bootstrap {
-            self.commit_bootstrap(prepared);
-        }
-
-        Self::start_metrics_publishing(
-            &schedulers,
+        if let Err(error) = Self::start_metrics_publishing(
+            &prepared_schedulers.schedulers,
             component.clone(),
             self.native_metrics.clone(),
             self.scheduler_shutdown.clone(),
             self.scheduler_tasks.clone(),
         )
-        .await?;
+        .await
+        {
+            self.rollback_uncommitted_bootstrap(prepared_bootstrap.as_ref())
+                .await;
+            let publisher_outcome = self
+                .rollback_prepared_schedulers(&prepared_schedulers.kv_publisher_shutdowns)
+                .await;
+            self.rollback_registration(&mut valkey_registration, publisher_outcome)
+                .await;
+            return Err(error.context("failed to start mocker metrics publishing"));
+        }
 
-        let _ = self._schedulers.set(schedulers);
+        if let Some(prepared) = prepared_bootstrap {
+            self.commit_bootstrap(prepared);
+        }
+        self.request_senders
+            .set(prepared_schedulers.request_senders)
+            .expect("mocker request senders initialized more than once");
+        self.command_senders
+            .set(prepared_schedulers.command_senders)
+            .expect("mocker command senders initialized more than once");
+        self.handoff_session_permits
+            .set(prepared_schedulers.handoff_session_permits)
+            .expect("mocker handoff permits initialized more than once");
+        self._schedulers
+            .set(prepared_schedulers.schedulers)
+            .unwrap_or_else(|_| panic!("mocker schedulers initialized more than once"));
+        if let Some(publisher) = fpm_publisher {
+            self._fpm_publisher
+                .set(publisher)
+                .unwrap_or_else(|_| panic!("mocker FPM publisher initialized more than once"));
+        }
+        *self._valkey_registration.lock().await = valkey_registration;
+        self.senders_ready.notify_waiters();
 
         let handoff_shutdown = self.handoff_shutdown.clone();
         let scheduler_shutdown = self.scheduler_shutdown.clone();
@@ -423,6 +579,8 @@ impl MockEngine {
         let scheduler_tasks = self.scheduler_tasks.clone();
         let source_manager = self.source_handoff_manager.get().cloned();
         let bootstrap_server = self.bootstrap_server.get().cloned();
+        let valkey_registration = self._valkey_registration.clone();
+        let kv_publisher_shutdowns = prepared_schedulers.kv_publisher_shutdowns;
         tokio::spawn(async move {
             primary_token.cancelled().await;
             handoff_shutdown.cancel();
@@ -437,6 +595,23 @@ impl MockEngine {
             scheduler_shutdown.cancel();
             scheduler_tasks.close();
             scheduler_tasks.wait().await;
+            let publisher_outcome = shutdown_publishers_and_wait(&kv_publisher_shutdowns).await;
+            let registration = valkey_registration.lock().await.take();
+            if let Some(mut registration) = registration {
+                if publisher_outcome == KvEventPublisherShutdownOutcome::Drained {
+                    if let Err(error) = registration.shutdown().await {
+                        tracing::warn!(
+                            error = %error,
+                            "Failed to unregister mocker Valkey lease; expiry remains the backstop"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        ?publisher_outcome,
+                        "Skipping mocker Valkey unregister after forced publisher shutdown; lease expiry remains the backstop"
+                    );
+                }
+            }
         });
 
         Ok(())
@@ -504,19 +679,24 @@ impl MockEngine {
         component: Option<&Component>,
         cancel_token: CancellationToken,
         fpm_sinks: Vec<dynamo_mocker::common::protocols::FpmPublisher>,
-    ) -> Vec<Box<dyn SchedulerHandle>> {
+        valkey_event_lease: Option<ValkeyWorkerEventLease>,
+    ) -> std::result::Result<PreparedSchedulers, MockerSchedulerStartupFailure> {
         let args = &self.engine_args;
+        let require_valkey_publisher = valkey_event_lease.is_some();
         let mut schedulers = Vec::<Box<dyn SchedulerHandle>>::new();
+        let mut kv_publisher_shutdowns = Vec::with_capacity(args.dp_size as usize);
         let mut senders = Vec::with_capacity(args.dp_size as usize);
         let mut command_senders = Vec::with_capacity(args.dp_size as usize);
         let mut handoff_session_permits = Vec::with_capacity(args.dp_size as usize);
 
         for (dp_rank, fpm_publisher) in (0..args.dp_size).zip(fpm_sinks) {
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
+            let mut fatal_publisher_error = None;
 
-            let (kv_event_publishers, relay_publisher): (
+            let (kv_event_publishers, relay_publisher, publisher_shutdown): (
                 KvEventPublishers,
                 Option<KvEventPublisher>,
+                Option<KvEventPublisherShutdown>,
             ) = match component {
                 Some(comp) if args.zmq_kv_events_port.is_some() => {
                     let zmq_port = args.zmq_kv_events_port.unwrap() + dp_rank as u16;
@@ -535,26 +715,37 @@ impl MockEngine {
                                 topic: String::new(),
                                 image_token_id: None,
                             });
-                            match KvEventPublisher::new_with_local_indexer(
+                            match KvEventPublisher::new_with_local_indexer_and_worker_id_and_valkey_lease(
                                 comp.clone(),
+                                None,
                                 args.block_size as u32,
                                 source_config,
                                 args.enable_local_indexer,
                                 dp_rank,
                                 None,
+                                valkey_event_lease.clone(),
                             ) {
-                                Ok(publisher) => (
-                                    KvEventPublishers::new(
-                                        None,
-                                        Some(Arc::new(sink) as Arc<dyn RawKvEventSink>),
-                                    ),
-                                    Some(publisher),
-                                ),
+                                Ok(publisher) => {
+                                    let shutdown = publisher.shutdown_handle();
+                                    (
+                                        KvEventPublishers::new(
+                                            None,
+                                            Some(Arc::new(sink) as Arc<dyn RawKvEventSink>),
+                                        ),
+                                        Some(publisher),
+                                        Some(shutdown),
+                                    )
+                                }
                                 Err(e) => {
                                     tracing::error!(
                                         "Failed to create KV event relay for dp_rank {dp_rank}: {e}"
                                     );
-                                    (KvEventPublishers::default(), None)
+                                    if require_valkey_publisher {
+                                        fatal_publisher_error = Some(anyhow::anyhow!(
+                                            "failed to create required Valkey KV event relay for DP rank {dp_rank}: {e:#}"
+                                        ));
+                                    }
+                                    (KvEventPublishers::default(), None, None)
                                 }
                             }
                         }
@@ -562,37 +753,66 @@ impl MockEngine {
                             tracing::error!(
                                 "Failed to create ZMQ KV event sink for dp_rank {dp_rank}: {e}"
                             );
-                            (KvEventPublishers::default(), None)
+                            if require_valkey_publisher {
+                                fatal_publisher_error = Some(anyhow::anyhow!(
+                                    "failed to create required ZMQ KV event sink for DP rank {dp_rank}: {e:#}"
+                                ));
+                            }
+                            (KvEventPublishers::default(), None, None)
                         }
                     }
                 }
                 Some(comp) => {
-                    match KvEventPublisher::new_with_local_indexer(
+                    match KvEventPublisher::new_with_local_indexer_and_worker_id_and_valkey_lease(
                         comp.clone(),
+                        None,
                         args.block_size as u32,
                         None,
                         args.enable_local_indexer,
                         dp_rank,
                         None,
+                        valkey_event_lease.clone(),
                     ) {
-                        Ok(publisher) => (
-                            KvEventPublishers::new(
-                                Some(Arc::new(KvEventSinkAdapter(publisher))
-                                    as Arc<dyn KvCacheEventSink>),
+                        Ok(publisher) => {
+                            let shutdown = publisher.shutdown_handle();
+                            (
+                                KvEventPublishers::new(
+                                    Some(Arc::new(KvEventSinkAdapter::new(publisher))
+                                        as Arc<dyn KvCacheEventSink>),
+                                    None,
+                                ),
                                 None,
-                            ),
-                            None,
-                        ),
+                                Some(shutdown),
+                            )
+                        }
                         Err(e) => {
                             tracing::error!(
                                 "Failed to create KV event publisher for dp_rank {dp_rank}: {e}"
                             );
-                            (KvEventPublishers::default(), None)
+                            if require_valkey_publisher {
+                                fatal_publisher_error = Some(anyhow::anyhow!(
+                                    "failed to create required Valkey KV event publisher for DP rank {dp_rank}: {e:#}"
+                                ));
+                            }
+                            (KvEventPublishers::default(), None, None)
                         }
                     }
                 }
-                None => (KvEventPublishers::default(), None),
+                None => (KvEventPublishers::default(), None, None),
             };
+            if let Some(error) = fatal_publisher_error {
+                cancel_token.cancel();
+                self.scheduler_tasks.close();
+                self.scheduler_tasks.wait().await;
+                let publisher_outcome = shutdown_publishers_and_wait(&kv_publisher_shutdowns).await;
+                return Err(MockerSchedulerStartupFailure {
+                    error,
+                    publisher_outcome,
+                });
+            }
+            if let Some(shutdown) = publisher_shutdown {
+                kv_publisher_shutdowns.push(shutdown);
+            }
 
             let mut scheduler = create_engine(
                 args.clone(),
@@ -662,19 +882,13 @@ impl MockEngine {
             });
         }
 
-        // Set the senders once and notify waiters
-        self.request_senders
-            .set(senders)
-            .expect("Already initialized");
-        self.command_senders
-            .set(command_senders)
-            .expect("Already initialized");
-        self.handoff_session_permits
-            .set(handoff_session_permits)
-            .expect("Already initialized");
-        self.senders_ready.notify_waiters();
-
-        schedulers
+        Ok(PreparedSchedulers {
+            schedulers,
+            kv_publisher_shutdowns,
+            request_senders: senders,
+            command_senders,
+            handoff_session_permits,
+        })
     }
 
     /// Start background tasks to publish metrics on change
@@ -1140,6 +1354,37 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
 pub struct AnnotatedMockEngine {
     inner: Arc<MockEngine>,
+    startup: watch::Receiver<MockEngineStartup>,
+}
+
+#[derive(Clone, Debug)]
+enum MockEngineStartup {
+    Pending,
+    Ready,
+    Failed(Arc<str>),
+    Cancelled,
+}
+
+async fn wait_for_mock_engine_startup(
+    startup: &watch::Receiver<MockEngineStartup>,
+) -> Result<(), Error> {
+    let mut startup = startup.clone();
+    loop {
+        let state = startup.borrow_and_update().clone();
+        match state {
+            MockEngineStartup::Pending => {}
+            MockEngineStartup::Ready => return Ok(()),
+            MockEngineStartup::Failed(error) => {
+                return Err(Error::msg(format!("mocker engine startup failed: {error}")));
+            }
+            MockEngineStartup::Cancelled => {
+                return Err(Error::msg("mocker engine startup was cancelled"));
+            }
+        }
+        startup.changed().await.map_err(|_| {
+            Error::msg("mocker engine startup task exited without publishing a result")
+        })?;
+    }
 }
 
 impl AnnotatedMockEngine {
@@ -1150,6 +1395,7 @@ impl AnnotatedMockEngine {
     ) -> Self {
         let inner = Arc::new(inner);
         let inner_clone = inner.clone();
+        let (startup_tx, startup) = watch::channel(MockEngineStartup::Pending);
 
         // Start background task to wait for component service and start the engine
         let cancel_token = distributed_runtime.primary_token();
@@ -1157,6 +1403,7 @@ impl AnnotatedMockEngine {
             let component = loop {
                 if cancel_token.is_cancelled() {
                     tracing::debug!("Mocker engine startup cancelled");
+                    let _ = startup_tx.send(MockEngineStartup::Cancelled);
                     return;
                 }
 
@@ -1177,12 +1424,19 @@ impl AnnotatedMockEngine {
             };
 
             tracing::debug!("Component service is now available, starting mocker engine");
-            if let Err(e) = inner_clone.start(component).await {
-                tracing::error!("Failed to start mocker engine: {e}");
+            match inner_clone.start(component).await {
+                Ok(()) => {
+                    let _ = startup_tx.send(MockEngineStartup::Ready);
+                }
+                Err(error) => {
+                    let error: Arc<str> = Arc::from(format!("{error:#}"));
+                    tracing::error!(error = %error, "Failed to start mocker engine");
+                    let _ = startup_tx.send(MockEngineStartup::Failed(error));
+                }
             }
         });
 
-        Self { inner }
+        Self { inner, startup }
     }
 }
 
@@ -1194,6 +1448,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         input: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        wait_for_mock_engine_startup(&self.startup).await?;
         let stream = self.inner.generate(input).await?;
         let context = stream.context();
 
@@ -1243,6 +1498,50 @@ mod tests {
             .annotations(vec![])
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn startup_failure_rejects_requests_without_waiting_for_senders() {
+        let (startup_tx, startup_rx) = watch::channel(MockEngineStartup::Pending);
+        startup_tx
+            .send(MockEngineStartup::Failed(Arc::from(
+                "lease acquisition failed",
+            )))
+            .unwrap();
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_mock_engine_startup(&startup_rx),
+        )
+        .await
+        .expect("startup failure must not hang")
+        .unwrap_err();
+
+        assert!(error.to_string().contains("lease acquisition failed"));
+    }
+
+    #[tokio::test]
+    async fn startup_readiness_unblocks_only_after_success() {
+        let (startup_tx, startup_rx) = watch::channel(MockEngineStartup::Pending);
+        let waiter = tokio::spawn(async move { wait_for_mock_engine_startup(&startup_rx).await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        startup_tx.send(MockEngineStartup::Ready).unwrap();
+        waiter.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn startup_rollback_unregisters_only_after_proven_drain() {
+        assert!(startup_rollback_can_unregister(
+            KvEventPublisherShutdownOutcome::Drained
+        ));
+        assert!(!startup_rollback_can_unregister(
+            KvEventPublisherShutdownOutcome::Forced
+        ));
+        assert!(!startup_rollback_can_unregister(
+            KvEventPublisherShutdownOutcome::TimedOut
+        ));
     }
 
     fn decode_request(prompt_tokens: usize, max_tokens: u32) -> PreprocessedRequest {

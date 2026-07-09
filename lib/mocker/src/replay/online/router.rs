@@ -101,6 +101,10 @@ impl KvCacheEventSink for ReplayKvEventSink {
             .map_err(|_| anyhow!("replay router event channel closed"))
     }
 
+    fn is_closed(&self) -> bool {
+        self.event_tx.is_closed()
+    }
+
     fn publish_with_storage_tier(
         &self,
         event: dynamo_kv_router::protocols::KvCacheEvent,

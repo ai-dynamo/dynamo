@@ -85,8 +85,7 @@ pub struct DistributedRuntime {
     // Backs `/v1/metadata/{model_slug}/{model_suffix}/{filename}`.
     metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry,
 
-    // Resolved event transport kind — set once at construction time from
-    // DYN_EVENT_PLANE + discovery backend; returned by default_event_transport_kind().
+    // Resolved generic runtime event transport.
     event_transport_kind: crate::discovery::EventTransportKind,
 }
 
@@ -430,13 +429,9 @@ impl DistributedRuntime {
         self.request_plane
     }
 
-    /// Returns the event transport kind this runtime was configured with.
+    /// Returns the generic pub/sub transport for runtime event channels.
     ///
-    /// The value is resolved once at construction time by `DiscoveryBackend::resolve_event_transport_kind`:
-    /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the default is ZMQ.
-    ///
-    /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
-    /// access to a `DistributedRuntime`.
+    /// The NATS/ZMQ event-plane mode is resolved once at construction time.
     pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
         self.event_transport_kind
     }
@@ -626,31 +621,9 @@ impl DiscoveryBackend {
         )
     }
 
-    /// Resolve the event transport kind for this backend.
-    ///
-    /// This is the single authoritative mapping of `DYN_EVENT_PLANE` →
-    /// `EventTransportKind`. ZMQ is the default event plane for all backends
-    /// (`file`/`mem`/`etcd`/`kubernetes`); NATS is an explicit opt-in via
-    /// `DYN_EVENT_PLANE=nats`.
-    ///
-    /// Call this once at startup and store the result; do not call it repeatedly.
+    /// Resolve the generic transport kind selected for runtime event channels.
     pub fn resolve_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
-        use crate::config::environment_names::event_plane::DYN_EVENT_PLANE;
-        use crate::discovery::EventTransportKind;
-        match std::env::var(DYN_EVENT_PLANE).as_deref() {
-            Ok("nats") => EventTransportKind::Nats,
-            Ok("zmq") => EventTransportKind::Zmq,
-            // Unset or empty: ZMQ is the default for every backend.
-            Ok("") | Err(_) => EventTransportKind::Zmq,
-            Ok(other) => {
-                tracing::warn!(
-                    "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'. \
-                     Defaulting to ZMQ.",
-                    other
-                );
-                EventTransportKind::Zmq
-            }
-        }
+        crate::discovery::EventTransportKind::from_env().unwrap_or_else(|error| panic!("{error}"))
     }
 }
 
@@ -659,11 +632,21 @@ pub struct DistributedConfig {
     pub discovery_backend: DiscoveryBackend,
     pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
-    /// Resolved event transport kind — computed once at config time from
-    /// `DYN_EVENT_PLANE` and the discovery backend, then stored on the runtime
-    /// so callers always get the same answer regardless of which other services
-    /// happen to be reachable.
+    /// Resolved event transport, computed once and stored on the runtime.
     pub event_transport_kind: crate::discovery::EventTransportKind,
+}
+
+fn should_enable_nats(
+    request_plane: RequestPlaneMode,
+    event_transport_kind: crate::discovery::EventTransportKind,
+    nats_server_configured: bool,
+) -> bool {
+    request_plane.is_nats()
+        || matches!(
+            event_transport_kind,
+            crate::discovery::EventTransportKind::Nats
+        )
+        || nats_server_configured
 }
 
 impl DistributedConfig {
@@ -691,9 +674,6 @@ impl DistributedConfig {
             }
         };
 
-        // Resolve event transport kind once — the single source of truth used both to
-        // decide whether to open a NATS connection and to answer
-        // `DistributedRuntime::default_event_transport_kind()` later.
         let event_transport_kind = discovery_backend.resolve_event_transport_kind();
 
         // NATS is used for more than just NATS request-plane RPC:
@@ -703,13 +683,13 @@ impl DistributedConfig {
         // Enable the NATS client when any of these hold:
         // 1. Request plane is NATS
         // 2. NATS_SERVER is explicitly configured by the user
-        // 3. The resolved event transport kind is NATS
-        let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
-            || matches!(
-                event_transport_kind,
-                crate::discovery::EventTransportKind::Nats
-            );
+        // 3. The resolved event-plane mode is NATS
+        //
+        let nats_enabled = should_enable_nats(
+            request_plane,
+            event_transport_kind,
+            std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok(),
+        );
 
         DistributedConfig {
             discovery_backend,
@@ -732,12 +712,11 @@ impl DistributedConfig {
         let discovery_backend =
             DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config)));
         let event_transport_kind = discovery_backend.resolve_event_transport_kind();
-        let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
-            || matches!(
-                event_transport_kind,
-                crate::discovery::EventTransportKind::Nats
-            );
+        let nats_enabled = should_enable_nats(
+            request_plane,
+            event_transport_kind,
+            std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok(),
+        );
         DistributedConfig {
             discovery_backend,
             nats_config: if nats_enabled {
@@ -814,6 +793,40 @@ impl RequestPlaneMode {
 
     pub fn is_nats(&self) -> bool {
         matches!(self, RequestPlaneMode::Nats)
+    }
+}
+
+#[cfg(test)]
+mod event_plane_configuration_tests {
+    use super::{RequestPlaneMode, should_enable_nats};
+    use crate::discovery::EventTransportKind;
+
+    #[test]
+    fn ambient_nats_server_enables_nats_client() {
+        assert!(should_enable_nats(
+            RequestPlaneMode::Tcp,
+            EventTransportKind::Zmq,
+            true,
+        ));
+    }
+
+    #[test]
+    fn explicit_nats_requirements_still_enable_nats() {
+        assert!(should_enable_nats(
+            RequestPlaneMode::Nats,
+            EventTransportKind::Zmq,
+            false,
+        ));
+        assert!(should_enable_nats(
+            RequestPlaneMode::Tcp,
+            EventTransportKind::Nats,
+            false,
+        ));
+        assert!(should_enable_nats(
+            RequestPlaneMode::Tcp,
+            EventTransportKind::Zmq,
+            true,
+        ));
     }
 }
 

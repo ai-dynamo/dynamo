@@ -580,10 +580,16 @@ def predownload_tokenizers(pytestconfig, _models_dir_env):
     models = getattr(pytestconfig, "models_to_download", None)
     with FileLock(_download_lock_path):
         if models:
-            logging.info(
-                f"Downloading tokenizers for {len(models)} models needed for collected tests\nModels: {models}"
-            )
-            download_models(model_list=list(models), ignore_weights=True)
+            remote_models = [
+                model for model in models if not Path(model).expanduser().exists()
+            ]
+            if remote_models:
+                logging.info(
+                    "Downloading tokenizers for "
+                    f"{len(remote_models)} models needed for collected tests\n"
+                    f"Models: {set(remote_models)}"
+                )
+                download_models(model_list=remote_models, ignore_weights=True)
         else:
             download_models(ignore_weights=True)
 

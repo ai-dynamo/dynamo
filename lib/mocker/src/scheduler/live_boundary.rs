@@ -3,7 +3,8 @@
 
 use crate::common::protocols::{FpmPublisher, KvEventPublishers, OutputSignal};
 use crate::scheduler::kv_event_sink::{
-    DeferredKvPublish, DeferredKvPublishBuffer, publish_deferred_fpm, publish_deferred_kv_events,
+    DeferredKvForwardingLogState, DeferredKvPublish, DeferredKvPublishBuffer, publish_deferred_fpm,
+    publish_deferred_kv_events,
 };
 use crate::scheduler::vllm::MockerMetrics;
 use crate::scheduler::{
@@ -62,6 +63,7 @@ pub(crate) struct LiveEffectsPublisher {
     lifecycle_tx: mpsc::Sender<SchedulerLifecycleEvent>,
     metrics_tx: watch::Sender<MockerMetrics>,
     kv_event_publishers: KvEventPublishers,
+    kv_event_forwarding_log_state: DeferredKvForwardingLogState,
     fpm_publisher: FpmPublisher,
     captured_kv_events: DeferredKvPublishBuffer,
     #[cfg(test)]
@@ -108,6 +110,7 @@ impl LiveEffectsPublisher {
             lifecycle_tx,
             metrics_tx,
             kv_event_publishers,
+            kv_event_forwarding_log_state: DeferredKvForwardingLogState::default(),
             fpm_publisher,
             captured_kv_events,
             #[cfg(test)]
@@ -296,7 +299,11 @@ impl LiveEffectsPublisher {
         if !kv_events.is_empty() {
             self.record(PublishedEffect::Kv);
         }
-        publish_deferred_kv_events(&self.kv_event_publishers, kv_events);
+        publish_deferred_kv_events(
+            &self.kv_event_publishers,
+            kv_events,
+            &self.kv_event_forwarding_log_state,
+        );
         if let Some(fpm) = fpm {
             self.record(PublishedEffect::Fpm);
             publish_deferred_fpm(&self.fpm_publisher, vec![fpm]);

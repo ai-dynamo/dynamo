@@ -18,6 +18,12 @@ DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 logger = logging.getLogger(__name__)
 
 
+def validate_event_plane(value: str) -> str:
+    if value not in {"nats", "zmq"}:
+        raise argparse.ArgumentTypeError("event-plane must be 'nats' or 'zmq'")
+    return value
+
+
 def positive_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -689,15 +695,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--event-plane",
-        type=str,
+        type=validate_event_plane,
         choices=["nats", "zmq"],
         default=os.environ.get("DYN_EVENT_PLANE"),
-        help="Determines how events are published [nats|zmq]. If unset, "
-        "auto-detected from --discovery-backend (zmq for file/mem, nats "
-        "for etcd/kubernetes).",
+        help=(
+            "Determines how runtime events are published [nats|zmq]. "
+            "If unset, defaults to zmq. Direct Valkey KV publication is "
+            "configured independently through DYN_ROUTER_VALKEY_CONFIG."
+        ),
     )
 
     args = parser.parse_args(argv)
+    if args.event_plane not in {None, "nats", "zmq"}:
+        parser.error("event-plane must be 'nats' or 'zmq'")
     validate_worker_type_args(args)
 
     # Validate num_workers

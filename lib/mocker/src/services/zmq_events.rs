@@ -241,6 +241,10 @@ impl RawKvEventSink for ZmqKvEventSink {
             .send(event)
             .map_err(|_| anyhow::anyhow!("ZMQ event sink channel closed"))
     }
+
+    fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
 }
 
 fn convert_to_zmq_events(

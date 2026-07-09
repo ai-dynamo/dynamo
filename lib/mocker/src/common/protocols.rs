@@ -37,6 +37,14 @@ pub enum MockerEvictionBackend {
 pub trait KvCacheEventSink: Send + Sync {
     fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()>;
 
+    /// Reports whether this sink can no longer accept events.
+    ///
+    /// Channel-backed sinks override this so callers can distinguish terminal
+    /// receiver shutdown from transient, event-specific publish failures.
+    fn is_closed(&self) -> bool {
+        false
+    }
+
     fn publish_with_storage_tier(
         &self,
         event: KvCacheEvent,
@@ -58,6 +66,11 @@ pub struct RawKvEvent {
 /// Trait for publishing transport-specific raw KV event payloads.
 pub trait RawKvEventSink: Send + Sync {
     fn publish(&self, event: RawKvEvent) -> anyhow::Result<()>;
+
+    /// Reports whether this sink can no longer accept events.
+    fn is_closed(&self) -> bool {
+        false
+    }
 }
 
 /// Shared KV event publisher bundle used by schedulers and KV managers.
@@ -84,6 +97,15 @@ impl KvEventPublishers {
 
     pub fn is_empty(&self) -> bool {
         self.event_sink.is_none() && self.raw_sink.is_none()
+    }
+
+    /// Returns true when any configured channel-backed sink has permanently
+    /// lost its receiver.
+    pub fn has_closed_sink(&self) -> bool {
+        self.event_sink
+            .as_ref()
+            .is_some_and(|sink| sink.is_closed())
+            || self.raw_sink.as_ref().is_some_and(|sink| sink.is_closed())
     }
 
     pub fn publish(
