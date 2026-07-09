@@ -20,6 +20,11 @@ To enable reasoning parsing, launch the backend worker with:
 
 - `--dyn-reasoning-parser`: select the reasoning parser from the supported list below
 
+For vLLM structured output, or SGLang required/named tool choice, also configure
+the engine's native `--reasoning-parser`. It controls when the grammar starts;
+Dynamo's parser populates `reasoning_content`. Parser names can differ between
+registries.
+
 ```bash
 # <backend> can be sglang, trtllm, vllm, etc. based on your installation
 python -m dynamo.<backend> --help
@@ -32,8 +37,8 @@ python -m dynamo.<backend> --help
 
 The table below lists the currently supported reasoning parsers in Dynamo's registry. The
 **Upstream name** column shows where the vLLM or SGLang parser name differs
-from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [Parser Engine Fallback](../tool-calling/engine-fallback.md)). A blank upstream
+from Dynamo's. This is relevant for engine fallback and when configuring the
+native structured-output reasoning gate. A blank upstream
 column means the same name works everywhere. `Dynamo-only` means no upstream
 parser exists for this format.
 
@@ -82,7 +87,7 @@ Reasoning parsing happens before tool call parsing. If a model emits both reason
 
 ```bash
 # launch backend worker (or dynamo.vllm)
-python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
+python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --reasoning-parser qwen3 --dyn-reasoning-parser qwen3
 
 # launch frontend worker
 python -m dynamo.frontend

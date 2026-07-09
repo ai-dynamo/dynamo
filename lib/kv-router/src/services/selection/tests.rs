@@ -114,6 +114,7 @@ fn prompt_normalization_uses_mm_routing_info_and_eagle_hashing() {
         sequence_hashes: None,
         isl_tokens: None,
         lora_name: Some("adapter".to_string()),
+        cache_namespace: Some("tenant-a".to_string()),
         is_eagle: Some(true),
     };
 
@@ -126,6 +127,7 @@ fn prompt_normalization_uses_mm_routing_info_and_eagle_hashing() {
         BlockHashOptions {
             block_mm_infos: Some(&mm_infos),
             lora_name: Some("adapter"),
+            cache_namespace: Some("tenant-a"),
             is_eagle: Some(true),
         },
     );
@@ -135,6 +137,29 @@ fn prompt_normalization_uses_mm_routing_info_and_eagle_hashing() {
         compute_seq_hash_for_block(&expected_block_hashes)
     );
     assert_eq!(normalized.isl_tokens, 8);
+}
+
+#[test]
+fn prompt_request_cache_salt_changes_normalized_hashes() {
+    let salted: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [1, 2, 3, 4],
+        "cache_salt": "tenant-a"
+    }))
+    .expect("deserialize cache_salt");
+    let unsalted: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [1, 2, 3, 4]
+    }))
+    .expect("deserialize unsalted prompt");
+
+    let salted = salted
+        .normalize_for_selection(4, false)
+        .expect("normalize salted prompt");
+    let unsalted = unsalted
+        .normalize_for_selection(4, false)
+        .expect("normalize unsalted prompt");
+
+    assert_ne!(salted.block_hashes, unsalted.block_hashes);
+    assert_ne!(salted.sequence_hashes, unsalted.sequence_hashes);
 }
 
 #[test]
@@ -261,6 +286,8 @@ async fn select_echoes_selection_id_and_does_not_book_load() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     assert_eq!(body["selection_id"], "sel-a");
+    assert_eq!(body["routing_group"], "default");
+    assert!(body.get("tenant_id").is_none());
     assert_eq!(body["worker_id"], 1);
     assert_eq!(body["effective_prefill_tokens"], 4);
     assert_eq!(body["overlap"]["longest_matched"], 0);

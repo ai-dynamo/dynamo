@@ -1540,9 +1540,11 @@ name = "dynamo-kv-router"
 version = "1.3.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "dashmap",
  "derive_builder",
+ "dynamo-kv-hashing",
  "dynamo-runtime",
  "dynamo-tokens",
  "flume",
