@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -278,7 +279,12 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    run([str(venv_python), "-m", "pip", "install", *find_links, *requirements])
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = str(venv_python.parent.parent / "cargo-target")
+    run(
+        [str(venv_python), "-m", "pip", "install", *find_links, *requirements],
+        env=env,
+    )
 
 
 def pip_check(venv_python: Path) -> None:

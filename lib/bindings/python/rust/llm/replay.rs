@@ -163,6 +163,10 @@ impl MockEngineArgs {
         self.inner.clone()
     }
 
+    pub(crate) fn has_aic_backend(&self) -> bool {
+        self.inner.aic_backend.is_some()
+    }
+
     pub(crate) fn num_gpu_blocks_explicit(&self) -> bool {
         self.num_gpu_blocks_explicit
     }

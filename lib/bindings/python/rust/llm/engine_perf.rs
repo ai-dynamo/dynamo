@@ -13,6 +13,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyMapping, PyMappingMethods};
 
+use super::aic_callback::configure_default_data_roots;
 use super::replay::MockEngineArgs;
 
 /// AIC model and backend identity used by native forward-pass estimates.
@@ -297,6 +298,13 @@ impl RustEnginePerfModel {
         options: Option<PyRef<'_, RustEnginePerfOptions>>,
         bootstrap_fpms: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
+        if aic_config.is_some()
+            || engine_args
+                .as_ref()
+                .is_some_and(|args| args.has_aic_backend())
+        {
+            configure_default_data_roots(py);
+        }
         let bootstrap_fpms = bootstrap_fpms
             .as_ref()
             .map(|obj| iterations_from_py(obj.bind(py)))
@@ -350,6 +358,7 @@ impl RustEnginePerfModel {
         options: Option<PyRef<'_, RustEnginePerfOptions>>,
         bootstrap_fpms: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
+        configure_default_data_roots(py);
         let mut model = rs_engine_perf::EnginePerfModel::from_native(
             aic_config.inner.clone(),
             parse_worker_type(worker_type)?,

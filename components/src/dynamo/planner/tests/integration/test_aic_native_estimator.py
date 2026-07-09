@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Planner integration coverage against the real AIC native engine."""
+"""Planner integration coverage against the real AIC native estimator."""
 
 from __future__ import annotations
 
