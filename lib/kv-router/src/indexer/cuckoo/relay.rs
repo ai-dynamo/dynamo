@@ -371,48 +371,6 @@ impl DirtyBatchScratch {
 }
 
 #[derive(Debug)]
-struct OccupiedBucketTracker {
-    words: Box<[u64]>,
-}
-
-impl OccupiedBucketTracker {
-    fn new(bucket_count: usize) -> Result<Self, CkfBuildError> {
-        Ok(Self {
-            words: zeroed_boxed_slice(bucket_count.div_ceil(u64::BITS as usize))?,
-        })
-    }
-
-    fn set(&mut self, bucket: usize, occupied: bool) {
-        let word = bucket / u64::BITS as usize;
-        let bit = 1u64 << (bucket % u64::BITS as usize);
-        if occupied {
-            self.words[word] |= bit;
-        } else {
-            self.words[word] &= !bit;
-        }
-    }
-
-    fn clear_filter(&mut self, filter: &OwnedPackedCkfLane) {
-        for (word_index, word) in self.words.iter_mut().enumerate() {
-            let mut remaining = *word;
-            while remaining != 0 {
-                let bit = remaining.trailing_zeros() as usize;
-                filter.store_bucket(
-                    word_index * u64::BITS as usize + bit,
-                    PackedBucket::default(),
-                );
-                remaining &= remaining - 1;
-            }
-            *word = 0;
-        }
-    }
-
-    fn byte_len(&self) -> usize {
-        std::mem::size_of_val(self.words.as_ref())
-    }
-}
-
-#[derive(Debug)]
 struct RelayLaneState {
     member_blocks: FxHashMap<WorkerWithDpRank, FxHashSet<ExternalSequenceBlockHash>>,
     dc_refcounts: FxHashMap<ExternalSequenceBlockHash, u32>,
@@ -420,7 +378,6 @@ struct RelayLaneState {
     rng: u64,
     insertion_scratch: CuckooInsertionScratch,
     dirty_scratch: DirtyBatchScratch,
-    occupied_buckets: Option<OccupiedBucketTracker>,
     member_remove_scratch: Vec<ExternalSequenceBlockHash>,
     events_since_publish: usize,
     published_nonempty: bool,
@@ -454,7 +411,6 @@ impl RelayLaneState {
         lane_config: &RelayLaneConfig,
         config: CkfConfig,
         bucket_count: usize,
-        track_occupied: bool,
     ) -> Result<Self, CkfBuildError> {
         let member_count = lane_config.members.len();
         let mut member_blocks = FxHashMap::default();
@@ -494,9 +450,6 @@ impl RelayLaneState {
             insertion_scratch: CuckooInsertionScratch::new(config.max_kicks)
                 .map_err(|_| CkfBuildError::AllocationFailed)?,
             dirty_scratch: DirtyBatchScratch::new(bucket_count)?,
-            occupied_buckets: track_occupied
-                .then(|| OccupiedBucketTracker::new(bucket_count))
-                .transpose()?,
             member_remove_scratch,
             events_since_publish: 0,
             published_nonempty: false,
@@ -658,9 +611,6 @@ impl RelayLaneState {
         for index in 0..self.dirty_scratch.len() {
             let bucket = self.dirty_scratch.bucket(index);
             let value = self.filter.load_bucket(bucket);
-            if let Some(occupied) = self.occupied_buckets.as_mut() {
-                occupied.set(bucket, value != PackedBucket::default());
-            }
             if replica.table.load_image(bucket, lane) == value {
                 stats.net_reverted += 1;
             } else {
@@ -677,11 +627,7 @@ impl RelayLaneState {
     }
 
     fn reset_filter(&mut self) {
-        if let Some(occupied) = self.occupied_buckets.as_mut() {
-            occupied.clear_filter(&self.filter);
-        } else {
-            self.filter.clear();
-        }
+        self.filter.clear();
         self.dirty_scratch.clear();
     }
 
@@ -726,7 +672,6 @@ impl CkfRelayAggregator {
             }
         }
 
-        let track_occupied = benchmark_flag("DYNAMO_CKF_AGGREGATOR_OCCUPANCY");
         let mut lane_states = Vec::new();
         lane_states
             .try_reserve_exact(DC_COUNT)
@@ -740,7 +685,6 @@ impl CkfRelayAggregator {
                     lane_config,
                     config,
                     bucket_count,
-                    track_occupied,
                 )?))
             };
             lane_states.push(state);
@@ -838,13 +782,6 @@ impl CkfRelayAggregator {
             snapshot.dirty_tracking_bytes = snapshot
                 .dirty_tracking_bytes
                 .saturating_add(state.dirty_scratch.byte_len());
-            snapshot.aggregator_occupancy_bytes =
-                snapshot.aggregator_occupancy_bytes.saturating_add(
-                    state
-                        .occupied_buckets
-                        .as_ref()
-                        .map_or(0, OccupiedBucketTracker::byte_len),
-                );
             snapshot.insertion_scratch_capacity = snapshot
                 .insertion_scratch_capacity
                 .saturating_add(state.insertion_scratch.capacity());
@@ -912,7 +849,7 @@ pub struct TransposedCkfReplica {
     pub(super) addressing: CkfAddressing,
     pub(super) config: CkfConfig,
     format: CkfFormatIdentity,
-    occupied_buckets: Option<ReplicaOccupancy>,
+    occupied_buckets: ReplicaOccupancy,
 }
 
 impl TransposedCkfReplica {
@@ -922,9 +859,7 @@ impl TransposedCkfReplica {
             addressing: CkfAddressing::new(format.bucket_count, format.seed),
             config,
             format,
-            occupied_buckets: benchmark_flag("DYNAMO_CKF_REPLICA_OCCUPANCY")
-                .then(|| ReplicaOccupancy::new(format.bucket_count))
-                .transpose()?,
+            occupied_buckets: ReplicaOccupancy::new(format.bucket_count)?,
         })
     }
 
@@ -977,19 +912,14 @@ impl TransposedCkfReplica {
             if batch.reset_lanes & (1u16 << lane) == 0 {
                 continue;
             }
-            if let Some(occupied) = &self.occupied_buckets {
-                occupied.clear_lane(&self.table, lane);
-            } else {
-                self.table.clear_lane(lane);
-            }
+            self.occupied_buckets.clear_lane(&self.table, lane);
         }
         for image in &batch.images {
             let lane = usize::from(image.lane);
             let value = PackedBucket(image.value);
             self.table.store_image(image.bucket, lane, value);
-            if let Some(occupied) = &self.occupied_buckets {
-                occupied.set(lane, image.bucket, value != PackedBucket::default());
-            }
+            self.occupied_buckets
+                .set(lane, image.bucket, value != PackedBucket::default());
         }
     }
 
@@ -998,9 +928,7 @@ impl TransposedCkfReplica {
     }
 
     fn occupancy_byte_len(&self) -> usize {
-        self.occupied_buckets
-            .as_ref()
-            .map_or(0, ReplicaOccupancy::byte_len)
+        self.occupied_buckets.byte_len()
     }
 }
 
@@ -1813,16 +1741,6 @@ fn retain_first_error(slot: &mut Option<KvCacheEventError>, error: KvCacheEventE
     if slot.is_none() {
         *slot = Some(error);
     }
-}
-
-#[cfg(any(test, feature = "bench"))]
-fn benchmark_flag(name: &str) -> bool {
-    std::env::var_os(name).is_some()
-}
-
-#[cfg(not(any(test, feature = "bench")))]
-fn benchmark_flag(_name: &str) -> bool {
-    false
 }
 
 fn zeroed_boxed_slice<T: Default>(len: usize) -> Result<Box<[T]>, CkfBuildError> {

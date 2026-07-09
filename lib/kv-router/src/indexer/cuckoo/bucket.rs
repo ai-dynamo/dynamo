@@ -175,13 +175,6 @@ impl<const D: usize> TransposedCkfTable<D> {
         self.load(bucket, lane)
     }
 
-    pub(super) fn clear_lane(&self, lane: usize) {
-        debug_assert!(lane < D);
-        for bucket in 0..self.bucket_count {
-            self.store(bucket, lane, PackedBucket::default());
-        }
-    }
-
     #[inline]
     pub(super) fn probe(&self, probe: CkfProbe) -> u16 {
         let mut present = 0u16;
