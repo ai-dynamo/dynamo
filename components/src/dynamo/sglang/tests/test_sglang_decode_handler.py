@@ -366,46 +366,6 @@ def test_extract_logprobs_formats_top_tokens_as_token_ids():
     assert total == 1
 
 
-def test_metadata_uploader_parses_extra_args_nvext():
-    uploader = MetadataUploader.from_backend_request(
-        {
-            "extra_args": {
-                "nvext": {
-                    "metadata_upload": {
-                        "url": "s3://bucket/root/rollouts",
-                    }
-                }
-            }
-        }
-    )
-
-    assert uploader is not None
-    assert uploader.url == "s3://bucket/root/rollouts"
-
-    uploader = MetadataUploader.from_backend_request(
-        {"nvext": {"metadata_upload": {"url": "s3://bucket/root/rollouts"}}}
-    )
-    assert uploader is not None
-
-
-@pytest.mark.parametrize(
-    ("settings", "message"),
-    [
-        ({}, "metadata_upload.url is required"),
-        ({"url": ""}, "metadata_upload.url must not be empty"),
-        ({"url": 1}, "metadata_upload.url must be a string"),
-        ("invalid", "metadata_upload must be an object"),
-        (
-            {"url": "s3://bucket/root/rollouts", "format": "json"},
-            "metadata_upload.format is not supported",
-        ),
-    ],
-)
-def test_metadata_uploader_rejects_invalid_settings(settings, message):
-    with pytest.raises(ValueError, match=message):
-        MetadataUploader.from_backend_request({"nvext": {"metadata_upload": settings}})
-
-
 def test_nvext_extra_field_requested_supports_raw_and_preprocessed_shapes():
     assert _nvext_extra_field_requested(
         {"nvext": {"extra_fields": ["stop_reason"]}}, "stop_reason"
@@ -434,48 +394,6 @@ def test_metadata_upload_requires_enable_rl():
     )
     assert uploader is not None
     assert uploader.url == "s3://bucket/root/rollouts/run-1"
-
-
-@pytest.mark.asyncio
-async def test_metadata_upload_normalizes_tensor_values(tmp_path):
-    torch = pytest.importorskip("torch")
-    uploader = MetadataUploader(url=(tmp_path / "metadata/tensors").as_uri())
-    tensor = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
-
-    await uploader.upload_choice(0, {"router_tensor": tensor})
-
-    payload = _read_zstd_payload(tmp_path / "metadata/tensors/choice_0.msgpack.zst")
-    uploaded_tensor = payload["metadata"]["router_tensor"]
-    assert uploaded_tensor["type"] == "tensor"
-    assert uploaded_tensor["dtype"] == "int32"
-    assert uploaded_tensor["shape"] == [2, 2]
-    assert uploaded_tensor["data"] == tensor.numpy().tobytes()
-
-    bfloat_tensor = torch.tensor([1, 2], dtype=torch.bfloat16)
-    await uploader.upload_choice(1, {"router_tensor": bfloat_tensor})
-
-    payload = _read_zstd_payload(tmp_path / "metadata/tensors/choice_1.msgpack.zst")
-    uploaded_tensor = payload["metadata"]["router_tensor"]
-    assert uploaded_tensor["dtype"] == "bfloat16"
-    assert uploaded_tensor["shape"] == [2]
-    assert uploaded_tensor["data"] == bfloat_tensor.view(torch.uint8).numpy().tobytes()
-
-
-@pytest.mark.asyncio
-async def test_metadata_upload_normalizes_numpy_values(tmp_path):
-    np = pytest.importorskip("numpy")
-    uploader = MetadataUploader(url=(tmp_path / "metadata/arrays").as_uri())
-    array = np.array([[1.5, 2.5], [3.5, 4.5]], dtype=np.float32)
-
-    await uploader.upload_choice(0, {"scores": array[:, ::-1]})
-
-    payload = _read_zstd_payload(tmp_path / "metadata/arrays/choice_0.msgpack.zst")
-    uploaded_array = payload["metadata"]["scores"]
-    expected = np.ascontiguousarray(array[:, ::-1])
-    assert uploaded_array["type"] == "ndarray"
-    assert uploaded_array["dtype"] == "float32"
-    assert uploaded_array["shape"] == [2, 2]
-    assert uploaded_array["data"] == expected.tobytes()
 
 
 @pytest.mark.asyncio

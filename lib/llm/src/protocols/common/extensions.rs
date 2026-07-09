@@ -45,6 +45,13 @@ pub struct RouterParams {
 pub struct MetadataUpload {
     #[serde(deserialize_with = "deserialize_metadata_upload_url")]
     pub url: String,
+
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_metadata_upload_fallback_url"
+    )]
+    pub fallback_url: Option<String>,
 }
 
 fn deserialize_metadata_upload_url<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -52,11 +59,27 @@ where
     D: serde::Deserializer<'de>,
 {
     let url = String::deserialize(deserializer)?;
+    normalize_metadata_upload_url(url, "metadata_upload.url")
+}
+
+fn deserialize_metadata_upload_fallback_url<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|url| normalize_metadata_upload_url(url, "metadata_upload.fallback_url"))
+        .transpose()
+}
+
+fn normalize_metadata_upload_url<E>(url: String, field: &str) -> Result<String, E>
+where
+    E: serde::de::Error,
+{
     let url = url.trim();
     if url.is_empty() {
-        return Err(serde::de::Error::custom(
-            "metadata_upload.url must not be empty",
-        ));
+        return Err(E::custom(format!("{field} must not be empty")));
     }
     Ok(url.to_string())
 }
@@ -790,16 +813,21 @@ mod tests {
     }
 
     #[test]
-    fn metadata_upload_parses_url() {
+    fn metadata_upload_parses_urls() {
         let nvext: NvExt = serde_json::from_value(serde_json::json!({
             "metadata_upload": {
-                "url": " s3://bucket/root/rollouts "
+                "url": " s3://bucket/root/rollouts ",
+                "fallback_url": " file:///var/tmp/rollouts "
             }
         }))
         .unwrap();
 
         let upload = nvext.metadata_upload.as_ref().unwrap();
         assert_eq!(upload.url, "s3://bucket/root/rollouts");
+        assert_eq!(
+            upload.fallback_url.as_deref(),
+            Some("file:///var/tmp/rollouts")
+        );
         assert!(!NvExtResponseFieldSelection::from_nvext(Some(&nvext)).engine_data);
 
         assert!(
@@ -812,6 +840,15 @@ mod tests {
             serde_json::from_value::<NvExt>(serde_json::json!({
                 "metadata_upload": {
                     "url": ""
+                }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<NvExt>(serde_json::json!({
+                "metadata_upload": {
+                    "url": "s3://bucket/root/rollouts",
+                    "fallback_url": ""
                 }
             }))
             .is_err()
