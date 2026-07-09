@@ -262,6 +262,23 @@ class Client:
         """
         ...
 
+    def instance_tcp_addresses(self) -> List[str]:
+        """
+        Get the TCP transport addresses of this endpoint's current instances.
+
+        Returns the TCP transport string (e.g. "host:port/.../<endpoint>") for
+        each currently-registered instance, so a caller can reach the peer
+        worker's node (e.g. a startup RDMA connectivity check) via a dynamo API
+        rather than reading the discovery/etcd registry layout directly. Non-TCP
+        transports (e.g. NATS) are skipped. Snapshot of the watched instance set
+        (like ``instance_ids``); pair with ``wait_for_instances`` to block until
+        instances exist.
+
+        Returns:
+            A list of TCP transport strings for the current instances
+        """
+        ...
+
     async def wait_for_instances(self) -> List[int]:
         """
         Wait for instances to be available for work and return their IDs.
