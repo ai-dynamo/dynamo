@@ -84,6 +84,8 @@ from dynamo.vllm.kv_connector_protocols import (
 
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
+from .engine_generate import EngineGenerateRequest
+from .engine_generate import merge_kv_transfer_params as _merge_kv_transfer_params
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
@@ -664,6 +666,12 @@ def build_sampling_params(
     keep generation_config defaults for Gateway/backward-compatible traffic.
     Stop-token defaults from the model config are still applied later.
     """
+    engine_request = EngineGenerateRequest.from_request(request)
+    if engine_request is not None:
+        return engine_request.build_sampling_params(
+            default_sampling_params, model_max_len
+        )
+
     if enable_rl and _is_token_in_request(request):
         # Use vLLM defaults without model generation_config overlays.
         sampling_params = SamplingParams()
@@ -2558,6 +2566,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        engine_request: EngineGenerateRequest | None = None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -2588,6 +2597,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # carries None. Capture the first non-None payload and attach it to
             # the final chunk instead of reading res.prompt_logprobs there.
             prompt_logprobs_payload: Optional[list] = None
+            kv_transfer_params: Any = None
             async for res in gen:
                 # res is vllm's RequestOutput
                 if (
@@ -2597,6 +2607,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     prompt_logprobs_payload = _serialize_prompt_logprobs(
                         res.prompt_logprobs
                     )
+                if getattr(res, "kv_transfer_params", None) is not None:
+                    kv_transfer_params = res.kv_transfer_params
 
                 if not res.outputs:
                     self._log_with_lora_context(
@@ -2676,18 +2688,31 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         # out-of-range request (e.g. start=999 on a 100-token
                         # prompt) would otherwise publish a `start` the consumer
                         # cannot align to the (clamped) tensor.
-                        raw_start = int(
-                            getattr(sampling_params, "routed_experts_prompt_start", 0)
-                            or 0
-                        )
-                        prompt_len = len(getattr(res, "prompt_token_ids", None) or [])
-                        effective_start = min(raw_start, prompt_len)
-                        routed_experts = _serialize_routed_experts(
-                            raw_routed_experts_by_output.get(output_idx),
-                            start=effective_start,
-                        )
-                        if routed_experts is not None:
-                            _attach_routed_experts_engine_data(out, routed_experts)
+                        if engine_request is not None:
+                            engine_request.adapt_response_metadata(
+                                out,
+                                raw_routed_experts_by_output.get(output_idx),
+                                kv_transfer_params,
+                            )
+                        else:
+                            raw_start = int(
+                                getattr(
+                                    sampling_params,
+                                    "routed_experts_prompt_start",
+                                    0,
+                                )
+                                or 0
+                            )
+                            prompt_len = len(
+                                getattr(res, "prompt_token_ids", None) or []
+                            )
+                            effective_start = min(raw_start, prompt_len)
+                            routed_experts = _serialize_routed_experts(
+                                raw_routed_experts_by_output.get(output_idx),
+                                start=effective_start,
+                            )
+                            if routed_experts is not None:
+                                _attach_routed_experts_engine_data(out, routed_experts)
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -2765,6 +2790,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
+        engine_request = EngineGenerateRequest.from_request(request)
         # Firstly extract disaggregated params from prefill result if available
         prefill_result = request.get("prefill_result")
         if prefill_result and isinstance(prefill_result, dict):
@@ -2832,6 +2858,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             yield error
             return
 
+        if engine_request is not None:
+            prompt = engine_request.build_prompt()
+            embedding_sequence_length = None
+
         _apply_nvext_cache_salt(request, prompt)
 
         # Build sampling params from request
@@ -2845,7 +2875,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if kv_params is not None:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = kv_params
+            sampling_params.extra_args[
+                "kv_transfer_params"
+            ] = _merge_kv_transfer_params(
+                sampling_params.extra_args.get("kv_transfer_params"), kv_params
+            )
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
             )
@@ -2866,7 +2900,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        priority = (
+            engine_request.priority(routing)
+            if engine_request is not None
+            else -int(routing.get("priority", 0))
+        )
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
@@ -2919,6 +2957,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        engine_request=engine_request,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -3107,6 +3146,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
+        engine_request = EngineGenerateRequest.from_request(request)
         prepared_input = await self._multimodal_request_processor.prepare_input(
             request,
             request_id,
@@ -3131,6 +3171,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             yield error
             return
 
+        if engine_request is not None:
+            prompt = engine_request.build_prompt()
+            embedding_sequence_length = None
+
         _apply_nvext_cache_salt(request, prompt)
 
         # Build sampling params from request using shared utility
@@ -3148,9 +3192,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
         if sampling_params.extra_args is None:
             sampling_params.extra_args = {}
-        sampling_params.extra_args[
-            "kv_transfer_params"
-        ] = kv_protocol.prefill_request_kv_transfer_params()
+        sampling_params.extra_args["kv_transfer_params"] = _merge_kv_transfer_params(
+            sampling_params.extra_args.get("kv_transfer_params"),
+            kv_protocol.prefill_request_kv_transfer_params(),
+        )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
@@ -3170,7 +3215,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        priority = (
+            engine_request.priority(routing)
+            if engine_request is not None
+            else -int(routing.get("priority", 0))
+        )
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)

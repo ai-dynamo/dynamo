@@ -979,6 +979,32 @@ mod tests {
     }
 
     #[test]
+    fn worker_fixture_matches_frontend_projection() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/data/inference_generate/vllm-tito-worker.json"
+        ))
+        .unwrap();
+        let mut request = fixture["extra_args"]["vllm_tito"].clone();
+        request["token_ids"] = fixture["token_ids"].clone();
+        let request: GenerateRequest = serde_json::from_value(request).unwrap();
+
+        let preprocessed =
+            preprocessed_from_generate(&request, "test-model", None, "resolved-request").unwrap();
+
+        assert_eq!(
+            serde_json::to_value(preprocessed.routing).unwrap()["priority"],
+            fixture["routing"]["priority"]
+        );
+        let expected_token_ids: Vec<u32> =
+            serde_json::from_value(fixture["token_ids"].clone()).unwrap();
+        assert_eq!(preprocessed.token_ids, expected_token_ids);
+        assert_eq!(
+            preprocessed.extra_args.unwrap()["vllm_tito"],
+            fixture["extra_args"]["vllm_tito"]
+        );
+    }
+
+    #[test]
     fn engine_fields_reach_envelope_with_resolved_id_and_cache_namespace() {
         let raw = serde_json::json!({
             "request_id": "req-forward",

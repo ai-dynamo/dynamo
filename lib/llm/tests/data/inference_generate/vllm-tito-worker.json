@@ -1,0 +1,42 @@
+{
+  "token_ids": [
+    11,
+    22,
+    33
+  ],
+  "routing": {
+    "priority": -7,
+    "cache_namespace": "tenant-a"
+  },
+  "extra_args": {
+    "vllm_tito": {
+      "request_id": "resolved-request",
+      "sampling_params": {
+        "temperature": 0.25
+      },
+      "model": "test-model",
+      "stream": false,
+      "cache_salt": "tenant-a",
+      "priority": 7,
+      "kv_transfer_params": {
+        "remote": "worker-a"
+      },
+      "features": {
+        "mm_hashes": {
+          "image": [
+            "hash-1"
+          ]
+        },
+        "mm_placeholders": {
+          "image": [
+            {
+              "offset": 1,
+              "length": 1
+            }
+          ]
+        },
+        "kwargs_data": null
+      }
+    }
+  }
+}

@@ -141,6 +141,85 @@ def test_endpoint_not_provided_preserves_defaults(mock_vllm_cli):
     assert config.endpoint == "generate"
 
 
+def test_engine_config_json_populates_vllm_args(tmp_path):
+    path = tmp_path / "engine.json"
+    path.write_text(
+        json.dumps(
+            {
+                "model": "Qwen/Qwen3-0.6B",
+                "max_model_len": 4096,
+                "gpu_memory_utilization": 0.4,
+                "enforce_eager": False,
+            }
+        )
+    )
+
+    config = parse_args(["--engine-config-json", str(path)])
+
+    assert config.model == "Qwen/Qwen3-0.6B"
+    assert config.engine_args.max_model_len == 4096
+    assert config.engine_args.gpu_memory_utilization == 0.4
+    assert config.engine_args.enforce_eager is False
+
+
+def test_engine_config_json_cli_values_take_precedence(tmp_path):
+    path = tmp_path / "engine.json"
+    path.write_text(
+        json.dumps(
+            {
+                "model": "Qwen/Qwen3-0.6B",
+                "max_model_len": 4096,
+            }
+        )
+    )
+
+    config = parse_args(
+        [
+            "--engine-config-json",
+            str(path),
+            "--max-model-len",
+            "8192",
+        ]
+    )
+
+    assert config.engine_args.max_model_len == 8192
+
+
+def test_engine_config_json_converts_structured_vllm_args(tmp_path):
+    path = tmp_path / "engine.json"
+    path.write_text(
+        json.dumps(
+            {
+                "model": "Qwen/Qwen3-0.6B",
+                "kv_transfer_config": {
+                    "kv_connector": "NixlConnector",
+                    "kv_role": "kv_both",
+                },
+            }
+        )
+    )
+
+    config = parse_args(["--engine-config-json", str(path)])
+
+    assert config.engine_args.kv_transfer_config.kv_connector == "NixlConnector"
+    assert config.engine_args.kv_transfer_config.kv_role == "kv_both"
+
+
+def test_engine_config_json_rejects_unknown_vllm_args(tmp_path):
+    path = tmp_path / "engine.json"
+    path.write_text(
+        json.dumps(
+            {
+                "model": "Qwen/Qwen3-0.6B",
+                "not_a_vllm_option": True,
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="not_a_vllm_option"):
+        parse_args(["--engine-config-json", str(path)])
+
+
 def test_endpoint_overrides_with_prefill_worker(mock_vllm_cli):
     """Test that --endpoint overrides even with --disaggregation-mode prefill."""
     mock_vllm_cli(
