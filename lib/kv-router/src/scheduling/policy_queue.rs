@@ -242,6 +242,10 @@ impl<T> PolicyClassQueue<T> {
         is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
     ) -> Option<DispatchCandidate> {
         if self.ready_by_worker.is_empty() {
+            debug_assert!(
+                self.blocked_workers.is_empty(),
+                "blocked workers must have a ready lane"
+            );
             return self
                 .pending
                 .peek()
@@ -263,6 +267,8 @@ impl<T> PolicyClassQueue<T> {
     ) -> Option<DispatchCandidate> {
         if self.needs_blocked_worker_recheck {
             self.needs_blocked_worker_recheck = false;
+            // Defer the scan until dispatch, when `is_dispatchable` is meaningful.
+            // Re-peeking here also observes head changes from intervening `push_ready` calls.
             let Self {
                 config,
                 ready_by_worker,
@@ -541,6 +547,8 @@ impl<T> PolicyQueue<T> {
 
     /// Runs one DRR ring pass over dispatchable class heads. If no head has
     /// enough credit, bulk-adds the minimum complete rounds needed for progress.
+    /// `is_dispatchable` may be evaluated more than once for the same entry
+    /// during one call; callers must not rely on an exact invocation count.
     pub fn pop_next(
         &mut self,
         mut is_dispatchable: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
@@ -1060,6 +1068,68 @@ policy_classes:
             .pop_next(|_, _, lane| available[*lane as usize])
             .expect("later worker availability should dispatch on the next recheck");
         assert_eq!(entry.into_payload(), 2);
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn global_recheck_preserves_priority_for_multiple_available_workers() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        for (worker, strict_priority, payload) in [(1, 0, "low"), (2, 1, "high")] {
+            queue
+                .enqueue(
+                    0,
+                    2,
+                    QueueSnapshot::new(1, 0),
+                    0.0,
+                    0.0,
+                    strict_priority,
+                    WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
+                    payload,
+                )
+                .unwrap();
+        }
+
+        assert!(queue.pop_next(|_, _, _| false).is_none());
+
+        queue.recheck_all_workers();
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "high"
+        );
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "low"
+        );
+    }
+
+    #[test]
+    fn pending_global_recheck_survives_retain_removing_blocked_lane() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        for (worker, payload) in [(1, "remove"), (2, "keep")] {
+            queue
+                .enqueue(
+                    0,
+                    2,
+                    QueueSnapshot::new(1, 0),
+                    0.0,
+                    0.0,
+                    0,
+                    WorkerPlacement::Exact(WorkerWithDpRank::new(worker, 0)),
+                    payload,
+                )
+                .unwrap();
+        }
+
+        assert!(queue.pop_next(|_, _, _| false).is_none());
+        queue.recheck_all_workers();
+        queue.retain(|payload| *payload == "keep");
+
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "keep"
+        );
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[test]
