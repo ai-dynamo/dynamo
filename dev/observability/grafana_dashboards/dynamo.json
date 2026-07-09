@@ -1092,7 +1092,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(dynamo_frontend_active_requests{model=\"$model\"})",
+          "expr": "sum(dynamo_frontend_active_requests)",
           "legendFormat": "active",
           "range": true,
           "refId": "A"
@@ -1103,13 +1103,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(dynamo_frontend_stage_requests{stage=~\"preprocess|route|dispatch\", model=\"$model\"})",
+          "expr": "sum(dynamo_frontend_stage_requests{stage=~\"preprocess|route|dispatch\"})",
           "legendFormat": "queued",
           "range": true,
           "refId": "B"
         }
       ],
-      "title": "Inflight vs Queued Requests",
+      "title": "Active vs Queued Requests",
       "type": "timeseries"
     },
     {

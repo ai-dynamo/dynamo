@@ -188,7 +188,7 @@ async fn test_metrics_prefix_default() {
         // Assert metrics that are actually present in the default configuration
         assert!(body.contains("dynamo_frontend_requests_started_total"));
         assert!(body.contains("dynamo_frontend_requests_total"));
-        assert!(body.contains("dynamo_frontend_inflight_requests"));
+        assert!(body.contains("dynamo_frontend_active_requests"));
         assert!(body.contains("dynamo_frontend_request_duration_seconds"));
         assert!(body.contains("dynamo_frontend_disconnected_clients"));
 
@@ -374,10 +374,10 @@ async fn test_metrics_with_mock_model() {
         // Assert that key metrics are present with the mockmodel
         assert!(metrics_body.contains("dynamo_frontend_requests_total"));
         assert!(metrics_body.contains("model=\"mockmodel\""));
-        assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));
+        assert!(metrics_body.contains("dynamo_frontend_active_requests"));
         assert!(metrics_body.contains("dynamo_frontend_request_duration_seconds"));
         assert!(metrics_body.contains("dynamo_frontend_output_sequence_tokens"));
-        assert!(metrics_body.contains("dynamo_frontend_queued_requests"));
+        assert!(metrics_body.contains("dynamo_frontend_stage_requests"));
 
         // Verify specific request counter incremented
         assert!(metrics_body.contains("endpoint=\"chat_completions\""));
@@ -792,10 +792,10 @@ mod integration_tests {
         assert!(metrics_body.contains("dynamo_frontend_requests_started_total"));
         assert!(metrics_body.contains("dynamo_frontend_requests_total"));
         assert!(metrics_body.contains(&format!("model=\"{}\"", model_name)));
-        assert!(metrics_body.contains("dynamo_frontend_inflight_requests"));
+        assert!(metrics_body.contains("dynamo_frontend_active_requests"));
         assert!(metrics_body.contains("dynamo_frontend_request_duration_seconds"));
         assert!(metrics_body.contains("dynamo_frontend_output_sequence_tokens"));
-        assert!(metrics_body.contains("dynamo_frontend_queued_requests"));
+        assert!(metrics_body.contains("dynamo_frontend_stage_requests"));
 
         // Assert MDC-based model configuration metrics are present
         // These MUST be present for the test to pass

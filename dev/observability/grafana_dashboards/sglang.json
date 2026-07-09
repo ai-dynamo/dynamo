@@ -823,7 +823,7 @@
     {
       "id": 14,
       "type": "timeseries",
-      "title": "Inflight vs Queued Requests",
+      "title": "Active vs Queued Requests",
       "description": "DYN: dynamo_frontend_active_requests / stage_requests gauges. Active = currently being processed (dispatched to a worker, awaiting completion). Queued = sum of stage_requests across the preprocess, route, and dispatch stages (requests received but not yet sent to a worker). Active pinned at the worker concurrency limit while queued grows means workers are saturated and the gateway is buffering.",
       "datasource": {
         "type": "prometheus",
