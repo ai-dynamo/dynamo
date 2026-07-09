@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import re as re_mod
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -257,6 +258,20 @@ class TestLLMEngineOverrideSamplingParams:
         expected = "(" + "|".join(re_mod.escape(choice) for choice in choices) + ")"
         assert result.guided_decoding.regex == expected
 
+    def test_guided_decoding_structural_tag_is_serialized(self):
+        sampling_params = MockSamplingParams()
+        structural_tag = {
+            "type": "structural_tag",
+            "format": {"type": "json_schema", "json_schema": self.JSON_SCHEMA},
+        }
+        request = {
+            "sampling_options": {"guided_decoding": {"structural_tag": structural_tag}}
+        }
+
+        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
+
+        assert json.loads(result.guided_decoding.structural_tag) == structural_tag
+
 
 @pytest.mark.parametrize(
     ("override", "expected"),
@@ -279,6 +294,99 @@ def test_unified_guided_decoding_backend_matches_legacy(override, expected):
     engine, _ = asyncio.run(TrtllmLLMEngine.from_args(argv))
 
     assert engine.engine_args["guided_decoding_backend"] == expected
+    assert engine._guided_decoding_backend == expected
+
+
+@pytest.mark.parametrize(
+    (
+        "reasoning_parser",
+        "tool_parser",
+        "override",
+        "explicit_structural_tag",
+        "expected_mode",
+    ),
+    [
+        ("qwen3", "hermes", None, False, "reasoning_required"),
+        (
+            "qwen3",
+            "hermes",
+            '{"guided_decoding_backend": "llguidance"}',
+            False,
+            "off",
+        ),
+        ("qwen3", None, None, False, "off"),
+        (None, "hermes", None, False, "off"),
+        ("qwen3", "hermes", None, True, "on"),
+        (
+            "qwen3",
+            "hermes",
+            '{"guided_decoding_backend": "llguidance"}',
+            True,
+            "on",
+        ),
+    ],
+    ids=[
+        "xgrammar-with-both-parsers",
+        "effective-llguidance-override",
+        "missing-tool-parser",
+        "missing-reasoning-parser",
+        "explicit-structural-tags",
+        "explicit-structural-tags-with-llguidance",
+    ],
+)
+def test_unified_guided_reasoning_structural_tag_mode(
+    reasoning_parser,
+    tool_parser,
+    override,
+    explicit_structural_tag,
+    expected_mode,
+):
+    argv = [
+        "--model-path",
+        "Qwen/Qwen3-0.6B",
+        "--guided-decoding-backend",
+        "xgrammar",
+    ]
+    if reasoning_parser is not None:
+        argv.extend(["--dyn-reasoning-parser", reasoning_parser])
+    if tool_parser is not None:
+        argv.extend(["--dyn-tool-call-parser", tool_parser])
+    if override is not None:
+        argv.extend(["--override-engine-args", override])
+    if explicit_structural_tag:
+        argv.append("--dyn-enable-structural-tag")
+
+    _, worker_config = asyncio.run(TrtllmLLMEngine.from_args(argv))
+
+    assert worker_config.structural_tag_mode == expected_mode
+
+
+@pytest.mark.parametrize(
+    ("backend", "require_reasoning", "raises"),
+    [
+        ("llguidance", True, True),
+        ("llguidance", False, False),
+        ("xgrammar", True, False),
+    ],
+)
+def test_unified_llguidance_rejects_reasoning_required_tool_choice(
+    backend, require_reasoning, raises
+):
+    request = {"require_reasoning": require_reasoning}
+
+    if raises:
+        with pytest.raises(
+            ValueError,
+            match=(
+                "TRT-LLM llguidance cannot preserve reasoning for required or "
+                "named tool_choice"
+            ),
+        ):
+            TrtllmLLMEngine._validate_guided_reasoning_support_for_backend(
+                backend, request
+            )
+    else:
+        TrtllmLLMEngine._validate_guided_reasoning_support_for_backend(backend, request)
 
 
 class TestGuidedDecodingFromToolChoice:

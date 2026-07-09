@@ -29,7 +29,11 @@ from tests.utils.payload_builder import (
     multimodal_payload_default,
     router_selection_chat_payload_default,
 )
-from tests.utils.payloads import ImageGenerationPayload, VideoGenerationPayload
+from tests.utils.payloads import (
+    ImageGenerationPayload,
+    ToolCallingChatPayload,
+    VideoGenerationPayload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +58,52 @@ qwen3_vl_engine_config_files = (
     "encode.yaml",
     "prefill.yaml",
 )
+
+
+def reasoning_tool_call_payload(
+    tool_choice: str | dict, enable_thinking: bool
+) -> ToolCallingChatPayload:
+    return ToolCallingChatPayload(
+        body={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "What is the weather in San Francisco? Use get_weather."
+                    ),
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get the current weather for a location.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "location": {"type": "string"},
+                            },
+                            "required": ["location"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": False,
+            "chat_template_kwargs": {"enable_thinking": enable_thinking},
+            "max_tokens": 512,
+            "temperature": 0.0,
+        },
+        repeat_count=1,
+        expected_log=[],
+        expected_response=["San Francisco"],
+        expected_tool_name="get_weather",
+        expected_reasoning=enable_thinking,
+        expected_finish_reason="tool_calls",
+    )
+
 
 # TensorRT-LLM test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~442s (7m 22s) total to run sequentially (with models pre-cached)
@@ -100,7 +150,15 @@ trtllm_configs = {
         name="aggregated_unified",
         directory=trtllm_dir,
         script_name="agg.sh",
-        script_args=["--unified", "--guided-decoding-backend", "xgrammar"],
+        script_args=[
+            "--unified",
+            "--guided-decoding-backend",
+            "xgrammar",
+            "--dyn-reasoning-parser",
+            "qwen3",
+            "--dyn-tool-call-parser",
+            "hermes",
+        ],
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
@@ -118,6 +176,15 @@ trtllm_configs = {
             chat_payload_default(),
             completion_payload_default(),
             guided_decoding_chat_payload_default(),
+            reasoning_tool_call_payload("required", enable_thinking=True),
+            reasoning_tool_call_payload(
+                {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+                enable_thinking=True,
+            ),
+            reasoning_tool_call_payload("required", enable_thinking=False),
         ],
     ),
     "disaggregated": TRTLLMConfig(

@@ -141,6 +141,16 @@ def test_worker_config_accepts_disaggregation_mode():
         backend.WorkerConfig(namespace="dynamo", disaggregation_mode=mode)
 
 
+def test_worker_config_accepts_reasoning_required_structural_tag_mode():
+    backend.WorkerConfig(namespace="dynamo", structural_tag_mode="reasoning_required")
+
+
+def test_model_runtime_config_accepts_reasoning_required_structural_tag_mode():
+    from dynamo._core import ModelRuntimeConfig
+
+    ModelRuntimeConfig().set_structural_tag_mode("reasoning_required")
+
+
 @pytest.mark.unified
 def test_python_worker_config_from_runtime_config_copies_parser_settings():
     from dynamo.common.backend.worker import WorkerConfig

@@ -256,9 +256,10 @@ impl ModelRuntimeConfig {
         self.inner.structural_tag_mode = match mode {
             "off" => RsStructuralTagMode::Off,
             "on" => RsStructuralTagMode::On,
+            "reasoning_required" => RsStructuralTagMode::ReasoningRequired,
             _ => {
                 return Err(PyErr::new::<PyException, _>(format!(
-                    "Invalid structural_tag_mode: {mode}. Expected 'off' or 'on'."
+                    "Invalid structural_tag_mode: {mode}. Expected 'off', 'on', or 'reasoning_required'."
                 )));
             }
         };

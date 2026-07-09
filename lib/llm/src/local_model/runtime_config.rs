@@ -34,6 +34,9 @@ pub enum StructuralTagMode {
     #[default]
     Off,
     On,
+    /// Apply structural tags only when a forced tool choice must preserve a
+    /// reasoning phase before the schema-constrained tool call.
+    ReasoningRequired,
 }
 
 /// Controls when structural tags are activated based on `tool_choice`.
@@ -651,6 +654,26 @@ mod tests {
         assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
         let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
+    }
+
+    #[test]
+    fn reasoning_required_structural_tag_mode_roundtrips_through_serde_json() {
+        assert_eq!(
+            ModelRuntimeConfig::default().structural_tag_mode,
+            StructuralTagMode::Off
+        );
+        let cfg = ModelRuntimeConfig {
+            structural_tag_mode: StructuralTagMode::ReasoningRequired,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"structural_tag_mode\":\"reasoning_required\""));
+        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.structural_tag_mode,
+            StructuralTagMode::ReasoningRequired
+        );
     }
 
     #[test]

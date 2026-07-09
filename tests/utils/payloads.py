@@ -290,9 +290,18 @@ class ChatPayloadWithLogprobs(ChatPayload):
 class ToolCallingChatPayload(ChatPayload):
     """ChatPayload that validates tool calls in the response."""
 
-    def __init__(self, *args, expected_tool_name: Optional[str] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        expected_tool_name: Optional[str] = None,
+        expected_reasoning: Optional[bool] = None,
+        expected_finish_reason: Optional[str] = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.expected_tool_name = expected_tool_name
+        self.expected_reasoning = expected_reasoning
+        self.expected_finish_reason = expected_finish_reason
 
     def validate(self, response, content: str) -> None:
         """Validate that tool calls exist in the response.
@@ -307,7 +316,8 @@ class ToolCallingChatPayload(ChatPayload):
         choices = response_data.get("choices", [])
         assert choices, "Response missing choices"
 
-        message = choices[0].get("message", {})
+        choice = choices[0]
+        message = choice.get("message", {})
         tool_calls = message.get("tool_calls", [])
 
         assert tool_calls, "Expected model to generate tool calls but none found"
@@ -333,6 +343,21 @@ class ToolCallingChatPayload(ChatPayload):
                 self.expected_tool_name in tool_names
             ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
             logger.info(f"Expected tool '{self.expected_tool_name}' was called")
+
+        reasoning = message.get("reasoning_content")
+        has_reasoning = bool(reasoning and str(reasoning).strip())
+        if self.expected_reasoning is True:
+            assert has_reasoning, "Expected non-empty reasoning_content"
+        elif self.expected_reasoning is False:
+            assert (
+                not has_reasoning
+            ), f"Expected empty reasoning_content, got: {reasoning!r}"
+
+        if self.expected_finish_reason is not None:
+            assert choice.get("finish_reason") == self.expected_finish_reason, (
+                f"Expected finish_reason={self.expected_finish_reason!r}, "
+                f"got {choice.get('finish_reason')!r}"
+            )
 
         # Check expected_response keywords against tool call arguments (OR logic)
         if self.expected_response:

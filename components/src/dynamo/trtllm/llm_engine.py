@@ -96,6 +96,12 @@ _IDLE_SLEEP_S = 0.01
 # publish KV cache events. Without this, `get_kv_cache_events` returns empty.
 _DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
 
+_LLGUIDANCE_REASONING_ERROR = (
+    "TRT-LLM llguidance cannot preserve reasoning for required or named "
+    "tool_choice; use xgrammar or set "
+    "chat_template_kwargs.enable_thinking=false"
+)
+
 # Note: `metrics_dict` is set per-instance on `GenerationResult` (only
 # when TRT-LLM's perf-stats collection is enabled and the request
 # finished). Check `hasattr(res, "metrics_dict")` on each instance —
@@ -122,6 +128,19 @@ def _to_signed_i64(value: int | None) -> int | None:
     return value
 
 
+def _resolve_structural_tag_mode(config: Any, guided_decoding_backend: object) -> str:
+    """Resolve the structural-tag policy published by the unified worker."""
+    if config.dyn_enable_structural_tag:
+        return "on"
+    if (
+        guided_decoding_backend == "xgrammar"
+        and config.dyn_reasoning_parser
+        and config.dyn_tool_call_parser
+    ):
+        return "reasoning_required"
+    return "off"
+
+
 class TrtllmLLMEngine(LLMEngine):
     def __init__(
         self,
@@ -137,6 +156,7 @@ class TrtllmLLMEngine(LLMEngine):
         publish_events_and_metrics: bool = False,
     ):
         self.engine_args = engine_args
+        self._guided_decoding_backend = engine_args.get("guided_decoding_backend")
         self.model_name = model_name
         self.served_model_name = served_model_name
         self.max_seq_len = max_seq_len
@@ -320,12 +340,16 @@ class TrtllmLLMEngine(LLMEngine):
             component=config.component,
             publish_events_and_metrics=config.publish_events_and_metrics,
         )
+        structural_tag_mode = _resolve_structural_tag_mode(
+            config, engine._guided_decoding_backend
+        )
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,
             model_input=ModelInput.Tokens,
             disaggregation_mode=_TRTLLM_TO_COMMON_DISAGG[config.disaggregation_mode],
+            structural_tag_mode=structural_tag_mode,
         )
         return engine, worker_config
 
@@ -758,6 +782,7 @@ class TrtllmLLMEngine(LLMEngine):
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
         assert self._engine is not None, "Engine not initialized"
+        self._validate_guided_reasoning_support(request)
 
         # Tag the request as structured-output / image so the per-type
         # counters split traffic correctly in Prometheus.
@@ -1100,6 +1125,18 @@ class TrtllmLLMEngine(LLMEngine):
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")
+
+    @staticmethod
+    def _validate_guided_reasoning_support_for_backend(
+        guided_decoding_backend: object, request: GenerateRequest
+    ) -> None:
+        if request.get("require_reasoning") and guided_decoding_backend == "llguidance":
+            raise ValueError(_LLGUIDANCE_REASONING_ERROR)
+
+    def _validate_guided_reasoning_support(self, request: GenerateRequest) -> None:
+        self._validate_guided_reasoning_support_for_backend(
+            self._guided_decoding_backend, request
+        )
 
     @staticmethod
     def _override_sampling_params(

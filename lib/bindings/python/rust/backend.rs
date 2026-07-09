@@ -376,9 +376,10 @@ impl WorkerConfig {
         let st_mode = match structural_tag_mode.as_str() {
             "off" => RsStructuralTagMode::Off,
             "on" => RsStructuralTagMode::On,
+            "reasoning_required" => RsStructuralTagMode::ReasoningRequired,
             other => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Invalid structural_tag_mode: {other}. Expected 'off' or 'on'."
+                    "Invalid structural_tag_mode: {other}. Expected 'off', 'on', or 'reasoning_required'."
                 )));
             }
         };
