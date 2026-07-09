@@ -230,7 +230,11 @@ For vLLM multinode deployments, the operator automatically selects and configure
 
 For multi-node tensor/pipeline parallelism, **the `mp` (multiprocessing) backend is the recommended approach**.
 
+<<<<<<< HEAD
 **When used**: Multi-node TP/PP deployments (`world_size > GPUs_per_node`) where `world_size = tensor_parallel_size × pipeline_parallel_size`. DGDs created by operator ≥ 1.0.0 use `mp` by default; pre-upgrade DGDs without an origin annotation remain on `ray`. Override with the `nvidia.com/vllm-distributed-executor-backend` annotation.
+=======
+**When used**: Multi-node TP/PP deployments (`world_size > GPUs_per_node`). DGDs created by operator ≥ 1.0.0 use `mp` by default; pre-upgrade DGDs without an origin annotation remain on `ray`. Override with the `nvidia.com/vllm-distributed-executor-backend` annotation.
+>>>>>>> fa122ab0ef59f6a7b0e1ba3587f6119633ba8e92
 
 **All Nodes (Leader and Workers):**
 - **Injected Flags**:
