@@ -25,6 +25,10 @@ spec:
           jsonPath: .status.conditions[?(@.type=="Ready")].status
           name: Ready
           type: string
+        - description: Lifecycle state of the graph deployment
+          jsonPath: .status.state
+          name: State
+          type: string
         - description: Backend framework (sglang, vllm, trtllm)
           jsonPath: .spec.backendFramework
           name: Backend
