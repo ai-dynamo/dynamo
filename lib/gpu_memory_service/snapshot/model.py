@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass(frozen=True)
@@ -27,3 +27,4 @@ class SaveManifest:
     layout_hash: str
     device: int
     allocations: List[AllocationEntry] = field(default_factory=list)
+    layout_metadata_file: Optional[str] = None

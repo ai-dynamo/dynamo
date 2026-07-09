@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import os
 import signal
 import socket
@@ -51,6 +52,10 @@ from gpu_memory_service.server import allocations as server_allocations
 from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.fsm import ServerState
 from gpu_memory_service.server.rpc import GMSRPCServer
+from gpu_memory_service.snapshot import storage_client as snapshot_storage_client
+from gpu_memory_service.snapshot.disk import LAYOUT_METADATA_FILENAME
+from gpu_memory_service.snapshot.model import AllocationEntry
+from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -345,12 +350,89 @@ def test_rw_commit_publishes_allocations_metadata_and_layout_hash(running_gms):
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_layout_metadata_coexists_with_tensor_metadata_and_survives_commit(
+    running_gms,
+):
+    _, socket_path = running_gms
+    opaque_identity = b"\x00\xfftrtllm-identity\x80"
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        writer.connect(RequestedLockType.RW)
+        allocation_id, _ = writer.allocate_handle(4096, "weights")
+        writer.metadata_put("tensor.0", allocation_id, 0, b"tensor-spec")
+        writer.layout_metadata_put("trtllm", "weight_layout", b"post_transform")
+        writer.layout_metadata_put("other", "source_identity", b"other-value")
+        writer.layout_metadata_put("trtllm", "source_identity", opaque_identity)
+        writer.layout_metadata_put("trtllm", "temporary", b"delete-me")
+        assert writer.layout_metadata_delete("trtllm", "temporary")
+        assert not writer.layout_metadata_delete("trtllm", "temporary")
+        assert writer.layout_metadata_get("trtllm", "temporary") is None
+        assert writer.commit()
+    finally:
+        writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        reader.connect(RequestedLockType.RO)
+        assert reader.metadata_list() == ["tensor.0"]
+        assert reader.metadata_get("tensor.0") == (
+            allocation_id,
+            0,
+            b"tensor-spec",
+        )
+        assert (
+            reader.layout_metadata_get("trtllm", "source_identity") == opaque_identity
+        )
+        assert reader.layout_metadata_get("trtllm", "missing") is None
+        assert [
+            (item.namespace, item.key) for item in reader.layout_metadata_list()
+        ] == [
+            ("other", "source_identity"),
+            ("trtllm", "source_identity"),
+            ("trtllm", "weight_layout"),
+        ]
+        assert [
+            (item.namespace, item.key)
+            for item in reader.layout_metadata_list(namespace="trtllm", prefix="source")
+        ] == [("trtllm", "source_identity")]
+    finally:
+        reader.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_layout_metadata_is_independent_of_allocation_lifetime(running_gms):
+    _, socket_path = running_gms
+
+    writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
+    try:
+        allocation_id, _ = writer.allocate(4096, "weights")
+        writer.metadata_put("tensor.0", allocation_id, 0, b"tensor-spec")
+        writer.layout_metadata_put("trtllm", "source_identity", b"identity")
+
+        assert writer.free(allocation_id)
+        assert writer.metadata_list() == []
+        assert writer.layout_metadata_get("trtllm", "source_identity") == b"identity"
+        assert writer.commit()
+    finally:
+        writer.close()
+
+    reader = _GMSClientSession(socket_path, RequestedLockType.RO, None)
+    try:
+        assert reader.list_allocations() == []
+        assert reader.layout_metadata_get("trtllm", "source_identity") == b"identity"
+    finally:
+        reader.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
 def test_rw_disconnect_aborts_layout_and_next_writer_starts_clean(running_gms):
     server, socket_path = running_gms
 
     writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
     allocation_id, _ = writer.allocate(4096, "weights")
     writer.metadata_put("stale", allocation_id, 0, b"value")
+    writer.layout_metadata_put("trtllm", "stale", b"identity")
     _drop_connection(writer)
 
     _wait_for_server_state(server, ServerState.EMPTY)
@@ -359,8 +441,201 @@ def test_rw_disconnect_aborts_layout_and_next_writer_starts_clean(running_gms):
     try:
         assert next_writer.list_allocations() == []
         assert next_writer.metadata_list() == []
+        assert next_writer.layout_metadata_list() == []
     finally:
         next_writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_new_writer_clears_committed_layout_metadata(running_gms):
+    _, socket_path = running_gms
+
+    writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
+    writer.layout_metadata_put("trtllm", "source_identity", b"stale")
+    writer.commit()
+
+    reader = _GMSClientSession(socket_path, RequestedLockType.RO, None)
+    try:
+        assert reader.layout_metadata_get("trtllm", "source_identity") == b"stale"
+    finally:
+        reader.close()
+
+    next_writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
+    try:
+        assert next_writer.layout_metadata_list() == []
+    finally:
+        next_writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_layout_metadata_validates_keys_and_rejects_ro_mutation(running_gms):
+    _, socket_path = running_gms
+
+    writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
+    try:
+        with pytest.raises(RuntimeError, match="namespace must not be empty"):
+            writer.layout_metadata_put("", "source_identity", b"identity")
+        with pytest.raises(RuntimeError, match="key must not be empty"):
+            writer.layout_metadata_put("trtllm", "", b"identity")
+        with pytest.raises(RuntimeError, match="namespace must not be empty"):
+            writer.layout_metadata_list(namespace="")
+
+        writer.layout_metadata_put("trtllm", "source_identity", b"identity")
+        assert writer.commit()
+    finally:
+        writer.close()
+
+    reader = _GMSClientSession(socket_path, RequestedLockType.RO, None)
+    try:
+        with pytest.raises(RuntimeError, match="not allowed for RO session"):
+            reader.layout_metadata_put("trtllm", "source_identity", b"changed")
+        with pytest.raises(RuntimeError, match="not allowed for RO session"):
+            reader.layout_metadata_delete("trtllm", "source_identity")
+        assert reader.layout_metadata_get("trtllm", "source_identity") == b"identity"
+    finally:
+        reader.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_layout_metadata_hash_is_order_independent_and_value_sensitive(running_gms):
+    _, socket_path = running_gms
+
+    def publish_and_get_hash(entries):
+        writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
+        try:
+            for namespace, key, value in entries:
+                writer.layout_metadata_put(namespace, key, value)
+            assert writer.commit()
+        finally:
+            writer.close()
+
+        reader = _GMSClientSession(socket_path, RequestedLockType.RO, None)
+        try:
+            return reader.get_memory_layout_hash()
+        finally:
+            reader.close()
+
+    first_hash = publish_and_get_hash(
+        [("trtllm", "z", b"last"), ("other", "a", b"first")]
+    )
+    reordered_hash = publish_and_get_hash(
+        [("other", "a", b"first"), ("trtllm", "z", b"last")]
+    )
+    changed_hash = publish_and_get_hash(
+        [("other", "a", b"changed"), ("trtllm", "z", b"last")]
+    )
+
+    assert first_hash
+    assert reordered_hash == first_hash
+    assert changed_hash != first_hash
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+@pytest.mark.parametrize("include_layout_metadata", [True, False])
+def test_layout_metadata_snapshot_round_trip(
+    running_gms,
+    monkeypatch,
+    tmp_path,
+    include_layout_metadata,
+):
+    _, socket_path = running_gms
+    identity = b"\x00identity\xff"
+    writer = _GMSClientSession(socket_path, RequestedLockType.RW, 1_000)
+    try:
+        allocation_id, aligned_size = writer.allocate(4096, "weights")
+        writer.metadata_put("tensor.0", allocation_id, 0, b"tensor-spec")
+        if include_layout_metadata:
+            writer.layout_metadata_put("trtllm", "source_identity", identity)
+        writer.commit()
+    finally:
+        writer.close()
+
+    def skip_shard_writes(
+        self,
+        shard_dirs,
+        allocations_info,
+        va_list,
+        *,
+        max_workers,
+        use_absolute_shard_paths=False,
+    ):
+        del self, shard_dirs, va_list, max_workers, use_absolute_shard_paths
+        return [
+            AllocationEntry(
+                allocation_id=info.allocation_id,
+                size=info.size,
+                aligned_size=info.aligned_size,
+                tag=info.tag,
+                tensor_file=f"shards/{info.allocation_id}.bin",
+                tensor_offset=0,
+            )
+            for info in allocations_info
+        ]
+
+    class FakeTransferSession:
+        def restore(self, targets):
+            assert len(targets) == 1
+            target = targets[allocation_id]
+            assert target.byte_count == aligned_size
+
+        def close(self):
+            pass
+
+    class FakeTransferBackend:
+        def start_restore(self, sources):
+            assert len(sources) == 1
+            return FakeTransferSession()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(GMSStorageClient, "_write_shards", skip_shard_writes)
+    monkeypatch.setattr(
+        snapshot_storage_client,
+        "create_transfer_backend",
+        lambda name, config: FakeTransferBackend(),
+    )
+
+    snapshot_dir = tmp_path / "snapshot"
+    storage = GMSStorageClient(
+        output_dir=str(snapshot_dir),
+        socket_path=socket_path,
+        device=0,
+        timeout_ms=1_000,
+    )
+    source_manifest = storage.save()
+    assert source_manifest.layout_metadata_file == LAYOUT_METADATA_FILENAME
+    if not include_layout_metadata:
+        manifest_path = snapshot_dir / "manifest.json"
+        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_payload.pop("layout_metadata_file")
+        manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+        stray_sidecar = {
+            "format_version": 1,
+            "entries": [
+                {
+                    "namespace": "trtllm",
+                    "key": "source_identity",
+                    "value": "c3RyYXk=",
+                }
+            ],
+        }
+        (snapshot_dir / LAYOUT_METADATA_FILENAME).write_text(
+            json.dumps(stray_sidecar), encoding="utf-8"
+        )
+    id_map = storage.load_to_gms(str(snapshot_dir))
+    assert set(id_map) == {allocation_id}
+
+    reader = _GMSClientSession(socket_path, RequestedLockType.RO, 1_000)
+    try:
+        assert reader.get_memory_layout_hash() == source_manifest.layout_hash
+        assert reader.metadata_list() == ["tensor.0"]
+        expected_identity = identity if include_layout_metadata else None
+        assert (
+            reader.layout_metadata_get("trtllm", "source_identity") == expected_identity
+        )
+    finally:
+        reader.close()
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
@@ -814,6 +1089,43 @@ def test_remap_all_vas_rejects_stale_layout_after_new_layout_commit(
         next_writer.close()
         reader.close()
         writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_remap_all_vas_rejects_layout_metadata_only_change(running_gms):
+    _, socket_path = running_gms
+
+    first_writer = GMSClientMemoryManager(socket_path, device=0)
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    second_writer = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        first_writer.connect(RequestedLockType.RW)
+        first_va = first_writer.create_mapping(size=4096, tag="weights")
+        first_allocation_id = first_writer.mappings[first_va].allocation_id
+        first_writer.metadata_put("tensor.0", first_allocation_id, 0, b"tensor-spec")
+        first_writer.layout_metadata_put("trtllm", "generation", b"first")
+        assert first_writer.commit()
+
+        reader.connect(RequestedLockType.RO)
+        reader.create_mapping(allocation_id=first_allocation_id)
+        reader.unmap_all_vas()
+        reader.abort()
+
+        second_writer.connect(RequestedLockType.RW)
+        second_va = second_writer.create_mapping(size=4096, tag="weights")
+        second_allocation_id = second_writer.mappings[second_va].allocation_id
+        second_writer.metadata_put("tensor.0", second_allocation_id, 0, b"tensor-spec")
+        second_writer.layout_metadata_put("trtllm", "generation", b"second")
+        assert second_writer.commit()
+
+        reader.connect(RequestedLockType.RO)
+        with pytest.raises(StaleMemoryLayoutError, match="Layout changed"):
+            reader.remap_all_vas()
+        reader.abort()
+    finally:
+        second_writer.close()
+        reader.close()
+        first_writer.close()
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)

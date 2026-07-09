@@ -11,7 +11,9 @@ Tier 1 (Atomic Operations):
     get_handle_info, free_handle, commit, list_handles,
     get_memory_layout_hash
   - VA ops (local address space): reserve_va, map_va, unmap_va, free_va
-  - Metadata: metadata_put, metadata_get, metadata_list, metadata_delete
+  - Tensor metadata: metadata_put, metadata_get, metadata_list, metadata_delete
+  - Layout metadata: layout_metadata_put, layout_metadata_get,
+    layout_metadata_list, layout_metadata_delete
 
 Tier 2 (Convenience — compose Tier 1 with error handling + sync):
   - create_mapping, destroy_mapping
@@ -51,7 +53,10 @@ from gpu_memory_service.common.cuda_utils import (
     cumem_unmap,
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-from gpu_memory_service.common.protocol.messages import GetAllocationResponse
+from gpu_memory_service.common.protocol.messages import (
+    GetAllocationResponse,
+    LayoutMetadataKey,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +69,8 @@ class StaleMemoryLayoutError(Exception):
     reader was unmapped. The caller should re-import the model from scratch.
 
     IMPORTANT: This is a LAYOUT check, NOT a CONTENT check.
-    - Detected: Allocation sizes changed, tensors added/removed, metadata structure changed
+    - Detected: Allocation sizes changed, tensors added/removed, tensor or layout
+      metadata changed
     - NOT detected: Data values modified in-place
 
     This design is intentional: unmap/remap enables use cases like RL training
@@ -370,6 +376,33 @@ class GMSClientMemoryManager:
 
     def metadata_delete(self, key: str) -> bool:
         return self._client_rpc.metadata_delete(key)
+
+    # ==================== Tier 1: Layout Metadata ====================
+
+    def layout_metadata_put(self, namespace: str, key: str, value: bytes) -> bool:
+        """Store opaque application metadata with the active memory layout.
+
+        Layout metadata is independent of tensor allocations. It is published
+        atomically by :meth:`commit` and remains available to read-only
+        sessions until a new writer replaces or aborts the layout.
+        """
+        return self._client_rpc.layout_metadata_put(namespace, key, value)
+
+    def layout_metadata_get(self, namespace: str, key: str) -> Optional[bytes]:
+        """Return one layout metadata value, or ``None`` when absent."""
+        return self._client_rpc.layout_metadata_get(namespace, key)
+
+    def layout_metadata_list(
+        self,
+        namespace: Optional[str] = None,
+        prefix: str = "",
+    ) -> List[LayoutMetadataKey]:
+        """List layout metadata keys, optionally filtered by namespace/prefix."""
+        return self._client_rpc.layout_metadata_list(namespace, prefix)
+
+    def layout_metadata_delete(self, namespace: str, key: str) -> bool:
+        """Delete one layout metadata value from the active writer layout."""
+        return self._client_rpc.layout_metadata_delete(namespace, key)
 
     # ==================== Tier 1: VA Operations (local) ====================
 

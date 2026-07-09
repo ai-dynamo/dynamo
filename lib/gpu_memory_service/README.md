@@ -39,7 +39,7 @@ This leads to:
 │  │ └────────────────┘ │                                                              │
 │  │                    │                  ┌─────────────────────────────────────────┐ │
 │  │ ┌────────────────┐ │                  │    GMSClientMemoryManager (Reader)      │ │
-│  │ │ Metadata Store │ │                  │                                         │ │
+│  │ │ Metadata Stores│ │                  │                                         │ │
 │  │ └────────────────┘ │ ◄── Unix ───────►│  ┌─────────────────────────────────┐    │ │
 │  │                    │    Socket        │  │         GMS Session             │    │ │
 │  └────────────────────┘       +          │  └─────────────────────────────────┘    │ │
@@ -69,7 +69,7 @@ The server consists of three main components:
 
 2. **State Machine (FSM)** - Manages global lock state, waiter coordination, and disconnect cleanup.
 
-3. **Metadata Store / Layout State** - `GMS` owns the metadata table and committed layout hash. Allocations and metadata live in one flat store that is cleared on each new writer connect or writer abort.
+3. **Metadata Stores / Layout State** - `GMS` owns allocation-anchored tensor metadata, allocation-independent namespaced layout metadata, and the committed layout hash. Both metadata stores are cleared on each new writer connect or writer abort.
 
 Each GMS server is responsible for managing memory of only 1 GPU, and does not interact with GMS servers corresponding to other GPUs.
 
@@ -197,10 +197,11 @@ flowchart LR
 - `RW_ABORT` discards the current RW layout and returns the system to `EMPTY`.
 - `RW -> EMPTY` does not require allocating a new layout first; it happens immediately when the writer drops the session before commit.
 - There is no RPC that clears the active RW layout while keeping the same writer session alive. To abandon a partially built RW layout, the writer must disconnect or call `abort()`, and any later RW build starts from a fresh `RW_CONNECT`.
-- Allocations and metadata live in one flat store that is cleared on `RW_CONNECT` and `RW_ABORT`.
+- Allocations, allocation-anchored tensor metadata, and namespaced layout metadata form one published layout. All are cleared on `RW_CONNECT` and `RW_ABORT`.
 - RO requests are served only from the committed layout, while RW requests mutate only the active layout.
-- Read RPCs (`export`, allocation lookup/listing, metadata lookup/listing) operate on that single live store. This is safe because the FSM prevents RW and RO sessions from coexisting.
-- `metadata_put` validates allocation ownership and offset bounds, `free` cascades metadata cleanup, and `commit` rejects dangling metadata references.
+- Read RPCs (`export`, allocation lookup/listing, and both metadata APIs) operate on that single live layout. This is safe because the FSM prevents RW and RO sessions from coexisting.
+- `metadata_put` stores tensor metadata and validates allocation ownership and offset bounds. `free` cascades only that allocation-anchored metadata, and `commit` rejects dangling references.
+- `layout_metadata_put(namespace, key, value)` stores opaque application bytes without an allocation anchor. These entries survive allocation pruning, are isolated from tensor enumeration, and publish atomically with `commit`.
 
 ### Allocation Backpressure on OOM
 
@@ -278,6 +279,9 @@ sequenceDiagram
         W->>C: mgr.metadata_put(key, allocation_id, offset, shape)
     end
 
+    W->>C: mgr.layout_metadata_put(namespace, key, opaque_bytes)
+    C->>S: Store allocation-independent application metadata
+
     W->>C: mgr.commit()
     C->>GPU: synchronize()
     C->>GPU: cuMemUnmap(...) + cuMemRelease(...)
@@ -316,6 +320,39 @@ sequenceDiagram
 
     Note over R,C: Keep connection open during inference
 ```
+
+### Namespaced Layout Metadata
+
+Framework integrations can publish small, opaque compatibility envelopes with
+the same commit as the tensor layout:
+
+```python
+manager.layout_metadata_put(
+    "trtllm",
+    "committed_weight_envelope",
+    serialized_envelope,
+)
+manager.commit()
+```
+
+The namespace and key are separate protocol fields; GMS does not interpret the
+value or define a framework schema. Put/delete operations require RW, while
+get/list are available in RW and RO sessions. Layout metadata is not returned
+by `metadata_list()` and is not deleted when an allocation is freed. It is
+cleared with the rest of the layout on a new writer or writer abort, and its
+bytes contribute to the committed memory-layout hash.
+
+Because those bytes contribute to the hash, an application envelope cannot
+embed the final hash without creating a self-reference. Readers should fetch
+the envelope and `get_memory_layout_hash()` from the same RO session, or place a
+publisher-generated layout generation ID in the envelope.
+
+GMS snapshots persist this store in the optional, versioned
+`gms_layout_metadata.json` file. New loaders accept legacy snapshots without
+that file and ignore undeclared sidecars; new manifests declare the sidecar so
+deleting it is a load error. Servers and clients must use compatible GMS
+package versions because the wire protocol does not currently negotiate
+optional RPC capabilities.
 
 ### Unmap/Remap Flow (Memory Pressure)
 
@@ -438,7 +475,8 @@ During `remap_all_vas()`:
 
 On commit, the server computes a hash of:
 - All allocation layout slots, sizes, aligned sizes, and tags
-- All metadata keys, offsets, and values
+- All tensor metadata keys, offsets, and values
+- All layout metadata namespaces, keys, and opaque values
 
 On `remap_all_vas()`, this hash is checked:
 - If match: Safe to remap (layout unchanged)
@@ -512,11 +550,17 @@ class GMSClientMemoryManager:
     def unmap_va(va: int) -> None                                    # Keeps VA reservation
     def free_va(va: int) -> None                                     # Releases VA reservation
 
-    # --- Tier 1: Metadata ---
+    # --- Tier 1: Tensor metadata (allocation-anchored) ---
     def metadata_put(key: str, allocation_id: str, offset_bytes: int, value: bytes) -> bool
     def metadata_get(key: str) -> Optional[Tuple[str, int, bytes]]
     def metadata_list(prefix: str = "") -> List[str]
     def metadata_delete(key: str) -> bool
+
+    # --- Tier 1: Layout metadata (allocation-independent application bytes) ---
+    def layout_metadata_put(namespace: str, key: str, value: bytes) -> bool
+    def layout_metadata_get(namespace: str, key: str) -> Optional[bytes]
+    def layout_metadata_list(namespace: Optional[str] = None, prefix: str = "") -> List[LayoutMetadataKey]
+    def layout_metadata_delete(namespace: str, key: str) -> bool
 
     # --- Tier 2: Convenience ---
     def create_mapping(allocation_id=None, size=0, tag="default") -> int  # Allocate or import

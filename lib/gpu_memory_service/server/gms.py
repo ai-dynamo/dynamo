@@ -32,6 +32,15 @@ from gpu_memory_service.common.protocol.messages import (
     GetStateHashRequest,
     GetStateHashResponse,
     GMSRuntimeEvent,
+    LayoutMetadataDeleteRequest,
+    LayoutMetadataDeleteResponse,
+    LayoutMetadataGetRequest,
+    LayoutMetadataGetResponse,
+    LayoutMetadataKey,
+    LayoutMetadataListRequest,
+    LayoutMetadataListResponse,
+    LayoutMetadataPutRequest,
+    LayoutMetadataPutResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
     MetadataDeleteRequest,
@@ -78,6 +87,7 @@ class GMS:
         self._sessions = GMSSessionManager()
         self._events: deque[GMSRuntimeEvent] = deque(maxlen=self._MAX_EVENTS)
         self._metadata: dict[str, MetadataEntry] = {}
+        self._layout_metadata: dict[tuple[str, str], bytes] = {}
         self._memory_layout_hash = ""
         logger.info("GMS initialized: device=%d", device)
 
@@ -186,12 +196,33 @@ class GMS:
             rank = allocation_ranks_by_id[entry.allocation_id]
             h.update(f"{key}:{rank}:{entry.offset_bytes}:".encode())
             h.update(entry.value)
+
+        if self._layout_metadata:
+            # Preserve the legacy hash byte-for-byte when this store is empty.
+            # When it is populated, fix the boundary after the legacy stream
+            # before hashing the separately framed application-owned fields.
+            legacy_layout_digest = h.digest()
+            h = hashlib.sha256()
+            h.update(b"\x00gms-layout-state-v2\x00")
+            h.update(legacy_layout_digest)
+            for (namespace, key), value in sorted(self._layout_metadata.items()):
+                for field in (namespace.encode("utf-8"), key.encode("utf-8"), value):
+                    h.update(len(field).to_bytes(8, byteorder="big"))
+                    h.update(field)
         return h.hexdigest()
 
     def _clear_layout_state(self) -> int:
         self._metadata.clear()
+        self._layout_metadata.clear()
         self._memory_layout_hash = ""
         return self._allocations.clear_all()
+
+    @staticmethod
+    def _validate_layout_metadata_key(namespace: str, key: str) -> None:
+        if not namespace:
+            raise ValueError("layout metadata namespace must not be empty")
+        if not key:
+            raise ValueError("layout metadata key must not be empty")
 
     def on_connect(self, conn: Connection) -> None:
         if conn.mode == GrantedLockType.RW:
@@ -405,5 +436,39 @@ class GMS:
                     key for key in self._metadata if key.startswith(msg.prefix)
                 )
             return MetadataListResponse(keys=keys), -1, False
+
+        if msg_type is LayoutMetadataPutRequest:
+            self._validate_layout_metadata_key(msg.namespace, msg.key)
+            self._layout_metadata[(msg.namespace, msg.key)] = msg.value
+            return LayoutMetadataPutResponse(success=True), -1, False
+
+        if msg_type is LayoutMetadataGetRequest:
+            self._validate_layout_metadata_key(msg.namespace, msg.key)
+            value = self._layout_metadata.get((msg.namespace, msg.key))
+            if value is None:
+                return LayoutMetadataGetResponse(found=False), -1, False
+            return LayoutMetadataGetResponse(found=True, value=value), -1, False
+
+        if msg_type is LayoutMetadataDeleteRequest:
+            self._validate_layout_metadata_key(msg.namespace, msg.key)
+            return (
+                LayoutMetadataDeleteResponse(
+                    deleted=self._layout_metadata.pop((msg.namespace, msg.key), None)
+                    is not None
+                ),
+                -1,
+                False,
+            )
+
+        if msg_type is LayoutMetadataListRequest:
+            if msg.namespace == "":
+                raise ValueError("layout metadata namespace must not be empty")
+            keys = [
+                LayoutMetadataKey(namespace=namespace, key=key)
+                for namespace, key in sorted(self._layout_metadata)
+                if (msg.namespace is None or namespace == msg.namespace)
+                and key.startswith(msg.prefix)
+            ]
+            return LayoutMetadataListResponse(keys=keys), -1, False
 
         raise ValueError(f"Unknown request: {msg_type.__name__}")

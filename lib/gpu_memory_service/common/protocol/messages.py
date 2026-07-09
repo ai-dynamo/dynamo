@@ -144,12 +144,58 @@ class MetadataListResponse(msgspec.Struct, tag="metadata_list_response"):
     keys: List[str] = []
 
 
+class LayoutMetadataKey(msgspec.Struct):
+    namespace: str
+    key: str
+
+
+class LayoutMetadataPutRequest(msgspec.Struct, tag="layout_metadata_put_request"):
+    namespace: str
+    key: str
+    value: bytes
+
+
+class LayoutMetadataPutResponse(msgspec.Struct, tag="layout_metadata_put_response"):
+    success: bool
+
+
+class LayoutMetadataGetRequest(msgspec.Struct, tag="layout_metadata_get_request"):
+    namespace: str
+    key: str
+
+
+class LayoutMetadataGetResponse(msgspec.Struct, tag="layout_metadata_get_response"):
+    found: bool
+    value: Optional[bytes] = None
+
+
+class LayoutMetadataDeleteRequest(msgspec.Struct, tag="layout_metadata_delete_request"):
+    namespace: str
+    key: str
+
+
+class LayoutMetadataDeleteResponse(
+    msgspec.Struct, tag="layout_metadata_delete_response"
+):
+    deleted: bool
+
+
+class LayoutMetadataListRequest(msgspec.Struct, tag="layout_metadata_list_request"):
+    namespace: Optional[str] = None
+    prefix: str = ""
+
+
+class LayoutMetadataListResponse(msgspec.Struct, tag="layout_metadata_list_response"):
+    keys: List[LayoutMetadataKey] = []
+
+
 class GetStateHashRequest(msgspec.Struct, tag="get_memory_layout_hash_request"):
     pass
 
 
 class GetStateHashResponse(msgspec.Struct, tag="get_memory_layout_hash_response"):
-    memory_layout_hash: str  # Hash of allocations + metadata, empty if not committed
+    # Hash of allocations plus tensor/layout metadata; empty if not committed.
+    memory_layout_hash: str
 
 
 class GetRuntimeStateRequest(msgspec.Struct, tag="get_runtime_state_request"):
@@ -208,6 +254,14 @@ Message = Union[
     MetadataDeleteResponse,
     MetadataListRequest,
     MetadataListResponse,
+    LayoutMetadataPutRequest,
+    LayoutMetadataPutResponse,
+    LayoutMetadataGetRequest,
+    LayoutMetadataGetResponse,
+    LayoutMetadataDeleteRequest,
+    LayoutMetadataDeleteResponse,
+    LayoutMetadataListRequest,
+    LayoutMetadataListResponse,
     GetStateHashRequest,
     GetStateHashResponse,
     GetRuntimeStateRequest,

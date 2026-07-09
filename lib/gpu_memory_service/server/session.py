@@ -19,6 +19,10 @@ from gpu_memory_service.common.protocol.messages import (
     GetAllocationStateRequest,
     GetLockStateRequest,
     GetStateHashRequest,
+    LayoutMetadataDeleteRequest,
+    LayoutMetadataGetRequest,
+    LayoutMetadataListRequest,
+    LayoutMetadataPutRequest,
     ListAllocationsRequest,
     MetadataDeleteRequest,
     MetadataGetRequest,
@@ -39,6 +43,8 @@ RW_REQUIRED: frozenset[type] = frozenset(
         FreeAllocationRequest,
         MetadataPutRequest,
         MetadataDeleteRequest,
+        LayoutMetadataPutRequest,
+        LayoutMetadataDeleteRequest,
         CommitRequest,
     }
 )
@@ -50,6 +56,8 @@ RO_ALLOWED: frozenset[type] = frozenset(
         ListAllocationsRequest,
         MetadataGetRequest,
         MetadataListRequest,
+        LayoutMetadataGetRequest,
+        LayoutMetadataListRequest,
         GetLockStateRequest,
         GetAllocationStateRequest,
         GetStateHashRequest,

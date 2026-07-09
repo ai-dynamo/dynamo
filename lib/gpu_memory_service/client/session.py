@@ -28,6 +28,15 @@ from gpu_memory_service.common.protocol.messages import (
     GetStateHashRequest,
     GetStateHashResponse,
     HandshakeResponse,
+    LayoutMetadataDeleteRequest,
+    LayoutMetadataDeleteResponse,
+    LayoutMetadataGetRequest,
+    LayoutMetadataGetResponse,
+    LayoutMetadataKey,
+    LayoutMetadataListRequest,
+    LayoutMetadataListResponse,
+    LayoutMetadataPutRequest,
+    LayoutMetadataPutResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
     MetadataDeleteRequest,
@@ -204,6 +213,41 @@ class _GMSClientSession:
     def metadata_list(self, prefix: str = "") -> List[str]:
         return self._transport.request(
             MetadataListRequest(prefix=prefix), MetadataListResponse
+        ).keys
+
+    def layout_metadata_put(self, namespace: str, key: str, value: bytes) -> bool:
+        return self._transport.request(
+            LayoutMetadataPutRequest(
+                namespace=namespace,
+                key=key,
+                value=value,
+            ),
+            LayoutMetadataPutResponse,
+        ).success
+
+    def layout_metadata_get(self, namespace: str, key: str) -> Optional[bytes]:
+        response = self._transport.request(
+            LayoutMetadataGetRequest(namespace=namespace, key=key),
+            LayoutMetadataGetResponse,
+        )
+        if not response.found:
+            return None
+        return response.value
+
+    def layout_metadata_delete(self, namespace: str, key: str) -> bool:
+        return self._transport.request(
+            LayoutMetadataDeleteRequest(namespace=namespace, key=key),
+            LayoutMetadataDeleteResponse,
+        ).deleted
+
+    def layout_metadata_list(
+        self,
+        namespace: Optional[str] = None,
+        prefix: str = "",
+    ) -> List[LayoutMetadataKey]:
+        return self._transport.request(
+            LayoutMetadataListRequest(namespace=namespace, prefix=prefix),
+            LayoutMetadataListResponse,
         ).keys
 
     def get_memory_layout_hash(self) -> str:
