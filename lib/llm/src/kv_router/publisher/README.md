@@ -36,6 +36,28 @@ unknown removes pass through defensively.
 `sinks.rs` applies the emitted router event to the optional local indexer before
 publishing it externally. Both side effects receive the same `RouterEvent`.
 
+## Direct Valkey Integrity Fence
+
+Direct worker-to-Valkey mode uses a bounded 4,096-event ingress. Queue
+overflow, raw event-id discontinuity, ZMQ batch-sequence discontinuity/source
+failure, replica-WAIT timeout, and permanent `APPLY_OWNED` rejection all enter
+one worker-wide integrity fence shared by every DP rank and the lease
+heartbeat. New input is rejected, queued input is discarded, heartbeat renewal
+stops, and one owner-fenced `UNREGISTER_WORKER` is attempted. The publisher
+never automatically resumes: an ambiguous unregister response cannot safely be
+followed by registration without an atomic module clear-and-reregister
+primitive. A confirmed unregister removes metadata and admission immediately;
+otherwise worker-lease expiry is the fail-closed backstop. Process restart
+acquires a fresh owner lease.
+
+Each registered worker also runs lifecycle GC independently of the lease
+heartbeat. The default cadence is 60 seconds with a 256-record inspection
+budget; the first tick is deterministically phased by owner nonce over one
+additional interval. `DYN_ROUTER_VALKEY_GC_INTERVAL_MS=0` disables it, while
+`DYN_ROUTER_VALKEY_GC_INSPECTION_BUDGET` tunes the bounded module scan. GC only
+runs while integrity is healthy and the worker mutation gate is idle. Failure
+is logged and counted but never fences serving or delays the next heartbeat.
+
 ## Ordering
 
 ```mermaid

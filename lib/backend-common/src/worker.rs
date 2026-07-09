@@ -21,6 +21,7 @@ use dynamo_llm::local_model::runtime_config::{
 use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_llm::preprocessor::media::{MediaDecoder, MediaFetcher};
 use dynamo_llm::worker_type::WorkerType;
+use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -33,7 +34,11 @@ use crate::engine::{
     EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
-use crate::publisher::{PublisherHandles, setup_publishers};
+use crate::publisher::{PublisherHandles, PublisherSetup, setup_publishers};
+use dynamo_llm::kv_router::publisher::{
+    MAX_VALKEY_WORKER_RANKS, ValkeyWorkerConfig, valkey_worker_config_from_env,
+    valkey_worker_events_enabled,
+};
 
 /// Default grace-period in seconds between discovery unregister and engine drain.
 /// Mirrors the Python `_DEFAULT_GRACE_PERIOD_SECS` constant.
@@ -74,9 +79,9 @@ pub struct RuntimeConfig {
     pub discovery_backend: Option<String>,
     /// Request-plane transport — e.g. `"tcp"`, `"nats"`. Maps to `DYN_REQUEST_PLANE`.
     pub request_plane: Option<String>,
-    /// Event-plane transport — `"nats"` or `"zmq"`. When `None` the runtime
-    /// derives a default from the discovery backend. Maps to `DYN_EVENT_PLANE`.
-    pub event_plane: Option<String>,
+    /// Generic event-plane mode — NATS or ZMQ.
+    /// When `None` the runtime defaults to ZMQ. Maps to `DYN_EVENT_PLANE`.
+    pub event_plane: Option<EventTransportKind>,
 }
 
 impl RuntimeConfig {
@@ -109,7 +114,7 @@ impl RuntimeConfig {
             set("DYN_REQUEST_PLANE", value);
         }
         if let Some(ref value) = self.event_plane {
-            set("DYN_EVENT_PLANE", value);
+            set("DYN_EVENT_PLANE", value.as_str());
         }
     }
 }
@@ -582,6 +587,16 @@ impl Worker {
             "engine.start() complete"
         );
 
+        // Resolve and validate direct-Valkey topology before setup_metrics can
+        // start engine-owned callbacks or threads. Registration itself is
+        // still awaited below before discovery attach.
+        let direct_valkey_plan = direct_valkey_registration_plan(
+            &component,
+            self.engine.is_raw(),
+            &self.config,
+            &engine_config,
+        )?;
+
         // Engine builds its EngineMetrics once. `setup_metrics` is the
         // single hook for both foreign-registry expfmt callbacks (side-
         // effect on engine_metrics) and the structured component publisher
@@ -600,6 +615,7 @@ impl Worker {
             &engine_metrics,
             model_load_time_seconds,
             lifecycle,
+            direct_valkey_plan,
         )
         .await?;
 
@@ -631,6 +647,7 @@ impl Worker {
         engine_metrics: &crate::metrics::EngineMetrics,
         model_load_time_seconds: f64,
         lifecycle: crate::metrics::LifecycleGauges,
+        direct_valkey_plan: Option<DirectValkeyRegistrationPlan>,
     ) -> Result<(), DynamoError> {
         let ctx = crate::engine::MetricsCtx {
             model: &engine_config.model,
@@ -646,7 +663,18 @@ impl Worker {
             return Ok(());
         }
         let kv_sources = self.engine.kv_event_sources().await?;
-        if kv_sources.is_empty() && bindings.dp_ranks.is_empty() {
+        let registration_dp_ranks = direct_valkey_plan
+            .as_ref()
+            .map(|plan| plan.dp_ranks.clone())
+            .unwrap_or_default();
+        if let Some(plan) = direct_valkey_plan.as_ref() {
+            validate_valkey_source_ranks(
+                kv_sources.iter().map(KvEventSource::dp_rank),
+                &plan.dp_ranks,
+            )?;
+        }
+        if kv_sources.is_empty() && bindings.dp_ranks.is_empty() && registration_dp_ranks.is_empty()
+        {
             tracing::debug!("engine returned no KV sources / dp_ranks; KV-aware routing disabled");
             self.lifecycle = Some(lifecycle);
             return Ok(());
@@ -667,11 +695,15 @@ impl Worker {
         let handles = setup_publishers(
             component,
             engine_metrics,
-            kv_sources,
-            bindings.dp_ranks,
-            bindings.on_publisher_ready,
-            kv_cache_block_size,
-            enable_local_indexer,
+            PublisherSetup {
+                kv_sources,
+                snapshot_dp_ranks: bindings.dp_ranks,
+                registration_dp_ranks,
+                valkey_worker_config: direct_valkey_plan.map(|plan| plan.config),
+                on_snapshot_ready: bindings.on_publisher_ready,
+                kv_cache_block_size,
+                enable_local_indexer,
+            },
         )
         .await?;
         self.publishers = Some(handles);
@@ -803,10 +835,12 @@ impl Worker {
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.observe_cleanup_time(cleanup_elapsed);
         }
-        // Drop publisher handles AFTER engine.cleanup so the engine's
-        // last snapshot writes complete. There is no background task to
-        // join — snapshot writes are event-driven (engine pushes
-        // synchronously); KV-event publishers own their own threads.
+        // Stop KV-event sources and conditionally unregister the worker-owned
+        // Valkey lease AFTER engine cleanup so the engine's final writes have
+        // completed. Crash paths remain covered by server-side lease expiry.
+        if let Some(publishers) = self.publishers.as_mut() {
+            publishers.shutdown().await;
+        }
         self.publishers = None;
         // Mark stopped even on failure so a follow-up call no-ops; engines
         // like vLLM/TRT-LLM tear down NCCL groups in cleanup() and a second
@@ -1694,6 +1728,109 @@ async fn build_local_model(
     })
 }
 
+struct DirectValkeyRegistrationPlan {
+    config: ValkeyWorkerConfig,
+    dp_ranks: Vec<u32>,
+}
+
+fn direct_valkey_registration_plan(
+    component: &dynamo_runtime::component::Component,
+    raw_engine: bool,
+    worker_config: &WorkerConfig,
+    engine_config: &EngineConfig,
+) -> Result<Option<DirectValkeyRegistrationPlan>, DynamoError> {
+    let enabled = valkey_worker_events_enabled().map_err(|error| {
+        err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            error.to_string(),
+        )
+    })?;
+    if !enabled || raw_engine {
+        return Ok(None);
+    }
+    if !worker_config.enable_kv_routing {
+        return Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "DYN_ROUTER_VALKEY_WORKER_EVENTS requires enable_kv_routing=true for LLM workers; refusing to advertise without registration",
+        ));
+    }
+    let llm = engine_config.llm.as_ref().ok_or_else(|| {
+        err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "DYN_ROUTER_VALKEY_WORKER_EVENTS requires EngineConfig.llm for LLM workers; refusing to advertise without a DP range",
+        )
+    })?;
+    if llm
+        .kv_cache_block_size
+        .is_none_or(|block_size| block_size == 0)
+    {
+        return Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "DYN_ROUTER_VALKEY_WORKER_EVENTS requires a nonzero EngineConfig.llm.kv_cache_block_size; refusing to advertise unregistered worker ranks",
+        ));
+    }
+    let dp_ranks = valkey_registration_dp_ranks(engine_config)?;
+    let config = valkey_worker_config_from_env(component)
+        .map_err(|error| {
+            err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                error.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                "direct Valkey configuration disappeared during startup",
+            )
+        })?;
+    Ok(Some(DirectValkeyRegistrationPlan { config, dp_ranks }))
+}
+
+/// Derive the worker-owned DP range from registration metadata, independent
+/// of optional metrics bindings. Decode engines can legitimately publish no
+/// KV events and no per-rank metrics while still requiring admission records.
+fn valkey_registration_dp_ranks(engine_config: &EngineConfig) -> Result<Vec<u32>, DynamoError> {
+    let Some(llm) = engine_config.llm.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let start = llm.data_parallel_start_rank.unwrap_or(0);
+    let size = llm.data_parallel_size.unwrap_or(1);
+    if size == 0 || size > MAX_VALKEY_WORKER_RANKS {
+        return Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            format!(
+                "Valkey worker registration requires data_parallel_size in 1..={MAX_VALKEY_WORKER_RANKS}; got {size}"
+            ),
+        ));
+    }
+    let end = u64::from(start) + u64::from(size);
+    if end > u64::from(u32::MAX) + 1 {
+        return Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            format!("Valkey worker DP range overflows u32: start={start}, size={size}"),
+        ));
+    }
+    Ok((u64::from(start)..end).map(|rank| rank as u32).collect())
+}
+
+fn validate_valkey_source_ranks(
+    source_ranks: impl IntoIterator<Item = u32>,
+    owned_ranks: &[u32],
+) -> Result<(), DynamoError> {
+    if let Some(source_rank) = source_ranks
+        .into_iter()
+        .find(|rank| owned_ranks.binary_search(rank).is_err())
+    {
+        return Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            format!(
+                "KV event source DP rank {source_rank} is outside the EngineConfig-owned Valkey range {owned_ranks:?}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1706,6 +1843,83 @@ mod tests {
     fn parse_endpoint_types_happy_path() {
         let got = parse_endpoint_types("chat,completions").unwrap();
         assert_eq!(got, ModelType::Chat | ModelType::Completions);
+    }
+
+    #[test]
+    fn valkey_registration_ranks_use_engine_dp_range() {
+        let engine_config = EngineConfig {
+            llm: Some(crate::engine::LlmRegistration {
+                data_parallel_start_rank: Some(3),
+                data_parallel_size: Some(4),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            valkey_registration_dp_ranks(&engine_config).unwrap(),
+            vec![3, 4, 5, 6]
+        );
+    }
+
+    #[test]
+    fn valkey_registration_ranks_default_to_one_and_skip_raw_engines() {
+        let llm = EngineConfig {
+            llm: Some(crate::engine::LlmRegistration::default()),
+            ..Default::default()
+        };
+        assert_eq!(valkey_registration_dp_ranks(&llm).unwrap(), vec![0]);
+        assert!(
+            valkey_registration_dp_ranks(&EngineConfig::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn valkey_registration_ranks_reject_zero_and_overflow() {
+        for (start, size) in [(0, 0), (u32::MAX, 2)] {
+            let engine_config = EngineConfig {
+                llm: Some(crate::engine::LlmRegistration {
+                    data_parallel_start_rank: Some(start),
+                    data_parallel_size: Some(size),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let error = valkey_registration_dp_ranks(&engine_config).unwrap_err();
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::InvalidArgument)
+            );
+        }
+    }
+
+    #[test]
+    fn valkey_registration_ranks_accept_last_u32_rank() {
+        let engine_config = EngineConfig {
+            llm: Some(crate::engine::LlmRegistration {
+                data_parallel_start_rank: Some(u32::MAX),
+                data_parallel_size: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            valkey_registration_dp_ranks(&engine_config).unwrap(),
+            vec![u32::MAX]
+        );
+    }
+
+    #[test]
+    fn valkey_source_ranks_must_be_a_subset_of_owned_topology() {
+        validate_valkey_source_ranks([], &[3, 4, 5]).unwrap();
+        validate_valkey_source_ranks([3, 5], &[3, 4, 5]).unwrap();
+        let error = validate_valkey_source_ranks([2, 3], &[3, 4, 5]).unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(error.to_string().contains("DP rank 2"));
     }
 
     #[test]
@@ -2843,7 +3057,7 @@ mod tests {
         let cfg = RuntimeConfig {
             discovery_backend: Some("file".to_string()),
             request_plane: Some("tcp".to_string()),
-            event_plane: Some("zmq".to_string()),
+            event_plane: Some(EventTransportKind::Zmq),
         };
 
         let mut applied = Vec::new();

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use std::str::FromStr;
 use tokio_util::sync::CancellationToken;
 
 mod metadata;
@@ -23,7 +24,7 @@ pub mod utils;
 use crate::component::{DeviceType, TransportType};
 pub use utils::watch_and_extract_field;
 
-/// Transport kind for event plane - used for configuration and env var selection.
+/// Native generic event-plane transport kind.
 ///
 /// This enum represents the *type* of transport without connection details.
 /// Use `EventTransport` when you need the full transport configuration.
@@ -37,35 +38,44 @@ pub enum EventTransportKind {
     Zmq,
 }
 
+impl FromStr for EventTransportKind {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "nats" => Ok(Self::Nats),
+            "zmq" => Ok(Self::Zmq),
+            other => anyhow::bail!(
+                "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'",
+                other
+            ),
+        }
+    }
+}
+
 impl EventTransportKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Nats => "nats",
+            Self::Zmq => "zmq",
+        }
+    }
+
     /// Parse from environment variable `DYN_EVENT_PLANE`.
     ///
-    /// Returns `Zmq` if the variable is not set or is empty: ZMQ is the default
-    /// event plane for all backends. NATS remains available as an explicit opt-in
-    /// (`DYN_EVENT_PLANE=nats`). When you have access to a runtime, prefer
-    /// [`DistributedRuntime::default_event_transport_kind`], which resolves the same
-    /// default through the configured discovery backend.
+    /// Returns `Zmq` if the variable is unset or empty. NATS remains an
+    /// explicit opt-in.
+    /// When you have access to a runtime, prefer
+    /// [`DistributedRuntime::default_event_transport_kind`].
     ///
     /// Returns an error for unrecognised values.
     pub fn from_env() -> Result<Self> {
         match std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
             .as_deref()
         {
-            Ok("nats") => Ok(Self::Nats),
-            Ok("zmq") | Ok("") | Err(_) => Ok(Self::Zmq),
-            Ok(other) => anyhow::bail!(
-                "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'",
-                other
-            ),
+            Ok("") | Err(_) => Ok(Self::Zmq),
+            Ok(value) => value.parse(),
         }
-    }
-
-    /// Logs a warning if an invalid value is encountered.
-    pub fn from_env_or_default() -> Self {
-        Self::from_env().unwrap_or_else(|e| {
-            tracing::warn!("{e}, defaulting to ZMQ");
-            Self::Zmq
-        })
     }
 
     /// Get the default codec for this transport kind.
@@ -865,4 +875,23 @@ pub trait Discovery: Send + Sync {
     /// For KV store backends, this deletes owned registrations immediately rather than
     /// waiting for TTL expiry. Default is a no-op for backends that don't need cleanup.
     fn shutdown(&self) {}
+}
+
+#[cfg(test)]
+mod event_plane_mode_tests {
+    use super::EventTransportKind;
+
+    #[test]
+    fn parses_supported_event_plane_modes() {
+        assert_eq!(
+            "nats".parse::<EventTransportKind>().unwrap(),
+            EventTransportKind::Nats
+        );
+        assert_eq!(
+            "zmq".parse::<EventTransportKind>().unwrap(),
+            EventTransportKind::Zmq
+        );
+        assert!("valkey".parse::<EventTransportKind>().is_err());
+        assert!("invalid".parse::<EventTransportKind>().is_err());
+    }
 }

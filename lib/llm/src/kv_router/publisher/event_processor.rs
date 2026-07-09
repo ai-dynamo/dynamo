@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -17,13 +18,46 @@ use crate::kv_router::metrics::kv_publisher_metrics;
 use super::DEFAULT_MAX_BATCH_BLOCKS;
 use super::batching::BatchingState;
 use super::dedup::EventDedupFilter;
-use super::sinks::{JetStreamPublisher, emit};
+use super::sinks::{IntegrityState, JetStreamPublisher, ValkeyEventPublisher, emit};
+use super::{PlacementEventReceiver, PublisherInput};
 
+async fn wait_for_integrity_signal(recovery: Option<&ValkeyEventPublisher>) {
+    match recovery {
+        Some(recovery) => recovery.integrity().wait_for_state_change().await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
 pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    mut rx: mpsc::UnboundedReceiver<PlacementEvent>,
+    rx: mpsc::UnboundedReceiver<PlacementEvent>,
+    local_indexer: Option<Arc<LocalKvIndexer>>,
+    timeout_ms: Option<u64>,
+    max_batch_blocks: usize,
+) {
+    run_event_processor_loop_inner(
+        publisher,
+        None,
+        worker_id,
+        cancellation_token,
+        PlacementEventReceiver::Unbounded(rx),
+        local_indexer,
+        timeout_ms,
+        max_batch_blocks,
+    )
+    .await;
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn run_event_processor_loop_inner<P: RouterEventSink + Send + Sync + 'static>(
+    publisher: P,
+    recovery: Option<ValkeyEventPublisher>,
+    worker_id: u64,
+    cancellation_token: CancellationToken,
+    mut rx: PlacementEventReceiver,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     timeout_ms: Option<u64>,
     max_batch_blocks: usize,
@@ -31,24 +65,91 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
     let mut batching_state = BatchingState::new();
     let mut dedup = EventDedupFilter::new();
     let mut last_raw_input_id: Option<u64> = None;
+    let mut draining = false;
 
     loop {
-        tokio::select! {
-            _ = cancellation_token.cancelled() => {
-                tracing::info!("KV Event source received cancellation signal");
-                batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+        if let Some(recovery) = &recovery
+            && recovery.integrity().state() != IntegrityState::Healthy
+        {
+            // Nothing accepted before an integrity fault may be published.
+            // The process stays fenced, so discard all bounded old ingress.
+            batching_state = BatchingState::new();
+            dedup.clear();
+            last_raw_input_id = None;
+            while rx.try_recv().is_ok() {
+                if let Some(metrics) = kv_publisher_metrics() {
+                    metrics.increment_input_dropped_event("integrity_fenced_queue");
+                }
+            }
+
+            if draining || cancellation_token.is_cancelled() {
+                rx.close();
+                tracing::warn!(
+                    worker_id,
+                    "Stopping a faulted direct-Valkey publisher during bounded shutdown; worker unregister/lease expiry remains the final fence"
+                );
                 break;
             }
-            event = rx.recv() => {
-                let Some(placement_event) = event else {
+
+            match recovery.integrity().state() {
+                IntegrityState::Faulted => {
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => continue,
+                        _ = recovery.integrity().fence_once() => {}
+                    }
+                }
+                IntegrityState::Fencing | IntegrityState::Fenced => {
+                    // Another DP-rank owns the best-effort unregister, or it
+                    // has finished. Remain fenced until process shutdown.
+                    tokio::select! {
+                        _ = cancellation_token.cancelled() => {}
+                        _ = recovery.integrity().wait_for_state_change() => {}
+                        input = rx.recv() => {
+                            if input.is_some() {
+                                if let Some(metrics) = kv_publisher_metrics() {
+                                    metrics.increment_input_dropped_event("integrity_fenced_queue");
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+                IntegrityState::Healthy => {}
+            }
+            continue;
+        }
+
+        tokio::select! {
+            _ = wait_for_integrity_signal(recovery.as_ref()), if recovery.is_some() => {
+                continue;
+            }
+            _ = cancellation_token.cancelled(), if !draining => {
+                tracing::info!("KV Event source received cancellation signal; draining queued events");
+                // Reject new events while preserving every event accepted before
+                // shutdown. The owner lease remains live until this loop exits.
+                rx.close();
+                draining = true;
+            }
+            input = rx.recv() => {
+                let Some(PublisherInput { event: placement_event }) = input else {
                     tracing::debug!("Event processor channel closed.");
                     batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
                     break;
                 };
 
+                if let Some(recovery) = &recovery
+                    && recovery.integrity().state() != IntegrityState::Healthy
+                {
+                    if let Some(metrics) = kv_publisher_metrics() {
+                        metrics.increment_input_dropped_event("integrity_fenced_queue");
+                    }
+                    continue;
+                }
+
                 let raw_event_id = placement_event.event.event_id;
                 if let Some(last_id) = last_raw_input_id
-                    && raw_event_id > last_id + 1
+                    && raw_event_id > last_id.saturating_add(1)
                 {
                     let gap = raw_event_id - last_id - 1;
                     tracing::warn!(
@@ -67,6 +168,29 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                             "Failed to record dropped events metric: metrics not initialized"
                         );
                     }
+                    if let Some(recovery) = &recovery {
+                        recovery.integrity().mark_fault("raw_event_gap");
+                        if let Some(metrics) = kv_publisher_metrics() {
+                            metrics.increment_input_dropped_event("raw_event_gap");
+                        }
+                        continue;
+                    }
+                }
+                if let Some(last_id) = last_raw_input_id
+                    && raw_event_id <= last_id
+                    && let Some(recovery) = &recovery
+                {
+                    tracing::error!(
+                        worker_id,
+                        last_raw_input_id = last_id,
+                        raw_event_id,
+                        "Input event id regressed or repeated; fencing direct-Valkey metadata"
+                    );
+                    recovery.integrity().mark_fault("raw_event_regression");
+                    if let Some(metrics) = kv_publisher_metrics() {
+                        metrics.increment_input_dropped_event("raw_event_regression");
+                    }
+                    continue;
                 }
                 last_raw_input_id = Some(raw_event_id);
 
@@ -153,18 +277,51 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
             }
         }
     }
+
+    // Direct Valkey publication returns after bounded queue acceptance so
+    // rank processors can fill worker-sized pipelines. Do not let graceful
+    // shutdown unregister the owner lease until every accepted normalized
+    // event has committed or the shared integrity domain has fenced it.
+    if let Some(recovery) = &recovery {
+        recovery.integrity().wait_for_idle().await;
+    }
 }
 
 pub(super) async fn start_event_processor<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    rx: mpsc::UnboundedReceiver<PlacementEvent>,
+    rx: impl Into<PlacementEventReceiver>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
 ) {
-    run_event_processor_loop(
+    run_event_processor_loop_inner(
         publisher,
+        None,
+        worker_id,
+        cancellation_token,
+        rx.into(),
+        local_indexer,
+        batching_timeout_ms,
+        DEFAULT_MAX_BATCH_BLOCKS,
+    )
+    .await
+}
+
+pub(super) async fn start_direct_valkey_event_processor<
+    P: RouterEventSink + Send + Sync + 'static,
+>(
+    publisher: P,
+    recovery: ValkeyEventPublisher,
+    worker_id: u64,
+    cancellation_token: CancellationToken,
+    rx: PlacementEventReceiver,
+    local_indexer: Option<Arc<LocalKvIndexer>>,
+    batching_timeout_ms: Option<u64>,
+) {
+    run_event_processor_loop_inner(
+        publisher,
+        Some(recovery),
         worker_id,
         cancellation_token,
         rx,
@@ -179,15 +336,16 @@ pub(super) async fn start_event_processor_jetstream(
     publisher: NatsQueue,
     worker_id: u64,
     cancellation_token: CancellationToken,
-    rx: mpsc::UnboundedReceiver<PlacementEvent>,
+    rx: impl Into<PlacementEventReceiver>,
     local_indexer: Option<Arc<LocalKvIndexer>>,
     batching_timeout_ms: Option<u64>,
 ) {
-    run_event_processor_loop(
+    run_event_processor_loop_inner(
         JetStreamPublisher(publisher),
+        None,
         worker_id,
         cancellation_token,
-        rx,
+        rx.into(),
         local_indexer,
         batching_timeout_ms,
         DEFAULT_MAX_BATCH_BLOCKS,

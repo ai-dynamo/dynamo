@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::StreamExt;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::protocols::*;
@@ -14,17 +13,40 @@ use dynamo_kv_router::zmq_wire::*;
 use crate::kv_router::metrics::kv_publisher_metrics;
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
+use super::PlacementEventSender;
+
+fn sequence_fault(last_sequence: Option<u64>, sequence: u64) -> Option<(&'static str, u64)> {
+    last_sequence.and_then(|last_sequence| {
+        if sequence > last_sequence.saturating_add(1) {
+            Some((
+                "zmq_sequence_gap",
+                sequence - last_sequence.saturating_add(1),
+            ))
+        } else if sequence <= last_sequence {
+            Some(("zmq_sequence_regression", 1))
+        } else {
+            None
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn start_zmq_listener(
+pub(super) async fn start_zmq_listener<T>(
     zmq_endpoint: String,
     zmq_topic: String,
     worker_id: WorkerId,
-    tx: mpsc::UnboundedSender<PlacementEvent>,
+    tx: T,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
     next_event_id: Arc<AtomicU64>,
     image_token_id: Option<u32>,
-) {
+) where
+    T: Into<PlacementEventSender>,
+{
+    let tx = tx.into();
+    if cancellation_token.is_cancelled() {
+        return;
+    }
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
         zmq_endpoint,
@@ -36,6 +58,11 @@ pub(super) async fn start_zmq_listener(
         Ok(socket) => socket,
         Err(error) => {
             tracing::error!(endpoint = %zmq_endpoint, topic = %zmq_topic, error = %error, "ZMQ listener failed to connect");
+            if !cancellation_token.is_cancelled()
+                && let Some(integrity) = tx.integrity()
+            {
+                integrity.mark_fault("zmq_connect_error");
+            }
             return;
         }
     };
@@ -47,6 +74,7 @@ pub(super) async fn start_zmq_listener(
     }
 
     let mut messages_processed = 0u64;
+    let mut last_engine_seq: Option<u64> = None;
 
     let exit_reason = 'main: loop {
         tokio::select! {
@@ -62,9 +90,17 @@ pub(super) async fn start_zmq_listener(
                     Some(Ok(frames)) => multipart_message(frames),
                     Some(Err(error)) => {
                         tracing::error!(endpoint = %zmq_endpoint, error = %error, "ZMQ listener recv failed");
+                        if let Some(integrity) = tx.integrity() {
+                            integrity.mark_fault("zmq_recv_error");
+                        }
                         break 'main format!("ZMQ recv failed: {error}");
                     }
-                    None => break 'main String::from("ZMQ stream ended"),
+                    None => {
+                        if let Some(integrity) = tx.integrity() {
+                            integrity.mark_fault("zmq_stream_ended");
+                        }
+                        break 'main String::from("ZMQ stream ended");
+                    }
                 };
                 let mut frames = frames;
 
@@ -73,6 +109,9 @@ pub(super) async fn start_zmq_listener(
                         "Received unexpected ZMQ frame count: expected 3, actual {}",
                         frames.len()
                     );
+                    if let Some(integrity) = tx.integrity() {
+                        integrity.mark_fault("zmq_frame_error");
+                    }
                     continue;
                 }
 
@@ -84,6 +123,9 @@ pub(super) async fn start_zmq_listener(
                         "Invalid sequence number byte length: expected 8, actual {}",
                         seq_bytes.len()
                     );
+                    if let Some(integrity) = tx.integrity() {
+                        integrity.mark_fault("zmq_sequence_error");
+                    }
                     continue;
                 }
 
@@ -93,8 +135,33 @@ pub(super) async fn start_zmq_listener(
                 let Ok(batch) = batch_result else {
                     let e = batch_result.unwrap_err();
                     tracing::warn!("Failed to decode KVEventBatch msgpack: {e}");
+                    if let Some(integrity) = tx.integrity() {
+                        integrity.mark_fault("zmq_decode_error");
+                    }
                     continue;
                 };
+
+                let sequence_issue = sequence_fault(last_engine_seq, engine_seq);
+                last_engine_seq = Some(engine_seq);
+                if let Some((reason, missing_batches)) = sequence_issue
+                    && let Some(integrity) = tx.integrity()
+                {
+                    tracing::error!(
+                        worker_id,
+                        engine_seq,
+                        missing_batches,
+                        reason,
+                        "ZMQ KV event batch sequence lost continuity; fencing direct-Valkey metadata"
+                    );
+                    integrity.mark_fault(reason);
+                    if let Some(metrics) = &metrics {
+                        metrics.increment_engines_dropped_events(missing_batches);
+                        for _ in &batch.events {
+                            metrics.increment_input_dropped_event(reason);
+                        }
+                    }
+                    continue;
+                }
 
                 tracing::trace!(
                     "ZMQ listener on {} received batch with {} events (engine_seq={}, dp_rank={})",
@@ -130,6 +197,9 @@ pub(super) async fn start_zmq_listener(
                         if let Some(metrics) = &metrics {
                             metrics.increment_zmq_conversion_issue(event_type, "conversion_none");
                         }
+                        if let Some(integrity) = tx.integrity() {
+                            integrity.mark_fault("zmq_conversion_error");
+                        }
                         continue;
                     };
                     if matches!(event.event.data, KvCacheEventData::Stored(ref data) if data.blocks.is_empty())
@@ -137,9 +207,15 @@ pub(super) async fn start_zmq_listener(
                     {
                         metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
                     }
-                    if tx.send(event).is_err() {
-                        tracing::warn!("Failed to send message to channel - receiver dropped");
-                        break 'main String::from("channel receiver dropped");
+                    if let Err(error) = tx.send(event) {
+                        if error.is_closed() {
+                            tracing::warn!("Failed to send message to channel - receiver dropped");
+                            break 'main String::from("channel receiver dropped");
+                        }
+                        // Bounded direct-Valkey ingress has already recorded
+                        // and fenced this overflow/fault. Keep consuming ZMQ so
+                        // its socket cannot accumulate unbounded process memory.
+                        continue;
                     }
                     messages_processed += 1;
                 }
@@ -152,4 +228,24 @@ pub(super) async fn start_zmq_listener(
         exit_reason,
         messages_processed
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sequence_fault;
+
+    #[test]
+    fn detects_zmq_sequence_gap_and_regression() {
+        assert_eq!(sequence_fault(None, 9), None);
+        assert_eq!(sequence_fault(Some(9), 10), None);
+        assert_eq!(sequence_fault(Some(9), 12), Some(("zmq_sequence_gap", 2)));
+        assert_eq!(
+            sequence_fault(Some(9), 9),
+            Some(("zmq_sequence_regression", 1))
+        );
+        assert_eq!(
+            sequence_fault(Some(u64::MAX), 0),
+            Some(("zmq_sequence_regression", 1))
+        );
+    }
 }
