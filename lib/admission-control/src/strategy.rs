@@ -336,15 +336,15 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                     self.paused.shift_remove(&request.session_id);
                 }
             }
-        } else if let Some(context_tokens) = completed_context_tokens {
-            if let Some(program) = self.programs.get_mut(&request.session_id) {
-                program.token_total = context_tokens;
-                program.status = ProgramStatus::Acting;
-                program.acting_since = Some(Instant::now());
-                let pause = std::mem::take(&mut program.marked_for_pause);
-                if pause {
-                    self.pause_acting(&request.session_id);
-                }
+        } else if let Some(context_tokens) = completed_context_tokens
+            && let Some(program) = self.programs.get_mut(&request.session_id)
+        {
+            program.token_total = context_tokens;
+            program.status = ProgramStatus::Acting;
+            program.acting_since = Some(Instant::now());
+            let pause = std::mem::take(&mut program.marked_for_pause);
+            if pause {
+                self.pause_acting(&request.session_id);
             }
         }
 

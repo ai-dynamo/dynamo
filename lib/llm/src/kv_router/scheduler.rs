@@ -63,40 +63,6 @@ where
         model_name: Option<&str>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
-        Self::start_with_admission_strategies(
-            component,
-            block_size,
-            workers_with_configs,
-            selector,
-            kv_router_config,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-            model_name,
-            worker_type,
-            PolicyClassAdmissionStrategies::new(),
-        )
-        .await
-    }
-
-    /// Start the scheduler with caller-provided policy-class strategies.
-    ///
-    /// A provided class strategy overrides built-in construction for that
-    /// class; configured built-ins are still created for other classes.
-    #[expect(clippy::too_many_arguments)]
-    pub async fn start_with_admission_strategies(
-        component: Component,
-        block_size: u32,
-        workers_with_configs: RuntimeConfigWatch,
-        selector: Sel,
-        kv_router_config: &KvRouterConfig,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<RF>>,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        model_name: Option<&str>,
-        worker_type: &'static str,
-        provided_strategies: PolicyClassAdmissionStrategies,
-    ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
@@ -119,7 +85,7 @@ where
         let profile = kv_router_config
             .policy_profile(model_name)
             .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
-        let mut admission_strategies = provided_strategies;
+        let mut admission_strategies = PolicyClassAdmissionStrategies::new();
         register_builtin_strategies(
             &profile,
             workers_with_configs.clone(),
@@ -482,10 +448,6 @@ fn update_queue_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_kv_router::scheduling::{
-        AdmissionDecision, AdmissionRequest, PolicyClassAdmissionStrategy, RouterPolicyConfig,
-        WorkerPlacement,
-    };
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::sync::watch;
 
@@ -498,26 +460,6 @@ mod tests {
         namespace
             .component(format!("test-component-{name}"))
             .unwrap()
-    }
-
-    struct CustomStrategy;
-
-    impl PolicyClassAdmissionStrategy for CustomStrategy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
-            AdmissionDecision::Ready(WorkerPlacement::Any)
-        }
-    }
-
-    struct ZeroIntervalStrategy;
-
-    impl PolicyClassAdmissionStrategy for ZeroIntervalStrategy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
-            AdmissionDecision::Bypass
-        }
-
-        fn reconcile_interval(&self) -> Option<Duration> {
-            Some(Duration::ZERO)
-        }
     }
 
     #[test]
@@ -550,108 +492,6 @@ mod tests {
                 stats.pending_cached_tokens as i64
             );
         }
-    }
-
-    #[test]
-    fn builds_thunderagent_from_policy_class_options() {
-        let profile = RouterPolicyConfig::from_yaml(
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: agents
-    policy_family: standard
-    cache_bucket: all
-    queue_admission:
-      type: session_aware
-      pause_threshold: 0.7
-      pause_target: 0.6
-      resume_hysteresis: 0.05
-    quantum: 1
-"#,
-        )
-        .unwrap()
-        .resolve_profile(None, None, dynamo_kv_router::RouterQueuePolicy::Fcfs);
-        let (_tx, rx) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
-        let mut strategies = PolicyClassAdmissionStrategies::new();
-        register_builtin_strategies(&profile, rx, 16, &mut strategies).unwrap();
-        assert!(strategies.contains_key("agents"));
-        assert_eq!(
-            strategies["agents"].reconcile_interval(),
-            Some(Duration::from_secs(5))
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_admission_strategy_at_composition_boundary() {
-        let profile = RouterPolicyConfig::from_yaml(
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: agents
-    policy_family: standard
-    cache_bucket: all
-    queue_admission:
-      type: custom
-    quantum: 1
-"#,
-        )
-        .unwrap()
-        .resolve_profile(None, None, dynamo_kv_router::RouterQueuePolicy::Fcfs);
-        let (_tx, rx) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
-        let mut strategies = PolicyClassAdmissionStrategies::new();
-        let error = register_builtin_strategies(&profile, rx, 16, &mut strategies).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported queue admission strategy")
-        );
-    }
-
-    #[test]
-    fn caller_can_supply_custom_strategy_without_composition_changes() {
-        let profile = RouterPolicyConfig::from_yaml(
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: agents
-    policy_family: standard
-    cache_bucket: all
-    queue_admission:
-      type: custom
-    quantum: 1
-"#,
-        )
-        .unwrap()
-        .resolve_profile(None, None, dynamo_kv_router::RouterQueuePolicy::Fcfs);
-        let (_tx, rx) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
-        let mut provided = PolicyClassAdmissionStrategies::new();
-        provided.insert("agents".to_owned(), Box::new(CustomStrategy));
-
-        register_builtin_strategies(&profile, rx, 16, &mut provided).unwrap();
-
-        assert!(provided.contains_key("agents"));
-        assert_eq!(provided["agents"].reconcile_interval(), None);
-    }
-
-    #[test]
-    fn rejects_zero_strategy_reconcile_interval() {
-        let mut strategies = PolicyClassAdmissionStrategies::new();
-        strategies.insert("agents".to_owned(), Box::new(ZeroIntervalStrategy));
-        assert!(
-            strategy_recheck_interval(&strategies)
-                .unwrap_err()
-                .to_string()
-                .contains("reconcile interval must be positive")
-        );
     }
 
     #[tokio::test]

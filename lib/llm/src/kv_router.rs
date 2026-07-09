@@ -251,43 +251,6 @@ where
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
-        Self::new_with_admission_strategies(
-            endpoint,
-            client,
-            workers_with_configs,
-            block_size,
-            selector,
-            kv_router_config,
-            prefill_load_estimator,
-            worker_type,
-            model_name,
-            is_eagle,
-            shared_cache,
-            lora_filter,
-            scheduling::PolicyClassAdmissionStrategies::new(),
-        )
-        .await
-    }
-
-    /// Construct a router with caller-provided policy-class admission
-    /// strategies. Provided strategies override built-in construction for the
-    /// matching class without changing queue internals.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn new_with_admission_strategies(
-        endpoint: Endpoint,
-        client: Client,
-        workers_with_configs: RuntimeConfigWatch,
-        block_size: u32,
-        selector: Sel,
-        kv_router_config: Option<KvRouterConfig>,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        worker_type: &'static str,
-        model_name: Option<String>,
-        is_eagle: bool,
-        shared_cache: Option<Box<dyn SharedKvCache>>,
-        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
-        admission_strategies: scheduling::PolicyClassAdmissionStrategies,
-    ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
         let component = endpoint.component();
@@ -326,7 +289,7 @@ where
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
-        let scheduler = KvScheduler::start_with_admission_strategies(
+        let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
             workers_with_configs.clone(),
@@ -337,7 +300,6 @@ where
             Some(overloaded_worker_provider),
             model_name.as_deref(),
             worker_type,
-            admission_strategies,
         )
         .await?;
 

@@ -91,3 +91,121 @@ pub fn strategy_recheck_interval(
     }
     Ok(minimum)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_kv_router::scheduling::{
+        AdmissionDecision, AdmissionRequest, PolicyClassAdmissionStrategy, RouterPolicyConfig,
+        WorkerPlacement,
+    };
+
+    struct TestWorkerConfig;
+
+    impl WorkerConfigLike for TestWorkerConfig {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            1
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            Some(1)
+        }
+    }
+
+    struct CustomStrategy;
+
+    impl PolicyClassAdmissionStrategy for CustomStrategy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Ready(WorkerPlacement::Any)
+        }
+    }
+
+    struct ZeroIntervalStrategy;
+
+    impl PolicyClassAdmissionStrategy for ZeroIntervalStrategy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Bypass
+        }
+
+        fn reconcile_interval(&self) -> Option<Duration> {
+            Some(Duration::ZERO)
+        }
+    }
+
+    fn profile(strategy: &str) -> PolicyProfile {
+        RouterPolicyConfig::from_yaml(&format!(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: agents
+    policy_family: standard
+    cache_bucket: all
+    queue_admission:
+      type: {strategy}
+    quantum: 1
+"#
+        ))
+        .unwrap()
+        .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
+    }
+
+    fn workers() -> watch::Receiver<HashMap<WorkerId, TestWorkerConfig>> {
+        watch::channel(HashMap::new()).1
+    }
+
+    #[test]
+    fn builds_configured_thunderagent() {
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        register_builtin_strategies(&profile(STRATEGY_NAME), workers(), 16, &mut strategies)
+            .unwrap();
+
+        assert_eq!(
+            strategies["agents"].reconcile_interval(),
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_strategy() {
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        let error = register_builtin_strategies(&profile("custom"), workers(), 16, &mut strategies)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RegistrationError::UnsupportedStrategy { .. }
+        ));
+    }
+
+    #[test]
+    fn preserves_caller_provided_strategy() {
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        strategies.insert("agents".to_owned(), Box::new(CustomStrategy));
+
+        register_builtin_strategies(&profile("custom"), workers(), 16, &mut strategies).unwrap();
+
+        assert_eq!(strategies["agents"].reconcile_interval(), None);
+    }
+
+    #[test]
+    fn rejects_zero_reconcile_interval() {
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        strategies.insert("agents".to_owned(), Box::new(ZeroIntervalStrategy));
+
+        assert!(matches!(
+            strategy_recheck_interval(&strategies),
+            Err(RegistrationError::ZeroReconcileInterval)
+        ));
+    }
+}
