@@ -481,43 +481,19 @@ func dgdHubComponentOriginSaveNeeded(src *v1beta1.DynamoComponentDeploymentShare
 }
 
 func marshalDGDHubSpec(src *v1beta1.DynamoGraphDeploymentSpec) ([]byte, error) {
-	return marshalPreservedSpec(*src.DeepCopy(), func(spec *v1beta1.DynamoGraphDeploymentSpec, records *[]preservedRawJSON) {
-		for i := range spec.Components {
-			if spec.Components[i].EPPConfig != nil {
-				preserveEPPPluginParameters(spec.Components[i].EPPConfig.Config, fmt.Sprintf("components/%d/eppConfig/config", i), records)
-			}
-		}
-	})
+	return marshalPreservedSpec(*src.DeepCopy(), func(*v1beta1.DynamoGraphDeploymentSpec, *[]preservedRawJSON) {})
 }
 
 func restoreDGDHubSpec(raw string) (v1beta1.DynamoGraphDeploymentSpec, bool) {
-	return restorePreservedSpec(raw, func(spec *v1beta1.DynamoGraphDeploymentSpec, records []preservedRawJSON) {
-		for i := range spec.Components {
-			if spec.Components[i].EPPConfig != nil {
-				restoreEPPPluginParameters(spec.Components[i].EPPConfig.Config, fmt.Sprintf("components/%d/eppConfig/config", i), records)
-			}
-		}
-	})
+	return restorePreservedSpec(raw, func(*v1beta1.DynamoGraphDeploymentSpec, []preservedRawJSON) {})
 }
 
 func marshalDGDSpokeSpec(src *DynamoGraphDeploymentSpec) ([]byte, error) {
-	return marshalPreservedSpec(*src.DeepCopy(), func(spec *DynamoGraphDeploymentSpec, records *[]preservedRawJSON) {
-		for name, svc := range spec.Services {
-			if svc != nil && svc.EPPConfig != nil {
-				preserveEPPPluginParameters(svc.EPPConfig.Config, fmt.Sprintf("services/%s/eppConfig/config", name), records)
-			}
-		}
-	})
+	return marshalPreservedSpec(*src.DeepCopy(), func(*DynamoGraphDeploymentSpec, *[]preservedRawJSON) {})
 }
 
 func restoreDGDSpokeSpec(raw string) (DynamoGraphDeploymentSpec, bool) {
-	return restorePreservedSpec(raw, func(spec *DynamoGraphDeploymentSpec, records []preservedRawJSON) {
-		for name, svc := range spec.Services {
-			if svc != nil && svc.EPPConfig != nil {
-				restoreEPPPluginParameters(svc.EPPConfig.Config, fmt.Sprintf("services/%s/eppConfig/config", name), records)
-			}
-		}
-	})
+	return restorePreservedSpec(raw, func(*DynamoGraphDeploymentSpec, []preservedRawJSON) {})
 }
 
 func hasDGDSpokeAnnotations(obj metav1.Object) bool {

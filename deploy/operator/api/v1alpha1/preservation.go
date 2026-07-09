@@ -19,9 +19,6 @@ package v1alpha1
 
 import (
 	"encoding/json"
-	"fmt"
-
-	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 type preservedSpecEnvelope[T any] struct {
@@ -69,46 +66,4 @@ func restorePreservedSpec[T any](raw string, apply func(*T, []preservedRawJSON))
 		apply(&envelope.Spec, envelope.RawJSON)
 	}
 	return envelope.Spec, true
-}
-
-func preserveEPPPluginParameters(config *apixv1alpha1.EndpointPickerConfig, pathPrefix string, records *[]preservedRawJSON) {
-	if config == nil {
-		return
-	}
-	for i := range config.Plugins {
-		params := config.Plugins[i].Parameters
-		if params == nil {
-			*records = append(*records, preservedRawJSON{
-				Path: fmt.Sprintf("%s/plugins/%d/parameters", pathPrefix, i),
-				Nil:  true,
-			})
-		} else if !json.Valid(params) {
-			*records = append(*records, preservedRawJSON{
-				Path: fmt.Sprintf("%s/plugins/%d/parameters", pathPrefix, i),
-				Raw:  append([]byte(nil), params...),
-			})
-			config.Plugins[i].Parameters = nil
-		}
-	}
-}
-
-func restoreEPPPluginParameters(config *apixv1alpha1.EndpointPickerConfig, pathPrefix string, records []preservedRawJSON) {
-	if config == nil || len(records) == 0 {
-		return
-	}
-	byPath := make(map[string]preservedRawJSON, len(records))
-	for _, record := range records {
-		byPath[record.Path] = record
-	}
-	for i := range config.Plugins {
-		record, ok := byPath[fmt.Sprintf("%s/plugins/%d/parameters", pathPrefix, i)]
-		if !ok {
-			continue
-		}
-		if record.Nil {
-			config.Plugins[i].Parameters = nil
-		} else {
-			config.Plugins[i].Parameters = append([]byte(nil), record.Raw...)
-		}
-	}
 }

@@ -161,18 +161,21 @@ the matching `InferencePool`, so users apply the DGD and the route instead of ha
 ### EPP Component Configuration
 
 Start from the recipe EPP component and update the `DynamoGraphDeployment` for your cluster. Change
-deployment-level settings such as replicas and resources to fit gateway traffic volume. Change
-routing plugin settings only when you want different endpoint-selection behavior, then validate the
-result with production-like traffic.
+deployment-level settings such as replicas and resources to fit gateway traffic volume, and set the
+`DYN_*` environment values to match the worker backend.
 
 | Setting | When to change it | Rule |
 |---|---|---|
 | `replicas` and `podTemplate.spec.containers[].resources` | Scale or reserve capacity for EPP pods. | Keep EPP capacity aligned with gateway request volume. |
 | `DYN_MODEL_NAME` | Change the served model. | Match the worker model name. |
 | `DYN_KV_CACHE_BLOCK_SIZE` | Change the backend KV block size. | Match the backend `--block-size` value. |
-| `label-filter` parameters | Change worker topology labels or component names. | Keep filter labels and values aligned with worker pod labels. |
-| `schedulingProfiles[].plugins[].weight` | Adjust how much each scorer influences endpoint selection. | Tune scorer weights deliberately; keep required filters and the picker in the profile. |
-| scorer and picker plugins | Change the routing strategy. | Treat this as advanced EPP tuning and validate with traffic. |
+
+The Dynamo EPP runs the full Dynamo KV-aware router natively and is configured through `DYN_*`
+environment variables. It implements the GAIE
+[Lightweight Endpoint Picker (LW-EPP)](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/pkg/lwepp/README.md)
+`ext_proc` interface and does not use a plugin or scheduling-profile config. Disaggregated versus
+aggregated routing is determined automatically from the worker types registered through Dynamo
+discovery.
 
 For upstream Endpoint Picker Plugin (EPP) semantics, see the GAIE
 [Implementer's Guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/implementers.md)
@@ -180,47 +183,19 @@ and the
 [Endpoint Picker Protocol specification](https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/docs/proposals/004-endpoint-picker-protocol).
 For label-based endpoint selection, see the upstream
 [InferencePool configuration guide](https://gateway-api-inference-extension.sigs.k8s.io/api-types/inferencepool/#how-to-configure-an-inferencepool).
-The `label-filter` plugin shown here is Dynamo-specific; the component role label comes from the
-Dynamo [ComponentType](../api-reference.md#componenttype) field.
+The worker component role label comes from the Dynamo
+[ComponentType](../api-reference.md#componenttype) field.
 
 The operator reconciles the EPP `Deployment`, EPP `Service`, and generated `InferencePool` from the
 DGD. Tune the DGD first; patch generated resources only for short-lived debugging.
+
+The `DYN_*` environment values are runtime contracts between the EPP router logic and the workers.
+Update them when the worker backend changes.
 
 ```yaml
 - name: Epp
   type: epp
   replicas: 1
-  eppConfig:
-    config:
-      plugins:
-        - type: disagg-profile-handler
-        - name: decode-filter
-          type: label-filter
-          parameters:
-            label: nvidia.com/dynamo-component-type
-            validValues: [decode]
-            allowsNoLabel: true # Aggregated recipes can route unlabeled decode pods.
-        - name: dyn-decode
-          type: dyn-decode-scorer
-        - name: picker
-          type: max-score-picker
-      schedulingProfiles:
-        - name: decode
-          plugins:
-            - pluginRef: decode-filter
-              weight: 1 # Keep topology filters aligned with the worker labels.
-            - pluginRef: dyn-decode
-              weight: 1 # Tune scorer weights to change endpoint scoring.
-            - pluginRef: picker
-              weight: 1
-```
-
-The `DYN_*` environment values are runtime contracts between the EPP router logic and the workers.
-Update them when the worker backend changes; do not use them to tune scoring.
-
-```yaml
-- name: Epp
-  type: epp
   podTemplate:
     spec:
       containers:

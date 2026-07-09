@@ -113,7 +113,7 @@ func (v *SharedSpecValidatorV1Alpha1) Validate(ctx context.Context) (admission.W
 	if err := v.validateServiceAnnotations(); err != nil {
 		return nil, err
 	}
-	if err := v.validateEPPConfig(ctx); err != nil {
+	if err := v.validateEPPComponent(ctx); err != nil {
 		return nil, err
 	}
 	if err := v.validateGPUMemoryService(); err != nil {
@@ -228,8 +228,8 @@ func (v *SharedSpecValidatorV1Alpha1) validateServiceAnnotations() error {
 	return vllmDistributedExecutorBackendAnnotationError(annotationsPath, v.spec.Annotations)
 }
 
-// validateEPPConfig validates EPP-specific configuration constraints.
-func (v *SharedSpecValidatorV1Alpha1) validateEPPConfig(ctx context.Context) error {
+// validateEPPComponent validates EPP-component constraints.
+func (v *SharedSpecValidatorV1Alpha1) validateEPPComponent(ctx context.Context) error {
 	// Only validate if this is an EPP component
 	if v.spec.ComponentType != consts.ComponentTypeEPP {
 		return nil
@@ -250,28 +250,6 @@ func (v *SharedSpecValidatorV1Alpha1) validateEPPConfig(ctx context.Context) err
 	// EPP should have exactly 1 replica (optional constraint - can be relaxed if needed)
 	if v.spec.Replicas != nil && *v.spec.Replicas != 1 {
 		return fmt.Errorf("%s: EPP component must have exactly 1 replica (found %d replicas)", v.fieldPath, *v.spec.Replicas)
-	}
-
-	// EPP components MUST have EPPConfig
-	if v.spec.EPPConfig == nil {
-		return fmt.Errorf("%s.eppConfig is required for EPP components", v.fieldPath)
-	}
-
-	// Either ConfigMapRef or Config must be specified (no default)
-	if v.spec.EPPConfig.ConfigMapRef == nil && v.spec.EPPConfig.Config == nil {
-		return fmt.Errorf("%s.eppConfig: either configMapRef or config must be specified (no default configuration provided)", v.fieldPath)
-	}
-
-	// ConfigMapRef and Config are mutually exclusive
-	if v.spec.EPPConfig.ConfigMapRef != nil && v.spec.EPPConfig.Config != nil {
-		return fmt.Errorf("%s.eppConfig: configMapRef and config are mutually exclusive, only one can be specified", v.fieldPath)
-	}
-
-	// If ConfigMapRef is provided, validate it
-	if v.spec.EPPConfig.ConfigMapRef != nil {
-		if v.spec.EPPConfig.ConfigMapRef.Name == "" {
-			return fmt.Errorf("%s.eppConfig.configMapRef.name is required", v.fieldPath)
-		}
 	}
 
 	return nil
@@ -529,9 +507,6 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	if spec.Ingress != nil {
 		allErrs = append(allErrs, v.validateIngressSpecV1alpha1(spec.Ingress, fldPath.Child("ingress"))...)
 	}
-	if spec.EPPConfig != nil {
-		allErrs = append(allErrs, v.validateEPPConfigV1alpha1(spec.EPPConfig, fldPath.Child("eppConfig"))...)
-	}
 	if spec.FrontendSidecar != nil && spec.ExtraPodSpec != nil && spec.ExtraPodSpec.PodSpec != nil &&
 		hasContainerNamed(spec.ExtraPodSpec.PodSpec.Containers, consts.FrontendSidecarContainerName) {
 		allErrs = append(allErrs, field.Forbidden(
@@ -569,24 +544,6 @@ func (v *sharedValidation) validateIngressSpecV1alpha1(
 		return nil
 	}
 	return field.ErrorList{field.Required(fldPath.Child("host"), "is required when ingress is enabled")}
-}
-
-// validateEPPConfigV1alpha1 validates config. config and fldPath must not be nil.
-func (v *sharedValidation) validateEPPConfigV1alpha1(
-	config *nvidiacomv1alpha1.EPPConfig,
-	fldPath *field.Path,
-) field.ErrorList {
-	if (config.ConfigMapRef == nil) == (config.Config == nil) {
-		return field.ErrorList{field.Invalid(
-			fldPath,
-			nil,
-			"exactly one of configMapRef or config is required",
-		)}
-	}
-	if config.ConfigMapRef == nil || config.ConfigMapRef.Name != "" {
-		return nil
-	}
-	return field.ErrorList{field.Required(fldPath.Child("configMapRef", "name"), "is required")}
 }
 
 // validateFailoverSpecV1alpha1 validates failover. failover and fldPath must not be nil.

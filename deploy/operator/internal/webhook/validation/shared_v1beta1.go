@@ -85,12 +85,6 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				"EPP component must have exactly 1 replica",
 			))
 		}
-		if spec.EPPConfig == nil {
-			allErrs = append(allErrs, field.Required(fldPath.Child("eppConfig"), "is required for EPP components"))
-		}
-	}
-	if spec.EPPConfig != nil {
-		allErrs = append(allErrs, v.validateEPPConfig(spec.EPPConfig, fldPath.Child("eppConfig"))...)
 	}
 
 	if spec.FrontendSidecar != nil {
@@ -121,17 +115,6 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	return allErrs
-}
-
-// validateEPPConfig validates config. config and fldPath must not be nil.
-func (v *sharedValidation) validateEPPConfig(
-	config *nvidiacomv1beta1.EPPConfig,
-	fldPath *field.Path,
-) field.ErrorList {
-	if config.ConfigMapRef == nil || config.ConfigMapRef.Name != "" {
-		return nil
-	}
-	return field.ErrorList{field.Required(fldPath.Child("configMapRef", "name"), "is required")}
 }
 
 // validateTopologyConstraint validates constraint. constraint, specConstraint, and fldPath must not be nil.

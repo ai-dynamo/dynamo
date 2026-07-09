@@ -65,7 +65,6 @@ func stripV1alpha1NonPodTemplateFields(spec *DynamoComponentDeploymentSharedSpec
 	stripped.ScalingAdapter = nil
 	stripped.Ingress = nil
 	stripped.ModelRef = nil
-	stripped.EPPConfig = nil
 
 	return stripped
 }

@@ -79,18 +79,8 @@ runs:
       env:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
-        sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
-        curl --retry 5 --retry-delay 2 --fail --show-error -sSL -o /tmp/rustup-init.sh https://sh.rustup.rs
-        sh /tmp/rustup-init.sh -y --default-toolchain stable
-        rm -f /tmp/rustup-init.sh
-        . "$HOME/.cargo/env"
-        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-        cargo install cbindgen
-
         DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
-        pushd deploy/inference-gateway/epp
-        make all DOCKER_PROXY=${DOCKER_PROXY}
-        popd
+        make -C deploy/inference-gateway/ext-proc all DOCKER_PROXY=${DOCKER_PROXY}
 
         EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
         EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"

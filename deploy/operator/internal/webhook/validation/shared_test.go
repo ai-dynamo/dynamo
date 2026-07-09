@@ -154,10 +154,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 		MinAvailable:     &minAvailable,
 		Multinode:        &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
 		SharedMemorySize: &sharedMemorySize,
-		EPPConfig: &nvidiacomv1beta1.EPPConfig{
-			ConfigMapRef: &corev1.ConfigMapKeySelector{},
-		},
-		FrontendSidecar: &frontendSidecar,
+		FrontendSidecar:  &frontendSidecar,
 	}
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 
@@ -168,7 +165,6 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 		"spec.components[0].type",
 		"spec.components[0].multinode",
 		"spec.components[0].replicas",
-		"spec.components[0].eppConfig.configMapRef.name",
 		"spec.components[0].frontendSidecar",
 	})
 }

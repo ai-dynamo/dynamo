@@ -89,7 +89,6 @@ func hasV1Alpha1CompatibilityFields(dgd *nvidiacomv1alpha1.DynamoGraphDeployment
 			hasDeprecatedAutoscaling ||
 			len(service.VolumeMounts) > 0 ||
 			service.SharedMemory != nil ||
-			service.EPPConfig != nil ||
 			service.FrontendSidecar != nil ||
 			service.Failover != nil ||
 			(service.GPUMemoryService != nil && !service.GPUMemoryService.Enabled) {
