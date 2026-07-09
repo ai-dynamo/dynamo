@@ -112,6 +112,9 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -658,6 +661,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
+	prepareGroveTopologyConstraintUpgrade(grovePodCliqueSet, existingPodCliqueSet)
 	preserveGrovePodCliqueSetOrder(grovePodCliqueSet, existingPodCliqueSet)
 	preserveGrovePodCliqueSetReplicas(grovePodCliqueSet, existingPodCliqueSet, checkpointInfos)
 	_, syncedGrovePodCliqueSet, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
@@ -724,6 +728,64 @@ func preserveGrovePodCliqueSetOrder(desired *grovev1alpha1.PodCliqueSet, existin
 	desired.Spec.Template.Cliques = orderLikeExisting(existing.Spec.Template.Cliques, desired.Spec.Template.Cliques, podCliqueTemplateName)
 	desired.Spec.Template.PodCliqueScalingGroupConfigs = orderLikeExisting(existing.Spec.Template.PodCliqueScalingGroupConfigs, desired.Spec.Template.PodCliqueScalingGroupConfigs, podCliqueScalingGroupConfigName)
 	desired.Spec.Template.ResourceClaimTemplates = orderLikeExisting(existing.Spec.Template.ResourceClaimTemplates, desired.Spec.Template.ResourceClaimTemplates, resourceClaimTemplateConfigName)
+}
+
+// prepareGroveTopologyConstraintUpgrade performs the first half of Grove's
+// supported legacy topology migration. A pre-alpha.9 constraint has
+// packDomain but no topologyName; Grove requires that object to be repaired by
+// adding topologyName before packDomain can be migrated to pack.required.
+// Keeping the legacy packing shape for this reconciliation lets the next
+// reconciliation apply the generated modern shape without recreating the PCS.
+func prepareGroveTopologyConstraintUpgrade(desired *grovev1alpha1.PodCliqueSet, existing *grovev1alpha1.PodCliqueSet) {
+	if desired == nil || existing == nil {
+		return
+	}
+
+	prepareLegacyGroveTopologyConstraintRepair(
+		desired.Spec.Template.TopologyConstraint,
+		existing.Spec.Template.TopologyConstraint,
+	)
+
+	existingCliqueConstraints := make(map[string]*grovev1alpha1.TopologyConstraint, len(existing.Spec.Template.Cliques))
+	for _, clique := range existing.Spec.Template.Cliques {
+		if clique != nil {
+			existingCliqueConstraints[clique.Name] = clique.TopologyConstraint
+		}
+	}
+	for _, clique := range desired.Spec.Template.Cliques {
+		if clique != nil {
+			prepareLegacyGroveTopologyConstraintRepair(clique.TopologyConstraint, existingCliqueConstraints[clique.Name])
+		}
+	}
+
+	existingScalingGroupConstraints := make(map[string]*grovev1alpha1.TopologyConstraint, len(existing.Spec.Template.PodCliqueScalingGroupConfigs))
+	for i := range existing.Spec.Template.PodCliqueScalingGroupConfigs {
+		config := &existing.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		existingScalingGroupConstraints[config.Name] = config.TopologyConstraint
+	}
+	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		config := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		prepareLegacyGroveTopologyConstraintRepair(config.TopologyConstraint, existingScalingGroupConstraints[config.Name])
+	}
+}
+
+func prepareLegacyGroveTopologyConstraintRepair(desired *grovev1alpha1.TopologyConstraint, existing *grovev1alpha1.TopologyConstraint) {
+	if desired == nil || existing == nil {
+		return
+	}
+	// A constraint without an explicit desired name inherits from its repaired
+	// parent and can migrate packDomain directly in the same update.
+	if desired.TopologyName == "" || existing.TopologyName != "" || existing.PackDomain == "" {
+		return
+	}
+
+	desired.PackDomain = existing.PackDomain
+	if existing.Pack == nil {
+		desired.Pack = nil
+		return
+	}
+	pack := *existing.Pack
+	desired.Pack = &pack
 }
 
 // Grove horizontal replicas are driven through scale subresources after creation;

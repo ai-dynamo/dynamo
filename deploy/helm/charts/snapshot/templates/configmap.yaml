@@ -45,6 +45,7 @@ data:
       linkRemap: {{ .Values.config.criu.linkRemap }}
       extMasters: {{ .Values.config.criu.extMasters }}
       manageCgroupsMode: {{ .Values.config.criu.manageCgroupsMode | quote }}
+      imageIoMode: {{ .Values.config.criu.imageIoMode | quote }}
       rstSibling: {{ .Values.config.criu.rstSibling }}
       mntnsCompatMode: {{ .Values.config.criu.mntnsCompatMode }}
       evasiveDevices: {{ .Values.config.criu.evasiveDevices }}

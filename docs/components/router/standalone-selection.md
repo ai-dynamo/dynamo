@@ -82,7 +82,7 @@ Content-Type: application/json
 {
   "worker_id": 1,
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "endpoint": "http://worker:8000",
   "block_size": 16,
   "data_parallel_start_rank": 0,
@@ -97,7 +97,7 @@ Content-Type: application/json
 
 `POST /workers` returns `201`. `PATCH /workers/{worker_id}` updates supplied
 fields, `DELETE /workers/{worker_id}` removes the worker, and `GET /workers`
-lists catalog state. `model_name` and `tenant_id` scope all selection, indexer,
+lists catalog state. `model_name` and `routing_group` scope all selection, indexer,
 and load state; both default to `"default"` when omitted.
 
 `GET /health` is process liveness. `GET /ready` returns `200` only after at
@@ -113,7 +113,7 @@ Select a worker without booking active load:
 {
   "selection_id": "select-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
   "isl_tokens": 512
@@ -130,7 +130,7 @@ globally unique `reservation_id`, or allow the service to generate one:
   "selection_id": "select-123",
   "reservation_id": "request-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
   "isl_tokens": 512
@@ -144,7 +144,7 @@ Both endpoints return the same selection shape:
   "selection_id": "select-123",
   "reservation_id": "request-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "worker_id": 1,
   "dp_rank": 0,
   "endpoint": "http://worker:8000",
@@ -194,7 +194,7 @@ Content-Type: application/json
 {
   "reservation_id": "request-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "worker_id": 1,
   "dp_rank": 0,
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
@@ -231,7 +231,7 @@ The selector has two independent peer configurations:
 | Plane | Transport | Flags | Purpose |
 |-------|-----------|-------|---------|
 | Indexer recovery | HTTP | `--indexer-peers` | Fetch a compatible `/dump` during startup and replay KV events into the local indexer. |
-| Replica synchronization | ZMQ | `--replica-sync-port`, `--replica-sync-peers` | Share admission, prefill-complete, and free events by model and tenant. |
+| Replica synchronization | ZMQ | `--replica-sync-port`, `--replica-sync-peers` | Share admission, prefill-complete, and free events by model and routing group. |
 
 Example:
 
@@ -268,8 +268,12 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   dropped events, and temporary active-load divergence are accepted.
 - There is no sequencing, acknowledgement, replay, backpressure, or
   resynchronization for replica lifecycle events.
-- Unknown worker, model, tenant, DP-rank, and block-size events are dropped.
+- Unknown worker, model, routing-group, DP-rank, and block-size events are dropped.
   Register the same worker catalog on every selector before routing traffic.
+- The v1 replica envelope uses `routing_group` and is incompatible with binaries that
+  send `tenant_id`. Drain active reservations and lifecycle traffic, upgrade all connected
+  selectors together, re-register worker catalogs, and then resume traffic. Active advisory
+  state is not migrated.
 - Admission, prefill-complete, and free are synchronized. Output-block growth
   remains local to avoid excessive network bandwidth.
 - Startup recovery waits for recovered events to be submitted to the indexer,
@@ -283,7 +287,7 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
 ## Inspection APIs
 
 - `GET /loads` returns active-load snapshots, optionally filtered by
-  `model_name` and `tenant_id`.
+  `model_name` and `routing_group`.
 - `POST /potential_loads` estimates worker load for a prompt without selection.
 - `POST /overlap_scores` returns per-worker/per-rank tiered overlap rows.
 - `GET /dump` returns the compatible indexer recovery snapshot.

@@ -199,6 +199,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	fldPath *field.Path,
 	opts dynamoGraphDeploymentSpecValidationOptions,
 ) field.ErrorList {
+	const validateInferencePoolAvailability = true
+
 	allErrs := field.ErrorList{}
 
 	if spec.PriorityClassName != "" && !opts.grovePathway {
@@ -255,6 +257,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			component,
 			componentPath,
 			opts.grovePathway,
+			validateInferencePoolAvailability,
 		)...)
 	}
 
@@ -543,6 +546,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			oldComponent,
 			componentsPath.Index(i),
 			canModifyReplicas,
+			nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind(),
 		)...)
 	}
 

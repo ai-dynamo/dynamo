@@ -286,6 +286,8 @@ async fn select_echoes_selection_id_and_does_not_book_load() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     assert_eq!(body["selection_id"], "sel-a");
+    assert_eq!(body["routing_group"], "default");
+    assert!(body.get("tenant_id").is_none());
     assert_eq!(body["worker_id"], 1);
     assert_eq!(body["effective_prefill_tokens"], 4);
     assert_eq!(body["overlap"]["longest_matched"], 0);

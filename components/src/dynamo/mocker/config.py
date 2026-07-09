@@ -3,17 +3,21 @@
 
 import argparse
 import json
+import logging
 import os
 import socket
 
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MEM_FRACTION_STATIC,
+    AicMemoryEstimatorUnavailableError,
     estimate_num_gpu_blocks,
 )
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 from dynamo.mocker import MockEngineArgs, ReasoningConfig, SglangArgs, TrtllmArgs
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_SEQS = 256
@@ -106,34 +110,44 @@ def _estimate_aic_num_gpu_blocks(
     resolved_block_size = _resolve_block_size_for_capacity(
         engine_type, block_size, sglang_page_size
     )
-    return estimate_num_gpu_blocks(
-        backend_name=aic_backend,
-        system=aic_system or _DEFAULT_AIC_SYSTEM,
-        model_path=aic_model_path,
-        tp_size=aic_tp_size if aic_tp_size is not None else 1,
-        block_size=resolved_block_size,
-        max_num_batched_tokens=(
-            max_num_batched_tokens
-            if max_num_batched_tokens is not None
-            else _DEFAULT_MAX_NUM_BATCHED_TOKENS
-        ),
-        gpu_memory_utilization=(
-            gpu_memory_utilization
-            if gpu_memory_utilization is not None
-            else DEFAULT_GPU_MEMORY_UTILIZATION
-        ),
-        mem_fraction_static=(
-            mem_fraction_static
-            if mem_fraction_static is not None
-            else DEFAULT_MEM_FRACTION_STATIC
-        ),
-        # None -> aic.py applies the TRT-LLM default (0.9).
-        free_gpu_memory_fraction=free_gpu_memory_fraction,
-        backend_version=aic_backend_version,
-        moe_tp_size=aic_moe_tp_size,
-        moe_ep_size=aic_moe_ep_size,
-        attention_dp_size=aic_attention_dp_size,
-    )
+    try:
+        return estimate_num_gpu_blocks(
+            backend_name=aic_backend,
+            system=aic_system or _DEFAULT_AIC_SYSTEM,
+            model_path=aic_model_path,
+            tp_size=aic_tp_size if aic_tp_size is not None else 1,
+            block_size=resolved_block_size,
+            max_num_batched_tokens=(
+                max_num_batched_tokens
+                if max_num_batched_tokens is not None
+                else _DEFAULT_MAX_NUM_BATCHED_TOKENS
+            ),
+            gpu_memory_utilization=(
+                gpu_memory_utilization
+                if gpu_memory_utilization is not None
+                else DEFAULT_GPU_MEMORY_UTILIZATION
+            ),
+            mem_fraction_static=(
+                mem_fraction_static
+                if mem_fraction_static is not None
+                else DEFAULT_MEM_FRACTION_STATIC
+            ),
+            # None -> aic.py applies the TRT-LLM default (0.9).
+            free_gpu_memory_fraction=free_gpu_memory_fraction,
+            backend_version=aic_backend_version,
+            moe_tp_size=aic_moe_tp_size,
+            moe_ep_size=aic_moe_ep_size,
+            attention_dp_size=aic_attention_dp_size,
+        )
+    except AicMemoryEstimatorUnavailableError as exc:
+        logger.warning(
+            "AIC KV-cache capacity estimation is unavailable: %s. Falling back "
+            "to default num_gpu_blocks=%d; upgrade aiconfigurator or set "
+            "--num-gpu-blocks-override explicitly.",
+            exc,
+            _DEFAULT_NUM_GPU_BLOCKS,
+        )
+        return _DEFAULT_NUM_GPU_BLOCKS
 
 
 def _resolve_num_gpu_blocks(

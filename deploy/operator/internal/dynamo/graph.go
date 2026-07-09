@@ -2211,7 +2211,10 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 
 	if !p.usesPCSG {
-		clique.TopologyConstraint = toGroveTopologyConstraint(p.component.TopologyConstraint)
+		clique.TopologyConstraint = toGroveTopologyConstraint(
+			p.component.TopologyConstraint,
+			p.dynamoDeployment.Spec.TopologyConstraint,
+		)
 	}
 
 	labels, err := generateLabels(p.component, p.dynamoDeployment, p.componentName, p.discoveryContext)
@@ -2498,7 +2501,7 @@ func GenerateGrovePodCliqueSet(
 				CliqueNames:        cliqueNames,
 				Replicas:           replicas,
 				MinAvailable:       minAvailable,
-				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
+				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint, dynamoDeployment.Spec.TopologyConstraint),
 			}
 			if isInterPodGMS {
 				pcsg.ResourceSharing = gmsResourceSharingEntries(componentName, roles)

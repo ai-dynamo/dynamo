@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 import math
 import os
@@ -26,6 +27,10 @@ DEFAULT_STATIC_STRIDE = 32
 DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
 DEFAULT_MEM_FRACTION_STATIC = 0.88
 DEFAULT_FREE_GPU_MEMORY_FRACTION = 0.9
+
+
+class AicMemoryEstimatorUnavailableError(RuntimeError):
+    """Raised when the optional AIC KV-cache estimator cannot be imported."""
 
 
 def _validate_kv_capacity_backend(backend_name: str) -> None:
@@ -454,21 +459,27 @@ def estimate_num_gpu_blocks(
 
     # Imported lazily: aiconfigurator is an optional dependency (the `mocker`
     # extra), so importing it at module scope would break callers that never run
-    # AIC estimation. Estimation is opt-in (only reached when an AIC backend is
-    # configured), so a missing install is a hard error -- fail loudly with an
-    # actionable message rather than silently using the default block count.
-    # Mirrors `_load_aiconfigurator`.
+    # AIC estimation. Report a typed error so callers can choose their policy:
+    # mocker warns and uses its existing default block count, while direct callers
+    # still receive an actionable error. Mirrors `_load_aiconfigurator`.
     # TODO: account for whether specdec is enabled (pass `nextn=...`). Currently
     #   omitted due to a downstream AIC bug where `_get_memory_usage` predicts
     #   negative KV capacity with Eagle.
     try:
-        from aiconfigurator.sdk import memory
-    except ImportError as exc:
-        raise RuntimeError(
-            "aiconfigurator is required for AIC KV-cache estimation but is not "
-            "installed; install the 'mocker' extra or set num_gpu_blocks "
-            "explicitly (e.g. --num-gpu-blocks-override)"
-        ) from exc
+        memory = importlib.import_module("aiconfigurator.sdk.memory")
+    except ModuleNotFoundError as exc:
+        if exc.name == "aiconfigurator.sdk.memory":
+            raise AicMemoryEstimatorUnavailableError(
+                "aiconfigurator.sdk.memory is required for AIC KV-cache estimation; "
+                "install a compatible aiconfigurator version"
+            ) from exc
+        if exc.name in {"aiconfigurator", "aiconfigurator.sdk"}:
+            raise RuntimeError(
+                "aiconfigurator is required for AIC KV-cache estimation but is not "
+                "installed; install the 'mocker' extra or set num_gpu_blocks "
+                "explicitly (e.g. --num-gpu-blocks-override)"
+            ) from exc
+        raise
 
     # AIC's non-KV memory is independent of batch size (activations track
     # max_num_tokens), so the fixed max_batch_size here does not affect the result.
