@@ -157,6 +157,22 @@ pub enum MultimodalData {
 // multimodal map containing {mm_part_type: [data...]}
 pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalData>>;
 
+/// Provider-neutral KV cache hints forwarded to inference backends.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KvHintEnvelope {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retention: Vec<KvRetentionHint>,
+}
+
+/// Retain the cumulative token prefix for the requested duration.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KvRetentionHint {
+    pub prefix_tokens: u32,
+    pub ttl_seconds: u32,
+}
+
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Debug, Clone, Builder)]
@@ -285,6 +301,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_context: Option<AgentContext>,
+
+    /// Provider-neutral KV cache intent forwarded unchanged by routers.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_hints: Option<KvHintEnvelope>,
 
     /// Multimodal processor kwargs forwarded to the backend engine
     /// (e.g. `{"use_audio_in_video": true}` for omni models).
@@ -569,6 +590,36 @@ mod tests {
         assert!(
             !json.as_object().unwrap().contains_key("encoder_result"),
             "encoder_result must be absent from wire when None; got {json}"
+        );
+    }
+
+    #[test]
+    fn kv_hint_envelope_matches_cross_language_fixture() {
+        let fixture = include_str!("../../../tests/data/kv_hint_envelope.json");
+        let req: PreprocessedRequest = serde_json::from_str(fixture).unwrap();
+        let hints = req.kv_hints.as_ref().unwrap();
+
+        assert_eq!(
+            hints.retention,
+            vec![
+                KvRetentionHint {
+                    prefix_tokens: 2,
+                    ttl_seconds: 300,
+                },
+                KvRetentionHint {
+                    prefix_tokens: 4,
+                    ttl_seconds: 3600,
+                },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&req).unwrap()["kv_hints"],
+            serde_json::json!({
+                "retention": [
+                    {"prefix_tokens": 2, "ttl_seconds": 300},
+                    {"prefix_tokens": 4, "ttl_seconds": 3600},
+                ]
+            })
         );
     }
 
