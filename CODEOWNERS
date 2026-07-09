@@ -96,6 +96,7 @@
 # === ops  (@ai-dynamo/dynamo-ops-codeowners) ===
 /dev/                                                                                         @ai-dynamo/dynamo-ops-codeowners
 /.github/                                                                                     @ai-dynamo/dynamo-ops-codeowners
+/scripts/                                                                                     @ai-dynamo/dynamo-ops-codeowners
 /deny.toml                                                                                    @ai-dynamo/dynamo-ops-codeowners
 /.gitignore                                                                                   @ai-dynamo/dynamo-ops-codeowners
 /Cargo.lock                                                                                   @ai-dynamo/dynamo-ops-codeowners
@@ -114,7 +115,6 @@
 /.coderabbit.yaml                                                                             @ai-dynamo/dynamo-ops-codeowners
 /.cargo/config.toml                                                                           @ai-dynamo/dynamo-ops-codeowners
 /rust-toolchain.toml                                                                          @ai-dynamo/dynamo-ops-codeowners
-/scripts/dco_check.py                                                                         @ai-dynamo/dynamo-ops-codeowners
 /dynamo.code-workspace                                                                        @ai-dynamo/dynamo-ops-codeowners
 /.pre-commit-config.yaml                                                                      @ai-dynamo/dynamo-ops-codeowners
 
@@ -180,6 +180,7 @@
 /lib/llm/src/kv.rs                                                                            @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/lora/                                                                            @ai-dynamo/dynamo-frontend-codeowners
 /dev/observability/                                                                           @ai-dynamo/dynamo-observability-codeowners
+/deploy/power-agent/                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /lib/backend-common/                                                                          @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/grpc.rs                                                                          @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http.rs                                                                          @ai-dynamo/dynamo-frontend-codeowners
@@ -389,7 +390,6 @@
 /deploy/operator/Dockerfile                                                                   @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners
 /deploy/snapshot/Dockerfile                                                                   @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-ops-codeowners
 /container/Dockerfile.template                                                                @ai-dynamo/dynamo-ops-codeowners
-/deploy/power-agent/Dockerfile                                                                @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners
 /examples/diffusers/Dockerfile                                                                @ai-dynamo/dynamo-diffusion-codeowners @ai-dynamo/dynamo-ops-codeowners
 /container/templates/aws.Dockerfile                                                           @ai-dynamo/dynamo-ops-codeowners
 /container/templates/dev.Dockerfile                                                           @ai-dynamo/dynamo-ops-codeowners
