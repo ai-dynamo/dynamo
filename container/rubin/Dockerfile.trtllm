@@ -80,7 +80,9 @@ RUN pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dis
 #     is resolved at runtime via LD_LIBRARY_PATH (same wiring as the runtime templates).
 #     dnf packages from wheel_builder are mapped to their apt equivalents for Ubuntu.
 ARG NIXL_REF=v1.0.1
-ARG NIXL_UCX_REF=v1.20.x
+# UCX >= 1.21: matches the vllm/sglang base UCX (1.21.0) and satisfies the runtime UCP API
+# requirement -- the 1.20.x line warned "UCP API version is incompatible: required >= 1.21".
+ARG NIXL_UCX_REF=v1.21.0
 ARG NIXL_GDRCOPY_REF=v2.5.2
 ARG NIXL_LIBFABRIC_REPO=https://github.com/ofiwg/libfabric.git
 ARG NIXL_LIBFABRIC_REF=v2.5.1
