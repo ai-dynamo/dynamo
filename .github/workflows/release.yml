@@ -1395,10 +1395,11 @@ jobs:
           # rotated without a code change.
           GITLAB_TRIGGER_URL:   ${{ secrets.GITLAB_PIPELINE_URL }}
           GITLAB_TRIGGER_TOKEN: ${{ secrets.GITLAB_TRIGGER_TOKEN }}
-          # release-automation ref to run; var override is for testing only.
-          # GitLab does NOT force dry-run on non-default refs — an overridden
-          # ref runs live (manual-gated) publish jobs.
-          GITLAB_REF:           ${{ vars.GITLAB_RELEASE_AUTOMATION_REF || 'main' }}
+          # release-automation ref to run (var-overridable). GitLab does NOT
+          # force dry-run on non-default refs.
+          # TEMPORARY(test): defaults to the GitLab dev branch. REVERT to 'main'
+          # before merge.
+          GITLAB_REF:           ${{ vars.GITLAB_RELEASE_AUTOMATION_REF || 'pvijayakrish/on-demand-release' }}
           VERSION:              ${{ needs.prepare-release.outputs.version }}
           NGC_VERSION_TAG:      ${{ needs.prepare-release.outputs.ngc_version_tag }}
           WHEEL_VERSION:        ${{ needs.prepare-release.outputs.wheel_version }}
