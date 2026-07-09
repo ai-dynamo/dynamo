@@ -387,9 +387,11 @@ def run_mocker_aic_import_smoke(venv_python: Path) -> None:
 import importlib.metadata as metadata
 import json
 import os
+import re
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from packaging.version import Version
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -402,7 +404,7 @@ from aiconfigurator.sdk.memory import estimate_num_gpu_blocks
 from aiconfigurator.sdk.task_v2 import Task
 from dynamo.mocker import AicEngineConfig, RustEnginePerfModel
 
-assert metadata.version("aiconfigurator") == "0.10.0"
+installed_aic_version = Version(metadata.version("aiconfigurator"))
 assert aiconfigurator_core
 assert compile_engine and estimate_num_gpu_blocks and Task
 assert build_default_tasks and _execute_tasks
@@ -413,14 +415,24 @@ aic_requirements = [
     for value in metadata.requires("ai-dynamo") or []
     if Requirement(value).name == "aiconfigurator"
 ]
-assert len(aic_requirements) == 1 and aic_requirements[0].url
-expected_ref = aic_requirements[0].url.rsplit("@", 1)[1]
-direct_url = json.loads(
-    metadata.distribution("aiconfigurator").read_text("direct_url.json")
-)
-vcs_info = direct_url["vcs_info"]
-assert vcs_info["requested_revision"] == expected_ref
-assert vcs_info["commit_id"].startswith(expected_ref)
+assert len(aic_requirements) == 1
+aic_requirement = aic_requirements[0]
+if aic_requirement.url:
+    assert aic_requirement.url.startswith("git+")
+    expected_ref = aic_requirement.url.rsplit("@", 1)[1]
+    direct_url_text = metadata.distribution("aiconfigurator").read_text(
+        "direct_url.json"
+    )
+    assert direct_url_text
+    vcs_info = json.loads(direct_url_text)["vcs_info"]
+    assert vcs_info["requested_revision"] == expected_ref
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", expected_ref):
+        assert vcs_info["commit_id"].lower().startswith(expected_ref.lower())
+    else:
+        assert re.fullmatch(r"[0-9a-fA-F]{40}", vcs_info["commit_id"])
+else:
+    assert aic_requirement.specifier
+    assert installed_aic_version in aic_requirement.specifier
 
 package_root = Path(aiconfigurator.__file__).resolve().parent
 assert (package_root / "model_configs/Qwen--Qwen3-32B_config.json").is_file()

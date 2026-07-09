@@ -43,7 +43,6 @@ def _build_mocker_command(
     num_workers: int,
     mocker_args: Dict[str, Any],
     worker_type: Optional[str] = None,
-    model_name: str = MODEL_NAME,
 ) -> list[str]:
     """Build the mocker CLI command with all arguments."""
     command = [
@@ -51,7 +50,7 @@ def _build_mocker_command(
         "-m",
         "dynamo.mocker",
         "--model-path",
-        model_name,
+        MODEL_NAME,
         "--endpoint",
         endpoint,
         "--discovery-backend",
@@ -149,7 +148,6 @@ class MockerProcess:
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.component_name = "mocker"
         self.model_name = model_name
-        self._model_path = MODEL_NAME if model_name == "mocker" else model_name
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_mockers
         self._zmq_kv_events_ports: list[int] = []
@@ -219,7 +217,6 @@ class MockerProcess:
                 store_backend=store_backend,
                 num_workers=num_mockers,
                 mocker_args=mocker_args,
-                model_name=self._model_path,
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = request_plane
@@ -334,7 +331,6 @@ class MockerProcess:
                 store_backend=self._store_backend,
                 num_workers=1,
                 mocker_args=mocker_args,
-                model_name=self._model_path,
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = self._request_plane
