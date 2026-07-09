@@ -94,7 +94,7 @@ spec:
             --input-file "${TRACE_FILE}" \
             --custom-dataset-type mooncake_trace \
             --num-requests "${TRACE_LINES}" \
-            --prompt-input-tokens-block-size 512 \
+            --endpoint-type chat \
             --url "http://${ENDPOINT}" \
             --streaming \
             --use-server-token-count \
