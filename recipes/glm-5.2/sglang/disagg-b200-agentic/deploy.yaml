@@ -32,6 +32,9 @@ data:
   prefill.yaml: |-
     model-path: nvidia/GLM-5.2-NVFP4
     served-model-name: zai-org/GLM-5.2
+    # Decode connects to the pod IP advertised by Dynamo, so the SGLang
+    # bootstrap server must not use its loopback-only default.
+    host: 0.0.0.0
     trust-remote-code: true
     tensor-parallel-size: 4
     data-parallel-size: 4
@@ -48,7 +51,9 @@ data:
     chunked-prefill-size: 16384
     max-prefill-tokens: 32768
     max-running-requests: 32
-    disable-cuda-graph: true
+    watchdog-timeout: 3600
+    cuda-graph-backend-prefill: disabled
+    cuda-graph-backend-decode: disabled
     disaggregation-mode: prefill
     disaggregation-transfer-backend: nixl
     disaggregation-bootstrap-port: 12345
@@ -126,6 +131,7 @@ spec:
                 - name: DYN_ROUTER_MODE
                   value: kv
               image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2
+              imagePullPolicy: Always
               resources: {}
       replicas: 1
 
@@ -177,6 +183,7 @@ spec:
                 - secretRef:
                     name: hf-token-secret
               image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2
+              imagePullPolicy: Always
               resources:
                 requests:
                   nvidia.com/gpu: "4"
@@ -278,6 +285,7 @@ spec:
                 - secretRef:
                     name: hf-token-secret
               image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2
+              imagePullPolicy: Always
               resources:
                 requests:
                   nvidia.com/gpu: "8"

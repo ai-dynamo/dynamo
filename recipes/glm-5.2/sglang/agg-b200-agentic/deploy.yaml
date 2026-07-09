@@ -85,6 +85,7 @@ spec:
                 - name: DYN_ROUTER_MODE
                   value: kv
               image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2
+              imagePullPolicy: Always
               resources: {}
       replicas: 1
 
@@ -133,6 +134,7 @@ spec:
                 - secretRef:
                     name: hf-token-secret
               image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2
+              imagePullPolicy: Always
               resources:
                 requests:
                   nvidia.com/gpu: "4"

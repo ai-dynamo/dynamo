@@ -18,10 +18,6 @@ Dynamo + SGLang deployment profiles for the B200 agentic workload:
 | **Framework** | SGLang | SGLang |
 | **Precision** | NVFP4 + FP8 KV | NVFP4 + FP8 KV |
 | **Parallelism** | DTP4 | DEP4 / DTP8 |
-| **MoE backend** | FlashInfer TRT-LLM | Prefill FlashInfer TRT-LLM routed; decode FlashInfer Cutlass |
-| **Attention backend** | DSA | DSA TRT-LLM prefill; default decode |
-| **AllReduce backend** | FlashInfer fusion | FlashInfer fusion on decode |
-| **All2All backend** | None | None |
 | **Routing** | KV-aware | KV-aware |
 | **Speculative decoding** | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) | EAGLE-style MTP (DL=3, SpeedBench AL=2.69) |
 | **Context length** | 500,000 | 500,000 |
