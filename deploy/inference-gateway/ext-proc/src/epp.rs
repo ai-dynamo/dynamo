@@ -215,7 +215,7 @@ impl Router {
     ///
     /// Priorities default to zero when absent. Mirrors the standalone Dynamo
     /// preprocessor lift in `lib/llm/src/preprocessor.rs`.
-    fn tokenize(&self, request_json: &str) -> Result<TokenizeResult> {
+    async fn tokenize(&self, request_json: &str) -> Result<TokenizeResult> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
@@ -234,7 +234,10 @@ impl Router {
             let routing_constraints = extract_routing_constraints(nvext);
             let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
-            let (token_ids, _) = self.preprocessor.gather_tokens(&request, None, None)?;
+            let (token_ids, _) = self
+                .preprocessor
+                .gather_tokens(&request, None, None)
+                .await?;
 
             return Ok(TokenizeResult {
                 token_ids,
@@ -1086,6 +1089,7 @@ impl EndpointPicker for Router {
             token_data_policy,
         } = self
             .tokenize(body_str)
+            .await
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
         let cache_namespace =
             cache_namespace_with_header_override(&req.headers, body_cache_namespace);
