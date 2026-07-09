@@ -35,6 +35,7 @@ from tests.utils.payload_builder import (
     elastic_ep_scale_payload,
     embedding_payload,
     embedding_payload_default,
+    guided_decoding_chat_payload_default,
     kv_events_metrics_payload,
     metric_payload_default,
     router_cached_tokens_chat_payload,
@@ -176,6 +177,7 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            guided_decoding_chat_payload_default(),
         ],
     ),
     # Launch-script smoke test: verifies the vLLM KVBM example
