@@ -199,6 +199,7 @@ config:
     linkRemap: true         # Required for deleted-but-open files (e.g. POSIX semaphores in /dev/shm)
     extMasters: true        # External bind mount masters
     manageCgroupsMode: soft # CRIU cgroup management mode (ignore/soft/full/strict)
+    imageIoMode: direct     # CRIU image I/O mode (writeback/direct); direct uses O_DIRECT to avoid page-cache double-buffering
 
     # Restore-specific options (only apply during CRIU restore, not dump)
     rstSibling: true         # Restore as sibling process (required for go-criu swrk mode)
