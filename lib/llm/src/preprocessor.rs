@@ -46,7 +46,8 @@ use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::protocols::common::preprocessor::{
-    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
+    KvHintEnvelope, KvRetentionHint, MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,
+    RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
@@ -247,6 +248,7 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
+pub(crate) const KV_RETENTION_TTL_CONTEXT_KEY: &str = "dynamo.llm.kv_retention_ttl_seconds";
 
 fn attach_agent_context_from_context(
     request: &mut PreprocessedRequest,
@@ -257,6 +259,32 @@ fn attach_agent_context_from_context(
     ) {
         request.agent_context = Some(agent_context.as_ref().clone());
     }
+}
+
+fn attach_kv_hints_from_context(request: &mut PreprocessedRequest, context: &PipelineContext<()>) {
+    if request.prompt_embeds.is_some()
+        || request
+            .multi_modal_data
+            .as_ref()
+            .is_some_and(|media| !media.is_empty())
+    {
+        return;
+    }
+    let Ok(ttl_seconds) = context.get::<u32>(KV_RETENTION_TTL_CONTEXT_KEY) else {
+        return;
+    };
+    let prefix_tokens = u32::try_from(request.token_ids.len()).unwrap_or(u32::MAX);
+    if prefix_tokens == 0 || *ttl_seconds == 0 {
+        return;
+    }
+    request
+        .kv_hints
+        .get_or_insert_with(KvHintEnvelope::default)
+        .retention
+        .push(KvRetentionHint {
+            prefix_tokens,
+            ttl_seconds: *ttl_seconds,
+        });
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3241,6 +3269,7 @@ impl
             .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
         attach_agent_context_from_context(&mut common_request, &context);
+        attach_kv_hints_from_context(&mut common_request, &context);
 
         let uses_tool_call_structural_tag = self.apply_tool_choice_guided_decoding(
             &request,
@@ -3429,6 +3458,7 @@ impl
 
         let mut common_request = builder.build()?;
         attach_agent_context_from_context(&mut common_request, &context);
+        attach_kv_hints_from_context(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
@@ -3625,6 +3655,36 @@ mod tests {
             b.multi_modal_data(Some(m));
         }
         b.build().unwrap()
+    }
+
+    #[test]
+    fn context_retention_becomes_full_token_prefix_hint() {
+        let mut context = PipelineContext::new(());
+        context.insert(KV_RETENTION_TTL_CONTEXT_KEY, 600_u32);
+        let mut request = preprocessed_with_media(None);
+
+        attach_kv_hints_from_context(&mut request, &context);
+
+        assert_eq!(
+            request.kv_hints.unwrap().retention,
+            vec![KvRetentionHint {
+                prefix_tokens: 3,
+                ttl_seconds: 600,
+            }]
+        );
+    }
+
+    #[test]
+    fn context_retention_ignores_unaligned_multimodal_prompt() {
+        let mut context = PipelineContext::new(());
+        context.insert(KV_RETENTION_TTL_CONTEXT_KEY, 600_u32);
+        let mut media = MultimodalDataMap::new();
+        media.insert("image_url".to_string(), vec![url_entry("http://x/a.png")]);
+        let mut request = preprocessed_with_media(Some(media));
+
+        attach_kv_hints_from_context(&mut request, &context);
+
+        assert!(request.kv_hints.is_none());
     }
 
     #[test]
