@@ -11,8 +11,6 @@ use dynamo_bench::kv_router_common::args::CommonArgs;
 use dynamo_bench::kv_router_common::replay::{generate_replay_artifacts, process_mooncake_trace};
 use dynamo_bench::kv_router_common::sweep::compute_sweep_durations;
 use dynamo_kv_router::indexer::KvIndexerMetrics;
-use dynamo_kv_router::indexer::cuckoo::{CkfConfig, EventTransposedCkfIndexer};
-use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::{
     ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
 };
@@ -395,10 +393,7 @@ async fn run_open_loop_for_config(
             run_backend(config.short_name(), indexer, trial, open_config).await
         }
         MooncakeIndexerKind::TransposedCkf => {
-            let workers = std::array::from_fn(|lane| WorkerWithDpRank::new(lane as u64, 0));
-            let mut ckf_config = CkfConfig::new(config.expected_blocks_per_dc);
-            ckf_config.publish_every_n_events = config.publish_every_n_events;
-            let backend = EventTransposedCkfIndexer::new(workers, ckf_config)?;
+            let backend = config.build_transposed_ckf_backend()?;
             let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
                 backend,
                 config.num_event_workers,

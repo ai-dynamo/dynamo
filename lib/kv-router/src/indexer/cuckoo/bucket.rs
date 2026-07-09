@@ -4,8 +4,8 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::CkfBuildError;
 use super::addressing::CkfProbe;
+use super::{CkfBuildError, DC_COUNT};
 
 const SLOT_COUNT: usize = 4;
 const REPEATED_ONE: u64 = 0x0001_0001_0001_0001;
@@ -130,7 +130,7 @@ pub(super) struct TransposedCkfTable<const D: usize> {
 
 impl<const D: usize> TransposedCkfTable<D> {
     pub(super) fn new(bucket_count: usize) -> Result<Self, CkfBuildError> {
-        debug_assert!((1..=16).contains(&D));
+        debug_assert!((1..=DC_COUNT).contains(&D));
         let lane_count = bucket_count
             .checked_mul(D)
             .ok_or(CkfBuildError::CapacityOverflow)?;

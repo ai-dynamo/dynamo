@@ -94,6 +94,13 @@ impl MooncakeIndexerConfig {
         self
     }
 
+    pub(crate) fn build_transposed_ckf_backend(&self) -> anyhow::Result<EventTransposedCkfIndexer> {
+        let workers = std::array::from_fn(|lane| WorkerWithDpRank::new(lane as u64, 0));
+        let mut config = CkfConfig::new(self.expected_blocks_per_dc);
+        config.publish_every_n_events = self.publish_every_n_events;
+        Ok(EventTransposedCkfIndexer::new(workers, config)?)
+    }
+
     pub fn branch_sharded_crtc(
         num_shards: usize,
         num_event_workers_per_shard: usize,
@@ -173,10 +180,7 @@ impl MooncakeIndexerConfig {
                 ))
             }
             MooncakeIndexerKind::TransposedCkf => {
-                let workers = std::array::from_fn(|lane| WorkerWithDpRank::new(lane as u64, 0));
-                let mut ckf_config = CkfConfig::new(self.expected_blocks_per_dc);
-                ckf_config.publish_every_n_events = self.publish_every_n_events;
-                let backend = EventTransposedCkfIndexer::new(workers, ckf_config)?;
+                let backend = self.build_transposed_ckf_backend()?;
                 Arc::new(ThreadPoolIndexer::new_with_metrics(
                     backend,
                     self.num_event_workers,

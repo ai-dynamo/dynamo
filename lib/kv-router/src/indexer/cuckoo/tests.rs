@@ -1,13 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc, Barrier,
     atomic::{AtomicBool, Ordering},
 };
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::indexer::pruning::PruneConfig;
 use crate::indexer::{KvIndexerInterface, SyncIndexer, ThreadPoolIndexer, WorkerTask};
@@ -1023,7 +1022,7 @@ fn successful_mutation_reports_each_final_dirty_image_once() {
     assert!(outcome.first_error().is_none());
 
     assert!(!batch.images().is_empty());
-    let mut unique = HashSet::new();
+    let mut unique = FxHashSet::default();
     for image in batch.images() {
         let lane = usize::from(image.lane());
         assert!(unique.insert((lane, image.bucket())));
@@ -1499,12 +1498,12 @@ fn fixed_verification_window_study() {
         let seed = study_seed(seed_index);
         let addressing = CkfAddressing::new(BUCKETS, seed);
         let chains = study_chains(seed, addressing, QUERIES_PER_CELL, MAX_QUERY_LEN);
-        let query_hashes: HashSet<u64> = chains
+        let query_hashes: FxHashSet<u64> = chains
             .iter()
             .flat_map(|chain| chain.sequence_hashes.iter().copied())
             .collect();
         let prefix_depths = study_prefix_depths(seed_index, QUERIES_PER_CELL, MAX_RESIDENT_PREFIX);
-        let distinct_queries: HashMap<usize, usize> = QUERY_LENGTHS
+        let distinct_queries: FxHashMap<usize, usize> = QUERY_LENGTHS
             .into_iter()
             .map(|query_len| (query_len, distinct_query_count(&chains, query_len)))
             .collect();
@@ -1707,12 +1706,12 @@ fn provenance_fallback_window_study() {
         let seed = study_seed(seed_index);
         let addressing = CkfAddressing::new(BUCKETS, seed);
         let chains = study_chains(seed, addressing, QUERIES_PER_CELL, MAX_QUERY_LEN);
-        let query_hashes: HashSet<u64> = chains
+        let query_hashes: FxHashSet<u64> = chains
             .iter()
             .flat_map(|chain| chain.sequence_hashes.iter().copied())
             .collect();
         let prefix_depths = study_prefix_depths(seed_index, QUERIES_PER_CELL, MAX_RESIDENT_PREFIX);
-        let distinct_queries: HashMap<usize, usize> = QUERY_LENGTHS
+        let distinct_queries: FxHashMap<usize, usize> = QUERY_LENGTHS
             .into_iter()
             .map(|query_len| (query_len, distinct_query_count(&chains, query_len)))
             .collect();
@@ -1852,7 +1851,7 @@ fn distinct_query_count(chains: &[StudyChain], query_len: usize) -> usize {
     chains
         .iter()
         .map(|chain| &chain.local_hashes[..query_len])
-        .collect::<HashSet<_>>()
+        .collect::<FxHashSet<_>>()
         .len()
 }
 
@@ -1876,7 +1875,7 @@ fn fill_study_table(
     addressing: CkfAddressing,
     chains: &[StudyChain],
     prefix_depths: &[[usize; DC_COUNT]],
-    query_hashes: &HashSet<u64>,
+    query_hashes: &FxHashSet<u64>,
     occupancy: usize,
     max_kicks: usize,
     seed: u64,
@@ -2061,7 +2060,7 @@ fn colliding_hashes(
     ExternalSequenceBlockHash,
     CkfProbe,
 ) {
-    let mut seen = HashMap::new();
+    let mut seen = FxHashMap::default();
     for hash in 0..1_000_000u64 {
         let probe = addressing.prepare(hash);
         let key = (probe.fingerprint, probe.bucket_a, probe.bucket_b);
