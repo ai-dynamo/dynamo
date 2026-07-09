@@ -665,6 +665,18 @@ pub mod frontend_perf {
     pub const TOKENIZER_CACHE_CACHED_TOKENS_TOTAL: &str = "tokenizer_cache_cached_tokens_total";
     /// Tokens freshly encoded after an L1 tokenizer prefix-cache lookup (cumulative, labeled by model)
     pub const TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL: &str = "tokenizer_cache_uncached_tokens_total";
+    /// Shared Valkey tokenizer cache hits after an L1 miss
+    pub const TOKENIZER_CACHE_L2_HITS_TOTAL: &str = "tokenizer_cache_l2_hits_total";
+    /// Shared Valkey tokenizer cache misses after an L1 miss
+    pub const TOKENIZER_CACHE_L2_MISSES_TOTAL: &str = "tokenizer_cache_l2_misses_total";
+    /// Shared tokenizer cache lookup failures that fell back to local tokenization
+    pub const TOKENIZER_CACHE_L2_ERRORS_TOTAL: &str = "tokenizer_cache_l2_errors_total";
+    /// Shared tokenizer cache writes dropped because the bounded queue was full
+    pub const TOKENIZER_CACHE_L2_WRITE_DROPS_TOTAL: &str = "tokenizer_cache_l2_write_drops_total";
+    /// Shared tokenizer cache write failures
+    pub const TOKENIZER_CACHE_L2_WRITE_ERRORS_TOTAL: &str = "tokenizer_cache_l2_write_errors_total";
+    /// Shared Valkey tokenizer cache lookup latency
+    pub const TOKENIZER_CACHE_L2_LOOKUP_SECONDS: &str = "tokenizer_cache_l2_lookup_seconds";
     /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
     /// Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
@@ -758,6 +770,21 @@ pub mod kv_publisher {
 
     /// Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
     pub const ZMQ_SUSPICIOUS_EVENTS_TOTAL: &str = "kv_publisher_zmq_suspicious_events_total";
+
+    /// Total number of events rejected by the bounded direct-Valkey ingress
+    pub const INPUT_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_input_dropped_events_total";
+
+    /// Total number of direct-Valkey publisher integrity faults
+    pub const INTEGRITY_FAULTS_TOTAL: &str = "kv_publisher_integrity_faults_total";
+
+    /// Total number of direct-Valkey permanent worker fence attempts
+    pub const INTEGRITY_FENCES_TOTAL: &str = "kv_publisher_integrity_fences_total";
+
+    /// Total number of authoritative direct-Valkey publish failures
+    pub const PUBLISH_ERRORS_TOTAL: &str = "kv_publisher_publish_errors_total";
+
+    /// Total number of direct-Valkey lifecycle GC ticks by outcome
+    pub const LIFECYCLE_GC_STEPS_TOTAL: &str = "kv_publisher_lifecycle_gc_steps_total";
 }
 
 /// Additional TRT-LLM worker metrics beyond what the engine natively provides.

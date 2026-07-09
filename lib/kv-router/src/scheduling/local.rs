@@ -434,6 +434,17 @@ where
         self.slots.add_request(req, Instant::now())
     }
 
+    /// Mirror an admission that was already made by an external authoritative
+    /// control plane.  Unlike [`add_request`](Self::add_request), this never
+    /// lazily creates a worker/rank, so a reservation racing a topology
+    /// removal cannot resurrect stale local scheduler state.
+    pub async fn book_preselected_if_registered(
+        &self,
+        req: SequenceRequest,
+    ) -> Result<(), SequenceError> {
+        self.slots.add_request_if_registered(req, Instant::now())
+    }
+
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);

@@ -13,6 +13,7 @@ pub mod prefill_load;
 pub mod queue;
 mod queue_admission;
 pub mod selector;
+mod valkey_config;
 
 mod types;
 pub use filter::*;

@@ -12,6 +12,8 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
+pub use super::valkey_config::ValkeyRouterConfig;
+use super::valkey_config::{MAX_REQUIRED_REPLICA_ACKS, ValkeyValidationContext};
 use crate::protocols::{
     BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
@@ -51,6 +53,8 @@ const fn default_prefill_load_scale() -> f64 {
 const fn default_overlap_score_credit_decay() -> f64 {
     0.0
 }
+
+pub const MAX_VALKEY_REQUIRED_REPLICA_ACKS: u32 = MAX_REQUIRED_REPLICA_ACKS;
 
 pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
     "overlap_score_credit must be between 0.0 and 1.0";
@@ -107,6 +111,13 @@ pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
         router_queue_threshold = ?config.router_queue_threshold,
         router_policy_config = ?config.router_policy_config,
         router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
+        valkey_urls = ?config.valkey.urls,
+        valkey_index_scope = ?config.valkey.index_scope,
+        valkey_connection_pool_size = config.valkey.connection_pool_size,
+        valkey_required_replica_acks = ?config.valkey.required_replica_acks,
+        valkey_worker_events = config.valkey.worker_events,
+        valkey_authoritative_admission = config.valkey.authoritative_admission,
+        valkey_admission_lease_ms = config.valkey.admission_lease_ms,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
     config
@@ -123,6 +134,14 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
             "false" | "0" | "no" | "off" => Some(false),
             _ => None,
         })
+    }
+
+    fn parse_u32(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<u32> {
+        get_env(key).and_then(|value| value.parse().ok())
+    }
+
+    fn parse_u64(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<u64> {
+        get_env(key).and_then(|value| value.parse().ok())
     }
 
     let mut config = KvRouterConfig::default();
@@ -176,6 +195,42 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREDICTED_TTL_SECS") {
         config.router_predicted_ttl_secs = Some(value);
+    }
+    if let Some(value) = get_env("DYN_ROUTER_VALKEY_URLS") {
+        config.valkey.urls = Some(value);
+    }
+    if let Some(value) = get_env("DYN_ROUTER_VALKEY_INDEX_SCOPE") {
+        config.valkey.index_scope = Some(value);
+    }
+    if let Some(value) = parse_u32(&get_env, "DYN_ROUTER_VALKEY_CONNECTION_POOL_SIZE") {
+        config.valkey.connection_pool_size = value;
+    }
+    if let Some(value) = parse_u32(&get_env, "DYN_ROUTER_VALKEY_REQUIRED_REPLICA_ACKS") {
+        config.valkey.required_replica_acks = Some(value);
+    }
+    if let Some(value) = get_env("DYN_ROUTER_VALKEY_SENTINEL_URLS") {
+        config.valkey.sentinel_urls = Some(value);
+    }
+    if let Some(value) = get_env("DYN_ROUTER_VALKEY_SENTINEL_MASTER_NAME") {
+        config.valkey.sentinel_master_name = Some(value);
+    }
+    if let Some(value) = parse_u32(&get_env, "DYN_ROUTER_VALKEY_SENTINEL_QUORUM") {
+        config.valkey.sentinel_quorum = Some(value);
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_VALKEY_ALLOW_INSECURE_PLAINTEXT") {
+        config.valkey.allow_insecure_plaintext = value;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_VALKEY_ALLOW_DEGRADED_WRITES") {
+        config.valkey.allow_degraded_writes = value;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_VALKEY_WORKER_EVENTS") {
+        config.valkey.worker_events = value;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_VALKEY_AUTHORITATIVE_ADMISSION") {
+        config.valkey.authoritative_admission = value;
+    }
+    if let Some(value) = parse_u64(&get_env, "DYN_ROUTER_VALKEY_ADMISSION_LEASE_MS") {
+        config.valkey.admission_lease_ms = value;
     }
 
     config
@@ -407,6 +462,8 @@ struct KvRouterConfigSerde {
     router_queue_policy: RouterQueuePolicy,
     use_remote_indexer: bool,
     serve_indexer: bool,
+    #[serde(flatten)]
+    valkey: ValkeyRouterConfig,
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
@@ -441,6 +498,7 @@ impl Default for KvRouterConfigSerde {
             router_queue_policy: config.router_queue_policy,
             use_remote_indexer: config.use_remote_indexer,
             serve_indexer: config.serve_indexer,
+            valkey: config.valkey.clone(),
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
@@ -565,6 +623,10 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub serve_indexer: bool,
 
+    /// Persistent Valkey index, Sentinel, worker-event, and admission settings.
+    #[serde(flatten)]
+    pub valkey: ValkeyRouterConfig,
+
     /// Multiplier for shared cache hits when scoring workers (0.0 to 1.0).
     /// Blocks available in the shared cache are less valuable than device-local blocks
     /// because they need to be fetched. A value of 0.5 means each shared cache hit
@@ -617,10 +679,38 @@ impl Default for KvRouterConfig {
             router_queue_policy: RouterQueuePolicy::default(),
             use_remote_indexer: false,
             serve_indexer: false,
+            valkey: ValkeyRouterConfig::default(),
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
         }
+    }
+}
+
+impl KvRouterConfig {
+    /// Apply the complete frontend policy required by module-owned admission.
+    ///
+    /// Keeping this beside `validate_kv_router_config` prevents language
+    /// adapters from reconstructing a second, incomplete copy of the policy.
+    pub fn apply_valkey_authoritative_admission_preset(&mut self) {
+        self.overlap_score_credit = 1.0;
+        self.overlap_score_credit_decay = 0.0;
+        self.host_cache_hit_weight = 0.0;
+        self.disk_cache_hit_weight = 0.0;
+        self.router_temperature = 0.0;
+        self.use_kv_events = true;
+        self.durable_kv_events = false;
+        self.router_replica_sync = false;
+        self.router_track_output_blocks = false;
+        self.router_track_prefill_tokens = false;
+        self.router_prefill_load_model = RouterPrefillLoadModel::None;
+        self.router_queue_threshold = None;
+        self.router_policy_config = None;
+        self.use_remote_indexer = false;
+        self.serve_indexer = false;
+        self.shared_cache_multiplier = 0.0;
+        self.shared_cache_type = SharedCacheType::None;
+        self.router_predicted_ttl_secs = None;
     }
 }
 
@@ -666,6 +756,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_queue_policy: compat.router_queue_policy,
             use_remote_indexer: compat.use_remote_indexer,
             serve_indexer: compat.serve_indexer,
+            valkey: compat.valkey,
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
@@ -700,6 +791,26 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "use_remote_indexer and serve_indexer are mutually exclusive",
         ));
     }
+    config.valkey.validate(ValkeyValidationContext {
+        use_remote_indexer: config.use_remote_indexer,
+        serve_indexer: config.serve_indexer,
+        use_kv_events: config.use_kv_events,
+        durable_kv_events: config.durable_kv_events,
+        overlap_enabled: config.overlap_score_credit > 0.0,
+        router_replica_sync: config.router_replica_sync,
+        immediate_admission: config.router_queue_threshold.is_none()
+            && config.router_policy_config.is_none(),
+        frontend_load_tracking: config.router_track_output_blocks
+            || config.router_track_prefill_tokens
+            || config.router_prefill_load_model.is_enabled()
+            || config.router_predicted_ttl_secs.is_some(),
+        frontend_scoring: config.shared_cache_type != SharedCacheType::None
+            || config.shared_cache_multiplier != 0.0
+            || config.host_cache_hit_weight != 0.0
+            || config.disk_cache_hit_weight != 0.0
+            || config.overlap_score_credit_decay != 0.0
+            || config.router_temperature != 0.0,
+    })?;
     if config.serve_indexer && config.overlap_score_credit == 0.0 {
         return Err(ValidationError::new(
             "serve_indexer requires overlap_score_credit > 0",
@@ -844,10 +955,15 @@ impl KvRouterConfig {
     /// - KV events are disabled (`use_kv_events=false`)
     /// - Overlap scoring is disabled (`overlap_score_credit=0`)
     ///
+    /// When direct Valkey worker events are enabled, the replicated Valkey
+    /// index is authoritative for GPU-tier routing state. The event plane is
+    /// then only a post-commit compatibility relay, so frontends must not run
+    /// recovery that can reset/replay the same worker state independently.
+    ///
     /// When false, the router skips starting the KV event subscription entirely,
     /// avoiding the need to query workers for their local indexer state.
     pub fn should_subscribe_to_kv_events(&self) -> bool {
-        self.use_kv_events && self.overlap_score_credit > 0.0
+        self.use_kv_events && self.overlap_score_credit > 0.0 && !self.valkey.worker_events
     }
 }
 
@@ -875,6 +991,22 @@ mod tests {
             ("DYN_ROUTER_TRACK_OUTPUT_BLOCKS", "on"),
             ("DYN_ROUTER_TRACK_PREFILL_TOKENS", "false"),
             ("DYN_ROUTER_QUEUE_THRESHOLD", "4.5"),
+            (
+                "DYN_ROUTER_VALKEY_URLS",
+                "valkey://127.0.0.1:6380,valkey://127.0.0.1:6381",
+            ),
+            ("DYN_ROUTER_VALKEY_INDEX_SCOPE", "shared-router"),
+            ("DYN_ROUTER_VALKEY_CONNECTION_POOL_SIZE", "8"),
+            ("DYN_ROUTER_VALKEY_REQUIRED_REPLICA_ACKS", "1"),
+            (
+                "DYN_ROUTER_VALKEY_SENTINEL_URLS",
+                "valkey://sentinel-0:26379,valkey://sentinel-1:26379,valkey://sentinel-2:26379",
+            ),
+            ("DYN_ROUTER_VALKEY_SENTINEL_MASTER_NAME", "dynamo-primary"),
+            ("DYN_ROUTER_VALKEY_SENTINEL_QUORUM", "2"),
+            ("DYN_ROUTER_VALKEY_ALLOW_DEGRADED_WRITES", "true"),
+            ("DYN_ROUTER_VALKEY_AUTHORITATIVE_ADMISSION", "true"),
+            ("DYN_ROUTER_VALKEY_ADMISSION_LEASE_MS", "45000"),
         ]);
 
         assert_eq!(config.overlap_score_credit, 0.25);
@@ -887,6 +1019,25 @@ mod tests {
         assert!(config.router_track_output_blocks);
         assert!(!config.router_track_prefill_tokens);
         assert_eq!(config.router_queue_threshold, Some(4.5));
+        assert_eq!(
+            config.valkey.urls.as_deref(),
+            Some("valkey://127.0.0.1:6380,valkey://127.0.0.1:6381")
+        );
+        assert_eq!(config.valkey.connection_pool_size, 8);
+        assert_eq!(config.valkey.required_replica_acks, Some(1));
+        assert_eq!(
+            config.valkey.sentinel_urls.as_deref(),
+            Some("valkey://sentinel-0:26379,valkey://sentinel-1:26379,valkey://sentinel-2:26379")
+        );
+        assert_eq!(
+            config.valkey.sentinel_master_name.as_deref(),
+            Some("dynamo-primary")
+        );
+        assert_eq!(config.valkey.sentinel_quorum, Some(2));
+        assert!(config.valkey.allow_degraded_writes);
+        assert_eq!(config.valkey.index_scope.as_deref(), Some("shared-router"));
+        assert!(config.valkey.authoritative_admission);
+        assert_eq!(config.valkey.admission_lease_ms, 45_000);
 
         let predicted = config_from_values(&[("DYN_ROUTER_PREDICTED_TTL_SECS", "60")]);
         assert_eq!(predicted.router_predicted_ttl_secs, Some(60.0));
@@ -928,6 +1079,12 @@ mod tests {
 
         let out_of_range = config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "1.5")]);
         assert!(out_of_range.validate_config().is_err());
+
+        for pool_size in [0, 65, u32::MAX] {
+            let mut invalid_pool = KvRouterConfig::default();
+            invalid_pool.valkey.connection_pool_size = pool_size;
+            assert!(invalid_pool.validate_config().is_err());
+        }
     }
 
     #[test]
@@ -1016,6 +1173,236 @@ mod tests {
         };
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_conflicting_or_approximate_valkey_indexers() {
+        let conflicting = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                urls: Some("127.0.0.1:6380".to_string()),
+                ..Default::default()
+            },
+            use_remote_indexer: true,
+            ..Default::default()
+        };
+        assert!(conflicting.validate().is_err());
+
+        let approximate = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                urls: Some("127.0.0.1:6380".to_string()),
+                ..Default::default()
+            },
+            use_kv_events: false,
+            ..Default::default()
+        };
+        assert!(approximate.validate().is_err());
+
+        let durable = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                urls: Some("127.0.0.1:6380".to_string()),
+                ..Default::default()
+            },
+            durable_kv_events: true,
+            ..Default::default()
+        };
+        assert!(durable.validate().is_err());
+
+        let direct_without_scope = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                urls: Some("127.0.0.1:6380".to_string()),
+                worker_events: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(direct_without_scope.validate().is_err());
+    }
+
+    #[test]
+    fn test_valkey_required_replica_acks_requires_a_valkey_indexer_and_wait_range() {
+        let without_valkey = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                required_replica_acks: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(without_valkey.validate().is_err());
+
+        let stable_primary = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                urls: Some("valkey://valkey-primary:6379".to_string()),
+                required_replica_acks: Some(1),
+                allow_insecure_plaintext: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        stable_primary
+            .validate()
+            .expect("one stable-primary URL may still require a replica acknowledgement");
+
+        let out_of_range = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                urls: Some("valkey://valkey-primary:6379".to_string()),
+                required_replica_acks: Some(MAX_VALKEY_REQUIRED_REPLICA_ACKS + 1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(out_of_range.validate().is_err());
+    }
+
+    #[test]
+    fn test_valkey_sentinel_and_degraded_write_policy_validation() {
+        let valid = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                urls: Some("valkey://valkey-0:6379,valkey://valkey-1:6379".to_string()),
+                required_replica_acks: Some(1),
+                sentinel_urls: Some(
+                    "valkey://sentinel-0:26379,valkey://sentinel-1:26379,valkey://sentinel-2:26379"
+                        .to_string(),
+                ),
+                sentinel_master_name: Some("dynamo-primary".to_string()),
+                sentinel_quorum: Some(2),
+                allow_insecure_plaintext: true,
+                allow_degraded_writes: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        valid.validate().expect("strict-majority Sentinel config");
+
+        assert!(
+            KvRouterConfig {
+                valkey: ValkeyRouterConfig {
+                    sentinel_master_name: None,
+                    ..valid.valkey.clone()
+                },
+                ..valid.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            KvRouterConfig {
+                valkey: ValkeyRouterConfig {
+                    sentinel_quorum: Some(1),
+                    ..valid.valkey.clone()
+                },
+                ..valid.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            KvRouterConfig {
+                valkey: ValkeyRouterConfig {
+                    sentinel_urls: Some("valkey://sentinel-0:26379".to_string()),
+                    sentinel_quorum: Some(1),
+                    ..valid.valkey.clone()
+                },
+                ..valid.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            KvRouterConfig {
+                valkey: ValkeyRouterConfig {
+                    sentinel_urls: None,
+                    sentinel_master_name: None,
+                    sentinel_quorum: None,
+                    ..valid.valkey.clone()
+                },
+                ..valid
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    fn authoritative_valkey_config() -> KvRouterConfig {
+        KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                urls: Some("valkey://127.0.0.1:6380".to_string()),
+                index_scope: Some("shared-router".to_string()),
+                allow_insecure_plaintext: true,
+                worker_events: true,
+                authoritative_admission: true,
+                ..Default::default()
+            },
+            router_queue_threshold: None,
+            router_track_prefill_tokens: false,
+            host_cache_hit_weight: 0.0,
+            disk_cache_hit_weight: 0.0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_valkey_authoritative_admission_requires_module_owned_inputs() {
+        assert!(authoritative_valkey_config().validate().is_ok());
+
+        let local_events = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                worker_events: false,
+                ..authoritative_valkey_config().valkey
+            },
+            ..authoritative_valkey_config()
+        };
+        assert!(local_events.validate().is_err());
+
+        let disabled_indexer = KvRouterConfig {
+            overlap_score_credit: 0.0,
+            ..authoritative_valkey_config()
+        };
+        assert!(disabled_indexer.validate().is_err());
+
+        let replica_sync = KvRouterConfig {
+            router_replica_sync: true,
+            ..authoritative_valkey_config()
+        };
+        assert!(replica_sync.validate().is_err());
+
+        let queued = KvRouterConfig {
+            router_queue_threshold: Some(1.0),
+            ..authoritative_valkey_config()
+        };
+        assert!(queued.validate().is_err());
+
+        let output_tracking = KvRouterConfig {
+            router_track_output_blocks: true,
+            ..authoritative_valkey_config()
+        };
+        assert!(output_tracking.validate().is_err());
+
+        let nonzero_temperature = KvRouterConfig {
+            router_temperature: 0.1,
+            ..authoritative_valkey_config()
+        };
+        assert!(nonzero_temperature.validate().is_err());
+    }
+
+    #[test]
+    fn test_valkey_authoritative_admission_validates_lease_duration() {
+        let too_short = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                admission_lease_ms: 9_999,
+                ..authoritative_valkey_config().valkey
+            },
+            ..authoritative_valkey_config()
+        };
+        assert!(too_short.validate().is_err());
+
+        let too_long = KvRouterConfig {
+            valkey: ValkeyRouterConfig {
+                admission_lease_ms: 600_001,
+                ..authoritative_valkey_config().valkey
+            },
+            ..authoritative_valkey_config()
+        };
+        assert!(too_long.validate().is_err());
     }
 
     #[test]
@@ -1336,6 +1723,25 @@ models:
             ..Default::default()
         };
 
+        assert!(!config.should_subscribe_to_kv_events());
+    }
+
+    #[test]
+    fn test_direct_valkey_worker_events_skip_kv_event_recovery_subscription() {
+        let config = KvRouterConfig {
+            use_kv_events: true,
+            overlap_score_credit: 1.0,
+            valkey: ValkeyRouterConfig {
+                urls: Some("valkey://127.0.0.1:6379".to_string()),
+                index_scope: Some("shared-router-index".to_string()),
+                allow_insecure_plaintext: true,
+                worker_events: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.validate().expect("direct Valkey config is valid");
         assert!(!config.should_subscribe_to_kv_events());
     }
 

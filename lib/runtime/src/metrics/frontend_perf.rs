@@ -164,6 +164,59 @@ pub static TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL: Lazy<IntCounterVec> = Lazy::ne
     .expect("tokenizer_cache_uncached_tokens_total counter vec")
 });
 
+pub static TOKENIZER_CACHE_L2_HITS_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::with_opts(Opts::new(
+        frontend_metric_name(frontend_perf::TOKENIZER_CACHE_L2_HITS_TOTAL),
+        "Cumulative shared Valkey tokenizer prefix-cache hits",
+    ))
+    .expect("tokenizer_cache_l2_hits_total counter")
+});
+
+pub static TOKENIZER_CACHE_L2_MISSES_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::with_opts(Opts::new(
+        frontend_metric_name(frontend_perf::TOKENIZER_CACHE_L2_MISSES_TOTAL),
+        "Cumulative shared Valkey tokenizer prefix-cache misses",
+    ))
+    .expect("tokenizer_cache_l2_misses_total counter")
+});
+
+pub static TOKENIZER_CACHE_L2_ERRORS_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::with_opts(Opts::new(
+        frontend_metric_name(frontend_perf::TOKENIZER_CACHE_L2_ERRORS_TOTAL),
+        "Cumulative shared tokenizer cache lookup errors that fell back locally",
+    ))
+    .expect("tokenizer_cache_l2_errors_total counter")
+});
+
+pub static TOKENIZER_CACHE_L2_WRITE_DROPS_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::with_opts(Opts::new(
+        frontend_metric_name(frontend_perf::TOKENIZER_CACHE_L2_WRITE_DROPS_TOTAL),
+        "Cumulative shared tokenizer cache writes dropped by the bounded queue",
+    ))
+    .expect("tokenizer_cache_l2_write_drops_total counter")
+});
+
+pub static TOKENIZER_CACHE_L2_WRITE_ERRORS_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::with_opts(Opts::new(
+        frontend_metric_name(frontend_perf::TOKENIZER_CACHE_L2_WRITE_ERRORS_TOTAL),
+        "Cumulative shared tokenizer cache write errors",
+    ))
+    .expect("tokenizer_cache_l2_write_errors_total counter")
+});
+
+pub static TOKENIZER_CACHE_L2_LOOKUP_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::TOKENIZER_CACHE_L2_LOOKUP_SECONDS),
+            "Shared Valkey tokenizer prefix-cache lookup latency (seconds)",
+        )
+        .buckets(vec![
+            0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025,
+        ]),
+    )
+    .expect("tokenizer_cache_l2_lookup_seconds histogram")
+});
+
 /// Guards idempotency for the `MetricsRegistry` registration path.
 static REGISTERED: OnceCell<()> = OnceCell::new();
 
@@ -197,6 +250,24 @@ fn register_frontend_perf_metrics(registry: &MetricsRegistry) {
     registry
         .add_metric(Box::new(TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL.clone()))
         .ok();
+    registry
+        .add_metric(Box::new(TOKENIZER_CACHE_L2_HITS_TOTAL.clone()))
+        .ok();
+    registry
+        .add_metric(Box::new(TOKENIZER_CACHE_L2_MISSES_TOTAL.clone()))
+        .ok();
+    registry
+        .add_metric(Box::new(TOKENIZER_CACHE_L2_ERRORS_TOTAL.clone()))
+        .ok();
+    registry
+        .add_metric(Box::new(TOKENIZER_CACHE_L2_WRITE_DROPS_TOTAL.clone()))
+        .ok();
+    registry
+        .add_metric(Box::new(TOKENIZER_CACHE_L2_WRITE_ERRORS_TOTAL.clone()))
+        .ok();
+    registry
+        .add_metric(Box::new(TOKENIZER_CACHE_L2_LOOKUP_SECONDS.clone()))
+        .ok();
 }
 
 fn register_frontend_perf_metrics_prometheus(registry: &Registry) -> Result<(), prometheus::Error> {
@@ -210,6 +281,12 @@ fn register_frontend_perf_metrics_prometheus(registry: &Registry) -> Result<(), 
     registry.register(Box::new(TOKENIZER_CACHE_MISSES_TOTAL.clone()))?;
     registry.register(Box::new(TOKENIZER_CACHE_CACHED_TOKENS_TOTAL.clone()))?;
     registry.register(Box::new(TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL.clone()))?;
+    registry.register(Box::new(TOKENIZER_CACHE_L2_HITS_TOTAL.clone()))?;
+    registry.register(Box::new(TOKENIZER_CACHE_L2_MISSES_TOTAL.clone()))?;
+    registry.register(Box::new(TOKENIZER_CACHE_L2_ERRORS_TOTAL.clone()))?;
+    registry.register(Box::new(TOKENIZER_CACHE_L2_WRITE_DROPS_TOTAL.clone()))?;
+    registry.register(Box::new(TOKENIZER_CACHE_L2_WRITE_ERRORS_TOTAL.clone()))?;
+    registry.register(Box::new(TOKENIZER_CACHE_L2_LOOKUP_SECONDS.clone()))?;
     Ok(())
 }
 
