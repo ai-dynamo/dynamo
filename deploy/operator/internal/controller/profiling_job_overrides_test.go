@@ -28,6 +28,8 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+const profilerEntrypoint = "python"
+
 func baseJob() *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -56,7 +58,7 @@ func baseJob() *batchv1.Job {
 						{
 							Name:    "profiler",
 							Image:   "profiler:latest",
-							Command: []string{"python", "-m", "dynamo.profiler"},
+							Command: []string{profilerEntrypoint, "-m", "dynamo.profiler"},
 							Env: []corev1.EnvVar{
 								{Name: "OUTPUT_DIR", Value: "/output"},
 							},
@@ -926,7 +928,7 @@ func TestApplyProfilingJobOverrides_CommandAndArgsPreserved(t *testing.T) {
 		},
 	})
 	c := job.Spec.Template.Spec.Containers[0]
-	if len(c.Command) == 0 || c.Command[0] != "python" {
+	if len(c.Command) == 0 || c.Command[0] != profilerEntrypoint {
 		t.Error("command was unexpectedly overwritten")
 	}
 }
@@ -1028,7 +1030,7 @@ func TestApplyProfilingJobOverrides_NamedProfilerAndOutputCopierOverrides(t *tes
 	if profiler.Image != "custom-profiler:v3" {
 		t.Errorf("profiler image: want custom-profiler:v3, got %s", profiler.Image)
 	}
-	if len(profiler.Command) == 0 || profiler.Command[0] != "python" {
+	if len(profiler.Command) == 0 || profiler.Command[0] != profilerEntrypoint {
 		t.Error("profiler command was unexpectedly overwritten")
 	}
 
@@ -1128,7 +1130,7 @@ func TestApplyProfilingJobOverrides_Combined(t *testing.T) {
 	if profiler.Image != "profiler:v2" {
 		t.Errorf("image: want profiler:v2, got %s", profiler.Image)
 	}
-	if profiler.Command[0] != "python" {
+	if profiler.Command[0] != profilerEntrypoint {
 		t.Error("command was overwritten")
 	}
 	if profiler.Resources.Limits.Cpu().String() != "8" {
