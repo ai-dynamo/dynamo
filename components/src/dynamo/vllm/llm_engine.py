@@ -591,10 +591,16 @@ class VllmLLMEngine(LLMEngine):
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
                     completion_tokens = sum(total_output_tokens_by_index.values())
+                    num_cached_tokens = getattr(res, "num_cached_tokens", None)
                     out["completion_usage"] = {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens,
+                        "prompt_tokens_details": (
+                            {"cached_tokens": num_cached_tokens}
+                            if num_cached_tokens
+                            else None
+                        ),
                     }
                     # Stamp the connector's transfer handle on the
                     # prefill terminal so PrefillRouter can forward it.
@@ -704,7 +710,13 @@ class VllmLLMEngine(LLMEngine):
         )
 
     def supported_controls(self) -> set[str]:
-        controls = {"start_profile", "stop_profile", "sleep", "wake_up"}
+        controls = {
+            "start_profile",
+            "stop_profile",
+            "sleep",
+            "wake_up",
+            "clear_kv_blocks",
+        }
         if self.engine_client is not None and hasattr(
             self.engine_client, "scale_elastic_ep"
         ):
@@ -717,6 +729,7 @@ class VllmLLMEngine(LLMEngine):
             "stop_profile": self.stop_profile,
             "sleep": self.sleep,
             "wake_up": self.wake_up,
+            "clear_kv_blocks": self.clear_kv_blocks,
         }
         if self.engine_client is not None and hasattr(
             self.engine_client, "scale_elastic_ep"
@@ -1293,6 +1306,19 @@ class VllmLLMEngine(LLMEngine):
             return {"status": "ok", "message": "Profiling stopped"}
         except Exception as e:
             logger.error("Failed to stop profiling: %s", e)
+            return {"status": "error", "message": str(e)}
+
+    async def clear_kv_blocks(self, body: dict) -> dict:
+        del body  # The control accepts an empty object and has no options.
+        if self.engine_client is None:
+            return {"status": "error", "message": "Engine is not running"}
+        try:
+            cleared = await self.engine_client.reset_prefix_cache(reset_connector=True)
+            if cleared is False:
+                return {"status": "error", "message": "KV cache reset failed"}
+            return {"status": "success", "message": "KV cache cleared"}
+        except Exception as e:
+            logger.error("Failed to clear KV cache: %s", e)
             return {"status": "error", "message": str(e)}
 
     async def scale_elastic_ep(self, body: dict) -> dict:

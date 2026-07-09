@@ -598,6 +598,100 @@ class CachedTokensChatPayload(ChatPayload):
 
 
 @dataclass
+class ClearKVBlocksPayload(ChatPayload):
+    """Warm the prefix cache, clear it through the system server, and infer.
+
+    The two warm-up requests happen before the request driven by the regular
+    serve-test harness. The second warm-up must report a cache hit; the harness
+    request then proves the clear removed that prefix without breaking serving.
+    """
+
+    def __init__(
+        self,
+        body: dict,
+        system_port: int = DefaultPort.SYSTEM1.value,
+        timeout: int = 60,
+    ):
+        super().__init__(
+            body=body,
+            repeat_count=1,
+            expected_response=[],
+            expected_log=[],
+            timeout=timeout,
+        )
+        self.system_ports = [system_port]
+        self._cleared = False
+
+    @staticmethod
+    def _cached_tokens(response: Any, phase: str) -> int:
+        result = response.json()
+        usage = result.get("usage")
+        prompt_tokens = (usage or {}).get("prompt_tokens")
+        if usage is None or prompt_tokens is None or prompt_tokens <= 0:
+            raise AssertionError(
+                f"{phase}: response carried no prompt-token usage evidence: "
+                f"{usage!r}"
+            )
+        details = usage.get("prompt_tokens_details") or {}
+        return details.get("cached_tokens", 0) or 0
+
+    def _warm_then_clear(self) -> None:
+        if self._cleared:
+            return
+
+        inference_url = super().url()
+        warm_responses = []
+        for request_number in (1, 2):
+            response = requests.post(
+                inference_url,
+                json=self.body,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            ChatPayload.extract_content(response)
+            warm_responses.append(response)
+            logger.info(
+                "KV-clear warm-up request %d reported %d cached tokens",
+                request_number,
+                self._cached_tokens(response, f"warm-up request {request_number}"),
+            )
+
+        second_cached_tokens = self._cached_tokens(
+            warm_responses[1], "second warm-up request"
+        )
+        if second_cached_tokens <= 0:
+            raise AssertionError(
+                "Second warm-up request did not report cached tokens; "
+                "prefix caching is not active"
+            )
+
+        clear_url = (
+            f"http://{self.host}:{self.system_ports[0]}"
+            "/engine/control/clear_kv_blocks"
+        )
+        response = requests.post(clear_url, json={}, timeout=self.timeout)
+        response.raise_for_status()
+        result = response.json()
+        expected = {"status": "success", "message": "KV cache cleared"}
+        if result != expected:
+            raise AssertionError(f"Unexpected clear_kv_blocks response: {result}")
+        self._cleared = True
+
+    def url(self) -> str:
+        self._warm_then_clear()
+        return super().url()
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        cached_tokens = self._cached_tokens(response, "first post-clear request")
+        if cached_tokens != 0:
+            raise AssertionError(
+                "First post-clear request unexpectedly reused "
+                f"{cached_tokens} cached tokens"
+            )
+
+
+@dataclass
 class LoraTestChatPayload(ChatPayload):
     """
     Chat payload that loads a LoRA adapter before sending inference requests.

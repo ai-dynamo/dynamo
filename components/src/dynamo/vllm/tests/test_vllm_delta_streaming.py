@@ -59,11 +59,11 @@ def _output(
     )
 
 
-def _request_output(outputs, *, prompt_token_ids=None):
+def _request_output(outputs, *, prompt_token_ids=None, num_cached_tokens=0):
     return SimpleNamespace(
         outputs=outputs,
         prompt_token_ids=prompt_token_ids if prompt_token_ids is not None else [101],
-        num_cached_tokens=0,
+        num_cached_tokens=num_cached_tokens,
         kv_transfer_params=None,
     )
 
@@ -252,7 +252,9 @@ async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
     responses = [
         _request_output([_output([1])], prompt_token_ids=[10, 11]),
         _request_output(
-            [_output([2, 3], finish_reason="length")], prompt_token_ids=[10, 11]
+            [_output([2, 3], finish_reason="length")],
+            prompt_token_ids=[10, 11],
+            num_cached_tokens=1,
         ),
     ]
     engine = VllmLLMEngine.__new__(VllmLLMEngine)
@@ -288,6 +290,7 @@ async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
         "prompt_tokens": 2,
         "completion_tokens": 3,
         "total_tokens": 5,
+        "prompt_tokens_details": {"cached_tokens": 1},
     }
 
 
