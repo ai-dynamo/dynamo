@@ -1456,9 +1456,11 @@ mod tests {
             "model": "test",
             "prompt_embeds": "encoded",
             "nvext": {
+                "cache_salt": "tenant-nvext",
                 "agent_hints": {"priority": 5, "strict_priority": 9},
                 "routing_constraints": {"required_taints": ["gpu=A100"]}
-            }
+            },
+            "cache_salt": "tenant-legacy"
         });
 
         let result = tokenize_completion_prompt_embeds(&request)
@@ -1468,6 +1470,7 @@ mod tests {
         assert!(result.token_ids.is_empty());
         assert_eq!(result.priority_jump, 5.0);
         assert_eq!(result.strict_priority, 9);
+        assert_eq!(result.cache_namespace.as_deref(), Some("tenant-nvext"));
         assert!(
             result
                 .routing_constraints
