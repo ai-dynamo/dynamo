@@ -2350,20 +2350,6 @@ func (m *mockScaleInterface) Patch(ctx context.Context, gvr schema.GroupVersionR
 	return &autoscalingv1.Scale{}, nil
 }
 
-func setWantGroveReconcileResultRuntimeNamespaces(dgd *v1beta1.DynamoGraphDeployment, result *ReconcileResult) {
-	if dgd == nil || result == nil {
-		return
-	}
-	for componentName, componentStatus := range result.ComponentStatus {
-		component := dgd.GetComponentByName(componentName)
-		if component == nil {
-			continue
-		}
-		componentStatus.RuntimeNamespace = dgd.GetDynamoNamespaceForComponent(component)
-		result.ComponentStatus[componentName] = componentStatus
-	}
-}
-
 func Test_reconcileGroveResources(t *testing.T) {
 	ctx := context.Background()
 
@@ -2431,11 +2417,12 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: "All resources are ready",
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-frontend"},
-						Replicas:        2,
-						UpdatedReplicas: 2,
-						ReadyReplicas:   ptr.To(int32(2)),
+						ComponentKind:    v1beta1.ComponentKindPodClique,
+						ComponentNames:   []string{"test-dgd-0-frontend"},
+						Replicas:         2,
+						UpdatedReplicas:  2,
+						ReadyReplicas:    ptr.To(int32(2)),
+						RuntimeNamespace: "default-test-dgd",
 					},
 				},
 			},
@@ -2493,18 +2480,20 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: Message("Resources not ready: test-dgd: podclique/test-dgd-0-decode: desired=2, ready=1"),
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-frontend"},
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   ptr.To(int32(1)),
+						ComponentKind:    v1beta1.ComponentKindPodClique,
+						ComponentNames:   []string{"test-dgd-0-frontend"},
+						Replicas:         1,
+						UpdatedReplicas:  1,
+						ReadyReplicas:    ptr.To(int32(1)),
+						RuntimeNamespace: "default-test-dgd",
 					},
 					"decode": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-decode"},
-						Replicas:        2,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   ptr.To(int32(1)),
+						ComponentKind:    v1beta1.ComponentKindPodClique,
+						ComponentNames:   []string{"test-dgd-0-decode"},
+						Replicas:         2,
+						UpdatedReplicas:  1,
+						ReadyReplicas:    ptr.To(int32(1)),
+						RuntimeNamespace: "default-test-dgd",
 					},
 				},
 			},
@@ -2573,6 +2562,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
+						RuntimeNamespace:  "default-test-dgd",
 					},
 					"prefill": {
 						ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
@@ -2580,6 +2570,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
+						RuntimeNamespace:  "default-test-dgd",
 					},
 				},
 			},
@@ -2640,11 +2631,12 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: Message("Resources not ready: test-dgd: pcsg/test-dgd-0-aggregated: desired=2, available=1"),
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-frontend"},
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   ptr.To(int32(1)),
+						ComponentKind:    v1beta1.ComponentKindPodClique,
+						ComponentNames:   []string{"test-dgd-0-frontend"},
+						Replicas:         1,
+						UpdatedReplicas:  1,
+						ReadyReplicas:    ptr.To(int32(1)),
+						RuntimeNamespace: "default-test-dgd",
 					},
 					"aggregated": {
 						ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
@@ -2652,6 +2644,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						AvailableReplicas: ptr.To(int32(1)),
+						RuntimeNamespace:  "default-test-dgd",
 					},
 				},
 			},
@@ -2705,7 +2698,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			setWantGroveReconcileResultRuntimeNamespaces(dgd, &tt.wantReconcileResult)
+			// setWantGroveReconcileResultRuntimeNamespaces(dgd, &tt.wantReconcileResult)
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
 		})
 	}
