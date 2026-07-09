@@ -139,17 +139,45 @@ _NON_WORKER_SERVICES = frozenset({"Frontend", "Planner"})
 
 
 def _inject_trust_remote_code_flag(config: dict) -> None:
-    """Append --trust-remote-code to all worker services that don't already have it."""
+    """Append --trust-remote-code to all worker services that don't already have it.
+
+    Shell-form workers (``command: ["sh", "-c"]`` with a single-string args
+    list) are handled correctly: the flag is appended inside the shell string
+    rather than as a second list element (which would become ``$0`` and break
+    the worker).
+    """
     services = config.get("spec", {}).get("services", {})
     for svc_name, svc in services.items():
         if not isinstance(svc, dict) or svc_name in _NON_WORKER_SERVICES:
             continue
-        main_container = (
-            svc.get("extraPodSpec", {}).get("mainContainer", {})
-            if isinstance(svc.get("extraPodSpec"), dict)
-            else {}
-        )
-        args = main_container.get("args") or []
-        if _TRUST_REMOTE_CODE_FLAG in args:
+        extra_pod_spec = svc.get("extraPodSpec")
+        if not isinstance(extra_pod_spec, dict):
             continue
-        main_container["args"] = list(args) + [_TRUST_REMOTE_CODE_FLAG]
+        main_container = extra_pod_spec.get("mainContainer")
+        if not isinstance(main_container, dict):
+            continue
+
+        args = main_container.get("args") or []
+        cmd = main_container.get("command") or []
+
+        # Detect shell form: command=["sh","-c"] with a single-string args.
+        is_shell_c = (
+            isinstance(cmd, list)
+            and len(cmd) >= 2
+            and cmd[0] in ("/bin/sh", "sh")
+            and cmd[1] == "-c"
+        )
+        is_single_string_args = (
+            isinstance(args, list) and len(args) == 1 and isinstance(args[0], str)
+        )
+
+        # Check idempotency: for shell-form check inside the string,
+        # for list-form check the list.
+        if is_shell_c and is_single_string_args:
+            if _TRUST_REMOTE_CODE_FLAG in args[0]:
+                continue
+            main_container["args"] = [args[0] + " " + _TRUST_REMOTE_CODE_FLAG]
+        else:
+            if _TRUST_REMOTE_CODE_FLAG in args:
+                continue
+            main_container["args"] = list(args) + [_TRUST_REMOTE_CODE_FLAG]

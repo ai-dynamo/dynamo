@@ -1058,7 +1058,120 @@ def test_materialize_dgd_excludes_frontend_and_planner() -> None:
     )
 
 
-def test_model_has_auto_map_returns_true_on_unexpected_error() -> None:
+def test_materialize_dgd_shell_form_worker() -> None:
+    """Shell-form workers (command=['sh','-c'], args=['<single string>']) must
+    have the flag appended inside the string, not as a second list element."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = {
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "command": ["sh", "-c"],
+                            "args": [
+                                "python3 -m vllm.entrypoints.openai.api_server "
+                                "--model some/model --tp 1"
+                            ],
+                        },
+                    },
+                },
+            }
+        }
+    }
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    result_args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    # Must still be a single-element list (shell form preserved).
+    assert isinstance(result_args, list) and len(result_args) == 1
+    assert result_args[0].endswith("--trust-remote-code")
+
+    # Idempotency: materializing again must not duplicate the flag.
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result2 = materialize_dgd(
+            result,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    result2_args = result2["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert len(result2_args) == 1
+    assert result2_args[0].count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_shell_form_preserves_syntax() -> None:
+    """Shell-form args with shell operators (&&, |, etc.) must not be
+    corrupted by shlex round-tripping."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    original_cmd = (
+        "export FOO=bar && python3 -m vllm.entrypoints.openai.api_server "
+        "--model some/model --tp 1"
+    )
+    cfg = {
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "command": ["sh", "-c"],
+                            "args": [original_cmd],
+                        },
+                    },
+                },
+            }
+        }
+    }
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    result_args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert len(result_args) == 1
+    # The original shell syntax (&&, export) must be preserved verbatim.
+    assert result_args[0] == original_cmd + " --trust-remote-code"
     """Unexpected errors (network, auth) must return True (conservative default)
     rather than silently returning False and risking a missed injection."""
     from dynamo.profiler.utils.model_info import model_has_auto_map
