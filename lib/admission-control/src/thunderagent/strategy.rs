@@ -12,7 +12,7 @@ use dynamo_kv_router::scheduling::{
 };
 use indexmap::{IndexMap, IndexSet};
 
-use crate::{ConfigError, ThunderAgentConfig, WorkerCapacity, WorkerCapacityProvider};
+use super::{ConfigError, ThunderAgentConfig, WorkerCapacity, WorkerCapacityProvider};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProgramStatus {

@@ -10,7 +10,7 @@ use dynamo_kv_router::scheduling::{PolicyClassAdmissionStrategies, PolicyProfile
 use thiserror::Error;
 use tokio::sync::watch;
 
-use crate::{ConfigError, STRATEGY_NAME, ThunderAgent, ThunderAgentConfig, WatchWorkerCapacity};
+use super::{ConfigError, STRATEGY_NAME, ThunderAgent, ThunderAgentConfig, WatchWorkerCapacity};
 
 #[derive(Debug, Error)]
 pub enum RegistrationError {
