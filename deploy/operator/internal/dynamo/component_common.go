@@ -143,7 +143,7 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 		})
 	}
 
-	if context.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
+if context.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "CONTAINER_NAME",
 			Value: commonconsts.MainContainerName,
@@ -151,6 +151,15 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "DYN_KUBE_DISCOVERY_MODE",
 			Value: string(configv1alpha1.KubeDiscoveryModeContainer),
+		})
+	}
+
+	// Worker hash suffix is populated only for worker/router component contexts.
+	// Export it here so default components like LocalRouter can consume it.
+	if context.WorkerHashSuffix != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  commonconsts.DynamoNamespaceWorkerSuffixEnvVar,
+			Value: context.WorkerHashSuffix,
 		})
 	}
 
