@@ -71,6 +71,10 @@ const WRITER_SPIN_LIMIT: u32 = 64;
 /// Soft limit for queued bytes in the TCP writer buffer.
 const WRITER_SOFT_WRITE_BUF_LIMIT: usize = 65_535;
 
+/// Larger byte limit used while a batch contains only payloads that are at
+/// least as large as the default soft limit.
+const WRITER_LARGE_PAYLOAD_WRITE_BUF_LIMIT: usize = 1024 * 1024;
+
 /// Buffers smaller than this are coalesced into the writer's flattened buffer.
 const WRITE_FLATTEN_THRESHOLD: usize = 4096;
 
@@ -165,6 +169,7 @@ struct TcpWriteBuffer {
     write_buf: VecDeque<Bytes>,
     flattened_writes: BytesMut,
     write_buf_len: usize,
+    only_large_payloads: bool,
 }
 
 impl TcpWriteBuffer {
@@ -173,6 +178,7 @@ impl TcpWriteBuffer {
             write_buf: VecDeque::with_capacity(WRITE_VECTORED_CHUNKS),
             flattened_writes: BytesMut::new(),
             write_buf_len: 0,
+            only_large_payloads: true,
         }
     }
 
@@ -181,7 +187,12 @@ impl TcpWriteBuffer {
     }
 
     fn is_full(&self) -> bool {
-        self.write_buf_len >= WRITER_SOFT_WRITE_BUF_LIMIT
+        let limit = if self.only_large_payloads {
+            WRITER_LARGE_PAYLOAD_WRITE_BUF_LIMIT
+        } else {
+            WRITER_SOFT_WRITE_BUF_LIMIT
+        };
+        self.write_buf_len >= limit
     }
 
     fn queued_len(&self) -> usize {
@@ -192,9 +203,11 @@ impl TcpWriteBuffer {
         self.write_buf.clear();
         self.flattened_writes.clear();
         self.write_buf_len = 0;
+        self.only_large_payloads = true;
     }
 
     fn push_frame(&mut self, frame: TcpRequestFrame) {
+        self.only_large_payloads &= frame.payload.len() >= WRITER_SOFT_WRITE_BUF_LIMIT;
         self.write(frame.header);
         self.write(frame.payload);
     }
@@ -1828,6 +1841,32 @@ mod tests {
         assert_eq!(written, queued_len);
         assert_eq!(writer.written, expected);
         assert!(write_buf.is_empty());
+    }
+
+    #[test]
+    fn test_tcp_write_buffer_extends_batch_only_for_large_payloads() {
+        let frame = |payload_len| TcpRequestFrame {
+            header: Bytes::from_static(b"h"),
+            payload: Bytes::from(vec![b'p'; payload_len]),
+        };
+
+        let mut large_batch = TcpWriteBuffer::new();
+        for _ in 0..15 {
+            large_batch.push_frame(frame(WRITER_SOFT_WRITE_BUF_LIMIT));
+            assert!(!large_batch.is_full());
+        }
+        large_batch.push_frame(frame(WRITER_SOFT_WRITE_BUF_LIMIT));
+        assert!(large_batch.is_full());
+
+        let mut mixed_batch = TcpWriteBuffer::new();
+        mixed_batch.push_frame(frame(WRITER_SOFT_WRITE_BUF_LIMIT));
+        assert!(!mixed_batch.is_full());
+        mixed_batch.push_frame(frame(WRITE_FLATTEN_THRESHOLD));
+        assert!(mixed_batch.is_full());
+
+        mixed_batch.clear();
+        mixed_batch.push_frame(frame(WRITER_SOFT_WRITE_BUF_LIMIT));
+        assert!(!mixed_batch.is_full());
     }
 
     #[tokio::test]
