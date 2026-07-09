@@ -4,6 +4,7 @@
 import argparse
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -608,6 +609,20 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
             "attention_dp_size": None,
         }
     ]
+
+
+def test_build_mocker_engine_args_falls_back_when_aic_estimator_missing(
+    monkeypatch, caplog
+):
+    monkeypatch.setitem(sys.modules, "aiconfigurator.sdk", None)
+
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(aic_perf_model=True, model_path="/models/mock")
+    )
+
+    assert engine_args.num_gpu_blocks == 16384
+    assert "Falling back to default num_gpu_blocks=16384" in caplog.text
+    assert "--num-gpu-blocks-override" in caplog.text
 
 
 def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):
