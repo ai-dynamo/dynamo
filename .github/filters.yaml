@@ -12,6 +12,7 @@
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
+#   aic      -> runtime, planner, and frontend AIC contract tests
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
@@ -125,6 +126,53 @@ core:
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
+
+aic:
+  - 'Cargo.toml'
+  - 'Cargo.lock'
+  - 'lib/bindings/python/Cargo.toml'
+  - 'lib/bindings/python/Cargo.lock'
+  - 'pyproject.toml'
+  - 'benchmarks/pyproject.toml'
+  - 'container/deps/requirements.planner.txt'
+  - 'container/templates/frontend.Dockerfile'
+  - 'container/templates/planner.Dockerfile'
+  - 'container/templates/wheel_builder.Dockerfile'
+  - 'lib/mocker/src/common/engine_perf.rs'
+  - 'lib/mocker/src/common/perf_model.rs'
+  - 'lib/mocker/src/common/protocols.rs'
+  - 'lib/bindings/python/rust/llm/aic_callback.rs'
+  - 'lib/bindings/python/rust/llm/engine_perf.rs'
+  - 'lib/bindings/python/src/dynamo/_internal/aic.py'
+  - 'lib/bindings/python/tests/**/*aic*'
+  - 'lib/bindings/python/tests/test_engine_perf_model.py'
+  - 'lib/kv-router/src/scheduling/config.rs'
+  - 'components/src/dynamo/common/configuration/groups/aic_perf_args.py'
+  - 'components/src/dynamo/frontend/frontend_args.py'
+  - 'components/src/dynamo/planner/**/*aic*'
+  - 'components/src/dynamo/planner/config/planner_config.py'
+  - 'components/src/dynamo/planner/core/perf_model/rust_adapter.py'
+  - 'components/src/dynamo/profiler/**/*aic*'
+  - 'components/src/dynamo/profiler/rapid.py'
+  - 'components/src/dynamo/profiler/thorough.py'
+  - 'components/src/dynamo/profiler/utils/replay_optimize/**'
+  - 'components/src/dynamo/profiler/tests/test_replay_optimize.py'
+  - 'components/src/dynamo/profiler/tests/unit/test_rapid_planner_replicas.py'
+  - 'components/src/dynamo/replay/api.py'
+  - 'components/src/dynamo/replay/main.py'
+  - 'tests/dependencies/test_aiconfigurator_consistency.py'
+  - 'tests/frontend/aic_image_smoke.py'
+  - 'tests/report_pytest_markers.py'
+  - 'tests/router/mocker_process.py'
+  - 'tests/router/test_router_e2e_with_mockers.py'
+  - 'tests/wheels/smoke_install.py'
+  - 'tests/wheels/test_dynamo_wheel_smoke.py'
+  - '.github/filters.yaml'
+  - '.github/actions/changed-files/action.yml'
+  - '.github/workflows/pr.yaml'
+  - '.github/workflows/pre-merge.yml'
+  - '.github/workflows/dynamo-pipeline.yml'
+  - '.github/workflows/shared-test.yml'
 
 operator:
   - *ci

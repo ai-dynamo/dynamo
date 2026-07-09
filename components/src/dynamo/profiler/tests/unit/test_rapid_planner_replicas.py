@@ -23,27 +23,24 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytest
+from aiconfigurator.sdk.task_v2 import Task
+
+from dynamo.profiler.rapid import _generate_dgd_from_pick
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DynamoGraphDeploymentRequestSpec,
+    HardwareSpec,
+    ModelCacheSpec,
+    SLASpec,
+    WorkloadSpec,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.unit,
     pytest.mark.planner,
+    pytest.mark.aiconfigurator,
 ]
-
-try:
-    from aiconfigurator.sdk.task_v2 import Task
-
-    from dynamo.profiler.rapid import _generate_dgd_from_pick
-    from dynamo.profiler.utils.dgdr_v1beta1_types import (
-        DynamoGraphDeploymentRequestSpec,
-        HardwareSpec,
-        ModelCacheSpec,
-        SLASpec,
-        WorkloadSpec,
-    )
-except ImportError as e:  # pragma: no cover - environment guard
-    pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
 
 
 def _make_dgdr() -> DynamoGraphDeploymentRequestSpec:

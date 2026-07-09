@@ -59,6 +59,11 @@ on:
         description: 'CPU-only pytest markers'
         required: false
         type: string
+      arm_cpu_only_test_markers:
+        description: 'Optional CPU-only pytest markers used only on arm64'
+        required: false
+        type: string
+        default: ''
       cpu_only_test_timeout_minutes:
         description: 'Timeout in minutes for CPU tests'
         required: false
@@ -205,7 +210,7 @@ jobs:
         uses: ./.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
-          pytest_marks: ${{ inputs.cpu_only_test_markers }}
+          pytest_marks: ${{ matrix.platform == 'arm64' && inputs.arm_cpu_only_test_markers != '' && inputs.arm_cpu_only_test_markers || inputs.cpu_only_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.platform }}
