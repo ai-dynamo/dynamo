@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -278,7 +279,12 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    run([str(venv_python), "-m", "pip", "install", *find_links, *requirements])
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = str(venv_python.parent.parent / "cargo-target")
+    run(
+        [str(venv_python), "-m", "pip", "install", *find_links, *requirements],
+        env=env,
+    )
 
 
 def pip_check(venv_python: Path) -> None:
@@ -382,6 +388,72 @@ assert metadata.version("ai-dynamo") == metadata.version("ai-dynamo-runtime")
     run([str(venv_python), "-c", code])
 
 
+def run_mocker_aic_import_smoke(venv_python: Path) -> None:
+    code = r"""
+import importlib.metadata as metadata
+import json
+import os
+import re
+from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.version import Version
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+import aiconfigurator
+import aiconfigurator_core
+from aiconfigurator.cli.main import _execute_tasks, build_default_tasks
+from aiconfigurator.sdk.engine import compile_engine
+from aiconfigurator.sdk.memory import estimate_num_gpu_blocks
+from aiconfigurator.sdk.task_v2 import Task
+from dynamo.mocker import AicEngineConfig, RustEnginePerfModel
+
+installed_aic_version = Version(metadata.version("aiconfigurator"))
+assert aiconfigurator_core
+assert compile_engine and estimate_num_gpu_blocks and Task
+assert build_default_tasks and _execute_tasks
+assert AicEngineConfig and RustEnginePerfModel
+
+aic_requirements = [
+    Requirement(value)
+    for value in metadata.requires("ai-dynamo") or []
+    if Requirement(value).name == "aiconfigurator"
+]
+assert len(aic_requirements) == 1
+aic_requirement = aic_requirements[0]
+if aic_requirement.url:
+    assert aic_requirement.url.startswith("git+")
+    expected_ref = aic_requirement.url.rsplit("@", 1)[1]
+    direct_url_text = metadata.distribution("aiconfigurator").read_text(
+        "direct_url.json"
+    )
+    assert direct_url_text
+    vcs_info = json.loads(direct_url_text)["vcs_info"]
+    assert vcs_info["requested_revision"] == expected_ref
+    if re.fullmatch(r"[0-9a-fA-F]{7,40}", expected_ref):
+        assert vcs_info["commit_id"].lower().startswith(expected_ref.lower())
+    else:
+        assert re.fullmatch(r"[0-9a-fA-F]{40}", vcs_info["commit_id"])
+else:
+    assert aic_requirement.specifier
+    assert installed_aic_version in aic_requirement.specifier
+
+package_root = Path(aiconfigurator.__file__).resolve().parent
+assert (package_root / "model_configs/Qwen--Qwen3-32B_config.json").is_file()
+assert (package_root / "systems/h200_sxm.yaml").is_file()
+parquet_files = list(
+    (package_root / "systems/data/h200_sxm/vllm/0.14.0").glob("*.parquet")
+)
+assert parquet_files
+for path in parquet_files:
+    with path.open("rb") as handle:
+        assert handle.read(4) == b"PAR1"
+"""
+    run([str(venv_python), "-c", code])
+
+
 OPTIONAL_IMPORT_NAMES = {"kvbm": "kvbm"}
 
 
@@ -408,5 +480,23 @@ def install_core(
             assert_local_direct_url(venv_python, dist, wheel, wheelhouse)
             import_name = OPTIONAL_IMPORT_NAMES.get(dist, dist)
             run([str(venv_python), "-c", f"import {import_name}; assert {import_name}"])
+    finally:
+        shutil.rmtree(venv_python.parent.parent, ignore_errors=True)
+
+
+def install_mocker_extra(wheelhouse: Path, python_spec: str) -> None:
+    ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
+    runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
+
+    venv_python = create_venv(python_spec)
+    try:
+        pip_install(
+            venv_python,
+            wheelhouse,
+            [str(runtime), f"{ai_dynamo}[mocker]"],
+        )
+        pip_check(venv_python)
+        assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)
+        run_mocker_aic_import_smoke(venv_python)
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)

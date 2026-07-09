@@ -12,11 +12,8 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-try:
-    from dynamo.llm import KvRouterConfig
-    from dynamo.mocker import MockEngineArgs
-except ImportError:
-    pytest.skip("dynamo mocker bindings not available", allow_module_level=True)
+from dynamo.llm import KvRouterConfig
+from dynamo.mocker import MockEngineArgs
 from dynamo.profiler.utils import replay_optimize
 from dynamo.profiler.utils.replay_optimize import (
     DenseAggReplayState,
@@ -42,6 +39,14 @@ pytestmark = [
 
 _AIC_MODEL = "Qwen/Qwen3-32B"
 _AIC_SYSTEM = "h200_sxm"
+
+
+def _require_aic_010(monkeypatch: pytest.MonkeyPatch) -> None:
+    from aiconfigurator.sdk.engine import compile_engine
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+    assert compile_engine
 
 
 def _base_prefill_args() -> dict[str, Any]:
@@ -1161,10 +1166,11 @@ def test_kv_router_config_with_overrides_deprecated_zero_wins() -> None:
 
 
 @pytest.mark.timeout(30)
+@pytest.mark.aic_full
+@pytest.mark.aiconfigurator
+@pytest.mark.planner
 def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator")
-    # Rust AIC callback also requires the Phase 1.5 Python engine API.
-    pytest.importorskip("aiconfigurator.sdk.engine")
+    _require_aic_010(monkeypatch)
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1190,10 +1196,11 @@ def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
 
 
 @pytest.mark.timeout(30)
+@pytest.mark.aic_full
+@pytest.mark.aiconfigurator
+@pytest.mark.planner
 def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator")
-    # Rust AIC callback also requires the Phase 1.5 Python engine API.
-    pytest.importorskip("aiconfigurator.sdk.engine")
+    _require_aic_010(monkeypatch)
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1219,10 +1226,11 @@ def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.timeout(30)
+@pytest.mark.aic_full
+@pytest.mark.aiconfigurator
+@pytest.mark.planner
 def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator")
-    # Rust AIC callback also requires the Phase 1.5 Python engine API.
-    pytest.importorskip("aiconfigurator.sdk.engine")
+    _require_aic_010(monkeypatch)
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1247,10 +1255,11 @@ def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.timeout(30)
+@pytest.mark.aic_full
+@pytest.mark.aiconfigurator
+@pytest.mark.planner
 def test_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator")
-    # Rust AIC callback also requires the Phase 1.5 Python engine API.
-    pytest.importorskip("aiconfigurator.sdk.engine")
+    _require_aic_010(monkeypatch)
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",

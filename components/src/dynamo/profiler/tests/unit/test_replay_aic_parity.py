@@ -4,19 +4,20 @@
 import json
 
 import pytest
+from aiconfigurator.sdk.backends.factory import get_backend
+from aiconfigurator.sdk.config import ModelConfig, RuntimeConfig
+from aiconfigurator.sdk.engine import compile_engine
+from aiconfigurator.sdk.inference_session import InferenceSession
+from aiconfigurator.sdk.models import get_model
+from aiconfigurator.sdk.perf_database import get_database
 
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay
 
-# run_synthetic_trace_replay constructs the Rust AIC callback, which imports
-# aiconfigurator.sdk.engine (Phase 1.5 compile_engine API). Skip if absent —
-# PyPI aiconfigurator releases predating PR #1200 don't ship it.
-pytest.importorskip("aiconfigurator.sdk.engine")
-
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
 AIC_PARITY_SYSTEM = "h200_sxm"
 AIC_PARITY_VERSIONS = {
-    "vllm": "0.19.0",
+    "vllm": "0.14.0",
     "sglang": "0.5.6.post2",
 }
 AIC_PARITY_BACKENDS = [
@@ -25,12 +26,20 @@ AIC_PARITY_BACKENDS = [
 ]
 
 pytestmark = [
+    pytest.mark.aic_full,
+    pytest.mark.aiconfigurator,
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.planner,
 ]
+
+
+@pytest.fixture(autouse=True)
+def _offline_aic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
 
 
 def _aic_replay_args(backend_name: str):
@@ -62,7 +71,7 @@ def _aic_disagg_replay_args(
     backend_name: str,
     *,
     tp_size: int,
-    is_prefill: bool,
+    worker_type: str,
     max_num_seqs: int,
     max_num_batched_tokens: int,
 ):
@@ -79,8 +88,7 @@ def _aic_disagg_replay_args(
         "aic_backend_version": AIC_PARITY_VERSIONS[backend_name],
         "aic_tp_size": tp_size,
         "aic_model_path": AIC_PARITY_MODEL,
-        "is_prefill": is_prefill,
-        "is_decode": not is_prefill,
+        "worker_type": worker_type,
     }
     if backend_name == "sglang":
         payload["engine_type"] = "sglang"
@@ -93,24 +101,22 @@ def _aic_disagg_replay_args(
 
 
 def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int):
-    aiconfigurator = pytest.importorskip("aiconfigurator")
+    assert compile_engine
 
-    database = aiconfigurator.sdk.perf_database.get_database(
+    database = get_database(
         system=AIC_PARITY_SYSTEM,
         backend=backend_name,
         version=AIC_PARITY_VERSIONS[backend_name],
     )
-    backend = aiconfigurator.sdk.backends.factory.get_backend(backend_name)
-    model = aiconfigurator.sdk.models.get_model(
+    backend = get_backend(backend_name)
+    model = get_model(
         model_path=AIC_PARITY_MODEL,
-        model_config=aiconfigurator.sdk.config.ModelConfig(tp_size=1),
+        model_config=ModelConfig(tp_size=1),
         backend_name=backend_name,
     )
-    session = aiconfigurator.sdk.inference_session.InferenceSession(
-        model, database, backend
-    )
+    session = InferenceSession(model, database, backend)
     summary = session.run_static(
-        runtime_config=aiconfigurator.sdk.config.RuntimeConfig(
+        runtime_config=RuntimeConfig(
             batch_size=batch_size,
             beam_width=1,
             isl=isl,
@@ -219,14 +225,14 @@ def test_run_synthetic_disagg_replay_preserves_aic_local_optimum(
     prefill_args = _aic_disagg_replay_args(
         backend_name,
         tp_size=prefill_tp,
-        is_prefill=True,
+        worker_type="prefill",
         max_num_seqs=prefill_bs,
         max_num_batched_tokens=isl,
     )
     decode_args = _aic_disagg_replay_args(
         backend_name,
         tp_size=decode_tp,
-        is_prefill=False,
+        worker_type="decode",
         max_num_seqs=decode_bs,
         max_num_batched_tokens=200000,
     )

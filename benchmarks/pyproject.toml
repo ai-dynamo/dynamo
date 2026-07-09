@@ -41,7 +41,7 @@ classifiers = [
 
 dependencies = [
     # TEMPORARY: direct git URL until aiconfigurator 0.10.0 is published to PyPI.
-    # Switch back to "aiconfigurator>=0.10.0" before dynamo publishes.
+    # Switch back to "aiconfigurator>=0.10.0,<0.11.0" before dynamo publishes.
     "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@0828d6b",
     "aiperf==0.10.0",
     "matplotlib",

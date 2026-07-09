@@ -79,7 +79,8 @@ mocker = [
     # TEMPORARY: direct git URL until aiconfigurator 0.10.0 is published to PyPI.
     # A direct reference blocks the wheel release (PyPI/Warehouse rejects direct
     # references), so this MUST be switched back to a versioned pin
-    # ("aiconfigurator>=0.10.0") before dynamo publishes. AIC publishes 0.10.0 first.
+    # ("aiconfigurator>=0.10.0,<0.11.0") before dynamo publishes. AIC publishes
+    # 0.10.0 first; the upper bound keeps Python aligned with Cargo's 0.10 line.
     "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@0828d6b",
 ]
 
@@ -294,6 +295,8 @@ markers = [
     "slow: marks tests as known to be slow",
     "h100: marks tests to run on H100",
     "aiconfigurator: marks e2e tests that cover aiconfigurator functionality",
+    "aic_full: marks full AIC behavior tests that run on amd64 only in PR CI",
+    "mocker: marks tests for the mocker component",
     "router: marks tests for router component",
     "planner: marks tests for planner component",
     "kvbm: marks tests for KV behavior and model determinism",

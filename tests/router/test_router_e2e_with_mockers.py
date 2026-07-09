@@ -59,6 +59,7 @@ from tests.utils.managed_process import ManagedProcess
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = ROUTER_MODEL_NAME
+AIC_MODEL_NAME = "Qwen/Qwen3-32B"
 COUNTER_WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "counter_worker.py")
 
 
@@ -91,6 +92,14 @@ ROUTER_AIC_CONFIG = {
     "aic_tp_size": 1,
     "aic_model_path": "Qwen/Qwen3-32B",
 }
+
+
+@pytest.fixture
+def offline_aic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+
+
 ROUTER_OVERLOAD_529_CASES = (
     pytest.param(
         {
@@ -169,16 +178,9 @@ COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
 
 
 def _require_router_aic() -> dict[str, Any]:
-    pytest.importorskip(
-        "aiconfigurator", reason="router AIC test requires aiconfigurator"
-    )
-    # Rust AIC callback imports aiconfigurator.sdk.engine.compile_engine
-    # (Phase 1.5 API from ai-dynamo/aiconfigurator#1200). PyPI releases
-    # predating it don't ship engine.py.
-    pytest.importorskip(
-        "aiconfigurator.sdk.engine",
-        reason="router AIC test requires aiconfigurator.sdk.engine (Phase 1.5)",
-    )
+    from aiconfigurator.sdk.engine import compile_engine
+
+    assert compile_engine
     return ROUTER_AIC_CONFIG.copy()
 
 
@@ -319,12 +321,6 @@ class CounterWorkerProcess:
             {"planner_profile_data": PLANNER_PROFILE_DATA_DIR},
             id="kv-planner",
         ),
-        pytest.param(
-            "kv",
-            False,
-            {"aic_perf_model": True, "aic_system": "h200_sxm"},
-            id="kv-aic",
-        ),
         pytest.param("kv", True, {}, id="kv-durable"),
         pytest.param("round-robin", False, {}, id="roundrobin"),
         pytest.param("random", False, {}, id="random"),
@@ -375,6 +371,57 @@ def test_mocker_router(
         num_requests=NUM_REQUESTS,
         router_mode=router_mode,
         min_initial_workers=NUM_MOCKERS,
+    )
+
+
+@pytest.mark.aiconfigurator
+@pytest.mark.aic_full
+@pytest.mark.mocker
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize(
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
+)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_mocker_aic_perf_model(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    durable_kv_events,
+    offline_aic,
+):
+    """Start the real Mocker AIC model and serve requests through the router."""
+    from aiconfigurator.sdk.engine import compile_engine
+
+    assert compile_engine
+    mocker_args = {
+        "aic_perf_model": True,
+        "aic_system": "h200_sxm",
+        "aic_backend_version": "0.14.0",
+        "aic_model_path": AIC_MODEL_NAME,
+        "aic_tp_size": 1,
+        "block_size": BLOCK_SIZE,
+        "durable_kv_events": durable_kv_events,
+        "speedup_ratio": SPEEDUP_RATIO,
+    }
+    run_basic_router_test(
+        engine_process_cls=MockerProcess,
+        engine_args_name="mocker_args",
+        engine_args=mocker_args,
+        num_workers=1,
+        single_gpu=False,
+        request=request,
+        request_plane=request_plane,
+        block_size=BLOCK_SIZE,
+        model_name=MODEL_NAME,
+        engine_process_kwargs={
+            "num_mockers": 1,
+            "model_name": MODEL_NAME,
+        },
+        test_payload=TEST_PAYLOAD,
+        num_requests=4,
+        router_mode="kv",
+        min_initial_workers=1,
     )
 
 
@@ -874,12 +921,15 @@ def test_router_decisions(
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.aiconfigurator
+@pytest.mark.aic_full
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_router_aic(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     request_plane,
+    offline_aic,
 ):
     """Validate agg KV-router decisions with router-side AIC enabled on the NATS Core path."""
     logger.info("Starting agg router decisions test with router-side AIC enabled")
@@ -1182,10 +1232,13 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
 
 
 @pytest.mark.timeout(180)
+@pytest.mark.aiconfigurator
+@pytest.mark.aic_full
 def test_router_decisions_disagg_router_aic(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
+    offline_aic,
 ):
     """Validate disagg KV-router decisions with router-side AIC enabled on the default startup path."""
     logger.info("Starting disaggregated router prefix reuse test with router-side AIC")

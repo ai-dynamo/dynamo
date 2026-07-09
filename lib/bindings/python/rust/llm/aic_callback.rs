@@ -80,6 +80,20 @@ impl PrefillLoadEstimator for RustAicCallback {
     }
 }
 
+/// Point the Rust AIC core at the data bundled in the installed Python wheel.
+#[cfg(feature = "aic-forward-pass")]
+pub(super) fn configure_default_data_roots(py: Python<'_>) {
+    if let Err(error) = py
+        .import("aiconfigurator.sdk.rust_engine_step")
+        .and_then(|module| module.call_method0("_configure_default_data_roots"))
+    {
+        tracing::warn!(
+            error = %error,
+            "AIC could not configure data roots; relying on the build-time default"
+        );
+    }
+}
+
 /// Build the pure-Rust AIC engine ONCE at startup and cache it per identity.
 /// `build_aic_engine` crosses into Python once here (shared pyo3 interpreter) to
 /// run `compile_engine`; the returned engine's predict hot path is pure Rust.
@@ -162,12 +176,7 @@ fn build_rust_engine(
     // Reuse aiconfigurator's own systems-path resolution: this sets
     // AICONFIGURATOR_SYSTEMS_PATH in the process env, which build_aic_engine
     // reads for the Rust-side perf-DB load.
-    if let Err(e) = py
-        .import("aiconfigurator.sdk.rust_engine_step")
-        .and_then(|m| m.call_method0("_configure_default_data_roots"))
-    {
-        tracing::warn!("AIC: could not configure data roots ({e}); relying on build-time default");
-    }
+    configure_default_data_roots(py);
     let engine = build_aic_engine(
         model_path,
         system,

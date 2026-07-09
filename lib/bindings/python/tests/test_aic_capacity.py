@@ -22,6 +22,7 @@ pytestmark = [
     pytest.mark.parallel,
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.aiconfigurator,
 ]
 
 
@@ -33,7 +34,8 @@ def _patch_memory(monkeypatch, return_value=123):
     truth), so these tests assert the dynamo->AIC mapping rather than recompute
     the math themselves.
     """
-    memory = pytest.importorskip("aiconfigurator.sdk.memory")
+    from aiconfigurator.sdk import memory
+
     calls = []
 
     def fake(model_path, system, backend, **kwargs):
@@ -267,7 +269,7 @@ def test_estimate_num_gpu_blocks_forwards_normalized_quant_modes(monkeypatch):
 
 
 def test_resolve_quant_mode_per_field():
-    common = pytest.importorskip("aiconfigurator.sdk.common")
+    from aiconfigurator.sdk import common
 
     assert _resolve_quant_mode("gemm", "int4") == common.GEMMQuantMode.int4_wo
     assert _resolve_quant_mode("gemm", "fp8") == common.GEMMQuantMode.fp8
@@ -281,8 +283,6 @@ def test_resolve_quant_mode_per_field():
 
 
 def test_resolve_quant_mode_rejects_unsupported_per_field():
-    pytest.importorskip("aiconfigurator.sdk.common")
-
     # `int4` -> `int4_wo` is valid for GEMM/MoE but not for KV cache or FMHA,
     # which have narrower vocabularies. The error must name the field and the
     # allowed values rather than surfacing a bare KeyError from aiconfigurator.
@@ -297,7 +297,8 @@ def test_resolve_quant_mode_rejects_unsupported_per_field():
 
 
 def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
-    common = pytest.importorskip("aiconfigurator.sdk.common")
+    from aiconfigurator.sdk import common
+
     import dynamo._internal.aic as aic_mod
 
     captured: dict = {}

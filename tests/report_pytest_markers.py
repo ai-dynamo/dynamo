@@ -273,17 +273,46 @@ STUB_MODULES = [
     "nixl._bindings",
     "aiohttp.web",
     "aiconfigurator.sdk",
+    "aiconfigurator.sdk.engine",
+    "aiconfigurator.sdk.memory",
+    "aiconfigurator.sdk.backends",
+    "aiconfigurator.sdk.backends.factory",
+    "aiconfigurator.sdk.common",
+    "aiconfigurator.sdk.config",
+    "aiconfigurator.sdk.inference_session",
+    "aiconfigurator.sdk.models",
+    "aiconfigurator.sdk.perf_database",
+    "aiconfigurator.sdk.picking",
     "aiconfigurator.sdk.task_v2",
+    "aiconfigurator.sdk.utils",
     "aiconfigurator.cli",
     "aiconfigurator.cli.main",
+    "aiconfigurator.generator",
+    "aiconfigurator.generator.api",
+    "aiconfigurator.generator.enumerate",
+    "aiconfigurator.generator.module_bridge",
+    "aiconfigurator.generator.naive",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
     "pybase64",
+    "uvloop",
+    "kvbm.trtllm_integration",
+    "kvbm.trtllm_integration.consolidator_config",
     "zmq",
     "zmq.asyncio",
     "blake3",
 ]
+
+# These APIs are new in AIC 0.10. The pre-commit environment can contain an
+# older, otherwise importable AIC release, so availability alone is not enough:
+# force stubs for the versioned contract modules during marker-only collection.
+FORCE_STUB_MODULES = {
+    "aiconfigurator.sdk.engine",
+    "aiconfigurator.sdk.memory",
+    "aiconfigurator.sdk.task_v2",
+    "aiconfigurator.cli.main",
+}
 
 # Project paths for local imports
 PROJECT_PATHS = [
@@ -411,9 +440,9 @@ class DependencyStubber:
         stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
         return stub
 
-    def ensure_available(self, module_name: str) -> ModuleType:
+    def ensure_available(self, module_name: str, *, force: bool = False) -> ModuleType:
         """Ensure a module is available, stubbing it if not installed."""
-        if module_name in sys.modules:
+        if module_name in sys.modules and not force:
             return sys.modules[module_name]
 
         parts = module_name.split(".")
@@ -421,7 +450,7 @@ class DependencyStubber:
             ".".join(parts[:i]) in self.stubbed for i in range(1, len(parts))
         )
 
-        if not parent_stubbed:
+        if not force and not parent_stubbed:
             try:
                 return importlib.import_module(module_name)
             except (ImportError, AttributeError):
@@ -441,6 +470,11 @@ class DependencyStubber:
         stub = self._create_module_stub(module_name)
         sys.modules[module_name] = stub
         self.stubbed.add(module_name)
+        if "." in module_name:
+            parent_name, child_name = module_name.rsplit(".", 1)
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                setattr(parent, child_name, stub)
         return stub
 
 
@@ -623,7 +657,7 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
 
         stubber = DependencyStubber()
         for module in STUB_MODULES:
-            stubber.ensure_available(module)
+            stubber.ensure_available(module, force=module in FORCE_STUB_MODULES)
 
         # Special case: pytest-benchmark needs a real Warning subclass
         try:

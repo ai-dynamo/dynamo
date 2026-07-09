@@ -34,6 +34,7 @@ jobs:
       trtllm: ${{ steps.changes.outputs.trtllm }}
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
+      aic: ${{ steps.changes.outputs.aic }}
       sample: ${{ steps.changes.outputs.sample }}
       efa: ${{ steps.changes.outputs.efa }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
@@ -82,6 +83,7 @@ jobs:
       - planner-build
       - planner-test
       - frontend-build
+      - frontend-test
       - frontend-copy-to-acr
     if: always()
     steps:
@@ -432,7 +434,7 @@ jobs:
   planner-build:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.aic == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -448,6 +450,7 @@ jobs:
     needs: [changed-files]
     if: |
       needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.aic == 'true' ||
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.deploy == 'true'
@@ -585,7 +588,7 @@ jobs:
   planner-test:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true' || needs.changed-files.outputs.aic == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: planner
@@ -597,10 +600,33 @@ jobs:
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
+      arm_cpu_only_test_markers: 'pre_merge and planner and gpu_0 and not aic_full'
       cpu_only_test_timeout_minutes: 30
       cpu_parallel_mode: '2'
       run_gpu_tests: false
     secrets: inherit
+
+  frontend-test:
+    name: frontend
+    needs: [changed-files, frontend-build]
+    if: needs.changed-files.outputs.frontend == 'true' || needs.changed-files.outputs.aic == 'true'
+    # This is intentionally a lightweight import/payload/native-engine contract smoke
+    # on both architectures. The full AIC behavior suite remains amd64-only via
+    # the aic_full marker exclusion used by the shared pytest jobs.
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64, arm64]
+    runs-on: ${{ matrix.platform == 'amd64' && 'prod-tester-amd-v2' || 'prod-tester-arm-v2' }}
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}
+      env:
+        HOME: /home/dynamo
+        USER: dynamo
+    steps:
+      - name: Validate AIC in the frontend image
+        working-directory: /workspace
+        run: python tests/frontend/aic_image_smoke.py
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE
@@ -616,12 +642,16 @@ jobs:
       needs.changed-files.outputs.vllm == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.trtllm == 'true' ||
-      needs.changed-files.outputs.benchmarks == 'true'
+      needs.changed-files.outputs.benchmarks == 'true' ||
+      needs.changed-files.outputs.aic == 'true'
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm or planner) and (gpu_0)'
+      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm or planner) and (gpu_0)'
+      # Marker deselection happens after collection/import. Ignore these paths as well
+      # so the runtime job does not import Planner/Profiler or AIC-upper contracts.
+      cpu_test_ignore_paths: 'components/src/dynamo/planner components/src/dynamo/profiler'
       gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 

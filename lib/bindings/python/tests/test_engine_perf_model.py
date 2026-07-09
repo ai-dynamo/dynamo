@@ -10,26 +10,20 @@ from dynamo.common.forward_pass_metrics import (
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
+from dynamo.mocker import (
+    EngineCapacityRequest,
+    EnginePerfLimits,
+    RustEnginePerfModel,
+    RustEnginePerfOptions,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.mocker,
 ]
-
-try:
-    from dynamo.mocker import (
-        EngineCapacityRequest,
-        EnginePerfLimits,
-        RustEnginePerfModel,
-        RustEnginePerfOptions,
-    )
-except ImportError:
-    pytest.skip(
-        "RustEnginePerfModel requires the aic-forward-pass Cargo feature",
-        allow_module_level=True,
-    )
 
 
 def decode_fpm(
