@@ -19,6 +19,7 @@ use super::sequence::{
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
+use dynamo_admission_control::{register_builtin_strategies, strategy_recheck_interval};
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
@@ -26,7 +27,6 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_thunderagent::{STRATEGY_NAME, ThunderAgent, ThunderAgentConfig, WatchWorkerCapacity};
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -118,13 +118,16 @@ where
         let profile = kv_router_config
             .policy_profile(model_name)
             .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
-        let admission_strategies = build_admission_strategies(
+        let mut admission_strategies = provided_strategies;
+        register_builtin_strategies(
             &profile,
             workers_with_configs.clone(),
             block_size,
-            provided_strategies,
-        )?;
-        let strategy_recheck_interval = strategy_recheck_interval(&admission_strategies)?;
+            &mut admission_strategies,
+        )
+        .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
+        let strategy_recheck_interval = strategy_recheck_interval(&admission_strategies)
+            .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
         let queue_recheck_interval = strategy_recheck_interval.map_or_else(
             || kv_router_config.router_queue_recheck_interval(),
             |strategy_interval| {
@@ -459,66 +462,6 @@ where
     }
 }
 
-fn build_admission_strategies(
-    profile: &dynamo_kv_router::scheduling::PolicyProfile,
-    workers: RuntimeConfigWatch,
-    block_size: u32,
-    mut strategies: PolicyClassAdmissionStrategies,
-) -> Result<PolicyClassAdmissionStrategies, KvSchedulerError> {
-    let mut thunderagent_class = None;
-    for class in profile.classes() {
-        let Some(admission) = &class.queue_admission else {
-            continue;
-        };
-        if strategies.contains_key(&class.name) {
-            continue;
-        }
-        if admission.strategy != STRATEGY_NAME {
-            return Err(KvSchedulerError::InitFailed(format!(
-                "unsupported queue admission strategy {:?} for policy class {:?}",
-                admission.strategy, class.name
-            )));
-        }
-        if class.queue_policy != dynamo_kv_router::RouterQueuePolicy::Fcfs {
-            return Err(KvSchedulerError::InitFailed(format!(
-                "ThunderAgent queue admission requires FCFS for policy class {:?}",
-                class.name
-            )));
-        }
-        if let Some(existing) = thunderagent_class.replace(class.name.as_str()) {
-            return Err(KvSchedulerError::InitFailed(format!(
-                "ThunderAgent queue admission may be configured for only one policy class (found {existing:?} and {:?})",
-                class.name
-            )));
-        }
-        let config = ThunderAgentConfig::from_options(&admission.options)
-            .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
-        let capacity = WatchWorkerCapacity::new(workers.clone(), block_size);
-        let strategy = ThunderAgent::new(capacity, config)
-            .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
-        strategies.insert(class.name.clone(), Box::new(strategy));
-    }
-    Ok(strategies)
-}
-
-fn strategy_recheck_interval(
-    strategies: &PolicyClassAdmissionStrategies,
-) -> Result<Option<Duration>, KvSchedulerError> {
-    let mut minimum = None;
-    for interval in strategies
-        .values()
-        .filter_map(|strategy| strategy.reconcile_interval())
-    {
-        if interval.is_zero() {
-            return Err(KvSchedulerError::InitFailed(
-                "admission strategy reconcile interval must be positive".to_owned(),
-            ));
-        }
-        minimum = Some(minimum.map_or(interval, |current: Duration| current.min(interval)));
-    }
-    Ok(minimum)
-}
-
 fn update_queue_metrics(
     handles: &[RouterQueueMetricHandles],
     mut stats_for: impl FnMut(usize) -> Option<dynamo_kv_router::queue::ClassQueueStats>,
@@ -637,9 +580,8 @@ policy_classes:
         .unwrap()
         .resolve_profile(None, None, dynamo_kv_router::RouterQueuePolicy::Fcfs);
         let (_tx, rx) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
-        let strategies =
-            build_admission_strategies(&profile, rx, 16, PolicyClassAdmissionStrategies::new())
-                .unwrap();
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        register_builtin_strategies(&profile, rx, 16, &mut strategies).unwrap();
         assert!(strategies.contains_key("agents"));
         assert_eq!(
             strategies["agents"].reconcile_interval(),
@@ -667,15 +609,8 @@ policy_classes:
         .unwrap()
         .resolve_profile(None, None, dynamo_kv_router::RouterQueuePolicy::Fcfs);
         let (_tx, rx) = watch::channel(HashMap::<WorkerId, ModelRuntimeConfig>::new());
-        let error = match build_admission_strategies(
-            &profile,
-            rx,
-            16,
-            PolicyClassAdmissionStrategies::new(),
-        ) {
-            Ok(_) => panic!("unknown strategy unexpectedly succeeded"),
-            Err(error) => error,
-        };
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        let error = register_builtin_strategies(&profile, rx, 16, &mut strategies).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -706,21 +641,22 @@ policy_classes:
         let mut provided = PolicyClassAdmissionStrategies::new();
         provided.insert("agents".to_owned(), Box::new(CustomStrategy));
 
-        let strategies = build_admission_strategies(&profile, rx, 16, provided).unwrap();
+        register_builtin_strategies(&profile, rx, 16, &mut provided).unwrap();
 
-        assert!(strategies.contains_key("agents"));
-        assert_eq!(strategies["agents"].reconcile_interval(), None);
+        assert!(provided.contains_key("agents"));
+        assert_eq!(provided["agents"].reconcile_interval(), None);
     }
 
     #[test]
     fn rejects_zero_strategy_reconcile_interval() {
         let mut strategies = PolicyClassAdmissionStrategies::new();
         strategies.insert("agents".to_owned(), Box::new(ZeroIntervalStrategy));
-        assert!(matches!(
-            strategy_recheck_interval(&strategies),
-            Err(KvSchedulerError::InitFailed(message))
-                if message.contains("reconcile interval must be positive")
-        ));
+        assert!(
+            strategy_recheck_interval(&strategies)
+                .unwrap_err()
+                .to_string()
+                .contains("reconcile interval must be positive")
+        );
     }
 
     #[tokio::test]

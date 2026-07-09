@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-thunderagent"
-description = "ThunderAgent queue admission strategy for Dynamo"
+name = "dynamo-admission-control"
+description = "Built-in queue admission strategies for Dynamo"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
