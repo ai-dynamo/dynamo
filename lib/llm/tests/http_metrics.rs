@@ -377,7 +377,7 @@ async fn test_metrics_with_mock_model() {
         assert!(metrics_body.contains("dynamo_frontend_active_requests"));
         assert!(metrics_body.contains("dynamo_frontend_request_duration_seconds"));
         assert!(metrics_body.contains("dynamo_frontend_output_sequence_tokens"));
-        assert!(metrics_body.contains("dynamo_frontend_stage_requests"));
+        assert!(metrics_body.contains("dynamo_frontend_queued_requests"));
 
         // Verify specific request counter incremented
         assert!(metrics_body.contains("endpoint=\"chat_completions\""));
@@ -795,7 +795,7 @@ mod integration_tests {
         assert!(metrics_body.contains("dynamo_frontend_active_requests"));
         assert!(metrics_body.contains("dynamo_frontend_request_duration_seconds"));
         assert!(metrics_body.contains("dynamo_frontend_output_sequence_tokens"));
-        assert!(metrics_body.contains("dynamo_frontend_stage_requests"));
+        assert!(metrics_body.contains("dynamo_frontend_queued_requests"));
 
         // Assert MDC-based model configuration metrics are present
         // These MUST be present for the test to pass
