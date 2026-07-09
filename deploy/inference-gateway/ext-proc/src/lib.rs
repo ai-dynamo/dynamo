@@ -20,6 +20,6 @@ pub mod proto;
 pub mod server;
 
 pub use epp::Router;
-pub use epp_config::{EppConfig, EppMode};
+pub use epp_config::{EppStandaloneConfig, EppMode};
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
 pub use server::ExtProcServer;

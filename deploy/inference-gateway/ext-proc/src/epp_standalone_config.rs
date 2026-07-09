@@ -24,8 +24,8 @@ const DEFAULT_PEER_SYNC_PORT: u16 = 9092;
 pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
 /// `DYN_EPP_MODE` value selecting standalone mode.
 pub const STANDALONE_MODE: &str = "standalone";
-/// `DYN_EPP_MODE` value selecting the default full Dynamo stack.
-pub const FULL_DYNAMO_STACK_MODE: &str = "full-dynamo-stack";
+/// `DYN_EPP_MODE` value selecting the Dynamo runtime.
+pub const DYNAMO_RUNTIME_MODE: &str = "dynamo";
 
 /// Reads an environment variable, matching the injectable getter used in tests.
 type EnvGet<'a> = dyn Fn(&str) -> Option<String> + 'a;
@@ -33,82 +33,72 @@ type EnvGet<'a> = dyn Fn(&str) -> Option<String> + 'a;
 /// Top-level EPP operating mode from `DYN_EPP_MODE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EppMode {
-    /// Default: attach to a Dynamo deployment (etcd/NATS + embedded KV router).
-    FullDynamoStack,
-    /// Front raw `vllm serve` pods with no Dynamo runtime.
+    // Connects to the Dynamo runtime and constructs a KvRouter. Requires Dynamo workers
+    // to be connected to the runtime. (default)
+    DynamoRuntime,
+    // No runtime connection. Constructs a ServiceSelector for tracking workers, kv state and selecting best worker.
+    // Workers can be raw vllm serve pods or other OpenAI-compatible backends.
     Standalone,
 }
 
 impl EppMode {
-    /// Parse `DYN_EPP_MODE` from the process environment.
     pub fn from_env() -> anyhow::Result<Self> {
         Self::parse(&|k| std::env::var(k).ok())
     }
 
-    /// Parse the mode, failing fast on an unrecognized value so a typo (e.g.
-    /// `standalone`) can never silently fall through to full-dynamo mode.
     fn parse(get: &EnvGet) -> anyhow::Result<Self> {
         match trimmed(get(DYN_EPP_MODE)).as_deref() {
-            None | Some(FULL_DYNAMO_STACK_MODE) => Ok(Self::FullDynamoStack),
+            None | Some(DYNAMO_RUNTIME_MODE) => Ok(Self::DynamoRuntime),
             Some(STANDALONE_MODE) => Ok(Self::Standalone),
             Some(other) => anyhow::bail!(
                 "{DYN_EPP_MODE} has invalid value {other:?}; \
-                 expected {STANDALONE_MODE:?} or {FULL_DYNAMO_STACK_MODE:?}"
+                 expected {STANDALONE_MODE:?} or {DYNAMO_RUNTIME_MODE:?}"
             ),
         }
     }
 }
 
-/// Standalone configuration. The pod selector and target port are NOT here —
-/// they come from the `InferencePool` named by `pool_name` at runtime.
-///
-/// Constraints are declared with `validator` attributes and checked by
-/// [`EppConfig::validate_config`]; `parse` only resolves env + defaults.
 #[derive(Debug, Clone, Validate)]
-pub struct EppConfig {
+pub struct EppStandaloneConfig {
     /// KV indexer thread-pool size for the in-process selector.
     #[validate(range(min = 1))]
     pub selector_threads: usize,
-    /// Embedded replication: the EPP's OWN `Service` whose EndpointSlices the
-    /// EPP watches to discover sibling replicas and sync active load with them
-    /// over ZMQ. `None` = single-replica (no cross-replica sync).
+    // EPP Service for peer discovery and state synchronization.
+    // `None` = single-replica (no cross-replica sync).
     pub peer_service: Option<String>,
-    /// Port each EPP replica binds for peer replica-sync (ZMQ) and dials peers
-    /// on; all replicas must agree. Used only when `peer_service` is set.
+    // Peer replication sync port.
+    // Required when `peer_service` is set.
     #[validate(range(min = 1))]
     pub peer_sync_port: u16,
     /// `InferencePool` this EPP backs; its selector + target port drive discovery.
-    #[validate(length(min = 1, message = "DYN_EPP_POOL_NAME is required"))]
-    pub pool_name: String,
-    /// Kubernetes namespace the EPP runs in (from `POD_NAMESPACE`, downward API).
-    /// The EPP, its `InferencePool`, the worker pods, and sibling EPP replicas
-    /// all live here — the EPP and the pool it backs are always co-located.
-    #[validate(length(min = 1, message = "POD_NAMESPACE is required (downward API metadata.namespace)"))]
+    #[validate(length(min = 1, message = "DYN_EPP_INFERENCE_POOL_NAME is required"))]
+    pub inference_pool_name: String,
+    // Kubernetes namespace the EPP runs in (from `POD_NAMESPACE`, downward API).
+    #[validate(length(min = 1, message = "POD_NAMESPACE is required"))]
     pub namespace: String,
-    /// Model id used to build the offline tokenizer (no model card in this mode).
+    /// Model id used to build the offline tokenizer and registerd with the selector.
     #[validate(length(min = 1, message = "DYN_MODEL_NAME is required"))]
     pub model_name: String,
-    /// KV-cache block size; MUST equal the vLLM `--block-size`.
+    /// KV-cache block size; MUST equal the inference engine block size.
     #[validate(range(min = 1, message = "DYN_KV_CACHE_BLOCK_SIZE must be >= 1"))]
     pub block_size: u32,
-    /// vLLM `--kv-events-config` PUB port the selector subscribes to.
+    /// KV zmq event port
     #[validate(range(min = 1))]
     pub kv_event_port: u16,
-    /// vLLM `--kv-events-config` topic (default empty).
+    // KV zmq event topic
     pub kv_event_topic: String,
-    /// Optional ZMQ REQ port the selector uses for live-stream gap replay.
+    /// Optional zmq port the selector uses for live-stream gap replay.
     pub replay_port: Option<u16>,
-    /// Engine data-parallel size. Data parallelism is not supported in this
-    /// release, so this must be exactly 1.
+    /// Engine data-parallel size. Currently only support DP=1.
     #[validate(range(min = 1, max = 1))]
     pub data_parallel_size: u32,
-    /// Optional per-worker total KV blocks hint for the selector's load model.
+    /// Optional per-worker total KV blocks.
     pub total_kv_blocks: Option<u64>,
-    /// Optional per-worker max batched tokens (needed only when queueing is on).
+    /// Optional per-worker max batched tokens (required when queuing or policy config is used).
     pub max_num_batched_tokens: Option<u64>,
 }
 
-impl EppConfig {
+impl EppStandaloneConfig {
     /// Build and validate the standalone contract from the process environment.
     pub fn from_env() -> anyhow::Result<Self> {
         let config = Self::parse(&|k| std::env::var(k).ok())?;
@@ -116,10 +106,6 @@ impl EppConfig {
         Ok(config)
     }
 
-    /// Resolve env vars + defaults into the struct. No constraint checking — that
-    /// lives in [`Self::validate_config`]. Only fails when a value that IS set
-    /// cannot be parsed into its type (e.g. a non-numeric port). Keeps parsing
-    /// pure so tests supply a map instead of mutating the process environment.
     fn parse(get: &EnvGet) -> anyhow::Result<Self> {
         Ok(Self {
             selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTOR_THREADS")?
@@ -127,10 +113,7 @@ impl EppConfig {
             peer_service: trimmed(get("DYN_EPP_PEER_SERVICE")),
             peer_sync_port: opt_parse::<u16>(get, "DYN_EPP_PEER_SYNC_PORT")?
                 .unwrap_or(DEFAULT_PEER_SYNC_PORT),
-            pool_name: trimmed(get("DYN_EPP_POOL_NAME")).unwrap_or_default(),
-            // The EPP and its InferencePool are always co-located, so the pod's
-            // own namespace (downward API) is the single source of truth — used
-            // to watch the pool, the worker pods, and sibling EPP replicas.
+            pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
             block_size: opt_parse::<u32>(get, "DYN_KV_CACHE_BLOCK_SIZE")?.unwrap_or(0),
@@ -196,15 +179,15 @@ mod tests {
     }
 
     /// Mirror `from_env`: resolve (parse) then validate.
-    fn parse_cfg(pairs: &[(&str, &str)]) -> anyhow::Result<EppConfig> {
-        let cfg = EppConfig::parse(&getter(pairs))?;
+    fn parse_cfg(pairs: &[(&str, &str)]) -> anyhow::Result<EppStandaloneConfig> {
+        let cfg = EppStandaloneConfig::parse(&getter(pairs))?;
         cfg.validate_config()?;
         Ok(cfg)
     }
 
     #[test]
     fn mode_defaults_to_full_when_unset() {
-        assert_eq!(parse_mode(&[]).unwrap(), EppMode::FullDynamoStack);
+        assert_eq!(parse_mode(&[]).unwrap(), EppMode::DynamoRuntime);
     }
 
     #[test]
@@ -215,7 +198,7 @@ mod tests {
         );
         assert_eq!(
             parse_mode(&[("DYN_EPP_MODE", "full-dynamo-stack")]).unwrap(),
-            EppMode::FullDynamoStack
+            EppMode::DynamoRuntime
         );
     }
 
@@ -228,7 +211,7 @@ mod tests {
     #[test]
     fn parses_required_and_defaults() {
         let cfg = parse_cfg(&[
-            ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
+            ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
@@ -254,7 +237,7 @@ mod tests {
         // it the EPP can't watch its pool, pods, or peers.
         assert!(
             parse_cfg(&[
-                ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
                 ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
             ])
@@ -268,7 +251,7 @@ mod tests {
             ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
             ("DYN_EPP_PEER_SYNC_PORT", "9191"),
             ("DYN_EPP_SELECTOR_THREADS", "8"),
-            ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
+            ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
@@ -296,7 +279,7 @@ mod tests {
     fn zero_block_size_fails() {
         assert!(
             parse_cfg(&[
-                ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
                 ("POD_NAMESPACE", "inference"),
                 ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "0"),
@@ -309,7 +292,7 @@ mod tests {
     fn data_parallel_size_must_be_one() {
         // Data parallelism is not supported in this release: only DP=1 is valid.
         let base = [
-            ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
+            ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
