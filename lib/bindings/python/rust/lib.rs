@@ -99,6 +99,8 @@ static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
+const BUILD_GIT_REVISION: &str = env!("DYNAMO_BUILD_GIT_REVISION");
+const BUILD_GIT_DIRTY: &str = env!("DYNAMO_BUILD_GIT_DIRTY");
 
 // Helper to get appropriate span for instrumentation - always emit spans
 fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
@@ -156,6 +158,16 @@ fn create_request_context(
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__build_git_revision__", BUILD_GIT_REVISION)?;
+    m.add(
+        "__build_git_dirty__",
+        match BUILD_GIT_DIRTY {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+    )?;
+
     // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
     if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
         eprintln!(

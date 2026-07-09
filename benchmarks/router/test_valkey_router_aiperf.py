@@ -313,7 +313,11 @@ def test_valkey_index_key_is_component_scoped_and_percent_encoded() -> None:
 
 def test_release_provenance_is_required_and_changes_are_rejected() -> None:
     release = {
-        "dynamo_core": {"rust_build_profile": "release"},
+        "dynamo_core": {
+            "rust_build_profile": "release",
+            "build_git_revision": "abc",
+            "build_git_dirty": False,
+        },
         "artifact": "a",
         "git": {"revision": "abc", "dirty": False},
     }
@@ -328,6 +332,18 @@ def test_release_provenance_is_required_and_changes_are_rejected() -> None:
     dirty_only = deepcopy(release)
     dirty_only["git"]["dirty"] = True
     assert harness.provenance_change_errors(release, dirty_only, dirty_only) == []
+
+    wrong_source = deepcopy(release)
+    wrong_source["dynamo_core"]["build_git_revision"] = "def"
+    assert "does not match" in harness.release_core_provenance_error(wrong_source)
+
+    dirty_core = deepcopy(release)
+    dirty_core["dynamo_core"]["build_git_dirty"] = True
+    assert "dirty" in harness.release_core_provenance_error(dirty_core)
+
+    unknown_source = deepcopy(release)
+    unknown_source["dynamo_core"].pop("build_git_revision")
+    assert "source revision" in harness.release_core_provenance_error(unknown_source)
 
 
 def test_arm_validation_rejects_malformed_records() -> None:

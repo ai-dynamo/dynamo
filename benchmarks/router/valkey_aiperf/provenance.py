@@ -174,6 +174,10 @@ def benchmark_provenance(
         raise RuntimeError("dynamo._core does not expose a loadable shared-object path")
     core_record = file_provenance(Path(core_import_path))
     core_record["import_path"] = core_import_path
+    core_record["build_git_revision"] = getattr(
+        core, "__build_git_revision__", None
+    )
+    core_record["build_git_dirty"] = getattr(core, "__build_git_dirty__", None)
     enrich_dynamo_core_build_profile(core_record)
     if include_valkey_artifacts:
         dynkv_module = file_provenance(args.dynkv_module)
@@ -211,6 +215,23 @@ def release_core_provenance_error(provenance: Any) -> str | None:
         return (
             "active dynamo._core build profile is "
             f"{profile!r}; performance comparisons require a proven release build"
+        )
+    build_revision = core.get("build_git_revision")
+    if not isinstance(build_revision, str) or not build_revision:
+        return "active dynamo._core does not expose its source revision"
+    build_dirty = core.get("build_git_dirty")
+    if build_dirty is not False:
+        return (
+            "active dynamo._core was built from a dirty or unproven source "
+            f"checkout ({build_dirty!r})"
+        )
+    git = provenance.get("git")
+    source_revision = git.get("revision") if isinstance(git, Mapping) else None
+    if build_revision != source_revision:
+        return (
+            "active dynamo._core source revision "
+            f"{build_revision!r} does not match benchmark source revision "
+            f"{source_revision!r}"
         )
     return None
 
