@@ -3,80 +3,55 @@
 
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
-use std::sync::{Arc, Weak};
+#[cfg(debug_assertions)]
+use rustc_hash::FxHashSet;
+use slotmap::{SlotMap, new_key_type};
+use std::collections::hash_map::Entry;
+use std::num::NonZeroU32;
+
+new_key_type! {
+    struct BlockNodeId;
+}
 
 /// One node in a persistent request block chain.
 ///
-/// Sequence hashes identify their lineage, so a live tail transitively owns the
-/// entire prompt prefix through these parent references.
+/// Sequence hashes identify their lineage. Parent IDs are generational arena
+/// keys, while `incoming` counts direct request-tail and child-to-parent edges.
 #[derive(Debug)]
 struct BlockNode {
     hash: SequenceHash,
     depth: usize,
-    parent: Option<Arc<BlockNode>>,
+    parent: Option<BlockNodeId>,
+    incoming: NonZeroU32,
 }
 
-/// The single strong block owner retained by a request.
+/// The single block-chain tail retained by a request.
 ///
 /// This type intentionally does not implement `Clone`. New request owners must
 /// be acquired through [`BlockTracker::acquire_prompt`], which also maintains
-/// the weak block index and membership transitions.
+/// the arena ownership counts and block index.
 #[derive(Debug, Default)]
+#[must_use = "request block chains must be retained by a request and released through BlockTracker"]
 pub(super) struct RequestBlockChain {
-    tail: Option<Arc<BlockNode>>,
+    tail: Option<BlockNodeId>,
     prompt_depth: usize,
 }
 
 impl RequestBlockChain {
-    fn new(tail: Option<Arc<BlockNode>>, prompt_depth: usize) -> Self {
+    fn new(tail: Option<BlockNodeId>, prompt_depth: usize) -> Self {
         Self { tail, prompt_depth }
-    }
-
-    #[cfg(any(test, debug_assertions))]
-    fn nodes_from_tail(&self) -> impl Iterator<Item = &BlockNode> {
-        std::iter::successors(self.tail.as_deref(), |node| node.parent.as_deref())
-    }
-
-    #[cfg(test)]
-    pub(super) fn prompt_hashes(&self) -> impl Iterator<Item = SequenceHash> + '_ {
-        self.nodes_from_tail()
-            .filter(|node| node.depth <= self.prompt_depth)
-            .map(|node| node.hash)
-    }
-}
-
-impl Drop for RequestBlockChain {
-    fn drop(&mut self) {
-        let Some(mut current) = self.tail.take() else {
-            return;
-        };
-
-        // A block-size-1 prompt can contain tens of thousands of nodes. Unwrap
-        // an exclusively owned suffix iteratively so dropping the parent chain
-        // cannot overflow the stack.
-        loop {
-            match Arc::try_unwrap(current) {
-                Ok(mut node) => match node.parent.take() {
-                    Some(parent) => current = parent,
-                    None => break,
-                },
-                Err(shared) => {
-                    drop(shared);
-                    break;
-                }
-            }
-        }
     }
 }
 
 #[derive(Debug, Default)]
 pub(super) struct BlockTracker {
-    unique_blocks: FxHashMap<SequenceHash, Weak<BlockNode>>,
+    nodes: SlotMap<BlockNodeId, BlockNode>,
+    unique_blocks: FxHashMap<SequenceHash, BlockNodeId>,
     fractional_blocks: FxHashMap<SequenceHash, f64>,
 }
 
 impl BlockTracker {
-    /// Acquire one strong tail for a prompt and return the first newly present
+    /// Acquire one request tail for a prompt and return the first newly present
     /// prompt index, if any.
     ///
     /// # Lineage contract
@@ -92,8 +67,9 @@ impl BlockTracker {
             return (RequestBlockChain::default(), None);
         };
 
-        if let Some(tail) = self.upgrade_live_node(tail_hash) {
-            Self::debug_assert_lineage(&tail, sequence);
+        if let Some(tail) = self.live_node_id(tail_hash) {
+            self.debug_assert_lineage(tail, sequence);
+            self.increment_incoming(tail);
             return (RequestBlockChain::new(Some(tail), sequence.len()), None);
         }
 
@@ -103,22 +79,39 @@ impl BlockTracker {
         // Prompt liveness is prefix-closed. Search backward for the deepest
         // live prefix, then construct only the missing suffix.
         for idx in (0..sequence.len().saturating_sub(1)).rev() {
-            if let Some(node) = self.upgrade_live_node(sequence[idx]) {
-                Self::debug_assert_lineage(&node, &sequence[..=idx]);
-                parent = Some(node);
+            if let Some(node_id) = self.live_node_id(sequence[idx]) {
+                self.debug_assert_lineage(node_id, &sequence[..=idx]);
+                parent = Some(node_id);
                 first_new_idx = idx + 1;
                 break;
             }
         }
 
+        let missing = sequence.len() - first_new_idx;
+        self.nodes.reserve(missing);
+        self.unique_blocks.reserve(missing);
+        self.debug_assert_new_hashes(&sequence[first_new_idx..]);
+
+        // Adding the first new child contributes one new incoming edge to the
+        // reused prefix. Subsequent construction transfers the provisional
+        // request-tail edge into a child-to-parent edge without changing it.
+        if let Some(parent_id) = parent {
+            self.increment_incoming(parent_id);
+        }
+
         for (idx, &hash) in sequence[first_new_idx..].iter().enumerate() {
-            let node = Arc::new(BlockNode {
+            let node_id = self.nodes.insert(BlockNode {
                 hash,
                 depth: first_new_idx + idx + 1,
                 parent,
+                incoming: NonZeroU32::MIN,
             });
-            self.unique_blocks.insert(hash, Arc::downgrade(&node));
-            parent = Some(node);
+            let previous = self.unique_blocks.insert(hash, node_id);
+            debug_assert!(
+                previous.is_none(),
+                "new block unexpectedly replaced a live index entry"
+            );
+            parent = Some(node_id);
         }
 
         (
@@ -130,47 +123,89 @@ impl BlockTracker {
     /// Append a unique output block to an existing request chain.
     pub(super) fn append_output(&mut self, chain: &mut RequestBlockChain, hash: SequenceHash) {
         debug_assert!(
-            self.unique_blocks
-                .get(&hash)
-                .and_then(Weak::upgrade)
-                .is_none(),
+            !self.unique_blocks.contains_key(&hash),
             "random output hash unexpectedly collided with a live block"
         );
 
-        let parent = chain.tail.take();
-        let depth = parent.as_ref().map_or(1, |node| node.depth + 1);
-        let node = Arc::new(BlockNode {
+        self.nodes.reserve(1);
+        self.unique_blocks.reserve(1);
+
+        let parent = chain.tail;
+        let depth = parent.map_or(1, |node_id| {
+            self.nodes
+                .get(node_id)
+                .expect("request tail references a missing block node")
+                .depth
+                .checked_add(1)
+                .expect("block chain depth overflowed")
+        });
+        let node_id = self.nodes.insert(BlockNode {
             hash,
             depth,
             parent,
+            incoming: NonZeroU32::MIN,
         });
-        self.unique_blocks.insert(hash, Arc::downgrade(&node));
-        chain.tail = Some(node);
+        let previous = self.unique_blocks.insert(hash, node_id);
+        debug_assert!(
+            previous.is_none(),
+            "new output unexpectedly replaced a live index entry"
+        );
+        chain.tail = Some(node_id);
     }
 
     /// Release a request chain and return the prompt suffix that became absent
     /// from the worker.
     pub(super) fn release(&mut self, chain: RequestBlockChain) -> Vec<SequenceHash> {
-        let mut dead_nodes = Vec::new();
-        let mut current = chain.tail.as_ref();
+        let RequestBlockChain { tail, prompt_depth } = chain;
+        let mut prompt_remove = Vec::new();
+        let mut current = tail;
 
-        while let Some(node) = current {
-            if Arc::strong_count(node) != 1 {
+        while let Some(node_id) = current {
+            let node = self
+                .nodes
+                .get(node_id)
+                .expect("request chain references a missing block node");
+            let incoming = node.incoming.get();
+
+            if incoming > 1 {
+                self.nodes
+                    .get_mut(node_id)
+                    .expect("request chain references a missing block node")
+                    .incoming = NonZeroU32::new(incoming - 1)
+                    .expect("shared block ownership count cannot become zero");
                 break;
             }
-            dead_nodes.push((node.hash, node.depth));
-            current = node.parent.as_ref();
-        }
 
-        for &(hash, _) in &dead_nodes {
-            self.unique_blocks.remove(&hash);
+            let node = self
+                .nodes
+                .get(node_id)
+                .expect("request chain references a missing block node");
+            let hash = node.hash;
+            let depth = node.depth;
+            let parent = node.parent;
+
+            match self.unique_blocks.entry(hash) {
+                Entry::Occupied(entry) => {
+                    assert_eq!(
+                        *entry.get(),
+                        node_id,
+                        "block hash index references a different live node"
+                    );
+                    entry.remove();
+                }
+                Entry::Vacant(_) => panic!("live block node is missing from the hash index"),
+            }
             self.fractional_blocks.remove(&hash);
+            self.nodes
+                .remove(node_id)
+                .expect("validated block node disappeared before removal");
+
+            if depth <= prompt_depth {
+                prompt_remove.push(hash);
+            }
+            current = parent;
         }
 
-        let mut prompt_remove = dead_nodes
-            .into_iter()
-            .filter_map(|(hash, depth)| (depth <= chain.prompt_depth).then_some(hash))
-            .collect::<Vec<_>>();
         prompt_remove.reverse();
         prompt_remove
     }
@@ -181,13 +216,17 @@ impl BlockTracker {
         chain: &RequestBlockChain,
         fraction: f64,
     ) {
-        let mut current = chain.tail.as_ref();
-        while let Some(node) = current {
-            if Arc::strong_count(node) != 1 {
+        let mut current = chain.tail;
+        while let Some(node_id) = current {
+            let node = self
+                .nodes
+                .get(node_id)
+                .expect("request chain references a missing block node");
+            if node.incoming.get() != 1 {
                 break;
             }
             self.fractional_blocks.insert(node.hash, fraction);
-            current = node.parent.as_ref();
+            current = node.parent;
         }
     }
 
@@ -202,21 +241,107 @@ impl BlockTracker {
     }
 
     pub(super) fn contains_block(&self, hash: &SequenceHash) -> bool {
-        self.unique_blocks.contains_key(hash)
+        self.live_node_id(*hash).is_some()
     }
 
     #[cfg(any(test, debug_assertions))]
-    pub(super) fn fractional_hashes_are_active(&self) -> bool {
-        self.fractional_blocks
-            .keys()
-            .all(|hash| self.unique_blocks.contains_key(hash))
-    }
+    pub(super) fn assert_consistent<'a>(
+        &self,
+        chains: impl IntoIterator<Item = &'a RequestBlockChain>,
+    ) {
+        assert_eq!(
+            self.nodes.len(),
+            self.unique_blocks.len(),
+            "arena and live block index must have identical cardinality"
+        );
 
-    #[cfg(any(test, debug_assertions))]
-    pub(super) fn contains_chain(&self, chain: &RequestBlockChain) -> bool {
-        chain
-            .nodes_from_tail()
-            .all(|node| self.unique_blocks.contains_key(&node.hash))
+        let mut expected_incoming = FxHashMap::default();
+        for (node_id, node) in &self.nodes {
+            assert!(
+                expected_incoming.insert(node_id, 0_u32).is_none(),
+                "arena yielded a duplicate node ID"
+            );
+            assert_eq!(
+                self.unique_blocks.get(&node.hash),
+                Some(&node_id),
+                "live arena node is missing its exact hash-index entry"
+            );
+
+            if let Some(parent_id) = node.parent {
+                let parent = self
+                    .nodes
+                    .get(parent_id)
+                    .expect("block node references a missing parent");
+                assert_eq!(
+                    parent.depth + 1,
+                    node.depth,
+                    "child block depth must immediately follow its parent"
+                );
+            } else {
+                assert_eq!(node.depth, 1, "root block depth must be one");
+            }
+        }
+
+        for (&hash, &node_id) in &self.unique_blocks {
+            let node = self
+                .nodes
+                .get(node_id)
+                .expect("hash index references a missing arena node");
+            assert_eq!(
+                node.hash, hash,
+                "hash index key does not match its arena node"
+            );
+        }
+
+        for (_, node) in &self.nodes {
+            if let Some(parent_id) = node.parent {
+                let count = expected_incoming
+                    .get_mut(&parent_id)
+                    .expect("block node references a missing parent");
+                *count = count
+                    .checked_add(1)
+                    .expect("reconstructed child ownership count overflowed");
+            }
+        }
+
+        for chain in chains {
+            if let Some(tail_id) = chain.tail {
+                let tail = self
+                    .nodes
+                    .get(tail_id)
+                    .expect("request tail references a missing arena node");
+                assert!(
+                    chain.prompt_depth <= tail.depth,
+                    "request prompt depth cannot exceed its full block-chain depth"
+                );
+                let count = expected_incoming
+                    .get_mut(&tail_id)
+                    .expect("request tail references a missing arena node");
+                *count = count
+                    .checked_add(1)
+                    .expect("reconstructed request ownership count overflowed");
+            } else {
+                assert_eq!(
+                    chain.prompt_depth, 0,
+                    "an empty request chain cannot retain prompt depth"
+                );
+            }
+        }
+
+        for (node_id, node) in &self.nodes {
+            assert_eq!(
+                expected_incoming[&node_id],
+                node.incoming.get(),
+                "stored incoming ownership count differs from reconstructed edges"
+            );
+        }
+
+        assert!(
+            self.fractional_blocks
+                .keys()
+                .all(|hash| self.unique_blocks.contains_key(hash)),
+            "fractional blocks cannot reference non-active blocks"
+        );
     }
 
     #[cfg(test)]
@@ -224,36 +349,124 @@ impl BlockTracker {
         self.unique_blocks.keys().copied()
     }
 
-    fn upgrade_live_node(&mut self, hash: SequenceHash) -> Option<Arc<BlockNode>> {
-        let weak = self.unique_blocks.get(&hash)?;
-        let node = weak.upgrade();
-        if node.is_none() {
-            self.unique_blocks.remove(&hash);
-            self.fractional_blocks.remove(&hash);
-        }
-        node
+    #[cfg(test)]
+    pub(super) fn prompt_hashes<'a>(
+        &'a self,
+        chain: &'a RequestBlockChain,
+    ) -> impl Iterator<Item = SequenceHash> + 'a {
+        self.node_ids_from_tail(chain).filter_map(|node_id| {
+            let node = &self.nodes[node_id];
+            (node.depth <= chain.prompt_depth).then_some(node.hash)
+        })
     }
 
+    fn live_node_id(&self, hash: SequenceHash) -> Option<BlockNodeId> {
+        let &node_id = self.unique_blocks.get(&hash)?;
+        let node = self
+            .nodes
+            .get(node_id)
+            .expect("live block index references a stale arena ID");
+        assert_eq!(
+            node.hash, hash,
+            "live block index key does not match its arena node"
+        );
+        Some(node_id)
+    }
+
+    fn increment_incoming(&mut self, node_id: BlockNodeId) {
+        let node = self
+            .nodes
+            .get_mut(node_id)
+            .expect("cannot acquire ownership of a missing block node");
+        let incoming = node
+            .incoming
+            .get()
+            .checked_add(1)
+            .expect("block ownership count overflowed");
+        node.incoming = NonZeroU32::new(incoming).expect("incremented ownership cannot be zero");
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_new_hashes(&self, hashes: &[SequenceHash]) {
+        let mut seen = FxHashSet::default();
+        for hash in hashes {
+            assert!(
+                !self.unique_blocks.contains_key(hash),
+                "sequence lineage hash unexpectedly aliases a live block"
+            );
+            assert!(
+                seen.insert(*hash),
+                "sequence lineage repeats a hash in one missing suffix"
+            );
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    fn debug_assert_new_hashes(&self, _hashes: &[SequenceHash]) {}
+
     #[cfg(any(test, debug_assertions))]
-    fn debug_assert_lineage(tail: &Arc<BlockNode>, sequence: &[SequenceHash]) {
-        assert_eq!(tail.depth, sequence.len(), "sequence tail depth mismatch");
-        let mut current = Some(tail.as_ref());
+    fn debug_assert_lineage(&self, tail: BlockNodeId, sequence: &[SequenceHash]) {
+        let tail_node = self
+            .nodes
+            .get(tail)
+            .expect("live sequence tail references a missing arena node");
+        assert_eq!(
+            tail_node.depth,
+            sequence.len(),
+            "sequence tail depth mismatch"
+        );
+        let mut current = Some(tail);
         for (expected_depth, &expected_hash) in sequence.iter().enumerate().rev() {
-            let node = current.expect("live sequence chain ended before its expected root");
+            let node_id = current.expect("live sequence chain ended before its expected root");
+            let node = self
+                .nodes
+                .get(node_id)
+                .expect("live sequence chain references a missing arena node");
             assert_eq!(node.depth, expected_depth + 1, "sequence depth mismatch");
             assert_eq!(node.hash, expected_hash, "sequence lineage hash mismatch");
-            current = node.parent.as_deref();
+            current = node.parent;
         }
     }
 
     #[cfg(not(any(test, debug_assertions)))]
     #[inline]
-    fn debug_assert_lineage(_tail: &Arc<BlockNode>, _sequence: &[SequenceHash]) {}
+    fn debug_assert_lineage(&self, _tail: BlockNodeId, _sequence: &[SequenceHash]) {}
+
+    #[cfg(test)]
+    fn node_ids_from_tail<'a>(
+        &'a self,
+        chain: &'a RequestBlockChain,
+    ) -> impl Iterator<Item = BlockNodeId> + 'a {
+        let mut current = chain.tail;
+        std::iter::from_fn(move || {
+            let node_id = current?;
+            let node = self
+                .nodes
+                .get(node_id)
+                .expect("request chain references a missing arena node");
+            current = node.parent;
+            Some(node_id)
+        })
+    }
+
+    #[cfg(test)]
+    fn incoming_for(&self, hash: SequenceHash) -> u32 {
+        let node_id = self.live_node_id(hash).expect("expected live block hash");
+        self.nodes[node_id].incoming.get()
+    }
+
+    #[cfg(test)]
+    fn node_id_for(&self, hash: SequenceHash) -> BlockNodeId {
+        self.live_node_id(hash).expect("expected live block hash")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rustc_hash::FxHashSet;
 
     #[test]
     fn first_acquire_and_last_release_report_presence_transitions() {
@@ -264,13 +477,52 @@ mod tests {
 
         assert_eq!(first_new, Some(0));
         assert_eq!(second_new, None);
+        assert_eq!(tracker.incoming_for(1), 2);
+        tracker.assert_consistent([&first, &second]);
         assert_eq!(tracker.active_blocks(), 1);
 
         assert!(tracker.release(first).is_empty());
+        assert_eq!(tracker.incoming_for(1), 1);
+        tracker.assert_consistent([&second]);
         assert_eq!(tracker.active_blocks(), 1);
 
         assert_eq!(tracker.release(second), vec![1]);
+        tracker.assert_consistent(std::iter::empty());
         assert_eq!(tracker.active_blocks(), 0);
+    }
+
+    #[test]
+    fn shorter_request_adds_only_a_tail_edge() {
+        let mut tracker = BlockTracker::default();
+        let (longer, _) = tracker.acquire_prompt(&[1, 2, 3]);
+        let (shorter, first_new) = tracker.acquire_prompt(&[1, 2]);
+
+        assert_eq!(first_new, None);
+        assert_eq!(tracker.incoming_for(1), 1);
+        assert_eq!(tracker.incoming_for(2), 2);
+        assert_eq!(tracker.incoming_for(3), 1);
+        tracker.assert_consistent([&longer, &shorter]);
+
+        assert!(tracker.release(shorter).is_empty());
+        tracker.assert_consistent([&longer]);
+        assert_eq!(tracker.release(longer), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn longer_request_adds_one_child_edge_to_a_shorter_tail() {
+        let mut tracker = BlockTracker::default();
+        let (shorter, _) = tracker.acquire_prompt(&[1, 2]);
+        let (longer, first_new) = tracker.acquire_prompt(&[1, 2, 3]);
+
+        assert_eq!(first_new, Some(2));
+        assert_eq!(tracker.incoming_for(1), 1);
+        assert_eq!(tracker.incoming_for(2), 2);
+        assert_eq!(tracker.incoming_for(3), 1);
+        tracker.assert_consistent([&shorter, &longer]);
+
+        assert_eq!(tracker.release(longer), vec![3]);
+        tracker.assert_consistent([&shorter]);
+        assert_eq!(tracker.release(shorter), vec![1, 2]);
     }
 
     #[test]
@@ -280,11 +532,59 @@ mod tests {
         let (right, first_new) = tracker.acquire_prompt(&[1, 2, 4]);
 
         assert_eq!(first_new, Some(2));
+        assert_eq!(tracker.incoming_for(1), 1);
+        assert_eq!(tracker.incoming_for(2), 2);
+        tracker.assert_consistent([&left, &right]);
         assert_eq!(tracker.active_blocks(), 4);
+
         assert_eq!(tracker.release(left), vec![3]);
+        tracker.assert_consistent([&right]);
         assert_eq!(tracker.active_blocks(), 3);
         assert_eq!(tracker.release(right), vec![1, 2, 4]);
+        tracker.assert_consistent(std::iter::empty());
         assert_eq!(tracker.active_blocks(), 0);
+    }
+
+    #[test]
+    fn output_append_transfers_tail_ownership_to_the_child_edge() {
+        let mut tracker = BlockTracker::default();
+        let (mut chain, _) = tracker.acquire_prompt(&[1, 2]);
+
+        let before = tracker.incoming_for(2);
+        tracker.append_output(&mut chain, 42);
+
+        assert_eq!(tracker.incoming_for(2), before);
+        assert_eq!(tracker.incoming_for(42), 1);
+        tracker.assert_consistent([&chain]);
+        assert_eq!(tracker.release(chain), vec![1, 2]);
+    }
+
+    #[test]
+    fn output_append_preserves_a_shared_tail_count() {
+        let mut tracker = BlockTracker::default();
+        let (mut generating, _) = tracker.acquire_prompt(&[1, 2]);
+        let (shared, _) = tracker.acquire_prompt(&[1, 2]);
+
+        assert_eq!(tracker.incoming_for(2), 2);
+        tracker.append_output(&mut generating, 42);
+        assert_eq!(tracker.incoming_for(2), 2);
+        tracker.assert_consistent([&generating, &shared]);
+
+        assert!(tracker.release(generating).is_empty());
+        assert_eq!(tracker.incoming_for(2), 1);
+        tracker.assert_consistent([&shared]);
+        assert_eq!(tracker.release(shared), vec![1, 2]);
+    }
+
+    #[test]
+    fn either_branch_can_be_released_first() {
+        let mut tracker = BlockTracker::default();
+        let (left, _) = tracker.acquire_prompt(&[1, 2, 3]);
+        let (right, _) = tracker.acquire_prompt(&[1, 2, 4]);
+
+        assert_eq!(tracker.release(right), vec![4]);
+        tracker.assert_consistent([&left]);
+        assert_eq!(tracker.release(left), vec![1, 2, 3]);
     }
 
     #[test]
@@ -293,10 +593,12 @@ mod tests {
         let (chain, _) = tracker.acquire_prompt(&[1, 2]);
 
         tracker.set_unique_suffix_fractional(&chain, 0.5);
+        tracker.assert_consistent([&chain]);
         assert_eq!(tracker.active_blocks(), 1);
 
         assert_eq!(tracker.release(chain), vec![1, 2]);
         assert!(tracker.fractional_blocks.is_empty());
+        tracker.assert_consistent(std::iter::empty());
         assert_eq!(tracker.active_blocks(), 0);
     }
 
@@ -310,9 +612,11 @@ mod tests {
         assert_eq!(tracker.fractional_blocks.get(&3), Some(&0.5));
         assert!(!tracker.fractional_blocks.contains_key(&1));
         assert!(!tracker.fractional_blocks.contains_key(&2));
+        tracker.assert_consistent([&longer, &shared_prefix]);
 
         assert_eq!(tracker.release(longer), vec![3]);
         assert!(tracker.fractional_blocks.is_empty());
+        tracker.assert_consistent([&shared_prefix]);
         assert_eq!(tracker.active_blocks(), 2);
 
         assert_eq!(tracker.release(shared_prefix), vec![1, 2]);
@@ -326,8 +630,155 @@ mod tests {
 
         assert_eq!(first_new, None);
         tracker.append_output(&mut chain, 42);
+        tracker.assert_consistent([&chain]);
         assert_eq!(tracker.active_blocks(), 1);
         assert!(tracker.release(chain).is_empty());
+        tracker.assert_consistent(std::iter::empty());
+        assert_eq!(tracker.active_blocks(), 0);
+    }
+
+    #[test]
+    fn removed_slot_generation_cannot_resolve_after_reuse() {
+        let mut tracker = BlockTracker::default();
+        let (first, _) = tracker.acquire_prompt(&[1]);
+        let old_id = tracker.node_id_for(1);
+        assert_eq!(tracker.release(first), vec![1]);
+
+        let (second, _) = tracker.acquire_prompt(&[2]);
+        assert!(tracker.nodes.get(old_id).is_none());
+        assert_ne!(old_id, tracker.node_id_for(2));
+        tracker.assert_consistent([&second]);
+        assert_eq!(tracker.release(second), vec![2]);
+    }
+
+    #[test]
+    #[should_panic(expected = "live block index references a stale arena ID")]
+    fn stale_generation_in_index_is_rejected() {
+        let mut tracker = BlockTracker::default();
+        let (first, _) = tracker.acquire_prompt(&[1]);
+        let old_id = tracker.node_id_for(1);
+        assert_eq!(tracker.release(first), vec![1]);
+        let (second, _) = tracker.acquire_prompt(&[2]);
+
+        tracker.unique_blocks.insert(99, old_id);
+        let _ = tracker.contains_block(&99);
+        drop(second);
+    }
+
+    #[test]
+    #[should_panic(expected = "live block index key does not match its arena node")]
+    fn live_id_with_the_wrong_hash_is_rejected() {
+        let mut tracker = BlockTracker::default();
+        let (chain, _) = tracker.acquire_prompt(&[1]);
+        let node_id = tracker.node_id_for(1);
+
+        tracker.unique_blocks.insert(2, node_id);
+        let _ = tracker.contains_block(&2);
+        drop(chain);
+    }
+
+    #[test]
+    #[should_panic(expected = "block ownership count overflowed")]
+    fn ownership_count_overflow_panics() {
+        let mut tracker = BlockTracker::default();
+        let (chain, _) = tracker.acquire_prompt(&[1]);
+        let node_id = tracker.node_id_for(1);
+        tracker.nodes[node_id].incoming = NonZeroU32::MAX;
+        let _ = tracker.acquire_prompt(&[1]);
+        drop(chain);
+    }
+
+    #[test]
+    fn randomized_lifecycle_matches_reference_model() {
+        const SLOTS: usize = 32;
+        const STEPS: usize = 10_000;
+        let prompts = [
+            vec![1, 2, 3, 4],
+            vec![1, 2, 3, 5],
+            vec![1, 2, 6],
+            vec![1, 7],
+            vec![8, 9, 10],
+            vec![8, 9, 11],
+            vec![12],
+        ];
+        let mut rng = StdRng::seed_from_u64(0x5eed_51a7);
+        let mut tracker = BlockTracker::default();
+        let mut chains = (0..SLOTS).map(|_| None).collect::<Vec<_>>();
+        let mut reference = (0..SLOTS)
+            .map(|_| None::<(Vec<SequenceHash>, usize)>)
+            .collect::<Vec<_>>();
+        let mut counts = FxHashMap::<SequenceHash, usize>::default();
+        let mut next_output = 1_000_000_u64;
+
+        for _ in 0..STEPS {
+            let slot = rng.random_range(0..SLOTS);
+            match (&mut chains[slot], &mut reference[slot]) {
+                (chain @ None, reference @ None) => {
+                    let prompt = &prompts[rng.random_range(0..prompts.len())];
+                    let expected_first_new =
+                        prompt.iter().position(|hash| !counts.contains_key(hash));
+                    let (new_chain, first_new) = tracker.acquire_prompt(prompt);
+                    assert_eq!(first_new, expected_first_new);
+                    for &hash in prompt {
+                        *counts.entry(hash).or_default() += 1;
+                    }
+                    *chain = Some(new_chain);
+                    *reference = Some((prompt.clone(), prompt.len()));
+                }
+                (Some(chain), Some((blocks, _prompt_depth))) if rng.random_bool(0.35) => {
+                    let hash = next_output;
+                    next_output += 1;
+                    tracker.append_output(chain, hash);
+                    blocks.push(hash);
+                    counts.insert(hash, 1);
+                }
+                (chain @ Some(_), reference @ Some(_)) => {
+                    let chain = chain.take().expect("matched active chain");
+                    let (blocks, prompt_depth) = reference.take().expect("matched reference");
+                    let expected_remove = blocks[..prompt_depth]
+                        .iter()
+                        .copied()
+                        .filter(|hash| counts[hash] == 1)
+                        .collect::<Vec<_>>();
+                    assert_eq!(tracker.release(chain), expected_remove);
+                    for hash in blocks {
+                        let count = counts.get_mut(&hash).expect("reference block is active");
+                        *count -= 1;
+                        if *count == 0 {
+                            counts.remove(&hash);
+                        }
+                    }
+                }
+                _ => unreachable!("tracker and reference occupancy diverged"),
+            }
+
+            tracker.assert_consistent(chains.iter().filter_map(Option::as_ref));
+            let actual = tracker.active_hashes().collect::<FxHashSet<_>>();
+            let expected = counts.keys().copied().collect::<FxHashSet<_>>();
+            assert_eq!(actual, expected);
+        }
+
+        for slot in 0..SLOTS {
+            if let Some(chain) = chains[slot].take() {
+                let (blocks, prompt_depth) = reference[slot].take().expect("active reference");
+                let expected_remove = blocks[..prompt_depth]
+                    .iter()
+                    .copied()
+                    .filter(|hash| counts[hash] == 1)
+                    .collect::<Vec<_>>();
+                assert_eq!(tracker.release(chain), expected_remove);
+                for hash in blocks {
+                    let count = counts.get_mut(&hash).expect("reference block is active");
+                    *count -= 1;
+                    if *count == 0 {
+                        counts.remove(&hash);
+                    }
+                }
+            }
+        }
+
+        tracker.assert_consistent(std::iter::empty());
+        assert!(counts.is_empty());
         assert_eq!(tracker.active_blocks(), 0);
     }
 
@@ -339,8 +790,10 @@ mod tests {
         let (chain, first_new) = tracker.acquire_prompt(&sequence);
 
         assert_eq!(first_new, Some(0));
+        tracker.assert_consistent([&chain]);
         assert_eq!(tracker.active_blocks(), DEPTH);
         assert_eq!(tracker.release(chain), sequence);
+        tracker.assert_consistent(std::iter::empty());
         assert_eq!(tracker.active_blocks(), 0);
     }
 }
