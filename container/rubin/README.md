@@ -23,25 +23,44 @@ from source → **wire up UCX + NIXL** → `ENTRYPOINT bash`.
 
 ### UCX + NIXL
 
-How UCX/NIXL are provided **differs by base image** — the two `dl/dgx` bases already ship a
-newer, framework-linked NIXL/UCX, but the trtllm `pytorch-rubin` base does not:
+**What these are:** **NIXL** is NVIDIA's library for moving KV-cache data quickly between GPUs or
+nodes — Dynamo needs it for *disaggregated serving* (running prefill on one GPU and decode on
+another). **UCX** is the lower-level networking library NIXL is built on top of.
+
+**The key idea:** how each image gets NIXL/UCX depends on its **base image** (the `FROM …` layer it
+starts from). Two of our bases already ship NIXL/UCX; the third does not — so we handle them
+differently. Think of it like moving in:
+
+- The **vllm** and **sglang** bases are a *furnished apartment* — NIXL/UCX are already installed, so
+  we just point Dynamo at them.
+- The **trtllm** base is an *empty apartment* — we build and install NIXL/UCX ourselves.
 
 | Image | Base ships NIXL/UCX? | What the Dockerfile does |
 |-------|----------------------|--------------------------|
-| `Dockerfile.vllm`   | **Yes** — NIXL 1.3.0 + UCX 1.21.0 at `/usr/local/nixl` + `/usr/local/ucx` (in the base `LD_LIBRARY_PATH`) | **Reuse the base copy.** Only wire `NIXL_PREFIX`/`NIXL_LIB_DIR`/`NIXL_PLUGIN_DIR` + prepend UCX to `LD_LIBRARY_PATH` so Dynamo's Rust `nixl-sys` `dlopen("libnixl.so")` resolves it (no rebuild — that would downgrade/shadow the base). |
+| `Dockerfile.vllm`   | **Yes** — NIXL 1.3.0 + UCX 1.21.0, pre-installed at `/usr/local/nixl` + `/usr/local/ucx` | **Reuse the base's copy.** Set `NIXL_PREFIX` / `NIXL_LIB_DIR` / `NIXL_PLUGIN_DIR` and add UCX to `LD_LIBRARY_PATH` so Dynamo can find the existing files. We deliberately **don't rebuild** — that would install an older NIXL and shadow the good one the base ships. |
 | `Dockerfile.sglang` | **Yes** — same as vllm | Same as vllm. |
-| `Dockerfile.trtllm` | **No** — `pytorch-rubin` is a build base; NIXL is not on `LD_LIBRARY_PATH` | **Build from source**, mirroring `container/templates/wheel_builder.Dockerfile`'s CUDA path (`hwloc` → `gdrcopy` → `libfabric` → `UCX` → `NIXL` via meson), `dnf`→`apt` mapped. |
+| `Dockerfile.trtllm` | **No** — its `pytorch-rubin` base is a *build base*; NIXL isn't installed | **Build from source**, in order `hwloc → gdrcopy → libfabric → UCX → NIXL`, following the same recipe Dynamo's runtime templates use (`container/templates/wheel_builder.Dockerfile`). |
 
-The trtllm from-source versions come from `container/context.yaml` (NIXL `v1.0.1`, UCX
-`v1.20.x`, gdrcopy `v2.5.2`, libfabric `v2.5.1`, hwloc `2.12.2`), each overridable via
-`--build-arg NIXL_REF=… / NIXL_UCX_REF=… / …`. trtllm installs NIXL to `/opt/nvidia/nvda_nixl`
-(`lib64`) and UCX to `/usr/local/ucx`, wired via the same env vars. The build is placed
-**after** the Dynamo wheel build so Dynamo compiles in the validated stub-mode path
-(unchanged); NIXL is supplied purely at runtime, exactly as the runtime templates do.
+**Why "reuse" still needs some wiring:** when a program needs a shared library (a `.so` file),
+Linux searches the folders listed in `LD_LIBRARY_PATH`. Dynamo's Rust code loads `libnixl.so`
+*by name* at runtime, so even though the file already exists in the base image, we still have to
+point the environment variables and `LD_LIBRARY_PATH` at it — otherwise the OS can't find it.
 
-The vllm/sglang wiring `test -f`/`test -d`-asserts the base NIXL layout at build time, so if a
-future base image relocates NIXL the build fails loudly (with a directory listing) instead of
-silently shipping a stub-mode image.
+**The trtllm from-source versions** come from `container/context.yaml` (NIXL `v1.0.1`, UCX
+`v1.20.x`, gdrcopy `v2.5.2`, libfabric `v2.5.1`, hwloc `2.12.2`), and each can be overridden at
+build time, e.g. `--build-arg NIXL_REF=…`. The built NIXL lands in `/opt/nvidia/nvda_nixl` and UCX
+in `/usr/local/ucx`, wired up with the same environment variables.
+
+**Why the build order matters (trtllm):** the NIXL build is placed **after** the Dynamo wheel
+build on purpose. Dynamo compiles against a lightweight *stub* of NIXL — a placeholder that lets
+the code build *without* the real library present — because the real NIXL is only needed **at
+runtime**. So we build Dynamo (using the stub) first, then add the real NIXL afterward, exactly how
+Dynamo's runtime images already do it. How Dynamo itself compiles doesn't change.
+
+**A built-in safety net (vllm/sglang):** the Dockerfile checks that the base's NIXL files are
+where we expect (`test -f` / `test -d`) at build time. If a future base image ever **moves** NIXL,
+the build **fails immediately and loudly** — printing a directory listing of what's actually there
+— instead of quietly producing an image that looks fine but can't do disaggregated serving.
 
 ## Build (on a native arm64 Docker host, e.g. `computelab-armbuild-1`)
 
