@@ -24,6 +24,7 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.llm_engine import TrtllmLLMEngine
+from dynamo.trtllm.request_handlers import handler_base as handler_base_module
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
 pytestmark = [
@@ -649,7 +650,7 @@ class TestDisaggRequestId:
     def test_disagg_request_id_populated_in_prefill_mode(self):
         """When mode is PREFILL and no ep_disaggregated_params, disagg_request_id is set."""
         handler = self._make_prefill_handler()
-        disagg_params, _, _ = handler._setup_disaggregated_params_for_mode(
+        disagg_params, _, _, _ = handler._setup_disaggregated_params_for_mode(
             request={}, ep_disaggregated_params=None
         )
         assert disagg_params is not None
@@ -661,7 +662,7 @@ class TestDisaggRequestId:
         handler = self._make_prefill_handler()
         ids = set()
         for _ in range(10):
-            params, _, _ = handler._setup_disaggregated_params_for_mode(
+            params, _, _, _ = handler._setup_disaggregated_params_for_mode(
                 request={}, ep_disaggregated_params=None
             )
             ids.add(params.disagg_request_id)
@@ -675,7 +676,7 @@ class TestDisaggRequestId:
         # Make bool(ep_params) truthy so the if-branch is taken
         ep_params.__bool__ = lambda self: True
 
-        params, _, _ = handler._setup_disaggregated_params_for_mode(
+        params, _, _, _ = handler._setup_disaggregated_params_for_mode(
             request={}, ep_disaggregated_params=ep_params
         )
         assert params.disagg_request_id is not None
@@ -689,7 +690,7 @@ class TestDisaggRequestId:
         ep_params.disagg_request_id = existing_id
         ep_params.__bool__ = lambda self: True
 
-        params, _, _ = handler._setup_disaggregated_params_for_mode(
+        params, _, _, _ = handler._setup_disaggregated_params_for_mode(
             request={}, ep_disaggregated_params=ep_params
         )
         assert params.disagg_request_id == existing_id
@@ -703,13 +704,100 @@ class TestDisaggRequestId:
         """Handlers with different machine_ids produce non-overlapping snowflake IDs."""
         handler_a = self._make_prefill_handler(machine_id=1)
         handler_b = self._make_prefill_handler(machine_id=2)
-        params_a, _, _ = handler_a._setup_disaggregated_params_for_mode(
+        params_a, _, _, _ = handler_a._setup_disaggregated_params_for_mode(
             request={}, ep_disaggregated_params=None
         )
-        params_b, _, _ = handler_b._setup_disaggregated_params_for_mode(
+        params_b, _, _, _ = handler_b._setup_disaggregated_params_for_mode(
             request={}, ep_disaggregated_params=None
         )
         assert params_a.disagg_request_id != params_b.disagg_request_id
+
+
+class TestConversationParamsCompatibility:
+    def _make_handler(self, mode=DisaggregationMode.AGGREGATED) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        config.disagg_machine_id = 42
+        handler = _ConcreteHandler(config)
+        handler.disaggregation_mode = mode
+        return handler
+
+    def test_prefers_conversation_params_when_available(self):
+        class FakeConversationParams:
+            def __init__(self, conversation_id):
+                self.conversation_id = conversation_id
+
+        handler = self._make_handler()
+        request = {"routing": {"conversation_id": "conv-new"}}
+
+        with mock.patch.object(
+            handler_base_module, "ConversationParams", FakeConversationParams
+        ):
+            (
+                disagg_params,
+                _,
+                _,
+                conversation_params,
+            ) = handler._setup_disaggregated_params_for_mode(request, None)
+
+        assert disagg_params is None
+        assert conversation_params.conversation_id == "conv-new"
+
+    def test_uses_legacy_disaggregated_params_field(self):
+        class LegacyDisaggregatedParams:
+            conversation_id = None
+
+            def __init__(self, **kwargs):
+                self.request_type = kwargs.get("request_type")
+                self.disagg_request_id = kwargs.get("disagg_request_id")
+
+        handler = self._make_handler(DisaggregationMode.PREFILL)
+        request = {"routing": {"conversation_id": "conv-old"}}
+
+        with (
+            mock.patch.object(handler_base_module, "ConversationParams", None),
+            mock.patch.object(
+                handler_base_module,
+                "LlmDisaggregatedParams",
+                LegacyDisaggregatedParams,
+            ),
+        ):
+            (
+                disagg_params,
+                _,
+                _,
+                conversation_params,
+            ) = handler._setup_disaggregated_params_for_mode(request, None)
+
+        assert conversation_params is None
+        assert disagg_params.conversation_id == "conv-old"
+
+    def test_missing_api_is_ignored_when_affinity_disabled(self, monkeypatch):
+        monkeypatch.delenv("DYN_ENGINE_CONV_AFFINITY", raising=False)
+        handler = self._make_handler()
+        request = {"routing": {"conversation_id": "conv-unused"}}
+
+        with mock.patch.object(handler_base_module, "ConversationParams", None):
+            (
+                disagg_params,
+                _,
+                _,
+                conversation_params,
+            ) = handler._setup_disaggregated_params_for_mode(request, None)
+
+        assert disagg_params is None
+        assert conversation_params is None
+
+    def test_missing_api_fails_clearly_when_affinity_enabled(self, monkeypatch):
+        monkeypatch.setenv("DYN_ENGINE_CONV_AFFINITY", "1")
+        handler = self._make_handler()
+        request = {"routing": {"conversation_id": "conv-required"}}
+
+        with (
+            mock.patch.object(handler_base_module, "ConversationParams", None),
+            pytest.raises(RuntimeError, match="requires a TRT-LLM build"),
+        ):
+            handler._setup_disaggregated_params_for_mode(request, None)
 
 
 class TestHealthCheckPriority:
