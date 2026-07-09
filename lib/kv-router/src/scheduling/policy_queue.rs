@@ -195,6 +195,7 @@ struct PolicyClassQueue<T> {
     ready_by_worker: FxHashMap<WorkerWithDpRank, BinaryHeap<PolicyQueueEntry<T>>>,
     blocked_workers: FxHashSet<WorkerWithDpRank>,
     candidate_worker_heads: BTreeSet<WorkerLaneHead>,
+    needs_blocked_worker_recheck: bool,
 }
 
 impl<T> PolicyClassQueue<T> {
@@ -260,6 +261,29 @@ impl<T> PolicyClassQueue<T> {
         class_index: usize,
         is_dispatchable: &mut impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
     ) -> Option<DispatchCandidate> {
+        if self.needs_blocked_worker_recheck {
+            self.needs_blocked_worker_recheck = false;
+            let Self {
+                config,
+                ready_by_worker,
+                blocked_workers,
+                candidate_worker_heads,
+                ..
+            } = self;
+            blocked_workers.retain(|worker| {
+                let ready = ready_by_worker
+                    .get(worker)
+                    .expect("blocked worker lane vanished");
+                let head = ready.peek().expect("blocked worker lane is empty");
+                if is_dispatchable(class_index, config, head.payload()) {
+                    candidate_worker_heads.insert(WorkerLaneHead::new(*worker, head));
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
         let shared = self
             .pending
             .peek()
@@ -364,21 +388,7 @@ impl<T> PolicyClassQueue<T> {
     }
 
     fn recheck_all_workers(&mut self) {
-        let Self {
-            ready_by_worker,
-            blocked_workers,
-            candidate_worker_heads,
-            ..
-        } = self;
-        for worker in blocked_workers.drain() {
-            let ready = ready_by_worker
-                .get(&worker)
-                .expect("blocked worker lane vanished");
-            candidate_worker_heads.insert(WorkerLaneHead::new(
-                worker,
-                ready.peek().expect("blocked worker lane is empty"),
-            ));
-        }
+        self.needs_blocked_worker_recheck = true;
     }
 
     fn rebuild_worker_heads(&mut self) {
@@ -419,6 +429,7 @@ impl<T> PolicyQueue<T> {
                     ready_by_worker: FxHashMap::default(),
                     blocked_workers: FxHashSet::default(),
                     candidate_worker_heads: BTreeSet::new(),
+                    needs_blocked_worker_recheck: false,
                     stats: PolicyQueueStats::default(),
                     deficit: 0,
                 })
@@ -1009,6 +1020,46 @@ policy_classes:
         assert_eq!(popped, LANES / 2);
         assert_eq!(checks, LANES);
         assert_eq!(queue.pending_count(), LANES / 2);
+    }
+
+    #[test]
+    fn global_recheck_dispatches_workers_as_they_become_available() {
+        let mut queue = PolicyQueue::new(admission_profile());
+        for lane in 0..3 {
+            queue
+                .enqueue(
+                    0,
+                    3,
+                    QueueSnapshot::new(1, 0),
+                    lane as f64,
+                    0.0,
+                    0,
+                    WorkerPlacement::Exact(WorkerWithDpRank::new(lane, 0)),
+                    lane,
+                )
+                .unwrap();
+        }
+
+        assert!(queue.pop_next(|_, _, _| false).is_none());
+
+        let mut available = [false, true, false];
+        queue.recheck_all_workers();
+        let entry = queue
+            .pop_next(|_, _, lane| available[*lane as usize])
+            .expect("newly available worker should dispatch");
+        assert_eq!(entry.into_payload(), 1);
+        assert!(
+            queue
+                .pop_next(|_, _, lane| available[*lane as usize])
+                .is_none()
+        );
+
+        available[2] = true;
+        queue.recheck_all_workers();
+        let entry = queue
+            .pop_next(|_, _, lane| available[*lane as usize])
+            .expect("later worker availability should dispatch on the next recheck");
+        assert_eq!(entry.into_payload(), 2);
     }
 
     #[test]
