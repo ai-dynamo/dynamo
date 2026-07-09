@@ -85,16 +85,44 @@ pub const ROOT_PATH: &str = "v1/mdc";
 /// "Special" here means `AddedToken { special: true, .. }` — these are the only tokens
 /// guaranteed atomic in BPE (won't be merged with surrounding bytes), so they are the
 /// only safe boundary points for the L1 prefix cache.
-fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
+pub(crate) fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     let added = hf.get_added_tokens_decoder();
     let mut out: Vec<String> = added
         .values()
-        .filter(|t| t.special)
+        // Prefixes are encoded independently and concatenated. Admit only
+        // tokens whose match span cannot depend on text on either side of the
+        // split. The other AddedToken flags can change whether a literal
+        // occurrence matches or consume adjacent whitespace/normalization,
+        // which would make cached token IDs differ from a full encode.
+        .filter(|token| {
+            token.special
+                && !token.single_word
+                && !token.lstrip
+                && !token.rstrip
+                && !token.normalized
+        })
         .map(|t| t.content.clone())
         .collect();
     out.sort();
     out.dedup();
     out
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TokenizerOutputBackend {
+    HuggingFace,
+    Fastokens,
+    TikToken,
+}
+
+impl TokenizerOutputBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::HuggingFace => "huggingface",
+            Self::Fastokens => "fastokens",
+            Self::TikToken => "tiktoken",
+        }
+    }
 }
 
 /// Resolve the static architectural context limit from local HF metadata.
@@ -1060,35 +1088,151 @@ impl ModelDeploymentCard {
         self.tokenizer.is_some()
     }
 
+    /// Load the atomic special-token strings used as safe shared-cache split points.
+    /// This is only called when the optional Valkey tokenizer cache is configured;
+    /// ordinary tokenizer construction retains its existing single file load.
+    fn tokenizer_output_backend(&self) -> anyhow::Result<TokenizerOutputBackend> {
+        let tokenizer = self
+            .tokenizer
+            .as_ref()
+            .context("tokenizer cache identity requires a tokenizer artifact")?;
+        match tokenizer {
+            TokenizerKind::TikTokenModel(_) => Ok(TokenizerOutputBackend::TikToken),
+            TokenizerKind::HfTokenizerJson(file)
+                if self
+                    .runtime_config
+                    .effective_tokenizer_backend()
+                    .is_fastokens() =>
+            {
+                let Some(path) = file.path() else {
+                    return Ok(TokenizerOutputBackend::HuggingFace);
+                };
+                let Some(path) = path.to_str() else {
+                    return Ok(TokenizerOutputBackend::HuggingFace);
+                };
+                Ok(
+                    if crate::tokenizers::FastTokenizer::from_file(path).is_ok() {
+                        TokenizerOutputBackend::Fastokens
+                    } else {
+                        TokenizerOutputBackend::HuggingFace
+                    },
+                )
+            }
+            TokenizerKind::HfTokenizerJson(_) => Ok(TokenizerOutputBackend::HuggingFace),
+        }
+    }
+
+    fn tokenizer_cache_special_tokens_for_backend(
+        &self,
+        backend: TokenizerOutputBackend,
+    ) -> anyhow::Result<Vec<String>> {
+        let Some(TokenizerKind::HfTokenizerJson(checked_file)) = &self.tokenizer else {
+            return Ok(Vec::new());
+        };
+        let path = checked_file
+            .path()
+            .ok_or_else(|| anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url()))?;
+        let mut tokenizer = HfTokenizer::from_file(path)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| path.display().to_string())?;
+        // Fastokens reads tokenizer.json directly and does not apply
+        // tokenizer_config.json additions. Only use boundaries that the active
+        // backend recognizes atomically.
+        if backend == TokenizerOutputBackend::HuggingFace
+            && let Some(model_dir) = path.parent()
+        {
+            crate::tokenizers::hf::merge_special_tokens_from_config(&mut tokenizer, model_dir);
+        }
+        Ok(extract_hf_special_tokens(&tokenizer))
+    }
+
+    /// Stable identity for tokenizer output only. Routing and admission policy
+    /// deliberately do not participate, so frontends with different router
+    /// policy can share the same central token cache safely.
+    fn tokenizer_cache_identity_for_backend(
+        &self,
+        backend: TokenizerOutputBackend,
+    ) -> anyhow::Result<String> {
+        let tokenizer = self
+            .tokenizer
+            .as_ref()
+            .context("tokenizer cache identity requires a tokenizer artifact")?;
+        let mut identity = blake3::Hasher::new();
+        identity.update(b"dynamo-tokenizer-cache-identity-v2\0");
+        identity.update(backend.as_str().as_bytes());
+        identity.update(b"\0");
+        match tokenizer {
+            TokenizerKind::HfTokenizerJson(file) => {
+                identity.update(b"hf-tokenizer-json\0");
+                identity.update(file.checksum().to_string().as_bytes());
+                if backend == TokenizerOutputBackend::HuggingFace
+                    && let Some(model_dir) = file.path().and_then(Path::parent)
+                {
+                    let config_path = model_dir.join("tokenizer_config.json");
+                    if config_path.is_file() {
+                        identity.update(b"\0tokenizer-config\0");
+                        identity.update(blake3::hash(&std::fs::read(config_path)?).as_bytes());
+                    }
+                }
+            }
+            TokenizerKind::TikTokenModel(file) => {
+                identity.update(b"tiktoken-model\0");
+                identity.update(file.checksum().to_string().as_bytes());
+            }
+        }
+        Ok(identity.finalize().to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tokenizer_cache_identity(&self) -> anyhow::Result<String> {
+        self.tokenizer_cache_identity_for_backend(self.tokenizer_output_backend()?)
+    }
+
+    pub(crate) fn tokenizer_cache_metadata(&self) -> anyhow::Result<(String, Vec<String>)> {
+        let backend = self.tokenizer_output_backend()?;
+        Ok((
+            self.tokenizer_cache_identity_for_backend(backend)?,
+            self.tokenizer_cache_special_tokens_for_backend(backend)?,
+        ))
+    }
+
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
     /// Tokenizer backend controls:
     /// - `runtime_config.tokenizer_backend=fastokens` — use `fastokens` as the encoding backend
     /// - `DYN_TOKENIZER=fastokens` — fallback backend for callers without explicit runtime config
-    /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
-    ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
-    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
-    /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
-    ///   (when the cache is enabled) a partial hit also caches the new suffix so each
-    ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
-    ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
-    ///   fall back to the original hit-without-insert behavior.
+    ///
+    /// Cache policy comes from the frontend's typed [`crate::tokenizer_cache::TokenizerCacheConfig`].
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        let cache_config = crate::tokenizer_cache::TokenizerCacheConfig {
+            enabled: tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref()),
+            l1_bytes: tokenizer_cache_bytes(
+                std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref(),
+            ) as u64,
+            extend: !matches!(
+                std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
+                Some("0")
+            ),
+            ..Default::default()
+        };
+        self.tokenizer_with_cache_config(&cache_config)
+    }
+
+    pub fn tokenizer_with_cache_config(
+        &self,
+        cache_config: &crate::tokenizer_cache::TokenizerCacheConfig,
+    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = self
             .runtime_config
             .effective_tokenizer_backend()
             .is_fastokens();
 
-        let cache_enabled =
-            tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
-        let cache_bytes =
-            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
-        // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
-        let cache_extend = !matches!(
-            std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
-            Some("0")
-        );
+        // The async preprocessor owns both L1 and Valkey L2 when shared caching is
+        // configured. Avoid wrapping it in a second, opaque in-process L1 here.
+        let local_cache_enabled = cache_config.enabled && cache_config.l2.is_none();
+        let cache_bytes = cache_config.l1_bytes as usize;
+        let cache_extend = cache_config.extend;
 
         let inner: Arc<dyn crate::tokenizers::traits::Tokenizer> = match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
@@ -1121,7 +1265,7 @@ impl ModelDeploymentCard {
                     crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
                 // Hold onto specials before any move of `hf`.
-                let specials: Vec<String> = if cache_enabled {
+                let specials: Vec<String> = if local_cache_enabled {
                     extract_hf_special_tokens(&hf)
                 } else {
                     Vec::new()
@@ -1158,7 +1302,7 @@ impl ModelDeploymentCard {
                     Arc::new(wrap_hf(hf))
                 };
 
-                if cache_enabled {
+                if local_cache_enabled {
                     tracing::info!(
                         cache_bytes,
                         cache_extend,
@@ -1189,10 +1333,9 @@ impl ModelDeploymentCard {
                     })?;
 
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
-                if cache_enabled {
-                    // Empty specials disable L1, so the wrapper bypasses cache observers.
-                    // The instrumentation helper still binds zero-valued per-model token
-                    // series, ready for future tiktoken special-token extraction.
+                if local_cache_enabled {
+                    // Empty specials -> L1 always misses; wrapper is a thin passthrough.
+                    // Special-token extraction for tiktoken is out of scope for v1.
                     tracing::info!(
                         cache_bytes,
                         "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 is disabled until tiktoken special-token extraction is added)",
@@ -2158,16 +2301,19 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_cache_bytes_defaults_to_64_mib_and_accepts_valid_overrides() {
-        assert_eq!(
-            super::tokenizer_cache_bytes(None),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
-        );
-        assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
-        assert_eq!(
-            super::tokenizer_cache_bytes(Some("invalid")),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
-        );
+    fn tokenizer_cache_boundaries_exclude_context_sensitive_added_tokens() {
+        use tokenizers::{AddedToken, Tokenizer, models::bpe::BPE};
+
+        let mut tokenizer = Tokenizer::new(BPE::default());
+        tokenizer.add_special_tokens(&[
+            AddedToken::from("<safe>", true),
+            AddedToken::from("word", true).single_word(true),
+            AddedToken::from("<left>", true).lstrip(true),
+            AddedToken::from("<right>", true).rstrip(true),
+            AddedToken::from("<normalized>", true).normalized(true),
+        ]);
+
+        assert_eq!(super::extract_hf_special_tokens(&tokenizer), ["<safe>"]);
     }
 
     #[test]
@@ -2514,6 +2660,45 @@ mod tests {
         a.extra_files.extend([cf1.clone(), cf2.clone()]);
         b.extra_files.extend([cf2, cf1]);
         assert_eq!(a.mdcsum(), b.mdcsum());
+    }
+
+    #[test]
+    fn tokenizer_cache_identity_ignores_router_policy_but_distinguishes_output_backend() {
+        let src =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1");
+        let mut card = super::ModelDeploymentCard::load_from_disk(&src, None).unwrap();
+        let baseline = card.tokenizer_cache_identity().unwrap();
+
+        card.router_config = Some(crate::entrypoint::RouterConfig::default());
+        card.router_config
+            .as_mut()
+            .unwrap()
+            .session_affinity_ttl_secs = Some(123);
+        assert_eq!(baseline, card.tokenizer_cache_identity().unwrap());
+
+        assert_ne!(
+            baseline,
+            card.tokenizer_cache_identity_for_backend(super::TokenizerOutputBackend::Fastokens)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn tokenizer_cache_identity_uses_hf_identity_after_fastokens_fallback() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut card = super::ModelDeploymentCard::load_from_disk(&src, None).unwrap();
+        let baseline = card.tokenizer_cache_identity().unwrap();
+        let tokenizer_path = src.join("tokenizer.json");
+        assert!(
+            crate::tokenizers::FastTokenizer::from_file(tokenizer_path.to_str().unwrap()).is_err(),
+            "the fixture must exercise Fastokens fallback"
+        );
+
+        card.runtime_config.tokenizer_backend =
+            Some(crate::local_model::runtime_config::TokenizerBackend::Fastokens);
+
+        assert_eq!(baseline, card.tokenizer_cache_identity().unwrap());
     }
 
     #[test]

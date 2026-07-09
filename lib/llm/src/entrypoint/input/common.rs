@@ -405,7 +405,13 @@ pub async fn prepare_engine(
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine, model.card().tokenizer()?)
+            >(
+                model.card(),
+                inner_engine,
+                model
+                    .card()
+                    .tokenizer_with_cache_config(&model.router_config().tokenizer_cache_config)?,
+            )
             .await?;
 
             let service_name = model.service_name().to_string();
@@ -437,9 +443,18 @@ where
 {
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(card)?;
-    let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?
-            .into_operator();
+    let cache_config = card
+        .router_config
+        .as_ref()
+        .map(|config| config.tokenizer_cache_config.clone())
+        .unwrap_or_default();
+    let preprocessor = OpenAIPreprocessor::new_with_parts_and_cache(
+        card.clone(),
+        formatter,
+        tokenizer.clone(),
+        cache_config,
+    )?
+    .into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
 

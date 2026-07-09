@@ -134,7 +134,9 @@ pub async fn run(
             let manager = http_service.model_manager();
             let checksum = model.card().mdcsum();
 
-            let tokenizer = model.card().tokenizer()?;
+            let tokenizer = model
+                .card()
+                .tokenizer_with_cache_config(&model.router_config().tokenizer_cache_config)?;
             let chat_pipeline = common::build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,

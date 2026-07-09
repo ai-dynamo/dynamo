@@ -1453,7 +1453,10 @@ impl ModelWatcher {
             let tokenizer = if (needs_local_chat_pipeline || needs_local_completions_pipeline)
                 && card.has_tokenizer()
             {
-                Some(card.tokenizer().context("tokenizer")?)
+                Some(
+                    card.tokenizer_with_cache_config(&router_config.tokenizer_cache_config)
+                        .context("tokenizer")?,
+                )
             } else {
                 None
             };
@@ -1596,9 +1599,13 @@ impl ModelWatcher {
                 } else if let Some(tk) = tokenizer.clone() {
                     let PromptFormatter::OAI(formatter) =
                         prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
-                    let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor.new_with_parts")?;
+                    let preprocessor = OpenAIPreprocessor::new_with_parts_and_cache(
+                        card.clone(),
+                        formatter,
+                        tk.clone(),
+                        router_config.tokenizer_cache_config.clone(),
+                    )
+                    .context("OpenAIPreprocessor.new_with_parts")?;
                     Some(
                         routing
                             .build_pipeline::<
@@ -1613,7 +1620,7 @@ impl ModelWatcher {
                                 self.metrics.clone(),
                             )
                             .context("PreprocessedRouting::build_pipeline")?,
-                        )
+                    )
                 } else if needs_generate_pipeline {
                     tracing::warn!(
                         "Skipping chat engine: no supported Rust tokenizer or chat_engine_factory; Generate remains available"
@@ -1638,9 +1645,13 @@ impl ModelWatcher {
                 if let Some(tk) = tokenizer {
                     let formatter = PromptFormatter::no_op();
                     let PromptFormatter::OAI(formatter) = formatter;
-                    let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor::new_with_parts")?;
+                    let preprocessor = OpenAIPreprocessor::new_with_parts_and_cache(
+                        card.clone(),
+                        formatter,
+                        tk.clone(),
+                        router_config.tokenizer_cache_config.clone(),
+                    )
+                    .context("OpenAIPreprocessor::new_with_parts")?;
                     let routing = preprocessed_routing.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("completions pipeline requires preprocessed routing")
                     })?;

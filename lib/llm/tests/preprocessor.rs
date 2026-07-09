@@ -8,12 +8,14 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::tokenizer_cache::{TokenizerCacheConfig, TokenizerCacheL2Config};
 use dynamo_renderer::PromptContextMixin;
 use dynamo_renderer::PromptFormatter;
 use serde::{Deserialize, Serialize};
 
 use hf_hub::{Cache, Repo, RepoType, api::tokio::ApiBuilder};
 use rstest::rstest;
+use serial_test::serial;
 
 use std::path::PathBuf;
 
@@ -744,4 +746,88 @@ mod context_length_validation {
         let result = preprocessor.preprocess_request(&request, None).await;
         assert!(result.is_ok(), "context_length=0 should skip validation");
     }
+}
+
+#[tokio::test]
+#[serial]
+#[ignore = "requires DYN_TOKENIZER_CACHE_TEST_URL pointing to a disposable Valkey server"]
+async fn tokenizer_l2_is_used_by_separate_preprocessor_instances_for_a_growing_chat() {
+    let url = std::env::var("DYN_TOKENIZER_CACHE_TEST_URL")
+        .expect("DYN_TOKENIZER_CACHE_TEST_URL is required");
+    let scope = format!("preprocessor-test-{}", std::process::id());
+    let cache_config = TokenizerCacheConfig {
+        l2: Some(TokenizerCacheL2Config {
+            allow_insecure_plaintext: true,
+            url: Some(url),
+            scope,
+            timeout_ms: 250,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    {
+        let model_path = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+        let mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        let shared_system = "large shared system context ".repeat(4096);
+        let first_messages = serde_json::to_string(&serde_json::json!([
+            {"role": "system", "content": &shared_system},
+            {"role": "user", "content": "first question"}
+        ]))
+        .unwrap();
+        let formatter = prompt_formatter_from_mdc(&mdc).unwrap();
+        let PromptFormatter::OAI(formatter) = formatter;
+        let tokenizer = mdc.tokenizer_with_cache_config(&cache_config).unwrap();
+        let first = OpenAIPreprocessor::new_with_parts_and_cache(
+            mdc.clone(),
+            formatter.clone(),
+            tokenizer.clone(),
+            cache_config.clone(),
+        )
+        .unwrap();
+        let first_request = Request::from(&first_messages, None, None, mdc.slug().to_string());
+        first
+            .preprocess_request(&first_request, None)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let hits_before =
+            dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_L2_HITS_TOTAL.get();
+        let second_messages = serde_json::to_string(&serde_json::json!([
+            {"role": "system", "content": &shared_system},
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "second question"}
+        ]))
+        .unwrap();
+        let second = OpenAIPreprocessor::new_with_parts_and_cache(
+            mdc.clone(),
+            formatter,
+            tokenizer,
+            cache_config,
+        )
+        .unwrap();
+        let second_request = Request::from(&second_messages, None, None, mdc.slug().to_string());
+        second
+            .preprocess_request(&second_request, None)
+            .await
+            .unwrap();
+
+        assert!(
+            dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_L2_HITS_TOTAL.get()
+                > hits_before,
+            "the second preprocessor should hydrate the growing prefix from Valkey"
+        );
+    }
+}
+
+#[test]
+fn custom_tokenizer_parts_do_not_require_an_mdc_tokenizer_without_l2() {
+    let model_path = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+    let tokenizer = mdc.tokenizer().unwrap();
+    let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(&mdc).unwrap();
+    mdc.tokenizer = None;
+
+    OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer).unwrap();
 }

@@ -97,6 +97,16 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     (priority_jump, strict_priority, priority)
 }
 
+async fn encode_embedding_batch(
+    tokenizer: Arc<dyn Tokenizer>,
+    inputs: Vec<String>,
+) -> anyhow::Result<Vec<Encoding>> {
+    tokio::task::spawn_blocking(move || {
+        tokenizer.encode_batch(&inputs.iter().map(String::as_str).collect::<Vec<_>>())
+    })
+    .await?
+}
+
 /// Encode a slice of `f32` values as a base64 string per the OpenAI
 /// `encoding_format=base64` spec: the raw little-endian byte
 /// representation of each `f32` is concatenated and the resulting byte
@@ -268,6 +278,9 @@ pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
+    /// Async L1 + shared Valkey L2 prefix cache. Present only when explicitly
+    /// configured; the tokenizer remains the correctness fallback and decoder.
+    tokenizer_cache: Option<Arc<crate::tokenizer_cache::SharedTokenizerCache>>,
     model_info: Arc<dyn ModelInfo>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
@@ -520,9 +533,16 @@ impl OpenAIPreprocessor {
 
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = prompt_formatter_from_mdc(&mdc)?;
-        let tokenizer = mdc.tokenizer()?;
+        let cache_config = mdc
+            .router_config
+            .as_ref()
+            .map(|config| config.tokenizer_cache_config.clone())
+            .unwrap_or_default();
+        let tokenizer = mdc.tokenizer_with_cache_config(&cache_config)?;
         match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
+            PromptFormatter::OAI(formatter) => {
+                Self::new_with_parts_and_cache(mdc, formatter, tokenizer, cache_config)
+            }
         }
     }
 
@@ -531,8 +551,29 @@ impl OpenAIPreprocessor {
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
+        Self::new_with_parts_and_cache(mdc, formatter, tokenizer, Default::default())
+    }
+
+    pub fn new_with_parts_and_cache(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: crate::tokenizers::Tokenizer,
+        cache_config: crate::tokenizer_cache::TokenizerCacheConfig,
+    ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
+        let tokenizer_cache = if cache_config.enabled && cache_config.l2.is_some() {
+            let (namespace, special_tokens) = mdc.tokenizer_cache_metadata()?;
+            crate::tokenizer_cache::SharedTokenizerCache::from_config(
+                Arc::clone(&tokenizer),
+                special_tokens,
+                namespace,
+                &cache_config,
+            )?
+            .map(Arc::new)
+        } else {
+            None
+        };
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
         let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
@@ -719,6 +760,7 @@ impl OpenAIPreprocessor {
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
+            tokenizer_cache,
             model_info,
             mdcsum,
             lora_name,
@@ -1928,8 +1970,13 @@ impl OpenAIPreprocessor {
         } else {
             prompt.to_string()
         };
-        let tokenizer = self.tokenizer.clone();
-        let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
+        let encoding = match &self.tokenizer_cache {
+            Some(cache) => cache.encode(&owned).await?,
+            None => {
+                let tokenizer = self.tokenizer.clone();
+                tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??
+            }
+        };
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
@@ -1952,19 +1999,15 @@ impl OpenAIPreprocessor {
 
         let all_token_ids = match &request.inner.input {
             dynamo_protocols::types::EmbeddingInput::String(s) => {
-                let encoding = self.tokenizer.encode(s)?;
+                let encoding = self.encode_with_timing(s, None).await?;
                 vec![encoding.token_ids().to_vec()]
             }
             dynamo_protocols::types::EmbeddingInput::StringArray(arr) => {
                 let input_strs: Vec<String> = arr.to_vec();
-                let encodings = tokio::task::spawn_blocking({
-                    let tokenizer = self.tokenizer.clone();
-                    let strs = input_strs.clone();
-                    move || {
-                        tokenizer.encode_batch(&strs.iter().map(|s| s.as_str()).collect::<Vec<_>>())
-                    }
-                })
-                .await??;
+                // Prefix reuse is request-oriented. Preserve the tokenizer's optimized batch
+                // path for embedding arrays so a slow L2 cannot serialize every array item.
+                let encodings =
+                    encode_embedding_batch(Arc::clone(&self.tokenizer), input_strs).await?;
                 let token_arrays: Vec<Vec<u32>> = encodings
                     .into_iter()
                     .map(|encoding| encoding.token_ids().to_vec())
@@ -3609,6 +3652,8 @@ mod tests {
     use super::*;
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use dynamo_tokenizers::traits::{DecodeResult, Decoder, Encoder};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn url_entry(u: &str) -> MultimodalData {
         MultimodalData::Url(url::Url::parse(u).unwrap())
@@ -3652,6 +3697,54 @@ mod tests {
         assert_eq!(counts.image, 0);
         assert_eq!(counts.video, 0);
         assert_eq!(counts.audio, 0);
+    }
+
+    struct BatchOnlyTokenizer {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Encoder for BatchOnlyTokenizer {
+        fn encode(&self, _input: &str) -> anyhow::Result<Encoding> {
+            panic!("embedding arrays must retain the tokenizer batch path")
+        }
+
+        fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(inputs
+                .iter()
+                .map(|input| Encoding::Sp(input.bytes().map(u32::from).collect()))
+                .collect())
+        }
+    }
+
+    impl Decoder for BatchOnlyTokenizer {
+        fn decode(
+            &self,
+            _token_ids: &[u32],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<DecodeResult> {
+            unreachable!("not used by this test")
+        }
+    }
+
+    impl Tokenizer for BatchOnlyTokenizer {}
+
+    #[tokio::test]
+    async fn embedding_arrays_use_one_batch_encode() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let tokenizer: Arc<dyn Tokenizer> = Arc::new(BatchOnlyTokenizer {
+            calls: Arc::clone(&calls),
+        });
+
+        let encoded = encode_embedding_batch(
+            tokenizer,
+            vec!["one".to_string(), "two".to_string(), "three".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(encoded.len(), 3);
     }
 
     #[test]
