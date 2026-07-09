@@ -134,12 +134,16 @@ pub(super) fn response_kind(response: &RespValue) -> &'static str {
     }
 }
 
-pub(super) fn encode_admission_identity(payload: &mut Vec<u8>, request: &ReservationRequest) {
+pub(super) fn encode_admission_identity(
+    payload: &mut Vec<u8>,
+    domain: &[u8],
+    nonce: ReservationNonce,
+) {
     payload.push(ADMISSION_WIRE_VERSION);
-    payload.extend_from_slice(&(request.domain.len() as u32).to_be_bytes());
-    payload.extend_from_slice(&request.domain);
-    payload.extend_from_slice(&request.nonce.client_nonce.to_be_bytes());
-    payload.extend_from_slice(&request.nonce.request_nonce.to_be_bytes());
+    payload.extend_from_slice(&(domain.len() as u32).to_be_bytes());
+    payload.extend_from_slice(domain);
+    payload.extend_from_slice(&nonce.client_nonce.to_be_bytes());
+    payload.extend_from_slice(&nonce.request_nonce.to_be_bytes());
 }
 
 pub(super) fn validate_worker_ranks(dp_ranks: &[DpRank]) -> Result<()> {
@@ -211,7 +215,7 @@ pub(super) fn encode_select_reserve(request: &ReservationRequest) -> Result<Vec<
     let mut payload = Vec::with_capacity(
         1 + 4 + request.domain.len() + 8 + 8 + 8 + 4 + prefix_bytes + 4 + candidate_bytes,
     );
-    encode_admission_identity(&mut payload, request);
+    encode_admission_identity(&mut payload, &request.domain, request.nonce);
     payload.extend_from_slice(&request.lease_ms.to_be_bytes());
     payload.extend_from_slice(&(request.block_hashes.len() as u32).to_be_bytes());
     for block_hash in &request.block_hashes {
@@ -226,16 +230,22 @@ pub(super) fn encode_select_reserve(request: &ReservationRequest) -> Result<Vec<
     Ok(payload)
 }
 
-pub(super) fn encode_release(request: &ReservationRequest, expected_expires_at_ms: u64) -> Vec<u8> {
+pub(super) fn encode_release(
+    request: &ReservationLifecycleRequest,
+    expected_expires_at_ms: u64,
+) -> Vec<u8> {
     let mut payload = Vec::with_capacity(1 + 4 + request.domain.len() + 8 + 8 + 8);
-    encode_admission_identity(&mut payload, request);
+    encode_admission_identity(&mut payload, &request.domain, request.nonce);
     payload.extend_from_slice(&expected_expires_at_ms.to_be_bytes());
     payload
 }
 
-pub(super) fn encode_renew(request: &ReservationRequest, expected_expires_at_ms: u64) -> Vec<u8> {
+pub(super) fn encode_renew(
+    request: &ReservationLifecycleRequest,
+    expected_expires_at_ms: u64,
+) -> Vec<u8> {
     let mut payload = Vec::with_capacity(1 + 4 + request.domain.len() + 8 + 8 + 8 + 8);
-    encode_admission_identity(&mut payload, request);
+    encode_admission_identity(&mut payload, &request.domain, request.nonce);
     payload.extend_from_slice(&expected_expires_at_ms.to_be_bytes());
     payload.extend_from_slice(&request.lease_ms.to_be_bytes());
     payload

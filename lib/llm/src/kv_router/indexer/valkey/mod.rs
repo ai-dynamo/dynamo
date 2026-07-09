@@ -29,7 +29,7 @@ use dynamo_kv_router::{
 use moka::future::Cache;
 use rustc_hash::FxHashMap;
 use tokio::{
-    sync::{Mutex, Semaphore},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
@@ -59,7 +59,7 @@ mod lease;
 mod reservation;
 use reservation::{
     PendingValkeyReservation, ReservationGrant, ReservationLeaseInner, ReservationLeaseState,
-    ReservationNonce, ReservationRequest,
+    ReservationLifecycleRequest, ReservationNonce, ReservationRequest,
 };
 pub(crate) use reservation::{ValkeyReservationCandidate, ValkeyReservationLease};
 mod wire;
@@ -89,9 +89,11 @@ const WRITE_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
 const SENTINEL_WRITE_RETRY_MAX_DELAY: Duration = Duration::from_millis(250);
 const DEGRADED_FAILOVER_WAIT_TIMEOUT_MS: u64 = 100;
 /// A small frontend cache avoids a primary round trip for repeated prompts.
-/// Its absolute TTL bounds stale ownership; stale overlap only affects cache
-/// affinity, never KV correctness.
-const MATCH_CACHE_CAPACITY: u64 = 512;
+/// Bound it by estimated retained bytes rather than entry count: a valid
+/// request can contain tens of thousands of hashes and a match can contain
+/// hundreds of worker records. Oversized keys bypass the cache entirely.
+const MATCH_CACHE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const MATCH_CACHE_MAX_KEY_HASHES: usize = 8 * 1024;
 const MATCH_CACHE_TTL: Duration = Duration::from_secs(1);
 /// Reads are affinity hints, but they must never stay pinned to a demoted
 /// primary indefinitely. Retry through the externally managed stable primary
@@ -129,6 +131,10 @@ const FRONTEND_ADMISSION_LANES: usize = 4;
 /// per-request cleanup futures. Once this many best-effort cleanups are in
 /// flight, later reservations rely on their module-owned lease expiry.
 const MAX_PENDING_ADMISSION_CLEANUPS: usize = 4096;
+/// Bound full selection requests retained only while reconciling an ambiguous
+/// SELECT_RESERVE. Count-only bounds allow maximum-size requests to consume
+/// multiple GiB per frontend.
+const MAX_PENDING_ADMISSION_CLEANUP_BYTES: usize = 64 * 1024 * 1024;
 /// Worker event streams are ordered independently per DP rank. Give those
 /// streams independent sockets while bounding the primary-side connection
 /// and command scheduling overhead for one worker process.
@@ -155,10 +161,48 @@ struct ValkeyIndexerInner {
     match_cache_generation: AtomicU64,
     cancellation_token: CancellationToken,
     admission_cleanup_permits: Arc<Semaphore>,
+    admission_cleanup_bytes: Arc<Semaphore>,
     /// Number of replicas required to acknowledge each mutation.  With a
     /// primary/replica pair this is one; a single-node development topology
     /// remains supported with zero.
     replication_quorum: usize,
+}
+
+fn match_cache_key_is_cacheable(block_hashes: &[LocalBlockHash]) -> bool {
+    block_hashes.len() <= MATCH_CACHE_MAX_KEY_HASHES
+}
+
+fn match_cache_weight(key: &Vec<LocalBlockHash>, details: &MatchDetails) -> u32 {
+    // Hash-table control bytes are implementation-specific. Charging one
+    // machine word per slot keeps this estimate conservative without coupling
+    // the cache to hashbrown internals.
+    let score_entry_bytes = size_of::<WorkerWithDpRank>() + size_of::<u32>() + size_of::<usize>();
+    let last_hash_entry_bytes =
+        size_of::<WorkerWithDpRank>() + size_of::<ExternalSequenceBlockHash>() + size_of::<usize>();
+    let bytes = size_of::<Vec<LocalBlockHash>>()
+        .saturating_add(size_of::<MatchDetails>())
+        .saturating_add(key.capacity().saturating_mul(size_of::<LocalBlockHash>()))
+        .saturating_add(
+            details
+                .overlap_scores
+                .scores
+                .capacity()
+                .saturating_mul(score_entry_bytes),
+        )
+        .saturating_add(
+            details
+                .overlap_scores
+                .frequencies
+                .capacity()
+                .saturating_mul(size_of::<usize>()),
+        )
+        .saturating_add(
+            details
+                .last_matched_hashes
+                .capacity()
+                .saturating_mul(last_hash_entry_bytes),
+        );
+    u32::try_from(bytes).unwrap_or(u32::MAX).max(1)
 }
 
 /// Persistent device-tier KV index backed by `dynkv` on a Valkey primary.
@@ -329,12 +373,16 @@ impl ValkeyIndexer {
                 index_key: prepared.index_key,
                 primary,
                 match_cache: Cache::builder()
-                    .max_capacity(MATCH_CACHE_CAPACITY)
+                    .max_capacity(MATCH_CACHE_MAX_BYTES)
+                    .weigher(match_cache_weight)
                     .time_to_live(MATCH_CACHE_TTL)
                     .build(),
                 match_cache_generation: AtomicU64::new(0),
                 cancellation_token,
                 admission_cleanup_permits: Arc::new(Semaphore::new(MAX_PENDING_ADMISSION_CLEANUPS)),
+                admission_cleanup_bytes: Arc::new(Semaphore::new(
+                    MAX_PENDING_ADMISSION_CLEANUP_BYTES,
+                )),
                 replication_quorum: prepared.replication_quorum,
             }),
         }
@@ -402,7 +450,7 @@ impl ValkeyIndexer {
 
     async fn release_reservation(
         &self,
-        request: &ReservationRequest,
+        request: &ReservationLifecycleRequest,
         expected_expires_at_ms: u64,
     ) -> Result<bool> {
         let payload = encode_release(request, expected_expires_at_ms);
@@ -434,7 +482,7 @@ impl ValkeyIndexer {
 
     async fn renew_reservation(
         &self,
-        request: &ReservationRequest,
+        request: &ReservationLifecycleRequest,
         expected_expires_at_ms: u64,
     ) -> Result<Option<ReservationGrant>> {
         let payload = encode_renew(request, expected_expires_at_ms);
@@ -522,8 +570,10 @@ impl ValkeyIndexer {
             return Ok(MatchDetails::new());
         }
         self.synchronize_match_cache_generation();
-        let cache_key = block_hashes.to_vec();
-        if let Some(details) = self.inner.match_cache.get(&cache_key).await {
+        let cache_key = match_cache_key_is_cacheable(block_hashes).then(|| block_hashes.to_vec());
+        if let Some(cache_key) = cache_key.as_ref()
+            && let Some(details) = self.inner.match_cache.get(cache_key).await
+        {
             return Ok(details);
         }
         let request = encode_match(block_hashes);
@@ -547,10 +597,12 @@ impl ValkeyIndexer {
             KvRouterError::IndexerOffline
         })?;
         self.synchronize_match_cache_generation();
-        self.inner
-            .match_cache
-            .insert(cache_key, details.clone())
-            .await;
+        if let Some(cache_key) = cache_key {
+            self.inner
+                .match_cache
+                .insert(cache_key, details.clone())
+                .await;
+        }
         Ok(details)
     }
 }

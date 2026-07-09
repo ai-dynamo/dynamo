@@ -5,6 +5,31 @@
 
 use super::*;
 
+pub(super) struct AdmissionCleanupPermit {
+    _task: OwnedSemaphorePermit,
+    _bytes: OwnedSemaphorePermit,
+}
+
+pub(super) fn try_acquire_admission_cleanup(
+    indexer: &ValkeyIndexer,
+    retained_bytes: usize,
+) -> Option<AdmissionCleanupPermit> {
+    let byte_permits = u32::try_from(retained_bytes.max(1)).ok()?;
+    if usize::try_from(byte_permits).ok()? > MAX_PENDING_ADMISSION_CLEANUP_BYTES {
+        return None;
+    }
+    let task = Arc::clone(&indexer.inner.admission_cleanup_permits)
+        .try_acquire_owned()
+        .ok()?;
+    let bytes = Arc::clone(&indexer.inner.admission_cleanup_bytes)
+        .try_acquire_many_owned(byte_permits)
+        .ok()?;
+    Some(AdmissionCleanupPermit {
+        _task: task,
+        _bytes: bytes,
+    })
+}
+
 impl PendingValkeyReservation {
     /// Execute exactly one logical reservation.  On a lost response the
     /// module sees the same nonce on retry; on cancellation/drop the pending
@@ -17,10 +42,11 @@ impl PendingValkeyReservation {
         };
 
         self.armed = false;
+        let request = self.request.take_lifecycle_request();
         let lease = ValkeyReservationLease {
             inner: Arc::new(ReservationLeaseInner {
                 indexer: self.indexer.clone(),
-                request: self.request.clone(),
+                request,
                 grant,
                 state: Mutex::new(ReservationLeaseState {
                     expires_at_ms: grant.expires_at_ms,
@@ -52,51 +78,40 @@ impl Drop for PendingValkeyReservation {
             return;
         };
         let indexer = self.indexer.clone();
-        let request = self.request.clone();
-        let Ok(permit) = Arc::clone(&indexer.inner.admission_cleanup_permits).try_acquire_owned()
+        let Some(permit) =
+            try_acquire_admission_cleanup(&indexer, self.request.retained_heap_bytes())
         else {
             tracing::debug!(
                 maximum = MAX_PENDING_ADMISSION_CLEANUPS,
-                "Skipping pending Valkey reservation reconciliation because the cleanup task limit is full; lease expiry remains the backstop"
+                maximum_bytes = MAX_PENDING_ADMISSION_CLEANUP_BYTES,
+                "Skipping pending Valkey reservation reconciliation because the cleanup task or byte budget is full; lease expiry remains the backstop"
             );
             return;
         };
+        // Clone the potentially large one-shot payload only after both the
+        // task and byte budgets are secured.
+        let request = self.request.clone();
         handle.spawn(async move {
             let _permit = permit;
             let cleanup_window = Duration::from_millis(request.lease_ms);
-            match timeout(cleanup_window, indexer.select_reservation(&request)).await {
+            let reconciliation = async {
+                let grant = indexer.select_reservation(&request).await?;
+                if let Some(grant) = grant {
+                    let lifecycle = ReservationLifecycleRequest::from(&request);
+                    indexer
+                        .release_reservation(&lifecycle, grant.expires_at_ms)
+                        .await?;
+                }
+                Ok::<_, anyhow::Error>(grant)
+            };
+            match timeout(cleanup_window, reconciliation).await {
                 Err(_) => {
                     tracing::debug!(
                         lease_ms = request.lease_ms,
                         "Pending Valkey reservation reconciliation reached its lease-sized deadline"
                     );
                 }
-                Ok(Ok(Some(grant))) => {
-                    match timeout(
-                        cleanup_window,
-                        indexer.release_reservation(&request, grant.expires_at_ms),
-                    )
-                    .await
-                    {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(error)) => {
-                            tracing::debug!(
-                                error = %error,
-                                worker_id = grant.worker.worker_id,
-                                dp_rank = grant.worker.dp_rank,
-                                "Failed to release reconciled Valkey reservation; lease expiry remains the backstop"
-                            );
-                        }
-                        Err(_) => {
-                            tracing::debug!(
-                                worker_id = grant.worker.worker_id,
-                                dp_rank = grant.worker.dp_rank,
-                                lease_ms = request.lease_ms,
-                                "Reconciled Valkey reservation release reached its lease-sized deadline"
-                            );
-                        }
-                    }
-                }
+                Ok(Ok(Some(_))) => {}
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
                     tracing::debug!(
@@ -171,15 +186,17 @@ impl ValkeyReservationLease {
             );
             return;
         };
-        let Ok(permit) =
-            Arc::clone(&self.inner.indexer.inner.admission_cleanup_permits).try_acquire_owned()
-        else {
+        let Some(permit) = try_acquire_admission_cleanup(
+            &self.inner.indexer,
+            self.inner.request.retained_heap_bytes(),
+        ) else {
             self.inner.release_started.store(true, Ordering::Release);
             tracing::debug!(
                 maximum = MAX_PENDING_ADMISSION_CLEANUPS,
+                maximum_bytes = MAX_PENDING_ADMISSION_CLEANUP_BYTES,
                 worker_id = self.inner.grant.worker.worker_id,
                 dp_rank = self.inner.grant.worker.dp_rank,
-                "Skipping detached Valkey reservation release because the cleanup task limit is full; lease expiry remains the backstop"
+                "Skipping detached Valkey reservation release because the cleanup task or byte budget is full; lease expiry remains the backstop"
             );
             return;
         };
@@ -209,15 +226,17 @@ impl Drop for ValkeyReservationLease {
             );
             return;
         };
-        let Ok(permit) =
-            Arc::clone(&self.inner.indexer.inner.admission_cleanup_permits).try_acquire_owned()
-        else {
+        let Some(permit) = try_acquire_admission_cleanup(
+            &self.inner.indexer,
+            self.inner.request.retained_heap_bytes(),
+        ) else {
             self.inner.release_started.store(true, Ordering::Release);
             tracing::debug!(
                 maximum = MAX_PENDING_ADMISSION_CLEANUPS,
+                maximum_bytes = MAX_PENDING_ADMISSION_CLEANUP_BYTES,
                 worker_id = self.inner.grant.worker.worker_id,
                 dp_rank = self.inner.grant.worker.dp_rank,
-                "Skipping dropped Valkey reservation release because the cleanup task limit is full; lease expiry remains the backstop"
+                "Skipping dropped Valkey reservation release because the cleanup task or byte budget is full; lease expiry remains the backstop"
             );
             return;
         };

@@ -40,6 +40,57 @@ pub(super) struct ReservationRequest {
     pub(super) candidates: Vec<ValkeyReservationCandidate>,
 }
 
+impl ReservationRequest {
+    pub(super) fn retained_heap_bytes(&self) -> usize {
+        self.domain
+            .capacity()
+            .saturating_add(
+                self.block_hashes
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<LocalBlockHash>()),
+            )
+            .saturating_add(
+                self.candidates
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<ValkeyReservationCandidate>()),
+            )
+    }
+
+    pub(super) fn take_lifecycle_request(&mut self) -> ReservationLifecycleRequest {
+        ReservationLifecycleRequest {
+            domain: std::mem::take(&mut self.domain),
+            nonce: self.nonce,
+            lease_ms: self.lease_ms,
+        }
+    }
+}
+
+/// Compact request identity retained after SELECT_RESERVE succeeds. Prefix
+/// hashes and candidates are one-shot selection inputs and must not stay live
+/// for the complete request/lease lifetime.
+#[derive(Clone, Debug)]
+pub(super) struct ReservationLifecycleRequest {
+    pub(super) domain: Vec<u8>,
+    pub(super) nonce: ReservationNonce,
+    pub(super) lease_ms: u64,
+}
+
+impl ReservationLifecycleRequest {
+    pub(super) fn retained_heap_bytes(&self) -> usize {
+        self.domain.capacity()
+    }
+}
+
+impl From<&ReservationRequest> for ReservationLifecycleRequest {
+    fn from(request: &ReservationRequest) -> Self {
+        Self {
+            domain: request.domain.clone(),
+            nonce: request.nonce,
+            lease_ms: request.lease_ms,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ReservationGrant {
     pub(super) worker: WorkerWithDpRank,
@@ -56,7 +107,7 @@ pub(super) struct ReservationLeaseState {
 
 pub(super) struct ReservationLeaseInner {
     pub(super) indexer: ValkeyIndexer,
-    pub(super) request: ReservationRequest,
+    pub(super) request: ReservationLifecycleRequest,
     pub(super) grant: ReservationGrant,
     pub(super) state: Mutex<ReservationLeaseState>,
     /// Serialize the one remote lifecycle mutation for this lease without

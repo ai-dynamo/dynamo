@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::super::lease::{renewal_schedule, renewal_should_stop};
+use super::super::lease::{renewal_schedule, renewal_should_stop, try_acquire_admission_cleanup};
 use super::super::*;
 use dynamo_kv_router::protocols::{
     KvCacheEvent, KvCacheStoreData, KvCacheStoredBlockData, StorageTier,
@@ -329,16 +329,52 @@ fn reservation_wire_encodes_identity_prefix_and_registered_capacity() {
     .concat();
     assert_eq!(encoded, expected);
 
-    let release = encode_release(&request, 99);
+    let lifecycle = ReservationLifecycleRequest::from(&request);
+    let release = encode_release(&lifecycle, 99);
     assert_eq!(
         &release[..1 + 4 + 6 + 8 + 8],
         &expected[..1 + 4 + 6 + 8 + 8]
     );
     assert_eq!(&release[release.len() - 8..], &99_u64.to_be_bytes());
 
-    let renew = encode_renew(&request, 99);
+    let renew = encode_renew(&lifecycle, 99);
     assert_eq!(&renew[..release.len()], &release);
     assert_eq!(&renew[renew.len() - 8..], &30_000_u64.to_be_bytes());
+}
+
+#[test]
+fn granted_reservation_lifecycle_discards_one_shot_selection_payload() {
+    let mut request = reservation_request();
+    request.block_hashes = vec![LocalBlockHash(7); MAX_ADMISSION_PREFIX_HASHES];
+    request.candidates = vec![
+        ValkeyReservationCandidate {
+            worker: WorkerWithDpRank::new(10, 2),
+            capacity: 64,
+        };
+        MAX_ADMISSION_CANDIDATES
+    ];
+    let selection_bytes = request.retained_heap_bytes();
+    let lifecycle = ReservationLifecycleRequest::from(&request);
+
+    assert_eq!(lifecycle.domain, request.domain);
+    assert_eq!(lifecycle.nonce, request.nonce);
+    assert_eq!(lifecycle.lease_ms, request.lease_ms);
+    assert!(selection_bytes > 700 * 1024);
+    assert!(lifecycle.retained_heap_bytes() <= MAX_ADMISSION_DOMAIN_LENGTH);
+}
+
+#[test]
+fn match_cache_is_byte_weighted_and_bypasses_oversized_prefixes() {
+    assert!(match_cache_key_is_cacheable(&vec![LocalBlockHash(1); 64]));
+    assert!(!match_cache_key_is_cacheable(&vec![
+        LocalBlockHash(1);
+        MATCH_CACHE_MAX_KEY_HASHES
+            + 1
+    ]));
+
+    let key = vec![LocalBlockHash(1); MATCH_CACHE_MAX_KEY_HASHES];
+    let details = MatchDetails::new();
+    assert!(u64::from(match_cache_weight(&key, &details)) <= MATCH_CACHE_MAX_BYTES);
 }
 
 #[test]
@@ -473,7 +509,7 @@ fn detached_release_cancels_renewal_before_its_release_task_can_run() {
     .unwrap();
     let inner = Arc::new(ReservationLeaseInner {
         indexer,
-        request,
+        request: ReservationLifecycleRequest::from(&request),
         grant,
         state: Mutex::new(ReservationLeaseState {
             expires_at_ms: grant.expires_at_ms,
@@ -535,7 +571,17 @@ async fn detached_admission_cleanup_tasks_are_bounded_and_expire() {
     );
     drop(permits);
 
-    let mut request = reservation_request();
+    let request = reservation_request();
+    let retained_bytes = request.retained_heap_bytes();
+    let cleanup = try_acquire_admission_cleanup(&indexer, retained_bytes)
+        .expect("cleanup count and byte budget should admit one small request");
+    assert_eq!(
+        indexer.inner.admission_cleanup_bytes.available_permits(),
+        MAX_PENDING_ADMISSION_CLEANUP_BYTES - retained_bytes
+    );
+    drop(cleanup);
+
+    let mut request = request;
     request.lease_ms = 25;
     drop(PendingValkeyReservation {
         indexer: indexer.clone(),
@@ -557,7 +603,7 @@ async fn detached_admission_cleanup_tasks_are_bounded_and_expire() {
     ValkeyReservationLease {
         inner: Arc::new(ReservationLeaseInner {
             indexer: indexer.clone(),
-            request,
+            request: ReservationLifecycleRequest::from(&request),
             grant,
             state: Mutex::new(ReservationLeaseState {
                 expires_at_ms: grant.expires_at_ms,
@@ -601,7 +647,7 @@ async fn release_does_not_hold_state_lock_while_waiting_for_lifecycle_io() {
     };
     let inner = Arc::new(ReservationLeaseInner {
         indexer,
-        request,
+        request: ReservationLifecycleRequest::from(&request),
         grant,
         state: Mutex::new(ReservationLeaseState {
             expires_at_ms: grant.expires_at_ms,
@@ -637,6 +683,8 @@ async fn wait_for_cleanup_permits(indexer: &ValkeyIndexer) {
         loop {
             if indexer.inner.admission_cleanup_permits.available_permits()
                 == MAX_PENDING_ADMISSION_CLEANUPS
+                && indexer.inner.admission_cleanup_bytes.available_permits()
+                    == MAX_PENDING_ADMISSION_CLEANUP_BYTES
             {
                 return;
             }
