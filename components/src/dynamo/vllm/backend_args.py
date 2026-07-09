@@ -474,6 +474,7 @@ class DynamoVllmConfig(ConfigBase):
         self._resolve_embedding_transfer_mode()
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
+        self._validate_encoder_topology()
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
         self._resolve_legacy_benchmark_sampling()
@@ -727,6 +728,28 @@ class DynamoVllmConfig(ConfigBase):
         if self._count_multimodal_roles() == 1 and not self.enable_multimodal:
             raise ValueError(
                 "Use --enable-multimodal when enabling any multimodal component"
+            )
+
+    def _validate_encoder_topology(self) -> None:
+        """Validate explicit unified Encode roles and encoder routing."""
+        is_encode = self.disaggregation_mode == DisaggregationMode.ENCODE
+        if (is_encode or self.route_to_encoder) and not self.enable_multimodal:
+            raise ValueError(
+                "--disaggregation-mode=encode and --route-to-encoder require "
+                "--enable-multimodal"
+            )
+        if self.route_to_encoder and self.disaggregation_mode not in (
+            DisaggregationMode.AGGREGATED,
+            DisaggregationMode.PREFILL,
+        ):
+            raise ValueError(
+                "--route-to-encoder is only valid with "
+                "--disaggregation-mode=agg or prefill"
+            )
+        if (is_encode or self.route_to_encoder) and self.frontend_decoding:
+            raise ValueError(
+                "Separate vLLM encode workers are incompatible with "
+                "--frontend-decoding because they require image URLs"
             )
 
     def _validate_custom_encoder(self) -> None:

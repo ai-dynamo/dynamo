@@ -119,13 +119,22 @@ class EncodeWorkerHandler:
             (None, None)
         )  # Send sentinel value to stop the checker
 
-    async def async_init(self, runtime: DistributedRuntime):
-        """Initialize the connector for RDMA transfers"""
+    def _init_connector(self) -> None:
+        """Initialize the connector shared by legacy and unified workers."""
         logger.info("Encode worker startup started.")
-        # Create and initialize a dynamo connector for this worker.
-        # We'll needs this to move data between this worker and remote workers efficiently.
+        # Create and initialize a Dynamo connector for moving embeddings
+        # between this worker and remote workers.
         self._connector = connect.Connector()
         logger.info("Encode worker startup completed.")
+
+    async def async_init(self, runtime: DistributedRuntime) -> None:
+        """Initialize a legacy worker while preserving its runtime contract."""
+        del runtime
+        self._init_connector()
+
+    async def async_init_unified(self) -> None:
+        """Initialize a unified engine, which does not own a Python runtime."""
+        self._init_connector()
 
     @_nvtx.range_decorator("mm:encode_worker_generate", color="blue")
     async def generate(
