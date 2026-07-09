@@ -185,15 +185,18 @@ vllm_configs = {
         name="aggregated_kvbm",
         directory=vllm_dir,
         script_name="agg_kvbm.sh",
+        # Bound VRAM so the test fits the 24 GiB gpu_1 CI runner. Unbounded,
+        # KVBM's GPU onboard fills the device (~44.9 GiB on a 48 GiB GPU).
+        # agg_kvbm.sh forwards "$@", so the cap lives in the test rather than
+        # changing the example's default (full-GPU) behavior.
+        script_args=["--gpu-memory-utilization", "0.3"],
         marks=[
             pytest.mark.kvbm,
             pytest.mark.gpu_1,
-            # No profiled_vram_gib: profiled in a KVBM-enabled image and it peaks
-            # ~44.9 GiB on a 48 GiB GPU (KVBM's 20 GiB CPU-cache onboard fills the
-            # device during inference), NOT ~agg's ~3.8 GiB. That exceeds the
-            # 24 GiB gpu_1 CI runner, so agg_kvbm.sh needs a GPU-memory bound (or
-            # a larger lane) before a portable profiled_vram_gib makes sense.
-            # Runs in the sequential GPU stage meanwhile.
+            # Profiled peak under --gpu-memory-utilization 0.3 (nvidia-smi, 48 GiB
+            # box). The bound is fractional, so the 24 GiB CI runner uses less;
+            # this is a safe ceiling that still fits --max-vram-gib=24.
+            pytest.mark.profiled_vram_gib(15.6),
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
             pytest.mark.timeout(410),
             pytest.mark.pre_merge,

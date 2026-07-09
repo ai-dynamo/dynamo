@@ -19,7 +19,7 @@ python -m dynamo.frontend &
 # run worker with KVBM enabled
 # NOTE: remove --enforce-eager for production use
 DYN_KVBM_CPU_CACHE_GB=20 \
-  python -m dynamo.vllm --model "$MODEL" --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}' --enforce-eager &
+  python -m dynamo.vllm --model "$MODEL" --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}' --enforce-eager "$@" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
