@@ -105,6 +105,30 @@ impl SelectionCache {
     /// Record (or replace) the pending selection under `(selection.key, selection_id)`,
     /// sweeping expired entries and evicting oldest-first if over the cap.
     pub(super) fn insert(&self, selection_id: String, selection: PendingSelection, now: Instant) {
+        self.insert_at(selection_id, selection, now, now);
+    }
+
+    /// Re-insert a selection taken earlier, keeping its original TTL anchor
+    /// (`inserted_at`) so a failed-booking retry loop cannot extend its life.
+    pub(super) fn reinsert(
+        &self,
+        selection_id: String,
+        selection: PendingSelection,
+        inserted_at: Instant,
+        now: Instant,
+    ) {
+        self.insert_at(selection_id, selection, inserted_at, now);
+    }
+
+    /// `inserted_at` anchors the entry's TTL (equal to `now` for a fresh insert,
+    /// the original time for a re-insert); `now` drives the sweep.
+    fn insert_at(
+        &self,
+        selection_id: String,
+        selection: PendingSelection,
+        inserted_at: Instant,
+        now: Instant,
+    ) {
         let cache_key = (selection.key.clone(), selection_id);
         let mut state = self.state.lock();
         // Drop stale and expired front tuples so `order` stays bounded by the
@@ -126,7 +150,7 @@ impl SelectionCache {
             cache_key,
             Entry {
                 selection,
-                inserted_at: now,
+                inserted_at,
                 generation,
             },
         );
@@ -139,20 +163,21 @@ impl SelectionCache {
         }
     }
 
-    /// Remove and return the pending selection for `(key, reservation_id)`. An
+    /// Remove and return the pending selection for `(key, reservation_id)` with
+    /// its original TTL anchor (for a possible [`reinsert`](Self::reinsert)). An
     /// entry older than the TTL is treated as already gone (and dropped).
     pub(super) fn take(
         &self,
         key: &SelectionKey,
         reservation_id: &str,
         now: Instant,
-    ) -> Option<PendingSelection> {
+    ) -> Option<(PendingSelection, Instant)> {
         let cache_key = (key.clone(), reservation_id.to_string());
         let entry = self.state.lock().entries.remove(&cache_key)?;
         if now.duration_since(entry.inserted_at) > self.ttl {
             return None;
         }
-        Some(entry.selection)
+        Some((entry.selection, entry.inserted_at))
     }
 
     #[cfg(test)]
@@ -200,7 +225,7 @@ mod tests {
         let now = Instant::now();
         cache.insert("req-1".to_string(), pending(1), now);
 
-        let taken = cache.take(&key(), "req-1", now).expect("entry present");
+        let (taken, _) = cache.take(&key(), "req-1", now).expect("entry present");
         assert_eq!(taken.worker.worker_id, 1);
         assert_eq!(taken.isl_tokens, 12);
         assert!(cache.take(&key(), "req-1", now).is_none());
@@ -333,5 +358,22 @@ mod tests {
             "order grew to {}",
             cache.order_len()
         );
+    }
+
+    #[test]
+    fn reinsert_preserves_original_ttl_anchor() {
+        let cache = cache();
+        let t0 = Instant::now();
+        cache.insert("req-1".to_string(), pending(1), t0);
+        let (pending, inserted_at) = cache.take(&key(), "req-1", t0).expect("entry present");
+        assert_eq!(inserted_at, t0);
+
+        // The failed-booking path re-inserts later but keeps the original
+        // anchor, so a retry loop cannot extend the entry past its TTL.
+        let later = t0 + Duration::from_secs(5);
+        cache.reinsert("req-1".to_string(), pending, inserted_at, later);
+
+        let past_original_ttl = t0 + TTL + Duration::from_secs(1);
+        assert!(cache.take(&key(), "req-1", past_original_ttl).is_none());
     }
 }

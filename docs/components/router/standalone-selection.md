@@ -231,7 +231,7 @@ replica) the call returns `404`; fall back to the explicit form.
 The self-contained form carries the worker identity and prompt and needs no
 cached selection; it wins whenever `worker_id` is present. It also discards
 any cached selection for `selection_id` (or, when absent, `reservation_id`),
-so a delayed replay cannot book stale state:
+so a delayed replay of the same id cannot book stale state:
 
 ```http
 POST /reservations

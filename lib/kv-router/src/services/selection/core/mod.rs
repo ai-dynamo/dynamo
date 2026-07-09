@@ -799,28 +799,30 @@ impl SelectionCore {
                 "selection_id or worker_id is required".to_string(),
             ));
         };
-        let Some(pending) = self
-            .selection_cache
-            .take(&key, &selection_id, Instant::now())
+        let Some((pending, inserted_at)) =
+            self.selection_cache
+                .take(&key, &selection_id, Instant::now())
         else {
             return Err(SelectionError::NotFound(format!(
                 "no pending selection {selection_id} for {key} (expired, already used, \
                  or never selected)"
             )));
         };
-        self.reserve_from_cached_selection(req, selection_id, pending)
+        self.reserve_from_cached_selection(req, selection_id, pending, inserted_at)
             .await
     }
 
     /// Book a reservation replaying exactly what the matching `select`
     /// captured; request fields other than the ids are ignored. A failure
-    /// before booking re-inserts the selection, so a retry sees the real
-    /// error and can still book once it clears.
+    /// before booking re-inserts the selection (keeping its original TTL
+    /// anchor), so a retry sees the real error and can still book once it
+    /// clears.
     async fn reserve_from_cached_selection(
         &self,
         req: ReservationRequest,
         selection_id: String,
         pending: PendingSelection,
+        inserted_at: Instant,
     ) -> Result<ReservationResponse, SelectionError> {
         match self.validate_cached_booking(&pending) {
             Ok(prefill_load_hint) => {
@@ -839,7 +841,7 @@ impl SelectionCore {
             }
             Err(error) => {
                 self.selection_cache
-                    .insert(selection_id, pending, Instant::now());
+                    .reinsert(selection_id, pending, inserted_at, Instant::now());
                 Err(error)
             }
         }
