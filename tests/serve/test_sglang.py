@@ -794,12 +794,13 @@ sglang_configs = {
         # diffusion_llada.sh forwards "$@", so VRAM is bounded from the test
         # (not the example default). --mem-fraction-static 0.4 is the tightest
         # bound that boots: LLaDA2.0-mini-preview weights + diffusion activation
-        # need ~22-31 GiB, and 0.2 SIGQUITs (too little for the model). Profiled
-        # peak is 31.6 GiB -> this does NOT fit the 24 GiB gpu_1 CI runner; it
-        # needs a larger single-GPU lane (nightly). Kept gpu_1 for the record.
+        # need ~22-31 GiB (profiled peak 31.6 GiB), and 0.2 SIGQUITs (too little
+        # for the model). That exceeds the 24 GiB gpu_1 lane, so this runs on the
+        # H100 lane (pytest.mark.h100, aws-dev-02 runner) which has 80 GiB.
         script_args=["--mem-fraction-static", "0.4"],
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.h100,
             pytest.mark.profiled_vram_gib(31.6),
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
