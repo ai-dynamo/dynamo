@@ -11,7 +11,9 @@
 //! complete snapshot, and recovery must validate and atomically publish a fully initialized table.
 //! This module deliberately implements none of that transport, fencing, or recovery machinery.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(feature = "bench")]
+use std::sync::atomic::Ordering;
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
@@ -791,65 +793,11 @@ impl CkfRelayAggregator {
 }
 
 #[derive(Debug)]
-struct ReplicaOccupancy {
-    words_per_lane: usize,
-    words: Box<[AtomicU64]>,
-}
-
-impl ReplicaOccupancy {
-    fn new(bucket_count: usize) -> Result<Self, CkfBuildError> {
-        let words_per_lane = bucket_count.div_ceil(u64::BITS as usize);
-        let word_count = words_per_lane
-            .checked_mul(DC_COUNT)
-            .ok_or(CkfBuildError::CapacityOverflow)?;
-        let mut words = Vec::new();
-        words
-            .try_reserve_exact(word_count)
-            .map_err(|_| CkfBuildError::AllocationFailed)?;
-        words.extend((0..word_count).map(|_| AtomicU64::new(0)));
-        Ok(Self {
-            words_per_lane,
-            words: words.into_boxed_slice(),
-        })
-    }
-
-    fn set(&self, lane: usize, bucket: usize, occupied: bool) {
-        let index = lane * self.words_per_lane + bucket / u64::BITS as usize;
-        let bit = 1u64 << (bucket % u64::BITS as usize);
-        if occupied {
-            self.words[index].fetch_or(bit, Ordering::Relaxed);
-        } else {
-            self.words[index].fetch_and(!bit, Ordering::Relaxed);
-        }
-    }
-
-    fn clear_lane(&self, table: &TransposedCkfTable<DC_COUNT>, lane: usize) {
-        let start = lane * self.words_per_lane;
-        for word_index in 0..self.words_per_lane {
-            let mut remaining = self.words[start + word_index].swap(0, Ordering::Relaxed);
-            while remaining != 0 {
-                let bit = remaining.trailing_zeros() as usize;
-                let bucket = word_index * u64::BITS as usize + bit;
-                if bucket < table.bucket_count() {
-                    table.store_image(bucket, lane, PackedBucket::default());
-                }
-                remaining &= remaining - 1;
-            }
-        }
-    }
-
-    fn byte_len(&self) -> usize {
-        std::mem::size_of_val(self.words.as_ref())
-    }
-}
-
-#[derive(Debug)]
 pub struct TransposedCkfReplica {
     pub(super) table: TransposedCkfTable<DC_COUNT>,
     pub(super) addressing: CkfAddressing,
     pub(super) config: CkfConfig,
     format: CkfFormatIdentity,
-    occupied_buckets: ReplicaOccupancy,
 }
 
 impl TransposedCkfReplica {
@@ -859,7 +807,6 @@ impl TransposedCkfReplica {
             addressing: CkfAddressing::new(format.bucket_count, format.seed),
             config,
             format,
-            occupied_buckets: ReplicaOccupancy::new(format.bucket_count)?,
         })
     }
 
@@ -912,14 +859,12 @@ impl TransposedCkfReplica {
             if batch.reset_lanes & (1u16 << lane) == 0 {
                 continue;
             }
-            self.occupied_buckets.clear_lane(&self.table, lane);
+            self.table.clear_lane(lane);
         }
         for image in &batch.images {
             let lane = usize::from(image.lane);
             let value = PackedBucket(image.value);
             self.table.store_image(image.bucket, lane, value);
-            self.occupied_buckets
-                .set(lane, image.bucket, value != PackedBucket::default());
         }
     }
 
@@ -928,7 +873,7 @@ impl TransposedCkfReplica {
     }
 
     fn occupancy_byte_len(&self) -> usize {
-        self.occupied_buckets.byte_len()
+        0
     }
 }
 
