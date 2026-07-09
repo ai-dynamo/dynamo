@@ -3,8 +3,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::policy_config::PolicyClassConfig;
 use super::types::KvSchedulerError;
 use crate::protocols::{DpRank, RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+
+pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkerEligibilityError {
@@ -33,7 +36,7 @@ pub enum WorkerEligibilityError {
 pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
-    available_worker_ranks: Option<&'a HashSet<WorkerWithDpRank>>,
+    prefill_availability: Option<(&'a HashMap<WorkerWithDpRank, usize>, &'a PolicyClassConfig)>,
     pinned_worker: Option<WorkerWithDpRank>,
     routing_constraints: &'a RoutingConstraints,
 }
@@ -49,25 +52,38 @@ impl<'a> RoutingEligibility<'a> {
         Self {
             allowed_worker_ids,
             overloaded_worker_ids,
-            available_worker_ranks: None,
+            prefill_availability: None,
             pinned_worker,
             routing_constraints,
         }
     }
 
     #[inline]
-    pub fn with_available_worker_ranks(
+    pub(crate) fn with_prefill_availability(
         mut self,
-        available_worker_ranks: &'a HashSet<WorkerWithDpRank>,
+        active_tokens: &'a HashMap<WorkerWithDpRank, usize>,
+        class: &'a PolicyClassConfig,
     ) -> Self {
-        self.available_worker_ranks = Some(available_worker_ranks);
+        self.prefill_availability = Some((active_tokens, class));
         self
     }
 
     #[inline]
-    fn allows_worker_rank(&self, worker: WorkerWithDpRank) -> bool {
-        self.available_worker_ranks
-            .is_none_or(|workers| workers.contains(&worker))
+    fn allows_worker_rank<C: WorkerConfigLike>(
+        &self,
+        worker: WorkerWithDpRank,
+        config: &C,
+    ) -> bool {
+        self.prefill_availability
+            .is_none_or(|(active_tokens, class)| {
+                let max_batched_tokens = config
+                    .max_num_batched_tokens()
+                    .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+                !class.worker_is_busy(
+                    active_tokens.get(&worker).copied().unwrap_or(0),
+                    max_batched_tokens,
+                )
+            })
     }
 
     #[inline]
@@ -127,7 +143,7 @@ impl<'a> RoutingEligibility<'a> {
                 && (config.data_parallel_start_rank()
                     ..config.data_parallel_start_rank() + config.data_parallel_size())
                     .any(|dp_rank| {
-                        self.allows_worker_rank(WorkerWithDpRank::new(worker_id, dp_rank))
+                        self.allows_worker_rank(WorkerWithDpRank::new(worker_id, dp_rank), config)
                     })
             {
                 return true;
@@ -148,7 +164,7 @@ impl<'a> RoutingEligibility<'a> {
                 && (config.data_parallel_start_rank()
                     ..config.data_parallel_start_rank() + config.data_parallel_size())
                     .any(|dp_rank| {
-                        self.allows_worker_rank(WorkerWithDpRank::new(worker_id, dp_rank))
+                        self.allows_worker_rank(WorkerWithDpRank::new(worker_id, dp_rank), config)
                     })
             {
                 return true;
@@ -185,7 +201,7 @@ impl<'a> RoutingEligibility<'a> {
                 worker_id: worker.worker_id,
             });
         }
-        if !self.allows_worker_rank(worker) {
+        if !self.allows_worker_rank(worker, config) {
             return Err(WorkerEligibilityError::WorkerUnavailable {
                 worker_id: worker.worker_id,
             });
@@ -219,7 +235,7 @@ impl<'a> RoutingEligibility<'a> {
             let dp_end = dp_start + config.data_parallel_size();
             for dp_rank in dp_start..dp_end {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                if self.allows_worker_rank(worker) && predicate(worker, config) {
+                if self.allows_worker_rank(worker, config) && predicate(worker, config) {
                     return true;
                 }
             }
@@ -281,6 +297,7 @@ fn worker_config_for_rank<C: WorkerConfigLike>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduling::policy_config::PolicyProfile;
 
     #[derive(Clone)]
     struct TestWorkerConfig {
@@ -507,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn routing_eligibility_honors_available_dp_ranks() {
+    fn routing_eligibility_honors_prefill_availability() {
         let workers = HashMap::from([(
             7,
             TestWorkerConfig {
@@ -517,9 +534,13 @@ mod tests {
             },
         )]);
         let constraints = RoutingConstraints::default();
-        let available = HashSet::from([WorkerWithDpRank::new(7, 3)]);
+        let profile = PolicyProfile::synthetic(Some(0.0), crate::RouterQueuePolicy::Fcfs);
+        let active_tokens = HashMap::from([
+            (WorkerWithDpRank::new(7, 2), 1),
+            (WorkerWithDpRank::new(7, 4), 1),
+        ]);
         let eligibility = RoutingEligibility::new(None, None, None, &constraints)
-            .with_available_worker_ranks(&available);
+            .with_prefill_availability(&active_tokens, profile.default_class());
         let mut ranks = Vec::new();
 
         eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));

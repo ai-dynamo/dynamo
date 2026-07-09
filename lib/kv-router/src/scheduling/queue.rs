@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use super::config::RouterQueuePolicy;
+pub use super::filter::DEFAULT_MAX_BATCHED_TOKENS;
 use super::filter::RoutingEligibility;
 use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
@@ -21,7 +22,7 @@ use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::{
     AdmissionAction, AdmissionDecision, AdmissionTicket, PolicyClassAdmissionController,
     PolicyClassAdmissionStrategies, WorkerAvailability, WorkerAvailabilitySnapshot,
-    WorkerAvailabilityState, WorkerPlacement,
+    WorkerPlacement,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -34,9 +35,6 @@ use crate::protocols::{
 };
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
-
-/// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
-pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
 const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
 
@@ -87,6 +85,45 @@ enum AdmissionCommand {
 struct ActiveAdmission {
     ticket: AdmissionTicket,
     worker: WorkerWithDpRank,
+}
+
+#[derive(Default)]
+struct DispatchAvailability {
+    overloaded_worker_ids: Option<HashSet<WorkerId>>,
+    active_tokens: Option<HashMap<WorkerWithDpRank, usize>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerAvailabilityState {
+    Ineligible,
+    Unavailable,
+    Available,
+}
+
+impl DispatchAvailability {
+    fn filters_workers(&self, class: &PolicyClassConfig) -> bool {
+        (class.queueing_enabled() && self.active_tokens.is_some())
+            || self
+                .overloaded_worker_ids
+                .as_ref()
+                .is_some_and(|workers| !workers.is_empty())
+    }
+
+    fn eligibility<'a>(
+        &'a self,
+        request: &'a SchedulingRequest,
+        class: &'a PolicyClassConfig,
+    ) -> RoutingEligibility<'a> {
+        let eligibility = request.eligibility_with_overloaded(self.overloaded_worker_ids.as_ref());
+        match self
+            .active_tokens
+            .as_ref()
+            .filter(|_| class.queueing_enabled())
+        {
+            Some(active_tokens) => eligibility.with_prefill_availability(active_tokens, class),
+            None => eligibility,
+        }
+    }
 }
 
 struct SchedulerQueueActor<
@@ -658,19 +695,26 @@ impl<
         let placement = request
             .pinned_worker
             .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
-        let mut dispatch_availability = None;
-        let should_queue = deferred || self.pending.has_backlog(class_index) || {
-            let availability = self.worker_availability_snapshot_for(&request, class_index);
-            let unavailable = availability.state(placement) == WorkerAvailabilityState::Unavailable;
-            dispatch_availability = Some(availability);
-            unavailable
-        };
+        let dispatch_availability = self.dispatch_availability_for(class, decay_now);
+        let should_queue = deferred
+            || self.pending.has_backlog(class_index)
+            || (dispatch_availability.filters_workers(class) && {
+                let workers = self.workers_with_configs.borrow();
+                worker_availability_state(
+                    request.eligibility(),
+                    class,
+                    &workers,
+                    dispatch_availability.overloaded_worker_ids.as_ref(),
+                    dispatch_availability.active_tokens.as_ref(),
+                ) == WorkerAvailabilityState::Unavailable
+            });
         if !should_queue {
             return self.admit_one(
                 request,
                 decay_now,
                 admission.map(|(ticket, _)| ticket),
-                dispatch_availability.expect("availability checked before immediate dispatch"),
+                class_index,
+                dispatch_availability,
             );
         }
 
@@ -755,29 +799,20 @@ impl<
         })
     }
 
-    fn worker_availability_snapshot_for(
+    fn dispatch_availability_for(
         &self,
-        request: &SchedulingRequest,
-        class_index: usize,
-    ) -> WorkerAvailabilitySnapshot {
-        let class = self.profile.class(class_index);
-        let active_tokens = class
-            .queueing_enabled()
-            .then(|| self.slots.active_tokens(Instant::now()));
-        let workers = self.workers_with_configs.borrow();
-        let overloaded_worker_ids = self
-            .overloaded_worker_provider
-            .as_ref()
-            .and_then(|provider| provider());
-        worker_availability_snapshot(
-            request.allowed_worker_ids.as_ref(),
-            request.pinned_worker,
-            &request.routing_constraints,
-            class,
-            &workers,
-            overloaded_worker_ids.as_ref(),
-            active_tokens.as_ref(),
-        )
+        class: &PolicyClassConfig,
+        now: Instant,
+    ) -> DispatchAvailability {
+        DispatchAvailability {
+            overloaded_worker_ids: self
+                .overloaded_worker_provider
+                .as_ref()
+                .and_then(|provider| provider()),
+            active_tokens: class
+                .queueing_enabled()
+                .then(|| self.slots.active_tokens(now)),
+        }
     }
 
     fn snapshot_for(&self, request: &SchedulingRequest) -> QueueSnapshot {
@@ -924,48 +959,34 @@ impl<
         // bounded command channel while processing an update.
         loop {
             let decay_now = Instant::now();
-            let active_tokens = self
-                .profile
-                .classes()
-                .iter()
-                .any(PolicyClassConfig::queueing_enabled)
-                .then(|| self.slots.active_tokens(decay_now));
-            let overloaded_worker_ids = self
-                .overloaded_worker_provider
-                .as_ref()
-                .and_then(|provider| provider());
-            let (popped, dispatch_availability) = {
+            let dispatch_availability = DispatchAvailability {
+                active_tokens: self
+                    .profile
+                    .classes()
+                    .iter()
+                    .any(PolicyClassConfig::queueing_enabled)
+                    .then(|| self.slots.active_tokens(decay_now)),
+                overloaded_worker_ids: self
+                    .overloaded_worker_provider
+                    .as_ref()
+                    .and_then(|provider| provider()),
+            };
+            let popped = {
                 let workers = self.workers_with_configs.borrow();
-                let popped = self.pending.pop_next(|_, class, queued| {
-                    worker_availability_state(
-                        queued.request.eligibility(),
-                        class,
-                        &workers,
-                        overloaded_worker_ids.as_ref(),
-                        active_tokens.as_ref(),
-                    ) != WorkerAvailabilityState::Unavailable
-                });
-                let availability = popped.as_ref().map(|entry| {
-                    let request = &entry.payload().request;
-                    worker_availability_snapshot(
-                        request.allowed_worker_ids.as_ref(),
-                        request.pinned_worker,
-                        &request.routing_constraints,
-                        self.profile.class(entry.class_index()),
-                        &workers,
-                        overloaded_worker_ids.as_ref(),
-                        active_tokens.as_ref(),
-                    )
-                });
-                (popped, availability)
+                self.pending.pop_next(|_, class, queued| {
+                    !dispatch_availability.filters_workers(class)
+                        || worker_availability_state(
+                            queued.request.eligibility(),
+                            class,
+                            &workers,
+                            dispatch_availability.overloaded_worker_ids.as_ref(),
+                            dispatch_availability.active_tokens.as_ref(),
+                        ) != WorkerAvailabilityState::Unavailable
+                })
             };
             let Some(mut popped) = popped else {
                 break;
             };
-            // Admission is committed at dequeue. Reuse this snapshot through
-            // selection even if overlap refresh awaits before booking.
-            let dispatch_availability =
-                dispatch_availability.expect("dequeued request has availability");
             let snapshot = popped.snapshot();
             let current_pending_count = self.pending_count.load(AtomicOrdering::Relaxed);
             debug_assert!(
@@ -1013,7 +1034,13 @@ impl<
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
-            self.admit_one(request, admit_now, admission, dispatch_availability);
+            self.admit_one(
+                request,
+                admit_now,
+                admission,
+                class_index,
+                dispatch_availability,
+            );
         }
     }
 
@@ -1024,7 +1051,8 @@ impl<
         mut request: SchedulingRequest,
         decay_now: Instant,
         admission: Option<AdmissionTicket>,
-        availability: WorkerAvailabilitySnapshot,
+        class_index: usize,
+        availability: DispatchAvailability,
     ) -> bool {
         request.worker_loads = self
             .slots
@@ -1032,9 +1060,7 @@ impl<
 
         let selection = {
             let workers = self.workers_with_configs.borrow();
-            let eligibility = request
-                .eligibility()
-                .with_available_worker_ranks(availability.available_workers());
+            let eligibility = availability.eligibility(&request, self.profile.class(class_index));
             self.selector
                 .select_worker(&workers, &request, eligibility, self.block_size)
                 .map(|selection| {

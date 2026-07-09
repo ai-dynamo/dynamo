@@ -59,13 +59,6 @@ pub struct WorkerAvailabilitySnapshot {
     available: Arc<HashSet<WorkerWithDpRank>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkerAvailabilityState {
-    Ineligible,
-    Unavailable,
-    Available,
-}
-
 impl WorkerAvailabilitySnapshot {
     pub fn new(workers: impl IntoIterator<Item = WorkerWithDpRank>) -> Self {
         let workers: Arc<HashSet<_>> = Arc::new(workers.into_iter().collect());
@@ -100,22 +93,6 @@ impl WorkerAvailabilitySnapshot {
 
     pub fn has_eligible_worker(&self) -> bool {
         !self.eligible.is_empty()
-    }
-
-    pub(crate) fn available_workers(&self) -> &HashSet<WorkerWithDpRank> {
-        &self.available
-    }
-
-    pub(crate) fn state(&self, placement: WorkerPlacement) -> WorkerAvailabilityState {
-        let (eligible, available) = match placement {
-            WorkerPlacement::Any => (self.has_eligible_worker(), self.has_available_worker()),
-            WorkerPlacement::Exact(worker) => (self.is_eligible(worker), self.is_available(worker)),
-        };
-        match (eligible, available) {
-            (false, _) => WorkerAvailabilityState::Ineligible,
-            (true, false) => WorkerAvailabilityState::Unavailable,
-            (true, true) => WorkerAvailabilityState::Available,
-        }
     }
 }
 
@@ -300,27 +277,5 @@ mod tests {
         assert!(snapshot.is_eligible(overloaded));
         assert!(snapshot.has_available_worker());
         assert!(snapshot.has_eligible_worker());
-        assert_eq!(
-            snapshot.state(WorkerPlacement::Any),
-            WorkerAvailabilityState::Available
-        );
-        assert_eq!(
-            snapshot.state(WorkerPlacement::Exact(available)),
-            WorkerAvailabilityState::Available
-        );
-        assert_eq!(
-            snapshot.state(WorkerPlacement::Exact(overloaded)),
-            WorkerAvailabilityState::Unavailable
-        );
-
-        let missing = WorkerWithDpRank::new(3, 0);
-        assert_eq!(
-            snapshot.state(WorkerPlacement::Exact(missing)),
-            WorkerAvailabilityState::Ineligible
-        );
-        assert_eq!(
-            WorkerAvailabilitySnapshot::new([]).state(WorkerPlacement::Any),
-            WorkerAvailabilityState::Ineligible
-        );
     }
 }
