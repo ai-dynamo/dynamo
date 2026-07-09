@@ -789,18 +789,14 @@ sglang_configs = {
         name="diffusion_llada",
         directory=sglang_dir,
         script_name="diffusion_llada.sh",
-        # diffusion_llada.sh forwards "$@", so the test bounds VRAM. 0.4 is too low
-        # (sglang scheduler OOMs at pool sizing); 0.7 boots (~56 GiB on the H100).
+        # diffusion_llada.sh forwards "$@"; 0.4 OOMs the sglang scheduler, 0.7 boots.
         script_args=["--mem-fraction-static", "0.7"],
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.h100,
-            # 0.7 reserves ~0.7*80 = 56 GiB on the H100; budget that, not the
-            # ~32 GiB transient peak, so the packer won't co-schedule.
             pytest.mark.profiled_vram_gib(56.0),
             # 32-token H100 smoke runs ~135s; ~4.4x headroom for cold pulls.
             pytest.mark.timeout(600),
-            # >24 GiB model: nightly H100 lane only, not the gpu_1 lanes.
             pytest.mark.nightly,
         ],
         model="inclusionAI/LLaDA2.0-mini-preview",
