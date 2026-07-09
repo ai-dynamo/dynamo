@@ -22,7 +22,9 @@ DLLM_ALGORITHM_CONFIG="${DLLM_ALGORITHM_CONFIG:-}"  # Optional: path to YAML con
 NAMESPACE="${NAMESPACE:-dynamo}"
 COMPONENT="${COMPONENT:-backend}"
 ENDPOINT="${ENDPOINT:-generate}"
-HTTP_PORT="${HTTP_PORT:-8001}"
+# Use the harness-assigned dynamic ports when present (DYN_HTTP_PORT / DYN_SYSTEM_PORT),
+# falling back to fixed defaults for manual runs. Avoids collisions with leftover/concurrent processes.
+HTTP_PORT="${DYN_HTTP_PORT:-8001}"
 TP_SIZE="${TP_SIZE:-1}"
 
 print_launch_banner --no-curl "Launching Diffusion LM Worker (LLaDA2.0)" "$MODEL_PATH" "$HTTP_PORT" \
@@ -56,6 +58,7 @@ echo "Starting Diffusion LM Worker..."
 
 # Build the command with required arguments
 export CUDA_VISIBLE_DEVICES=0
+export DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}"
 CMD="python -m dynamo.sglang \
     --model-path $MODEL_PATH \
     --tp-size $TP_SIZE \

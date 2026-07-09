@@ -792,12 +792,14 @@ sglang_configs = {
         directory=sglang_dir,
         script_name="diffusion_llada.sh",
         # diffusion_llada.sh forwards "$@", so VRAM is bounded from the test
-        # (not the example default). --mem-fraction-static 0.4 is the tightest
-        # bound that boots: LLaDA2.0-mini-preview weights + diffusion activation
-        # need ~22-31 GiB (profiled peak 31.6 GiB), and 0.2 SIGQUITs (too little
-        # for the model). That exceeds the 24 GiB gpu_1 lane, so this runs on the
-        # H100 lane (pytest.mark.h100, aws-dev-02 runner) which has 80 GiB.
-        script_args=["--mem-fraction-static", "0.4"],
+        # (not the example default). --mem-fraction-static 0.4 is TOO LOW: the
+        # sglang scheduler OOMs at pool sizing ("Not enough memory. Please try
+        # to increase --mem-fraction-static") because LLaDA2.0-mini-preview
+        # weights + diffusion activation need a large absolute reservation.
+        # 0.7 boots cleanly; on the 80 GiB H100 lane that is ~56 GiB. This model
+        # far exceeds the 24 GiB gpu_1 lane, so it runs on the H100 lane
+        # (pytest.mark.h100, aws-dev-02 runner).
+        script_args=["--mem-fraction-static", "0.7"],
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.h100,
