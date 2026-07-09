@@ -46,6 +46,7 @@ pub(super) struct PendingSelection {
 struct Entry {
     selection: PendingSelection,
     inserted_at: Instant,
+    generation: u64,
 }
 
 /// Pending selections are scoped to their (model, tenant), like every other
@@ -54,20 +55,21 @@ type CacheKey = (SelectionKey, String);
 
 struct State {
     entries: HashMap<CacheKey, Entry>,
-    /// Insertion-ordered `(key, inserted_at)`. The TTL is uniform, so the front
+    /// Insertion-ordered `(key, generation)`. The TTL is uniform, so the front
     /// is always the oldest. A tuple goes stale when its entry is taken or its
-    /// key re-inserted; eviction detects that by comparing `inserted_at`.
-    order: VecDeque<(CacheKey, Instant)>,
+    /// key re-inserted; eviction detects that by comparing `generation`.
+    order: VecDeque<(CacheKey, u64)>,
+    next_generation: u64,
 }
 
 impl State {
     /// Remove the entry for a tuple popped from `order`, unless the tuple is
-    /// stale (entry already taken, or key re-inserted with a newer timestamp).
-    fn remove_if_current(&mut self, key: &CacheKey, inserted_at: Instant) {
+    /// stale (entry already taken, or key re-inserted with a newer generation).
+    fn remove_if_current(&mut self, key: &CacheKey, generation: u64) {
         if self
             .entries
             .get(key)
-            .is_some_and(|entry| entry.inserted_at == inserted_at)
+            .is_some_and(|entry| entry.generation == generation)
         {
             self.entries.remove(key);
         }
@@ -95,6 +97,7 @@ impl SelectionCache {
             state: Mutex::new(State {
                 entries: HashMap::new(),
                 order: VecDeque::new(),
+                next_generation: 0,
             }),
         }
     }
@@ -104,30 +107,35 @@ impl SelectionCache {
     pub(super) fn insert(&self, selection_id: String, selection: PendingSelection, now: Instant) {
         let cache_key = (selection.key.clone(), selection_id);
         let mut state = self.state.lock();
-        loop {
-            let Some(oldest) = state.order.front().map(|(_, at)| *at) else {
-                break;
-            };
-            if now.duration_since(oldest) <= self.ttl {
+        // Drop stale and expired front tuples so `order` stays bounded by the
+        // number of live entries.
+        while let Some((key, generation)) = state.order.front().cloned() {
+            let live = state.entries.get(&key).is_some_and(|entry| {
+                entry.generation == generation && now.duration_since(entry.inserted_at) <= self.ttl
+            });
+            if live {
                 break;
             }
-            let (key, at) = state.order.pop_front().expect("front exists");
-            state.remove_if_current(&key, at);
+            state.order.pop_front();
+            state.remove_if_current(&key, generation);
         }
-        state.order.push_back((cache_key.clone(), now));
+        let generation = state.next_generation;
+        state.next_generation += 1;
+        state.order.push_back((cache_key.clone(), generation));
         state.entries.insert(
             cache_key,
             Entry {
                 selection,
                 inserted_at: now,
+                generation,
             },
         );
         // Every live entry has a matching tuple, so this terminates.
         while state.entries.len() > self.max_entries {
-            let Some((key, at)) = state.order.pop_front() else {
+            let Some((key, generation)) = state.order.pop_front() else {
                 break;
             };
-            state.remove_if_current(&key, at);
+            state.remove_if_current(&key, generation);
         }
     }
 
@@ -150,6 +158,11 @@ impl SelectionCache {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.state.lock().entries.len()
+    }
+
+    #[cfg(test)]
+    fn order_len(&self) -> usize {
+        self.state.lock().order.len()
     }
 }
 
@@ -280,5 +293,45 @@ mod tests {
         assert!(cache.take(&key(), "x", now).is_none());
         assert!(cache.take(&key(), "y", now).is_some());
         assert!(cache.take(&key(), "z", now).is_some());
+    }
+
+    #[test]
+    fn cap_eviction_identifies_entries_by_generation() {
+        // All ops share one instant, so a re-inserted id and its stale tuple
+        // carry the same timestamp; generation distinguishes them.
+        let cache = cache(); // CAP = 2
+        let t = Instant::now();
+        cache.insert("a".to_string(), pending(1), t);
+        cache.insert("b".to_string(), pending(2), t);
+        assert!(cache.take(&key(), "a", t).is_some());
+        cache.insert("a".to_string(), pending(3), t);
+        cache.insert("c".to_string(), pending(4), t);
+
+        // The oldest live entry "b" is evicted; refreshed "a" and "c" remain.
+        assert_eq!(cache.len(), 2);
+        assert!(cache.take(&key(), "b", t).is_none());
+        assert!(cache.take(&key(), "a", t).is_some());
+        assert!(cache.take(&key(), "c", t).is_some());
+    }
+
+    #[test]
+    fn insert_drains_stale_order_tuples() {
+        let cache = SelectionCache::new(TTL, 1024);
+        // Every insert is claimed immediately, so `entries` stays near empty.
+        // The order queue must not accumulate a tuple per request.
+        let t = Instant::now();
+        for i in 0..50 {
+            let id = format!("req-{i}");
+            cache.insert(id.clone(), pending(i as u64), t);
+            assert!(cache.take(&key(), &id, t).is_some());
+        }
+        cache.insert("last".to_string(), pending(99), t);
+        assert_eq!(cache.len(), 1);
+        // Bounded by live entries
+        assert!(
+            cache.order_len() <= 2,
+            "order grew to {}",
+            cache.order_len()
+        );
     }
 }
