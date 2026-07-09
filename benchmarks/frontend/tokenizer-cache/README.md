@@ -21,7 +21,6 @@ git checkout jthomson04/tokenizer-cache-benchmark-main-20260709 -- \
 # With your Python build environment activated:
 uv pip install pip 'maturin[patchelf]'
 (cd lib/bindings/python && maturin develop --uv --release)
-uv pip install -e lib/gpu_memory_service
 uv pip install -e .
 ```
 
