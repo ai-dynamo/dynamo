@@ -22,7 +22,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
 
 use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
 use dynamo_kv_router::protocols::RoutingConstraints;
@@ -41,7 +40,7 @@ const DEFAULT_TENANT: &str = "default";
 
 /// A worker the EPP registers into the selector. Only the fields standalone
 /// mode populates are included; the selector defaults the rest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRegistration {
     pub worker_id: u64,
     pub model_name: String,
@@ -49,57 +48,42 @@ pub struct WorkerRegistration {
     pub block_size: u32,
     pub data_parallel_size: u32,
     pub kv_events_endpoints: HashMap<u32, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub replay_endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_kv_blocks: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_num_batched_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stable_routing_id: Option<String>,
 }
 
-/// A worker-selection request. Prompt fields are sent flat; raw `token_ids` let
-/// the selector compute block/sequence hashes.
-#[derive(Debug, Clone, Serialize)]
+/// A worker-selection request. Raw `token_ids` let the selector compute
+/// block/sequence hashes.
+#[derive(Debug, Clone)]
 pub struct SelectRequest {
     pub model_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_id: Option<String>,
     pub token_ids: Vec<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<u64>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub priority_jump: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub strict_priority: Option<u32>,
 }
 
 /// Observability overlap summary (matched token counts).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OverlapSummary {
-    #[serde(default)]
     pub longest_matched: u32,
-    #[serde(default)]
     pub gpu: u32,
-    #[serde(default)]
     pub cpu: u32,
-    #[serde(default)]
     pub disk: u32,
 }
 
 /// The selector's choice for a prompt.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SelectResponse {
-    #[serde(default)]
     pub selection_id: Option<String>,
     pub worker_id: u64,
     pub dp_rank: u32,
     pub endpoint: String,
     pub block_size: u32,
-    #[serde(default)]
     pub overlap: OverlapSummary,
-    #[serde(default)]
     pub effective_prefill_tokens: usize,
 }
 
@@ -127,15 +111,23 @@ impl Selector {
         let mut builder =
             SelectionServiceBuilder::new(kv_router_config).indexer_threads(cfg.selector_threads);
 
-        let replicated = cfg.peer_service.is_some();
-        if replicated {
-            // Config validation guarantees peer_sync_port is set whenever
-            // peer_service is. Bind this replica's ZMQ replica-sync port; peers
-            // are registered dynamically by the EndpointSlice watch below.
-            let peer_sync_port = cfg
-                .peer_sync_port
-                .expect("peer_sync_port is required when peer_service is set");
-            builder = builder.replica_sync(peer_sync_port, Vec::new());
+        // Config validation already guarantees peer_sync_port is Some whenever
+        // peer_service is set; resolve the (name, port) pair once and surface the
+        // invariant as an error rather than a panic.
+        let replication: Option<(String, u16)> = match &cfg.peer_service {
+            Some(name) => {
+                let port = cfg.peer_sync_port.ok_or_else(|| {
+                    anyhow!("peer_sync_port is required when peer_service is set")
+                })?;
+                Some((name.clone(), port))
+            }
+            None => None,
+        };
+
+        if let Some((_, peer_sync_port)) = &replication {
+            // Bind this replica's ZMQ replica-sync port; peers are registered
+            // dynamically by the EndpointSlice watch below.
+            builder = builder.replica_sync(*peer_sync_port, Vec::new());
         }
 
         let service = Arc::new(
@@ -145,27 +137,27 @@ impl Selector {
                 .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
         );
 
-        if let Some(service_name) = cfg.peer_service.clone() {
-            // The EPP's own Service lives in the EPP's namespace (same as the
-            // pool); reuse the single resolved namespace.
-            let namespace = cfg.namespace.clone();
-            let peer_sync_port = cfg
-                .peer_sync_port
-                .expect("peer_sync_port is required when peer_service is set");
+        if let Some((service_name, peer_sync_port)) = replication {
+            // POD_IP is required (not advisory) in replicated mode: without it we
+            // can't exclude our own IP from the peer set, so this replica would
+            // sync with itself and double-count its own load. Fail fast rather
+            // than run in a knowingly-wrong state.
             let self_ip = std::env::var("POD_IP")
                 .ok()
                 .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
-            if self_ip.is_none() {
-                tracing::warn!(
-                    "DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; this replica cannot \
-                     exclude itself from its peer set. Inject POD_IP via the downward API \
-                     (fieldRef status.podIP)."
-                );
-            }
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; inject POD_IP \
+                         via the downward API (fieldRef status.podIP) so this replica can \
+                         exclude itself from its peer set"
+                    )
+                })?;
+            // The EPP's own Service lives in the EPP's namespace (same as the
+            // pool); reuse the single resolved namespace.
             crate::peer_discovery::spawn(
                 service.clone(),
-                &namespace,
+                &cfg.namespace,
                 &service_name,
                 peer_sync_port,
                 self_ip,
@@ -176,7 +168,7 @@ impl Selector {
 
         tracing::info!(
             indexer_threads = cfg.selector_threads,
-            replicated,
+            replicated = cfg.peer_service.is_some(),
             "Initialized in-process selection service"
         );
 
@@ -239,15 +231,17 @@ impl Selector {
         Ok(())
     }
 
-    /// Select a worker for a prompt and book its load in one operation.
-    pub async fn select_and_reserve(&self, req: &SelectRequest) -> Result<SelectResponse> {
+    /// Select a worker for a prompt and book its load in one operation. Takes the
+    /// request by value so per-request fields (`token_ids`, `model_name`, ...) are
+    /// moved into the core request rather than cloned on the hot path.
+    pub async fn select_and_reserve(&self, req: SelectRequest) -> Result<SelectResponse> {
         let core_req = CoreSelectAndReserveRequest {
-            model_name: req.model_name.clone(),
+            model_name: req.model_name,
             tenant_id: DEFAULT_TENANT.to_string(),
-            selection_id: req.selection_id.clone(),
+            selection_id: req.selection_id,
             reservation_id: None,
             prompt: PromptRequest {
-                token_ids: Some(req.token_ids.clone()),
+                token_ids: Some(req.token_ids),
                 ..Default::default()
             },
             router_config_override: None,
@@ -256,7 +250,7 @@ impl Selector {
             priority_jump: req.priority_jump,
             strict_priority: req.strict_priority,
             pinned_worker: None,
-            allowed_worker_ids: req.allowed_worker_ids.clone(),
+            allowed_worker_ids: req.allowed_worker_ids,
             routing_constraints: RoutingConstraints::default(),
         };
         let resp = self
@@ -291,66 +285,5 @@ impl Drop for Selector {
         // Stop the peer-discovery watch; the service's own Drop stops the core,
         // KV-event listeners, scheduling, and replica-sync tasks.
         self.cancel.cancel();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn worker_registration_serializes_expected_fields() {
-        let mut kv = HashMap::new();
-        kv.insert(0u32, "tcp://10.0.0.1:5557".to_string());
-        let reg = WorkerRegistration {
-            worker_id: 42,
-            model_name: "Qwen/Qwen3-0.6B".to_string(),
-            endpoint: "http://10.0.0.1:8000".to_string(),
-            block_size: 16,
-            data_parallel_size: 1,
-            kv_events_endpoints: kv,
-            replay_endpoint: None,
-            total_kv_blocks: Some(1000),
-            max_num_batched_tokens: None,
-            stable_routing_id: Some("vllm-0".to_string()),
-        };
-        let v = serde_json::to_value(&reg).unwrap();
-        assert_eq!(v["worker_id"], 42);
-        assert_eq!(v["model_name"], "Qwen/Qwen3-0.6B");
-        assert_eq!(v["endpoint"], "http://10.0.0.1:8000");
-        assert_eq!(v["block_size"], 16);
-        // Absent optional fields are omitted.
-        assert!(v.get("replay_endpoint").is_none());
-        assert!(v.get("max_num_batched_tokens").is_none());
-    }
-
-    #[test]
-    fn select_request_sends_flat_prompt() {
-        let req = SelectRequest {
-            model_name: "Qwen/Qwen3-0.6B".to_string(),
-            selection_id: Some("sel-1".to_string()),
-            token_ids: vec![1, 2, 3],
-            allowed_worker_ids: None,
-            priority_jump: None,
-            strict_priority: None,
-        };
-        let v = serde_json::to_value(&req).unwrap();
-        assert_eq!(v["token_ids"], serde_json::json!([1, 2, 3]));
-        assert_eq!(v["selection_id"], "sel-1");
-        assert!(v.get("allowed_worker_ids").is_none());
-    }
-
-    #[test]
-    fn select_response_deserializes() {
-        let v = serde_json::json!({
-            "worker_id": 7,
-            "dp_rank": 0,
-            "endpoint": "http://10.0.0.2:8000",
-            "block_size": 16
-        });
-        let resp: SelectResponse = serde_json::from_value(v).unwrap();
-        assert_eq!(resp.worker_id, 7);
-        assert_eq!(resp.endpoint, "http://10.0.0.2:8000");
-        assert_eq!(resp.effective_prefill_tokens, 0);
     }
 }
