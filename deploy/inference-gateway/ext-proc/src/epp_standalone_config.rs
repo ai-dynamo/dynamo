@@ -1,24 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Standalone mode configuration.
+//! Standalone EPP mode configuration.
 //!
-//! `DYN_EPP_MODE` selects the EPP mode: `full-dynamo-stack` (default) or
-//! `standalone` (fronts raw `vllm serve` pods with no Dynamo runtime and runs an
-//! in-process, runtime-free KV-aware selector). The pod selector and target port
-//! come from the `InferencePool`; the rest of the standalone contract comes from
-//! the environment.
+//! `DYN_EPP_MODE=dynamo` (default) uses the Dynamo runtime. `standalone` parses
+//! the selector-only config used when the EPP fronts raw OpenAI-compatible
+//! workers without a Dynamo runtime.
 //!
-//! [`EppConfig::from_env`] separates the two concerns: [`EppConfig::parse`] does
-//! env-read + default resolution only, and [`EppConfig::validate_config`] enforces
-//! the constraints declaratively via the `validator` derive.
+//! [`EppStandaloneConfig::from_env`] reads envs, applies defaults, and calls
+//! [`EppStandaloneConfig::validate_config`] for field and cross-field checks.
 
 use validator::Validate;
+use validator::ValidationError;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_DATA_PARALLEL_SIZE: u32 = 1;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
-const DEFAULT_PEER_SYNC_PORT: u16 = 9092;
 
 /// Environment variable that selects the EPP operating mode.
 pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
@@ -59,33 +56,36 @@ impl EppMode {
 }
 
 #[derive(Debug, Clone, Validate)]
+#[validate(schema(
+    function = "validate_epp_standalone_config",
+    skip_on_field_errors = true
+))]
 pub struct EppStandaloneConfig {
     /// KV indexer thread-pool size for the in-process selector.
     #[validate(range(min = 1))]
     pub selector_threads: usize,
-    // EPP Service for peer discovery and state synchronization.
-    // `None` = single-replica (no cross-replica sync).
+    /// EPP Service for peer discovery and state synchronization.
+    /// `None` means single-replica with cross-replica sync disabled.
     pub peer_service: Option<String>,
-    // Peer replication sync port.
-    // Required when `peer_service` is set.
+    /// Peer replication sync port. Required when `peer_service` is set.
     #[validate(range(min = 1))]
-    pub peer_sync_port: u16,
+    pub peer_sync_port: Option<u16>,
     /// `InferencePool` this EPP backs; its selector + target port drive discovery.
     #[validate(length(min = 1, message = "DYN_EPP_INFERENCE_POOL_NAME is required"))]
     pub inference_pool_name: String,
-    // Kubernetes namespace the EPP runs in (from `POD_NAMESPACE`, downward API).
+    /// Kubernetes namespace the EPP runs in (from `POD_NAMESPACE`, downward API).
     #[validate(length(min = 1, message = "POD_NAMESPACE is required"))]
     pub namespace: String,
-    /// Model id used to build the offline tokenizer and registerd with the selector.
+    /// Model id used to build the offline tokenizer and register with the selector.
     #[validate(length(min = 1, message = "DYN_MODEL_NAME is required"))]
     pub model_name: String,
     /// KV-cache block size; MUST equal the inference engine block size.
     #[validate(range(min = 1, message = "DYN_KV_CACHE_BLOCK_SIZE must be >= 1"))]
     pub block_size: u32,
-    /// KV zmq event port
+    /// KV zmq event port.
     #[validate(range(min = 1))]
     pub kv_event_port: u16,
-    // KV zmq event topic
+    /// KV zmq event topic.
     pub kv_event_topic: String,
     /// Optional zmq port the selector uses for live-stream gap replay.
     pub replay_port: Option<u16>,
@@ -111,9 +111,8 @@ impl EppStandaloneConfig {
             selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTOR_THREADS")?
                 .unwrap_or(DEFAULT_SELECTOR_THREADS),
             peer_service: trimmed(get("DYN_EPP_PEER_SERVICE")),
-            peer_sync_port: opt_parse::<u16>(get, "DYN_EPP_PEER_SYNC_PORT")?
-                .unwrap_or(DEFAULT_PEER_SYNC_PORT),
-            pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
+            peer_sync_port: opt_parse::<u16>(get, "DYN_EPP_PEER_SYNC_PORT")?,
+            inference_pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
             block_size: opt_parse::<u32>(get, "DYN_KV_CACHE_BLOCK_SIZE")?.unwrap_or(0),
@@ -133,6 +132,17 @@ impl EppStandaloneConfig {
         self.validate()
             .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))
     }
+}
+
+fn validate_epp_standalone_config(config: &EppStandaloneConfig) -> Result<(), ValidationError> {
+    if config.peer_service.is_some() && config.peer_sync_port.is_none() {
+        let mut error = ValidationError::new("peer_sync_port_required");
+        error.message =
+            Some("DYN_EPP_PEER_SYNC_PORT is required when DYN_EPP_PEER_SERVICE is set".into());
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 /// Trim a raw value and treat empty as absent.
@@ -186,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn mode_defaults_to_full_when_unset() {
+    fn mode_defaults_to_dynamo_when_unset() {
         assert_eq!(parse_mode(&[]).unwrap(), EppMode::DynamoRuntime);
     }
 
@@ -197,7 +207,7 @@ mod tests {
             EppMode::Standalone
         );
         assert_eq!(
-            parse_mode(&[("DYN_EPP_MODE", "full-dynamo-stack")]).unwrap(),
+            parse_mode(&[(DYN_EPP_MODE, DYNAMO_RUNTIME_MODE)]).unwrap(),
             EppMode::DynamoRuntime
         );
     }
@@ -220,8 +230,8 @@ mod tests {
         assert_eq!(cfg.selector_threads, DEFAULT_SELECTOR_THREADS);
         // No peer service => single-replica (replica sync off).
         assert!(cfg.peer_service.is_none());
-        assert_eq!(cfg.peer_sync_port, DEFAULT_PEER_SYNC_PORT);
-        assert_eq!(cfg.pool_name, "vllm-qwen-pool");
+        assert!(cfg.peer_sync_port.is_none());
+        assert_eq!(cfg.inference_pool_name, "vllm-qwen-pool");
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
         assert_eq!(cfg.block_size, 16);
@@ -258,13 +268,27 @@ mod tests {
         ])
         .expect("replication config should parse");
         assert_eq!(cfg.peer_service.as_deref(), Some("dynamo-epp"));
-        assert_eq!(cfg.peer_sync_port, 9191);
+        assert_eq!(cfg.peer_sync_port, Some(9191));
         assert_eq!(cfg.selector_threads, 8);
         assert_eq!(cfg.namespace, "inference");
     }
 
     #[test]
-    fn missing_pool_name_fails() {
+    fn peer_service_requires_sync_port() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn missing_inference_pool_name_fails() {
         assert!(
             parse_cfg(&[
                 ("POD_NAMESPACE", "inference"),
