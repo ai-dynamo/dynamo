@@ -75,14 +75,12 @@ Compare the two AIPerf summaries written under
 - AIPerf: `cquil11/aiperf` pinned to commit
   `8473e1545476c1d91932aa2402b642b416a23df6`.
 
-On the reference 24-CPU host, enabling the 8 GiB cache increased request
-throughput from 107.49 to 189.01 requests/second (+75.8%) and input-token
-throughput from 8.45M to 16.94M tokens/second (+100.6%). The frontend served
-92.9% of input tokens from the tokenizer cache. Both runs completed with zero
-request errors. Treat these as reference results; compare cache off and on on
-the same otherwise-idle host. These reference runs used post-`v1.3.0-rc1`
-`main` at `d64f398628`; rerun both arms on the tagged build for a
-version-controlled comparison.
+On the reference 24-CPU host running `v1.3.0-rc1` (`14a3b0d913`), enabling the
+8 GiB cache increased request throughput from 111.15 to 163.31 requests/second
+(+46.9%) and input-token throughput from 9.05M to 14.53M tokens/second
+(+60.6%). Median time to first token fell from 1,769 ms to 1,200 ms. Both runs
+completed with zero request errors. Treat these as reference results; compare
+cache off and on on the same otherwise-idle host.
 
 AIPerf reconstructs and memory-maps the AgentX dataset. Ensure the host has
 enough available memory before starting the benchmark.
