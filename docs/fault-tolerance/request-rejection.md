@@ -244,6 +244,15 @@ Content-Type: application/json
 }
 ```
 
+#### Configuring the rejection status code
+
+The status code returned for overload rejections is configurable via the
+`DYN_HTTP_OVERLOAD_STATUS_CODE` environment variable on the frontend. It
+defaults to `529` ("Site is overloaded"). Operators whose proxies or clients
+only understand `503` Service Unavailable retry semantics can set
+`DYN_HTTP_OVERLOAD_STATUS_CODE=503`. Any valid HTTP status code is accepted; an
+unparseable or out-of-range value falls back to `529`.
+
 ### Client Retry Strategy
 
 Clients should implement exponential backoff when receiving 529 responses:

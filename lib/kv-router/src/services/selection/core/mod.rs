@@ -194,7 +194,7 @@ impl SelectionCore {
             return;
         }
 
-        let key = SelectionKey::new(envelope.model_name, envelope.tenant_id);
+        let key = SelectionKey::new(envelope.model_name, envelope.routing_group);
         let Some(entry) = self.entries.read().get(&key).cloned() else {
             tracing::trace!(%key, "Dropping replica event for unknown selector entry");
             return;
@@ -271,9 +271,9 @@ impl SelectionCore {
     pub fn list_workers(
         &self,
         model_name: Option<&str>,
-        tenant_id: Option<&str>,
+        routing_group: Option<&str>,
     ) -> Vec<WorkerCatalogRecord> {
-        self.catalog.list(model_name, tenant_id)
+        self.catalog.list(model_name, routing_group)
     }
 
     pub fn ready(&self) -> ReadyResponse {
@@ -405,7 +405,7 @@ impl SelectionCore {
         let scoped_replica_sync = setup_scoped_replica_sync(
             self.replica_config.as_ref(),
             &key.model_name,
-            &key.tenant_id,
+            &key.routing_group,
             block_size,
         );
         let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
@@ -496,7 +496,7 @@ impl SelectionCore {
                     endpoint,
                     dp_rank,
                     record.model_name.clone(),
-                    record.tenant_id.clone(),
+                    record.routing_group.clone(),
                     block_size,
                     record.replay_endpoint.clone(),
                 )
@@ -510,7 +510,7 @@ impl SelectionCore {
         if self.kv_router_config.use_kv_events {
             if let Err(error) = self
                 .indexer_registry
-                .deregister(record.worker_id, &record.model_name, &record.tenant_id)
+                .deregister(record.worker_id, &record.model_name, &record.routing_group)
                 .await
             {
                 tracing::debug!(
@@ -573,7 +573,7 @@ impl SelectionCore {
     ) -> Result<SelectResponse, SelectionError> {
         self.schedule_selection(
             SelectionOperation {
-                key: SelectionKey::new(req.model_name, req.tenant_id),
+                key: SelectionKey::new(req.model_name, req.routing_group),
                 selection_id: req.selection_id,
                 reservation_id: None,
                 prompt: req.prompt,
@@ -609,7 +609,7 @@ impl SelectionCore {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.schedule_selection(
             SelectionOperation {
-                key: SelectionKey::new(req.model_name, req.tenant_id),
+                key: SelectionKey::new(req.model_name, req.routing_group),
                 selection_id: req.selection_id,
                 reservation_id: Some(reservation_id),
                 prompt: req.prompt,
@@ -713,7 +713,7 @@ impl SelectionCore {
             selection_id,
             reservation_id,
             model_name: key.model_name,
-            tenant_id: key.tenant_id,
+            routing_group: key.routing_group,
             worker_id: response.best_worker.worker_id,
             dp_rank: response.best_worker.dp_rank,
             endpoint,
@@ -728,7 +728,7 @@ impl SelectionCore {
         req: ReservationRequest,
     ) -> Result<ReservationResponse, SelectionError> {
         self.ensure_running()?;
-        let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
+        let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
         let entry = self.ready_entry(&key)?;
         let normalized = req
             .prompt
@@ -773,7 +773,7 @@ impl SelectionCore {
         Ok(ReservationResponse {
             reservation_id: req.reservation_id,
             model_name: key.model_name,
-            tenant_id: key.tenant_id,
+            routing_group: key.routing_group,
             worker_id: worker.worker_id,
             dp_rank: worker.dp_rank,
             endpoint,
@@ -840,19 +840,20 @@ impl SelectionCore {
     pub fn loads(
         &self,
         model_name: Option<&str>,
-        tenant_id: Option<&str>,
+        routing_group: Option<&str>,
     ) -> Vec<ModelLoadResponse> {
         let entries: Vec<_> = self.entries.read().values().cloned().collect();
         let mut loads = Vec::new();
         for entry in entries {
             if model_name.is_some_and(|model_name| entry.key.model_name != model_name)
-                || tenant_id.is_some_and(|tenant_id| entry.key.tenant_id != tenant_id)
+                || routing_group
+                    .is_some_and(|routing_group| entry.key.routing_group != routing_group)
             {
                 continue;
             }
             loads.push(ModelLoadResponse {
                 model_name: entry.key.model_name.clone(),
-                tenant_id: entry.key.tenant_id.clone(),
+                routing_group: entry.key.routing_group.clone(),
                 loads: entry
                     .scheduler
                     .get_potential_loads(None, 0, HashMap::new(), false),
@@ -860,7 +861,9 @@ impl SelectionCore {
                 pending_isl_tokens: entry.scheduler.pending_isl_tokens(),
             });
         }
-        loads.sort_by(|a, b| (&a.model_name, &a.tenant_id).cmp(&(&b.model_name, &b.tenant_id)));
+        loads.sort_by(|a, b| {
+            (&a.model_name, &a.routing_group).cmp(&(&b.model_name, &b.routing_group))
+        });
         loads
     }
 
@@ -868,7 +871,7 @@ impl SelectionCore {
         &self,
         req: PotentialLoadsRequest,
     ) -> Result<Vec<PotentialLoad>, SelectionError> {
-        let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
+        let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
         let entry = self.ready_entry(&key)?;
         let prepared = self.prepare_selection_inputs(&entry, &req.prompt).await?;
         let track_prefill_tokens = req
@@ -888,7 +891,7 @@ impl SelectionCore {
         &self,
         req: OverlapScoresRequest,
     ) -> Result<OverlapScoresResponse, SelectionError> {
-        let key = SelectionKey::new(req.model_name.clone(), req.tenant_id.clone());
+        let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
         let entry = self.ready_entry(&key)?;
         let normalized = req
             .prompt
@@ -978,7 +981,7 @@ mod tests {
         WorkerRequest {
             worker_id,
             model_name: "model".to_string(),
-            tenant_id: "default".to_string(),
+            routing_group: "default".to_string(),
             endpoint: Some(format!("http://worker-{worker_id}:8000")),
             kv_events_endpoint: None,
             kv_events_endpoints: HashMap::new(),
@@ -1014,6 +1017,7 @@ mod tests {
             sequence_hashes: None,
             isl_tokens: None,
             lora_name: None,
+            cache_namespace: None,
             is_eagle: None,
         }
     }
@@ -1021,7 +1025,7 @@ mod tests {
     fn select_request() -> SelectRequest {
         SelectRequest {
             model_name: "model".to_string(),
-            tenant_id: "default".to_string(),
+            routing_group: "default".to_string(),
             selection_id: None,
             prompt: prompt(),
             router_config_override: None,
@@ -1038,7 +1042,7 @@ mod tests {
     fn reserve_request(reservation_id: &str) -> SelectAndReserveRequest {
         SelectAndReserveRequest {
             model_name: "model".to_string(),
-            tenant_id: "default".to_string(),
+            routing_group: "default".to_string(),
             selection_id: None,
             reservation_id: Some(reservation_id.to_string()),
             prompt: prompt(),
@@ -1112,6 +1116,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upsert_moves_global_worker_id_between_routing_groups() {
+        let core = SelectionCore::new_local(test_config(true), 1, CancellationToken::new());
+        let mut group_a = worker_with_kv_events(1);
+        group_a.routing_group = "group-a".to_string();
+        core.upsert_worker(group_a).await.expect("group A upsert");
+        assert_eq!(
+            core.indexer_registry
+                .list_filtered(Some("model"), Some("group-a"))
+                .len(),
+            1
+        );
+
+        let mut group_b = worker_with_kv_events(1);
+        group_b.routing_group = "group-b".to_string();
+        core.upsert_worker(group_b).await.expect("group B upsert");
+
+        assert!(core.list_workers(Some("model"), Some("group-a")).is_empty());
+        assert_eq!(core.list_workers(Some("model"), Some("group-b")).len(), 1);
+        assert!(
+            core.indexer_registry
+                .list_filtered(Some("model"), Some("group-a"))
+                .is_empty()
+        );
+        assert_eq!(
+            core.indexer_registry
+                .list_filtered(Some("model"), Some("group-b"))
+                .len(),
+            1
+        );
+
+        let mut select_a = select_request();
+        select_a.routing_group = "group-a".to_string();
+        assert!(matches!(
+            core.select(select_a).await,
+            Err(SelectionError::NotReady(_))
+        ));
+        let mut select_b = select_request();
+        select_b.routing_group = "group-b".to_string();
+        assert_eq!(core.select(select_b).await.unwrap().worker_id, 1);
+
+        core.delete_worker(1).await.expect("delete group B worker");
+        assert!(
+            core.indexer_registry
+                .list_filtered(Some("model"), Some("group-b"))
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn shutdown_reports_not_ready_and_rejects_new_work() {
         let core = SelectionCore::new_local(test_config(false), 1, CancellationToken::new());
         core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -1148,7 +1201,7 @@ mod tests {
         let reservation_error = core
             .create_reservation(ReservationRequest {
                 model_name: "model".to_string(),
-                tenant_id: "default".to_string(),
+                routing_group: "default".to_string(),
                 reservation_id: "res-after-shutdown".to_string(),
                 worker_id: 1,
                 dp_rank: None,
@@ -1229,7 +1282,7 @@ mod tests {
         for worker_id in [1, 2] {
             core.create_reservation(ReservationRequest {
                 model_name: "model".to_string(),
-                tenant_id: "default".to_string(),
+                routing_group: "default".to_string(),
                 reservation_id: format!("occupy-{worker_id}"),
                 worker_id,
                 dp_rank: Some(0),
@@ -1241,6 +1294,7 @@ mod tests {
                     sequence_hashes: Some(vec![1, 2]),
                     isl_tokens: Some(8),
                     lora_name: None,
+                    cache_namespace: None,
                     is_eagle: None,
                 },
                 router_config_override: None,
@@ -1256,7 +1310,7 @@ mod tests {
             queued_core
                 .select_and_reserve(SelectAndReserveRequest {
                     model_name: "model".to_string(),
-                    tenant_id: "default".to_string(),
+                    routing_group: "default".to_string(),
                     selection_id: Some("refresh-selection".to_string()),
                     reservation_id: Some("refreshed-request".to_string()),
                     prompt: PromptRequest {
@@ -1267,6 +1321,7 @@ mod tests {
                         sequence_hashes: Some(vec![101, 102]),
                         isl_tokens: Some(8),
                         lora_name: None,
+                        cache_namespace: None,
                         is_eagle: None,
                     },
                     router_config_override: None,
