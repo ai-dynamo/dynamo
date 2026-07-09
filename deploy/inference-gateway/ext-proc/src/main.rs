@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{EppStandaloneConfig, EppMode, ExtProcServer, Router};
+use dynamo_ext_proc::{EppMode, EppStandaloneConfig, ExtProcServer, Router};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -145,9 +145,7 @@ async fn main() -> Result<()> {
             block_size = selector_cfg.block_size,
             "Parsed standalone selector configuration"
         );
-        anyhow::bail!(
-            "DYN_EPP_MODE=standalone is not yet supported"
-        );
+        anyhow::bail!("DYN_EPP_MODE=standalone is not yet supported");
     }
 
     // Start plaintext gRPC health server immediately (NOT_SERVING until router ready).
