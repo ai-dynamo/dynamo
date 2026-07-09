@@ -21,7 +21,7 @@ mod test_event_processing {
     use dynamo_kv_router::zmq_wire::StoredBlockOptions;
 
     #[test]
-    fn test_publish_batch_ignores_empty_and_singleton_publish_wraps_one_event() {
+    fn test_publish_wraps_event_in_singleton_batch() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
@@ -31,12 +31,6 @@ mod test_event_processing {
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
         };
-
-        publisher.publish_batch(Vec::new()).unwrap();
-        assert!(matches!(
-            rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
 
         publisher
             .publish(KvCacheEvent {

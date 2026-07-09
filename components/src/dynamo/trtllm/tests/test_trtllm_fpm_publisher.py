@@ -373,7 +373,6 @@ def _publisher_for_kv_event_test():
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.additional_metrics = None
     pub._last_engine_event_id_by_rank = {}
-    pub._warned_malformed_kv_event = False
     pub.processing_initial_created_events = False
     pub.partial_block_hashes = set()
     pub.kv_block_size = 4
@@ -412,10 +411,8 @@ def test_handle_kv_event_forwards_cache_salt_to_direct_publisher():
 
     pub._handle_kv_event(_stored_kv_event())
 
-    publisher.publish_batch.assert_called_once()
-    events = publisher.publish_batch.call_args.args[0]
-    assert len(events) == 1
-    assert events[0]["cache_salt"] == "tenant-a"
+    publisher.publish_stored.assert_called_once()
+    assert publisher.publish_stored.call_args.kwargs["cache_salt"] == "tenant-a"
 
 
 def test_handle_kv_event_forwards_cache_salt_to_zmq_publisher():
@@ -466,10 +463,8 @@ async def test_polling_loop_drops_conflicting_salts_and_processes_next_event(cap
             backoff_factor=1.0,
         )
 
-    publisher.publish_batch.assert_called_once()
-    events = publisher.publish_batch.call_args.args[0]
-    assert len(events) == 1
-    assert events[0]["cache_salt"] == "tenant-c"
+    publisher.publish_stored.assert_called_once()
+    assert publisher.publish_stored.call_args.kwargs["cache_salt"] == "tenant-c"
     assert "Dropping stored KV event with invalid cache namespace" in caplog.text
 
 
@@ -516,82 +511,6 @@ async def test_kv_event_polling_loop_records_drained_batch_size():
     )
 
     assert drained_batches == [3]
-
-
-@pytest.mark.asyncio
-async def test_polling_loop_delivers_one_native_drain_to_batch_handler():
-    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
-    pub._stop_event = threading.Event()
-    batches = []
-
-    async def fetch_events():
-        for event_id in range(3):
-            yield {"event_id": event_id}
-
-    def handle_batch(events):
-        batches.append(events)
-        pub._stop_event.set()
-
-    await pub._polling_loop(
-        fetch_events,
-        None,
-        min_sleep=0.001,
-        max_sleep=0.001,
-        backoff_factor=1.0,
-        batch_handler_fn=handle_batch,
-    )
-
-    assert batches == [[{"event_id": 0}, {"event_id": 1}, {"event_id": 2}]]
-
-
-@pytest.mark.asyncio
-async def test_polling_loop_delivers_partial_drain_before_fetch_error():
-    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
-    pub._stop_event = threading.Event()
-    batches = []
-    drained_batches = []
-
-    async def fetch_events():
-        yield {"event_id": 0}
-        yield {"event_id": 1}
-        raise RuntimeError("fetch failed")
-
-    with pytest.raises(RuntimeError, match="fetch failed"):
-        await pub._polling_loop(
-            fetch_events,
-            None,
-            min_sleep=0.001,
-            max_sleep=0.001,
-            backoff_factor=1.0,
-            batch_size_handler_fn=drained_batches.append,
-            batch_handler_fn=batches.append,
-        )
-
-    assert batches == [[{"event_id": 0}, {"event_id": 1}]]
-    assert drained_batches == [2]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("handler_fn", "batch_handler_fn"),
-    [(None, None), (MagicMock(), MagicMock())],
-)
-async def test_polling_loop_requires_exactly_one_handler(handler_fn, batch_handler_fn):
-    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
-    pub._stop_event = threading.Event()
-
-    async def fetch_events():
-        yield {"event_id": 0}
-
-    with pytest.raises(ValueError, match="exactly one"):
-        await pub._polling_loop(
-            fetch_events,
-            handler_fn,
-            min_sleep=0.001,
-            max_sleep=0.001,
-            backoff_factor=1.0,
-            batch_handler_fn=batch_handler_fn,
-        )
 
 
 @pytest.mark.asyncio
@@ -675,75 +594,7 @@ def test_partial_only_removed_event_does_not_publish_empty_batch():
     )
 
     assert pub.partial_block_hashes == set()
-    kv_event_publisher.publish_batch.assert_not_called()
-
-
-def test_handle_kv_event_batch_groups_mixed_events_per_rank_in_order():
-    pub = _publisher_for_kv_event_test()
-    rank_0 = MagicMock()
-    rank_1 = MagicMock()
-    pub.zmq_kv_event_publisher = None
-    pub.kv_event_publishers = {0: rank_0, 1: rank_1}
-
-    first = _stored_kv_event("tenant-a")
-    second = {
-        "event_id": 1,
-        "attention_dp_rank": 1,
-        "data": {"type": "removed", "block_hashes": [200]},
-    }
-    third = {
-        "event_id": 2,
-        "attention_dp_rank": 0,
-        "data": {"type": "removed", "block_hashes": [123]},
-    }
-
-    pub._handle_kv_event_batch([first, second, third])
-
-    rank_0.publish_batch.assert_called_once()
-    assert [event["type"] for event in rank_0.publish_batch.call_args.args[0]] == [
-        "stored",
-        "removed",
-    ]
-    rank_1.publish_batch.assert_called_once_with(
-        [{"type": "removed", "block_hashes": [200]}]
-    )
-
-
-def test_handle_kv_event_batch_warns_once_for_malformed_events_and_continues(caplog):
-    pub = _publisher_for_kv_event_test()
-    publisher = MagicMock()
-    pub.zmq_kv_event_publisher = None
-    pub.kv_event_publishers = {0: publisher}
-
-    with caplog.at_level(logging.WARNING):
-        pub._handle_kv_event_batch([{}, {}, _stored_kv_event()])
-
-    publisher.publish_batch.assert_called_once()
-    warnings = [
-        record
-        for record in caplog.records
-        if record.message.startswith("Dropping malformed KV event")
-    ]
-    assert len(warnings) == 1
-
-
-def test_handle_kv_event_batch_propagates_unexpected_normalizer_failure():
-    pub = _publisher_for_kv_event_test()
-    pub._normalize_kv_event = MagicMock(side_effect=RuntimeError("normalizer failed"))
-
-    with pytest.raises(RuntimeError, match="normalizer failed"):
-        pub._handle_kv_event_batch([_stored_kv_event()])
-
-
-def test_handle_kv_event_batch_propagates_publish_failure():
-    pub = _publisher_for_kv_event_test()
-    publisher = MagicMock()
-    publisher.publish_batch.side_effect = RuntimeError("publish failed")
-    pub.zmq_kv_event_publisher = None
-    pub.kv_event_publishers = {0: publisher}
-
-    with pytest.raises(RuntimeError, match="publish failed"):
-        pub._handle_kv_event_batch([_stored_kv_event()])
+    kv_event_publisher.publish_removed.assert_not_called()
 
 
 def test_interleaved_attention_dp_ranks_do_not_create_false_event_id_gaps():

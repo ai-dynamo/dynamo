@@ -339,29 +339,6 @@ impl KvEventPublisher {
         self.send_singleton(PlacementEvent::local_gpu(self.worker_id, event))
     }
 
-    /// Publish an ordered list of engine events as one processor input.
-    ///
-    /// The processor handles the complete list without receiving another list or
-    /// servicing its batching timer in between events. Empty lists are ignored.
-    /// Its block cap is evaluated after this complete list, so the cap is a
-    /// boundary flush trigger rather than a hard output-size limit.
-    pub fn publish_batch(
-        &self,
-        events: Vec<KvCacheEvent>,
-    ) -> Result<(), mpsc::error::SendError<Vec<KvCacheEvent>>> {
-        if events.is_empty() {
-            return Ok(());
-        }
-
-        let placement_events = events
-            .into_iter()
-            .map(|event| PlacementEvent::local_gpu(self.worker_id, event))
-            .collect();
-        self.tx.send(placement_events).map_err(|err| {
-            mpsc::error::SendError(err.0.into_iter().map(|event| event.event).collect())
-        })
-    }
-
     pub fn publish_with_storage_tier(
         &self,
         event: KvCacheEvent,
