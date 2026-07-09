@@ -41,6 +41,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -85,6 +86,7 @@ type DynamoGraphDeploymentReconciler struct {
 	client.Client
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
+	RestConfig            *rest.Config
 	Recorder              record.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
@@ -101,7 +103,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
-// +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=grove.io,resources=clustertopologybindings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
@@ -110,6 +112,9 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -279,18 +284,17 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	reconcileResult, err := r.reconcileResources(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "failed to reconcile the resources")
+		reason = "failed_to_reconcile_the_resources"
+		return ctrl.Result{}, err
+	}
 
 	state = reconcileResult.State
 	reason = reconcileResult.Reason
 	message = reconcileResult.Message
 	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
 	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
-
-	if err != nil {
-		logger.Error(err, "failed to reconcile the resources")
-		reason = "failed_to_reconcile_the_resources"
-		return ctrl.Result{}, err
-	}
 
 	// Override state based on rolling update status if a rolling update is in progress
 	if dynamoDeployment.Status.RollingUpdate != nil {
@@ -455,15 +459,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 }
 
 func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
-	// Unset or not "false": Grove if available; else component mode
-	// "false": component mode (multinode -> LWS; single-node -> standard)
-	enableGrove := true
-	if dgd.Annotations != nil && strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) == consts.KubeLabelValueFalse {
-		enableGrove = false
-	}
-
-	return enableGrove && r.RuntimeConfig.GroveEnabled
+	return r.RuntimeConfig.GroveEnabled && (dgd.Annotations == nil ||
+		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
 func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
@@ -512,10 +509,16 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 		// single-node GMS components stall in the in-progress list because the
 		// corresponding PodClique never exists.
 		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+		var readinessErr error
 		if usesPCSG {
-			isReady, reason, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, readinessErr = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		} else {
-			isReady, reason, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, readinessErr = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+		}
+		if readinessErr != nil {
+			logger.Error(readinessErr, "failed to check component readiness", "componentName", componentName, "resourceName", resourceName)
+			updatedInProgress = append(updatedInProgress, componentName)
+			continue
 		}
 		if !isReady {
 			logger.V(1).Info("component not ready", "componentName", componentName, "resourceName", resourceName, "reason", reason)
@@ -658,6 +661,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
+	prepareGroveTopologyConstraintUpgrade(grovePodCliqueSet, existingPodCliqueSet)
 	preserveGrovePodCliqueSetOrder(grovePodCliqueSet, existingPodCliqueSet)
 	preserveGrovePodCliqueSetReplicas(grovePodCliqueSet, existingPodCliqueSet, checkpointInfos)
 	_, syncedGrovePodCliqueSet, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
@@ -667,11 +671,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 		logger.Error(err, "failed to sync the Grove GangSet")
 		return nil, fmt.Errorf("failed to sync the Grove GangSet: %w", err)
 	}
+	allComponentsReady, reason, componentStatuses, err := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Grove component readiness: %w", err)
+	}
 	syncedGrovePodCliqueSetAsResource, err := commoncontroller.NewResourceWithComponentStatuses(
 		syncedGrovePodCliqueSet,
 		func() (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
-			allComponentsReady, reason, componentStatuses := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
 			if !allComponentsReady {
 				return false, reason, componentStatuses
 			}
@@ -721,6 +728,64 @@ func preserveGrovePodCliqueSetOrder(desired *grovev1alpha1.PodCliqueSet, existin
 	desired.Spec.Template.Cliques = orderLikeExisting(existing.Spec.Template.Cliques, desired.Spec.Template.Cliques, podCliqueTemplateName)
 	desired.Spec.Template.PodCliqueScalingGroupConfigs = orderLikeExisting(existing.Spec.Template.PodCliqueScalingGroupConfigs, desired.Spec.Template.PodCliqueScalingGroupConfigs, podCliqueScalingGroupConfigName)
 	desired.Spec.Template.ResourceClaimTemplates = orderLikeExisting(existing.Spec.Template.ResourceClaimTemplates, desired.Spec.Template.ResourceClaimTemplates, resourceClaimTemplateConfigName)
+}
+
+// prepareGroveTopologyConstraintUpgrade performs the first half of Grove's
+// supported legacy topology migration. A pre-alpha.9 constraint has
+// packDomain but no topologyName; Grove requires that object to be repaired by
+// adding topologyName before packDomain can be migrated to pack.required.
+// Keeping the legacy packing shape for this reconciliation lets the next
+// reconciliation apply the generated modern shape without recreating the PCS.
+func prepareGroveTopologyConstraintUpgrade(desired *grovev1alpha1.PodCliqueSet, existing *grovev1alpha1.PodCliqueSet) {
+	if desired == nil || existing == nil {
+		return
+	}
+
+	prepareLegacyGroveTopologyConstraintRepair(
+		desired.Spec.Template.TopologyConstraint,
+		existing.Spec.Template.TopologyConstraint,
+	)
+
+	existingCliqueConstraints := make(map[string]*grovev1alpha1.TopologyConstraint, len(existing.Spec.Template.Cliques))
+	for _, clique := range existing.Spec.Template.Cliques {
+		if clique != nil {
+			existingCliqueConstraints[clique.Name] = clique.TopologyConstraint
+		}
+	}
+	for _, clique := range desired.Spec.Template.Cliques {
+		if clique != nil {
+			prepareLegacyGroveTopologyConstraintRepair(clique.TopologyConstraint, existingCliqueConstraints[clique.Name])
+		}
+	}
+
+	existingScalingGroupConstraints := make(map[string]*grovev1alpha1.TopologyConstraint, len(existing.Spec.Template.PodCliqueScalingGroupConfigs))
+	for i := range existing.Spec.Template.PodCliqueScalingGroupConfigs {
+		config := &existing.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		existingScalingGroupConstraints[config.Name] = config.TopologyConstraint
+	}
+	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		config := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		prepareLegacyGroveTopologyConstraintRepair(config.TopologyConstraint, existingScalingGroupConstraints[config.Name])
+	}
+}
+
+func prepareLegacyGroveTopologyConstraintRepair(desired *grovev1alpha1.TopologyConstraint, existing *grovev1alpha1.TopologyConstraint) {
+	if desired == nil || existing == nil {
+		return
+	}
+	// A constraint without an explicit desired name inherits from its repaired
+	// parent and can migrate packDomain directly in the same update.
+	if desired.TopologyName == "" || existing.TopologyName != "" || existing.PackDomain == "" {
+		return
+	}
+
+	desired.PackDomain = existing.PackDomain
+	if existing.Pack == nil {
+		desired.Pack = nil
+		return
+	}
+	pack := *existing.Pack
+	desired.Pack = &pack
 }
 
 // Grove horizontal replicas are driven through scale subresources after creation;
@@ -1068,6 +1133,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				DynamoNamespace: dynamoNamespace,
 				ComponentName:   componentName,
 				Labels:          dynamo.GetDGDComponentResourceLabels(renderDeployment, componentName, component),
+				Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component),
 				IsK8sDiscovery:  isK8sDiscoveryEnabled,
 			})
 			if err != nil {
@@ -1082,6 +1148,25 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				return ReconcileResult{}, fmt.Errorf("failed to sync the main component service: %w", err)
 			}
 			if syncedMainComponentService != nil {
+				if syncedMainComponentService.Annotations == nil {
+					syncedMainComponentService.Annotations = make(map[string]string)
+				}
+				desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component)
+				var updateAnnotations bool
+				for key, value := range desiredAnnotations {
+					if val, ok := syncedMainComponentService.Annotations[key]; !ok || val != value {
+						syncedMainComponentService.Annotations[key] = value
+						updateAnnotations = true
+					}
+				}
+				if updateAnnotations {
+					err = r.Update(ctx, syncedMainComponentService)
+					if err != nil {
+						logger.Error(err, fmt.Sprintf("Failed to update main component service %s.", componentName))
+						r.GetRecorder().Eventf(dynamoDeployment, corev1.EventTypeWarning, "UpdateService", "Failed to update Service %s: %s", componentName, err)
+						return ReconcileResult{}, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
+					}
+				}
 				mainComponentServiceAsResource, err := commoncontroller.NewResource(syncedMainComponentService,
 					func() (bool, string) {
 						return true, ""
@@ -2563,8 +2648,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	// Only attempt DestinationRule reconciliation when the Istio CRDs are
 	// present on the cluster; otherwise the API call would fail on every
 	// reconcile for Istio-less clusters.
-	if r.RuntimeConfig.IstioAvailable {
-		meshEnabled := r.Config.ServiceMesh.IsEnabled()
+	// IsEnabled controls service mesh creation/update. When disabled, still
+	// best-effort clean up previously owned DestinationRules if the API exists.
+	meshEnabled := r.Config.ServiceMesh.IsEnabled()
+	istioAvailable := r.RuntimeConfig.IstioEnabled
+	if !meshEnabled && !istioAvailable {
+		istioAvailable = commoncontroller.DetectIstioDestinationRuleAvailabilityFromConfig(ctx, r.RestConfig)
+	}
+	if istioAvailable {
 		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.Config.ServiceMesh)
 		_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*networkingv1beta1.DestinationRule, bool, error) {
 			return destinationRule, !meshEnabled, nil
@@ -2575,6 +2666,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		}
 		if meshEnabled {
 			logger.Info("Synced EPP DestinationRule", "name", eppServiceName)
+		} else {
+			logger.Info("Cleaned up EPP DestinationRule", "name", eppServiceName)
 		}
 	} else if r.Config.ServiceMesh.IsEnabled() {
 		logger.Error(nil, "Service mesh is enabled but networking.istio.io CRDs are not installed; skipping DestinationRule reconciliation")
@@ -2642,7 +2735,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
-	if r.RuntimeConfig.IstioAvailable {
+	if r.RuntimeConfig.IstioEnabled {
 		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },

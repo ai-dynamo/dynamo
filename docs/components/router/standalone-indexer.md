@@ -160,6 +160,14 @@ curl http://localhost:8090/metrics
 | `dynamo_kvindexer_models` | Gauge | — | Number of active model+tenant indexers |
 | `dynamo_kvindexer_workers` | Gauge | — | Number of registered worker instances |
 | `dynamo_kvindexer_listeners` | Gauge | `status` | Number of ZMQ listeners by status (`pending`, `active`, `paused`, `failed`) |
+| `dynamo_kvrouter_kv_cache_events_applied` | Counter | `event_type`, `status` | Primary device-tier KV events applied, partitioned by event type and result |
+| `dynamo_kvrouter_kv_cache_event_warnings` | Counter | `warning_kind` | Suspicious-but-valid primary device-tier events, including duplicate STORE content |
+
+The core event counters aggregate process-wide across model and tenant indexers and
+across all indexer threads. A `duplicate_store` warning is not necessarily an error:
+peer recovery replay can reapply content already restored from a snapshot. Lower-tier
+events and listener transport or replay failures are not represented by these core
+event counters; use the standalone service metrics and logs for those paths.
 
 ### `POST /register` — Register an endpoint
 
@@ -335,7 +343,7 @@ All counts are in **matched tokens** (block overlap count × block size).
 | `model_name` | yes | — | Model name (selects the indexer) |
 | `tenant_id` | no | `"default"` | Tenant identifier |
 | `lora_name` | no | — | LoRA adapter (overrides indexer-level lora_name for this query) |
-| `cache_salt` | no | — | Per-request cache salt (Mooncake RFC #1403). Currently parsed for forward compatibility — engines apply their own salting today. |
+| `cache_salt` | no | — | Per-request cache salt (Mooncake RFC #1403). The indexer mixes it into hashes computed from `token_ids`; equal tokens with different salts do not match. |
 
 ### `POST /query_by_hash` — Query overlap for pre-computed hashes
 
@@ -352,7 +360,12 @@ Same response format as `/query`, including the per-instance `instances` map. Sc
 | `block_hashes` | yes | — | Pre-computed block hash array |
 | `model_name` | yes | — | Model name (selects the indexer) |
 | `tenant_id` | no | `"default"` | Tenant identifier |
-| `cache_salt` | no | — | Per-request cache salt (Mooncake RFC #1403). Currently parsed for forward compatibility — engines apply their own salting today. |
+| `cache_salt` | no | — | Must be omitted or `null`. Any string value, including an empty string, returns `400 Bad Request`. |
+
+`block_hashes` are opaque outputs of token hashing, so the indexer cannot apply or verify a salt
+after they have been computed. Callers must precompute these hashes with the intended cache salt
+and omit `cache_salt` from `/query_by_hash`. Use `/query` when the indexer should compute salted
+hashes from tokens server-side.
 
 ### Per-instance tier breakdown
 

@@ -97,6 +97,13 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     for i, p in enumerate(rank_paths):
         with open(p) as f:
             data = json.load(f)
+        if data.get("valid") is False:
+            raise RuntimeError(
+                f"Self-benchmark produced incomplete results at {p}: "
+                f"coverage={data.get('coverage')} "
+                f"skipped_points={data.get('skipped_points')} "
+                f"missing_phases={data.get('missing_phases')}"
+            )
         if i == 0:
             merged = data
             for r in merged.get("results", []):
@@ -106,6 +113,20 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
             for r in data.get("results", []):
                 r["point"]["dp_rank"] = dp_rank
             merged.setdefault("results", []).extend(data.get("results", []))
+            merged_coverage = merged.get("coverage")
+            rank_coverage = data.get("coverage")
+            if isinstance(merged_coverage, dict) and isinstance(rank_coverage, dict):
+                for key in (
+                    "expected_points",
+                    "completed_points",
+                    "skipped_points",
+                ):
+                    merged_coverage[key] = merged_coverage.get(
+                        key, 0
+                    ) + rank_coverage.get(key, 0)
+            merged.setdefault("skipped_points", []).extend(
+                data.get("skipped_points", [])
+            )
 
     logger.info(
         "Benchmark complete, %d points across %d rank(s)",
@@ -513,7 +534,7 @@ class WorkerFactory:
         # Set up forward pass metrics relay (child ZMQ -> event plane).
         # In checkpoint mode the engine was created before the runtime, so
         # ForwardPassMetrics.worker_id will be empty (relay still works).
-        fpm_relays = self.setup_fpm_relay(generate_endpoint, vllm_config)
+        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
         if fpm_relays:
             handler.fpm_relays = fpm_relays
 
@@ -755,7 +776,7 @@ class WorkerFactory:
         # Set up forward pass metrics relay (child ZMQ -> event plane).
         # In checkpoint mode the engine was created before the runtime, so
         # ForwardPassMetrics.worker_id will be empty (relay still works).
-        fpm_relays = self.setup_fpm_relay(generate_endpoint, vllm_config)
+        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
         if fpm_relays:
             handler.fpm_relays = fpm_relays
 
@@ -892,11 +913,13 @@ class WorkerFactory:
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
-        runtime.register_engine_route("start_profile", handler.start_profile)
-        runtime.register_engine_route("stop_profile", handler.stop_profile)
-        runtime.register_engine_route("sleep", handler.sleep)
-        runtime.register_engine_route("wake_up", handler.wake_up)
-        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+        runtime.register_engine_route("control/start_profile", handler.start_profile)
+        runtime.register_engine_route("control/stop_profile", handler.stop_profile)
+        runtime.register_engine_route("control/sleep", handler.sleep)
+        runtime.register_engine_route("control/wake_up", handler.wake_up)
+        runtime.register_engine_route(
+            "control/scale_elastic_ep", handler.scale_elastic_ep
+        )
 
         rl_routes: dict = {
             "liveness_probe": handler.liveness_probe,
@@ -931,8 +954,9 @@ class WorkerFactory:
         )
 
         logger.info(
-            "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
-            "start_profile, stop_profile, and RL admin routes: %s%s",
+            "Registered engine routes: control/sleep, control/wake_up, "
+            "control/scale_elastic_ep, control/start_profile, control/stop_profile, "
+            "and RL admin routes: %s%s",
             ", ".join(sorted(rl_routes)),
             " (LoRA routes: load_lora, unload_lora)" if lora_enabled else "",
         )

@@ -4,8 +4,9 @@
 use super::*;
 use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
 use crate::test_utils::{
-    assert_score, flush_and_settle, make_remove_event_with_parent, make_store_event,
-    make_store_event_with_parent, snapshot_events, snapshot_tree,
+    assert_score, flush_and_settle, make_clear_event_with_dp_rank, make_remove_event_with_parent,
+    make_store_event, make_store_event_with_dp_rank, make_store_event_with_parent, remove_event,
+    snapshot_events, snapshot_tree,
 };
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -18,6 +19,13 @@ fn worker(worker_id: u64) -> WorkerWithDpRank {
 
 fn direct_lookup() -> DirectLookup {
     FxHashMap::default()
+}
+
+fn stored_data(event: RouterEvent) -> KvCacheStoreData {
+    match event.event.data {
+        KvCacheEventData::Stored(op) => op,
+        _ => unreachable!("expected a store event"),
+    }
 }
 
 fn worker_lookup_len(lookup: &DirectLookup, worker: WorkerWithDpRank) -> Option<usize> {
@@ -35,6 +43,19 @@ async fn index_block_count(index: &ThreadPoolIndexer<ConcurrentRadixTreeCompress
 
 fn local_hashes(query: &[u64]) -> Vec<LocalBlockHash> {
     query.iter().copied().map(LocalBlockHash).collect()
+}
+
+fn remove_hashes_with_parent(
+    prefix_hashes: &[u64],
+    local_hashes: &[u64],
+) -> Vec<ExternalSequenceBlockHash> {
+    match make_remove_event_with_parent(0, prefix_hashes, local_hashes)
+        .event
+        .data
+    {
+        KvCacheEventData::Removed(op) => op.block_hashes,
+        _ => unreachable!("make_remove_event_with_parent must create a remove event"),
+    }
 }
 
 fn apply_direct(
@@ -194,6 +215,216 @@ mod race_tests {
             assert_direct_score(&index, &[1, 2, 3, 7, 8], worker1, 3);
             assert_direct_score(&index, &[1, 2, 3, 7, 8], worker2, 5);
         }
+
+        #[test]
+        fn stale_scan_cannot_commit_after_split() {
+            let index = ConcurrentRadixTreeCompressed::new();
+            let worker1 = worker(1);
+            let worker2 = worker(2);
+            let worker3 = worker(3);
+            let mut lookup1 = direct_lookup();
+            let mut lookup2 = direct_lookup();
+            let mut lookup3 = direct_lookup();
+
+            apply_direct(
+                &index,
+                &mut lookup1,
+                make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+            );
+            apply_direct(
+                &index,
+                &mut lookup2,
+                make_store_event(2, &[1, 2, 3, 4, 5, 6]),
+            );
+
+            let node = index
+                .root
+                .child_snapshot(LocalBlockHash(1))
+                .expect("root child should exist");
+            let blocks = stored_data(make_store_event(3, &[1, 2, 3, 4, 5, 6])).blocks;
+            let stale_scan = node.scan_store_prefix(&blocks);
+
+            apply_direct(
+                &index,
+                &mut lookup2,
+                make_store_event_with_parent(2, &[1, 2, 3], &[7]),
+            );
+
+            assert!(
+                node.promote_to_full_with_version(worker3, stale_scan.shape_version)
+                    .is_none()
+            );
+
+            apply_direct(
+                &index,
+                &mut lookup3,
+                make_store_event(3, &[1, 2, 3, 4, 5, 6]),
+            );
+
+            assert_eq!(
+                index.edge_topology_for_test(),
+                vec![edge_topology(
+                    &[1, 2, 3],
+                    vec![
+                        edge_topology(&[4, 5, 6], vec![]),
+                        edge_topology(&[7], vec![])
+                    ],
+                )],
+            );
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker2, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker3, 6);
+        }
+
+        #[test]
+        fn tail_parent_split_before_child_lookup_repairs_to_suffix() {
+            let index = ConcurrentRadixTreeCompressed::new();
+            let worker1 = worker(1);
+            let worker2 = worker(2);
+            let worker3 = worker(3);
+            let worker4 = worker(4);
+            let mut lookup1 = direct_lookup();
+            let mut lookup2 = direct_lookup();
+            let mut lookup3 = direct_lookup();
+            let mut lookup4 = direct_lookup();
+
+            for (worker_id, lookup) in [
+                (1, &mut lookup1),
+                (2, &mut lookup2),
+                (3, &mut lookup3),
+                (4, &mut lookup4),
+            ] {
+                apply_direct(&index, lookup, make_store_event(worker_id, &[1, 2, 3, 4]));
+            }
+            apply_direct(
+                &index,
+                &mut lookup1,
+                make_store_event_with_parent(1, &[1, 2, 3, 4], &[5, 6]),
+            );
+            apply_direct(
+                &index,
+                &mut lookup2,
+                make_store_event_with_parent(2, &[1, 2, 3, 4], &[7, 8]),
+            );
+
+            let stale_parent = index
+                .root
+                .child_snapshot(LocalBlockHash(1))
+                .expect("root child should exist");
+            let continuation = stored_data(make_store_event_with_parent(3, &[1, 2, 3, 4], &[9]));
+            let parent_hash = continuation.parent_hash.expect("continuation has a parent");
+            let plan = stale_parent
+                .plan_store_parent_edge(parent_hash, &continuation.blocks)
+                .expect("tail parent should be present before the split");
+            assert!(matches!(
+                plan.action,
+                ParentEdgePlanAction::InsertFromParent
+            ));
+
+            apply_direct(
+                &index,
+                &mut lookup4,
+                make_store_event_with_parent(4, &[1, 2], &[10]),
+            );
+
+            index
+                .insert_blocks_from_for_test(
+                    &mut lookup3,
+                    worker3,
+                    &stale_parent,
+                    parent_hash,
+                    &continuation.blocks,
+                )
+                .unwrap();
+
+            assert_eq!(
+                index.edge_topology_for_test(),
+                vec![edge_topology(
+                    &[1, 2],
+                    vec![
+                        edge_topology(
+                            &[3, 4],
+                            vec![
+                                edge_topology(&[5, 6], vec![]),
+                                edge_topology(&[7, 8], vec![]),
+                                edge_topology(&[9], vec![]),
+                            ],
+                        ),
+                        edge_topology(&[10], vec![]),
+                    ],
+                )],
+            );
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker2, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4, 9], worker3, 5);
+            assert_direct_score(&index, &[1, 2, 9], worker3, 2);
+            assert_direct_score(&index, &[1, 2, 10], worker4, 3);
+        }
+
+        #[test]
+        fn stale_tail_cursor_replans_before_descending_same_local_child() {
+            let index = ConcurrentRadixTreeCompressed::new();
+            let worker_a = worker(1);
+            let worker_b = worker(2);
+            let mut lookup_a = direct_lookup();
+            let mut lookup_b = direct_lookup();
+
+            apply_direct(&index, &mut lookup_a, make_store_event(1, &[1]));
+            apply_direct(&index, &mut lookup_b, make_store_event(2, &[1]));
+
+            let stale_parent = index
+                .root
+                .child_snapshot(LocalBlockHash(1))
+                .expect("root child should exist");
+            let continuation = stored_data(make_store_event_with_parent(1, &[1], &[7]));
+            let parent_hash = continuation.parent_hash.expect("continuation has a parent");
+            let plan = stale_parent
+                .plan_store_parent_edge(parent_hash, &continuation.blocks)
+                .expect("tail parent should be present before extension");
+            let action =
+                stale_parent.apply_store_parent_edge_plan(worker_a, plan, &continuation.blocks);
+            assert!(matches!(action, ParentEdgeAction::InsertFromParent(None)));
+
+            let b_extension = make_store_event_with_parent(2, &[1], &[5, 6, 7]);
+            let b_extension_data = stored_data(b_extension.clone());
+            assert_ne!(
+                continuation.blocks[0].block_hash, b_extension_data.blocks[2].block_hash,
+                "same local child must have distinct sequence hashes at different depths",
+            );
+            apply_direct(&index, &mut lookup_b, b_extension);
+            apply_direct(
+                &index,
+                &mut lookup_b,
+                make_store_event_with_parent(2, &[1, 5, 6], &[8]),
+            );
+
+            index
+                .insert_blocks_from_for_test(
+                    &mut lookup_a,
+                    worker_a,
+                    &stale_parent,
+                    parent_hash,
+                    &continuation.blocks,
+                )
+                .unwrap();
+
+            assert_direct_score(&index, &[1, 7], worker_a, 2);
+            assert_direct_score(&index, &[1, 5, 6, 7], worker_b, 4);
+            assert_direct_score(&index, &[1, 5, 6, 8], worker_b, 4);
+            assert_eq!(
+                index.edge_topology_for_test(),
+                vec![edge_topology(
+                    &[1],
+                    vec![
+                        edge_topology(
+                            &[5, 6],
+                            vec![edge_topology(&[7], vec![]), edge_topology(&[8], vec![]),],
+                        ),
+                        edge_topology(&[7], vec![]),
+                    ],
+                )],
+            );
+        }
     }
 
     mod remove {
@@ -285,6 +516,106 @@ mod race_tests {
             assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
             assert_direct_score(&index, &[1, 2, 3, 4], worker2, 1);
             assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker3, 6);
+        }
+    }
+
+    mod clear {
+        use super::super::*;
+
+        #[tokio::test]
+        async fn clear_sweeps_split_suffixes_across_event_threads_and_dp_ranks() {
+            let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 32);
+            let worker_a0 = WorkerWithDpRank::new(1, 0);
+            let worker_a1 = WorkerWithDpRank::new(1, 1);
+            let worker_b = WorkerWithDpRank::new(2, 0);
+
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1, 2], 0))
+                .await;
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1, 2], 1))
+                .await;
+            index.apply_event(make_store_event(2, &[1, 2])).await;
+            flush_and_settle(&index).await;
+
+            index
+                .apply_event(make_store_event_with_parent(2, &[1], &[3]))
+                .await;
+            flush_and_settle(&index).await;
+
+            index.apply_event(make_clear_event_with_dp_rank(1, 0)).await;
+            flush_and_settle(&index).await;
+
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1], 0))
+                .await;
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1], 1))
+                .await;
+            flush_and_settle(&index).await;
+
+            assert_score(&index, &[1, 2], worker_a0, 1).await;
+            assert_score(&index, &[1, 2], worker_a1, 1).await;
+            assert_score(&index, &[1, 2], worker_b, 2).await;
+            assert_score(&index, &[1, 3], worker_b, 2).await;
+        }
+
+        #[test]
+        fn clear_before_split_prevents_copying_removed_coverage() {
+            let index = ConcurrentRadixTreeCompressed::new();
+            let worker_a = worker(1);
+            let worker_b = worker(2);
+            let mut lookup_a = direct_lookup();
+            let mut lookup_b = direct_lookup();
+
+            apply_direct(&index, &mut lookup_a, make_store_event(1, &[1, 2]));
+            apply_direct(&index, &mut lookup_b, make_store_event(2, &[1, 2]));
+            apply_direct(&index, &mut lookup_a, make_clear_event_with_dp_rank(1, 0));
+            apply_direct(
+                &index,
+                &mut lookup_b,
+                make_store_event_with_parent(2, &[1], &[3]),
+            );
+            apply_direct(&index, &mut lookup_a, make_store_event(1, &[1]));
+
+            assert_direct_score(&index, &[1, 2], worker_a, 1);
+            assert_direct_score(&index, &[1, 2], worker_b, 2);
+            assert_direct_score(&index, &[1, 3], worker_b, 2);
+        }
+
+        #[tokio::test]
+        async fn worker_removal_respects_dp_rank_and_worker_targets() {
+            let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 4, 32);
+            let worker_a0 = WorkerWithDpRank::new(1, 0);
+            let worker_a1 = WorkerWithDpRank::new(1, 1);
+            let worker_b = WorkerWithDpRank::new(2, 0);
+
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1, 2], 0))
+                .await;
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1, 2], 1))
+                .await;
+            index.apply_event(make_store_event(2, &[1, 2])).await;
+            flush_and_settle(&index).await;
+            index
+                .apply_event(make_store_event_with_parent(2, &[1], &[3]))
+                .await;
+            flush_and_settle(&index).await;
+
+            index.remove_worker_dp_rank(1, 0).await;
+            flush_and_settle(&index).await;
+            let scores = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
+            assert!(!scores.scores.contains_key(&worker_a0));
+            assert_eq!(scores.scores.get(&worker_a1), Some(&2));
+            assert_eq!(scores.scores.get(&worker_b), Some(&2));
+
+            index.remove_worker(1).await;
+            flush_and_settle(&index).await;
+            let scores = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
+            assert!(!scores.scores.contains_key(&worker_a0));
+            assert!(!scores.scores.contains_key(&worker_a1));
+            assert_eq!(scores.scores.get(&worker_b), Some(&2));
         }
     }
 
@@ -444,6 +775,206 @@ mod race_tests {
                 }
             }
         }
+    }
+}
+
+mod remove_tests {
+    use super::*;
+
+    #[test]
+    fn remove_multiple_hashes_from_same_compressed_edge() {
+        let index = Arc::new(ConcurrentRadixTreeCompressed::new());
+        let worker0 = worker(0);
+        let worker1 = worker(1);
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event(0, &[1, 2, 3, 4, 5, 6]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 6);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_remove_event_with_parent(0, &[1, 2], &[3, 4, 5]),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 2);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event_with_parent(0, &[1, 2], &[3, 4, 5, 6]),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 6);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+    }
+
+    #[test]
+    fn batched_remove_uses_minimum_edge_position_not_event_order() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let worker0 = worker(0);
+        let worker1 = worker(1);
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event(0, &[1, 2, 3, 4, 5, 6]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+        );
+
+        let remove_hashes = remove_hashes_with_parent(&[1, 2], &[3, 4, 5]);
+        let out_of_order_hashes = vec![remove_hashes[2], remove_hashes[0], remove_hashes[1]];
+        apply_direct(
+            &index,
+            &mut lookup0,
+            remove_event(0, 0, 0, out_of_order_hashes),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 2);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+        assert_eq!(worker_lookup_len(&lookup0, worker0), Some(2));
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event_with_parent(0, &[1, 2], &[3, 4, 5, 6]),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 6);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+        assert_eq!(worker_lookup_len(&lookup0, worker0), Some(6));
+    }
+
+    #[test]
+    fn batched_remove_processes_hashes_moved_by_split_before_restore() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let worker0 = worker(0);
+        let worker1 = worker(1);
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event(0, &[1, 2, 3, 4, 5, 6]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+        );
+        let remove_hashes = remove_hashes_with_parent(&[1, 2], &[3, 4, 5]);
+        let group_node = lookup0
+            .get(&worker0)
+            .and_then(|worker_lookup| worker_lookup.get(&remove_hashes[0]))
+            .cloned()
+            .expect("remove hash should point to the pre-split group node");
+
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3], &[7]),
+        );
+        assert_eq!(
+            index.edge_topology_for_test(),
+            vec![edge_topology(
+                &[1, 2, 3],
+                vec![
+                    edge_topology(&[4, 5, 6], vec![]),
+                    edge_topology(&[7], vec![])
+                ],
+            )],
+        );
+
+        index.apply_removed_group(&mut lookup0, worker0, Some(group_node), &remove_hashes, 42);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 2);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event_with_parent(0, &[1, 2], &[3]),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 3);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+        assert_eq!(worker_lookup_len(&lookup0, worker0), Some(3));
+    }
+
+    #[test]
+    fn batched_remove_falls_back_when_all_grouped_hashes_move_before_restore() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let worker0 = worker(0);
+        let worker1 = worker(1);
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event(0, &[1, 2, 3, 4, 5, 6]),
+        );
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+        );
+        let remove_hashes = remove_hashes_with_parent(&[1, 2, 3], &[4, 5]);
+        let group_node = lookup0
+            .get(&worker0)
+            .and_then(|worker_lookup| worker_lookup.get(&remove_hashes[0]))
+            .cloned()
+            .expect("remove hash should point to the pre-split group node");
+
+        apply_direct(
+            &index,
+            &mut lookup1,
+            make_store_event_with_parent(1, &[1, 2, 3], &[7]),
+        );
+        assert_eq!(
+            index.edge_topology_for_test(),
+            vec![edge_topology(
+                &[1, 2, 3],
+                vec![
+                    edge_topology(&[4, 5, 6], vec![]),
+                    edge_topology(&[7], vec![])
+                ],
+            )],
+        );
+
+        index.apply_removed_group(&mut lookup0, worker0, Some(group_node), &remove_hashes, 42);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 3);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+        assert_eq!(worker_lookup_len(&lookup0, worker0), Some(3));
+
+        apply_direct(
+            &index,
+            &mut lookup0,
+            make_store_event_with_parent(0, &[1, 2, 3], &[4]),
+        );
+
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker0, 4);
+        assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+        assert_eq!(worker_lookup_len(&lookup0, worker0), Some(4));
     }
 }
 

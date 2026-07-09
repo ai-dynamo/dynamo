@@ -8,9 +8,9 @@ use std::{
 
 use dynamo_protocols::types::{ChatCompletionStreamOptions, CompletionUsage};
 
-use crate::protocols::{
-    common::timing::RequestTracker, openai::nvext::NvExt,
-    openai::nvext::NvExtResponseFieldSelection,
+use crate::protocols::common::{
+    extensions::{NvExt, NvExtResponseFieldSelection},
+    timing::RequestTracker,
 };
 
 /// Configuration options for the [`DeltaGenerator`], controlling response behavior.

@@ -13,7 +13,6 @@ import logging
 import os
 import sys
 import tempfile
-import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -21,42 +20,47 @@ import pytest
 
 from tests.router.common import (
     _test_busy_threshold_endpoint,
-    _test_disagg_background_prefill_sticky_routing,
     _test_disagg_direct_mode,
+    _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
-    _test_router_basic,
-    _test_router_decisions,
-    _test_router_decisions_disagg,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
-    _test_router_indexers_sync,
-    _test_router_overload_503,
+    _test_router_overload_529,
     _test_router_override_router_config,
     _test_router_query_instance_id,
     _test_router_threshold_none_disables_rejection,
     _test_router_two_routers,
+    _test_session_affinity,
+)
+from tests.router.e2e_harness import (
+    allocate_frontend_ports,
+    build_test_payload,
+    run_basic_router_test,
+    run_disagg_router_decisions_test,
+    run_indexers_sync_test,
+    run_router_decisions_test,
 )
 from tests.router.helper import (
     generate_random_suffix,
     get_runtime,
+    managed_runtime,
     poll_for_worker_instances,
     topology_env,
 )
 from tests.router.mocker_process import (
     DisaggMockerProcess,
     MockerProcess,
-    _launch_disagg_workers,
+    launch_disagg_workers,
 )
-from tests.router.router_process import FrontendRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = ROUTER_MODEL_NAME
 COUNTER_WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "counter_worker.py")
+
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -67,7 +71,6 @@ pytestmark = [
 ]
 NUM_MOCKERS = 2
 SPEEDUP_RATIO = 10.0
-BASE_PORT = 9100  # Base port for general test allocations (frontend, system, etc.)
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
 ROUTER_OVERLOAD_DEBUG_DYN_LOG = (
@@ -88,7 +91,7 @@ ROUTER_AIC_CONFIG = {
     "aic_tp_size": 1,
     "aic_model_path": "Qwen/Qwen3-32B",
 }
-ROUTER_OVERLOAD_503_CASES = (
+ROUTER_OVERLOAD_529_CASES = (
     pytest.param(
         {
             "blocks_threshold": 0.2,
@@ -107,6 +110,53 @@ ROUTER_OVERLOAD_503_CASES = (
         id="prefill-tokens",
     ),
 )
+# Speed isolation: only the *gated* stage is slow (speedup_ratio 0.01); the
+# non-gated stage is orders of magnitude faster (100.0) so its latency never
+# determines probe cleanup and each case exercises only the intended overload
+# signal.
+_SLOW_SPEEDUP = 0.01
+_FAST_SPEEDUP = 100.0
+ROUTER_DISAGG_OVERLOAD_529_CASES = (
+    pytest.param(
+        {
+            # A single prefill worker is sufficient to verify overloaded -> no
+            # free prefill worker -> 529. Registered worker types make the model
+            # list only after the prefill router activates, so frontend readiness
+            # already gates on prefill registration.
+            "num_prefill": 1,
+            "num_decode": 1,
+            "max_tokens": 1,
+            # Gate the PREFILL pool only: slow prefill (accumulates tokens), fast
+            # decode. Decode/queue thresholds disabled.
+            "prefill_speedup": _SLOW_SPEEDUP,
+            "decode_speedup": _FAST_SPEEDUP,
+            "thresholds": {
+                "blocks_threshold": "None",
+                "tokens_threshold": 1,
+                "tokens_threshold_frac": "None",
+                "router_queue_threshold": "None",
+            },
+        },
+        id="prefill-tokens",
+    ),
+    pytest.param(
+        {
+            "num_prefill": 1,
+            "num_decode": 1,
+            "max_tokens": 50,
+            # Gate the DECODE pool only: fast prefill, slow decode (fills its
+            # limited blocks). Prefill threshold disabled.
+            "prefill_speedup": _FAST_SPEEDUP,
+            "decode_speedup": _SLOW_SPEEDUP,
+            "thresholds": {
+                "blocks_threshold": 0.2,
+                "tokens_threshold": "None",
+                "tokens_threshold_frac": "None",
+            },
+        },
+        id="decode-blocks",
+    ),
+)
 ROUND_ROBIN_MOCKER_SKIP_REASON = (
     "Flaky on CI: tcp nondurable round-robin mocker router path timed out"
 )
@@ -122,45 +172,17 @@ def _require_router_aic() -> dict[str, Any]:
     pytest.importorskip(
         "aiconfigurator", reason="router AIC test requires aiconfigurator"
     )
+    # Rust AIC callback imports aiconfigurator.sdk.engine.compile_engine
+    # (Phase 1.5 API from ai-dynamo/aiconfigurator#1200). PyPI releases
+    # predating it don't ship engine.py.
+    pytest.importorskip(
+        "aiconfigurator.sdk.engine",
+        reason="router AIC test requires aiconfigurator.sdk.engine (Phase 1.5)",
+    )
     return ROUTER_AIC_CONFIG.copy()
 
 
-def get_unique_ports(
-    request,
-    num_ports: int = 1,
-    store_backend: str = "etcd",
-    request_plane: str = "nats",
-    registration_order: str = "prefill_first",
-) -> list[int]:
-    """Allocate random free ports for xdist-safe router tests.
-
-    This replaces the previous "test-name offset" scheme with the shared flock-backed
-    allocator from `tests.utils.port_utils`, which avoids collisions across pytest-xdist
-    worker processes.
-
-    Notes:
-    - The extra parameters are kept for call-site compatibility (they no longer affect
-      the chosen ports).
-    - Ports are released at the end of the test via a pytest finalizer.
-    """
-    _ = (store_backend, request_plane, registration_order)
-    ports = allocate_ports(num_ports, BASE_PORT)
-    request.addfinalizer(lambda: deallocate_ports(ports))
-    return ports
-
-
-# Shared test payload for all tests
-TEST_PAYLOAD: Dict[str, Any] = {
-    "model": MODEL_NAME,
-    "messages": [
-        {
-            "role": "user",
-            "content": "In a quiet meadow tucked between rolling hills, a plump gray rabbit nibbled on clover beneath the shade of a gnarled oak tree. Its ears twitched at the faint rustle of leaves, but it remained calm, confident in the safety of its burrow just a few hops away. The late afternoon sun warmed its fur, and tiny dust motes danced in the golden light as bees hummed lazily nearby. Though the rabbit lived a simple life, every day was an adventure of scents, shadows, and snacks—an endless search for the tastiest patch of greens and the softest spot to nap.",
-        }
-    ],
-    "stream": True,
-    "max_tokens": 10,
-}
+TEST_PAYLOAD = build_test_payload(MODEL_NAME)
 SOAK_TEST_PAYLOAD: Dict[str, Any] = {
     "model": MODEL_NAME,
     "messages": [
@@ -338,33 +360,22 @@ def test_mocker_router(
     }
     mocker_args.update(mocker_args_override)
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=NUM_MOCKERS,
+    run_basic_router_test(
+        engine_process_cls=MockerProcess,
+        engine_args_name="mocker_args",
+        engine_args=mocker_args,
+        num_workers=NUM_MOCKERS,
+        single_gpu=False,
+        request=request,
         request_plane=request_plane,
-    ) as mockers:
-        # Start mocker instances with the new CLI interface
-        logger.info(f"Starting {NUM_MOCKERS} mocker instances")
-        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
-
-        # Get unique port for this test
-        frontend_port = get_unique_ports(
-            request, num_ports=1, request_plane=request_plane
-        )[0]
-
-        # Run basic router test (starts router internally and waits for workers to be ready)
-        _test_router_basic(
-            engine_workers=mockers,
-            block_size=BLOCK_SIZE,
-            request=request,
-            frontend_port=frontend_port,
-            test_payload=TEST_PAYLOAD,
-            num_requests=NUM_REQUESTS,
-            request_plane=request_plane,
-            router_mode=router_mode,
-            min_initial_workers=mockers.num_workers,
-        )
+        block_size=BLOCK_SIZE,
+        model_name=MODEL_NAME,
+        engine_process_kwargs={"num_mockers": NUM_MOCKERS},
+        test_payload=TEST_PAYLOAD,
+        num_requests=NUM_REQUESTS,
+        router_mode=router_mode,
+        min_initial_workers=NUM_MOCKERS,
+    )
 
 
 @pytest.mark.timeout(180)
@@ -387,27 +398,22 @@ def test_mocker_router_soak(
         "durable_kv_events": durable_kv_events,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=2,
+    run_basic_router_test(
+        engine_process_cls=MockerProcess,
+        engine_args_name="mocker_args",
+        engine_args=mocker_args,
+        num_workers=NUM_MOCKERS,
+        single_gpu=False,
+        request=request,
         request_plane=request_plane,
-    ) as mockers:
-        frontend_port = get_unique_ports(
-            request, num_ports=1, request_plane=request_plane
-        )[0]
-
-        _test_router_basic(
-            engine_workers=mockers,
-            block_size=BLOCK_SIZE,
-            request=request,
-            frontend_port=frontend_port,
-            test_payload=SOAK_TEST_PAYLOAD,
-            num_requests=1024,
-            request_plane=request_plane,
-            router_mode=router_mode,
-            min_initial_workers=mockers.num_workers,
-        )
+        block_size=BLOCK_SIZE,
+        model_name=MODEL_NAME,
+        engine_process_kwargs={"num_mockers": NUM_MOCKERS},
+        test_payload=SOAK_TEST_PAYLOAD,
+        num_requests=1024,
+        router_mode=router_mode,
+        min_initial_workers=NUM_MOCKERS,
+    )
 
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
@@ -452,9 +458,7 @@ def test_mocker_two_kv_router(
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
         # Get unique ports for this test (2 ports for two routers)
-        router_ports = get_unique_ports(
-            request, num_ports=2, store_backend=store_backend
-        )
+        router_ports = allocate_frontend_ports(request, 2)
 
         # Run two-router test (starts KV routers internally and manages their lifecycle)
         _test_router_two_routers(
@@ -469,12 +473,44 @@ def test_mocker_two_kv_router(
         )
 
 
+@pytest.mark.parametrize("store_backend", ["etcd", "file"])
+@pytest.mark.timeout(180)
+def test_mocker_session_affinity(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    file_storage_backend,
+    store_backend,
+):
+    """One frontend keeps a session pinned despite conflicting KV-prefix placement."""
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "durable_kv_events": False,
+    }
+
+    with MockerProcess(
+        request,
+        mocker_args=mocker_args,
+        num_mockers=NUM_MOCKERS,
+        store_backend=store_backend,
+    ) as mockers:
+        _test_session_affinity(
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            store_backend=store_backend,
+        )
+
+
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )  # Use NATS Core (local indexer)
-@pytest.mark.parametrize("overload_config", ROUTER_OVERLOAD_503_CASES)
+@pytest.mark.parametrize("overload_config", ROUTER_OVERLOAD_529_CASES)
 @pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
-def test_mocker_kv_router_overload_503(
+def test_mocker_kv_router_overload_529(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
@@ -482,9 +518,9 @@ def test_mocker_kv_router_overload_503(
     monkeypatch,
     overload_config,
 ):
-    """Test that KV router returns 503 when mocker workers are overloaded."""
+    """Test that KV router returns 529 when mocker workers are overloaded."""
     monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
-    logger.info("Starting mocker KV router overload test for 503 status")
+    logger.info("Starting mocker KV router overload test for 529 status")
     # Create mocker args dictionary with limited resources - use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": 0.01,
@@ -499,10 +535,10 @@ def test_mocker_kv_router_overload_503(
         logger.info(f"Mocker using endpoint: {mockers.endpoint}")
 
         # Get unique port for this test
-        frontend_port = get_unique_ports(request, num_ports=1)[0]
+        frontend_port = allocate_frontend_ports(request, 1)[0]
 
-        # Run overload 503 test
-        _test_router_overload_503(
+        # Run overload 529 test
+        _test_router_overload_529(
             engine_workers=mockers,
             block_size=4,  # Match the mocker's block size
             request=request,
@@ -532,7 +568,7 @@ def test_mocker_kv_router_threshold_none_disables_rejection(
         logger.info("Starting single mocker instance with limited resources")
         logger.info(f"Mocker using endpoint: {mockers.endpoint}")
 
-        frontend_port = get_unique_ports(request, num_ports=1)[0]
+        frontend_port = allocate_frontend_ports(request, 1)[0]
 
         _test_router_threshold_none_disables_rejection(
             engine_workers=mockers,
@@ -565,18 +601,20 @@ def test_kv_router_bindings(
         "durable_kv_events": durable_kv_events,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=NUM_MOCKERS,
-        request_plane=request_plane,
-    ) as mockers:
+    with (
+        MockerProcess(
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            request_plane=request_plane,
+        ) as mockers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
         # Start mocker instances
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
         # Get runtime and create endpoint
-        runtime = get_runtime(request_plane=request_plane)
         endpoint = runtime.endpoint(
             f"{mockers.namespace}.{mockers.component_name}.generate"
         )
@@ -633,9 +671,6 @@ def test_indexers_sync(
         f"durable_kv_events={durable_kv_events}, request_plane={request_plane}"
     )
 
-    # Use the dynamic-port fixture to avoid hardcoded localhost:4222/2379 in parallel runs.
-    nats_process, _etcd_process = runtime_services_dynamic_ports
-
     # Create mocker args dictionary
     # Use 2 DP ranks to test per-dp_rank event ID tracking and recovery
     mocker_args = {
@@ -645,40 +680,27 @@ def test_indexers_sync(
         "dp_size": 2,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=NUM_MOCKERS,
+    run_indexers_sync_test(
+        engine_process_cls=MockerProcess,
+        engine_args_name="mocker_args",
+        engine_args=mocker_args,
+        request=request,
+        runtime_services_dynamic_ports=runtime_services_dynamic_ports,
         store_backend=store_backend,
+        durable_kv_events=durable_kv_events,
         request_plane=request_plane,
-        zmq_kv_events=True,
-        zmq_replay=True,
-        standalone_indexer=True,
+        block_size=BLOCK_SIZE,
         model_name=MODEL_NAME,
-    ) as mockers:
-        # Start mocker instances (2 workers x 2 DP ranks = 4 independent event streams)
-        logger.info(f"Starting {NUM_MOCKERS} mocker instances with dp_size=2")
-        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
-
-        # Use the common test implementation (creates its own runtimes for each router)
-        # Note: Consumer verification is done inside _test_router_indexers_sync while routers are alive
-        # When using durable_kv_events=True, use JetStream mode for the router
-        _test_router_indexers_sync(
-            engine_workers=mockers,
-            block_size=BLOCK_SIZE,
-            model_name=MODEL_NAME,
-            num_workers=NUM_MOCKERS,
-            store_backend=store_backend,
-            request_plane=request_plane,
-            test_nats_interruption=not durable_kv_events,
-            nats_server=nats_process if not durable_kv_events else None,
-            durable_kv_events=durable_kv_events,
-            standalone_indexer_url=mockers.standalone_indexer_url,
-            standalone_indexer_b_url=mockers.standalone_indexer_b_url,
-            test_zmq_replay=True,
-        )
-
-        logger.info("Indexers sync test completed successfully")
+        num_workers=NUM_MOCKERS,
+        engine_process_kwargs={
+            "num_mockers": NUM_MOCKERS,
+            "store_backend": store_backend,
+            "raw_kv_events": True,
+            "zmq_replay": True,
+            "standalone_indexer": True,
+            "model_name": MODEL_NAME,
+        },
+    )
 
 
 @pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
@@ -705,7 +727,7 @@ def test_query_instance_id_returns_worker_and_tokens(
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
         # Get unique port for this test
-        frontend_port = get_unique_ports(request, num_ports=1)[0]
+        frontend_port = allocate_frontend_ports(request, 1)[0]
 
         # Run query_instance_id annotation test
         _test_router_query_instance_id(
@@ -720,28 +742,31 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events,zmq_kv_events,use_remote_indexer,router_predicted_ttl_secs",
+    "durable_kv_events,use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,event_plane",
     [
-        (True, True, False, False, None),  # JetStream mode with KV events
+        (True, True, False, False, None, None),  # JetStream mode with KV events
         (
             False,
             True,
             False,
             False,
+            None,
             None,
         ),  # NATS Core mode with local indexer (default)
-        (False, True, False, False, 5.0),  # NATS Core mode with local side indexer
-        (False, True, False, True, None),  # NATS Core mode with a served remote indexer
-        (False, True, False, True, 5.0),  # Remote indexer plus local side indexer
-        (False, False, False, False, None),  # Approximate mode (--no-kv-events)
+        (False, True, False, False, 5.0, None),  # NATS Core with local side indexer
+        (False, True, False, True, None, None),  # NATS Core with remote indexer
+        (False, True, False, True, 5.0, None),  # Remote plus local side indexer
+        (False, False, False, False, None, None),  # Approximate (--no-kv-events)
         (
             False,
             False,
             False,
             True,
             None,
+            None,
         ),  # Approximate mode with a singleton served remote indexer
-        (False, True, True, False, None),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
+        # Raw engine ZMQ → relay → ZMQ event plane, with no NATS service.
+        (False, True, True, False, None, "zmq"),
     ],
     ids=[
         "jetstream",
@@ -751,9 +776,9 @@ def test_query_instance_id_returns_worker_and_tokens(
         "nats_core_remote_predict_on_route",
         "no_kv_events",
         "no_kv_events_remote",
-        "zmq",
+        "zmq_nats_free",
     ],
-    indirect=["durable_kv_events"],
+    indirect=["durable_kv_events", "event_plane"],
 )
 def test_router_decisions(
     request,
@@ -762,9 +787,10 @@ def test_router_decisions(
     durable_kv_events,
     use_kv_events,
     request_plane,
-    zmq_kv_events,
+    raw_kv_events,
     use_remote_indexer,
     router_predicted_ttl_secs,
+    event_plane,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
@@ -775,14 +801,21 @@ def test_router_decisions(
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
       based on routing decisions with TTL-based expiration and pruning
     - Approximate mode with a singleton served remote indexer
+    - NATS-free ZMQ mode: raw engine and Dynamo event-plane hops both use ZMQ
     """
+    if event_plane == "zmq":
+        nats_process, _ = runtime_services_dynamic_ports
+        assert nats_process is None
+        assert "NATS_SERVER" not in os.environ
+
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        "Starting test router decisions: durable_kv_events=%s, use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s",
+        "Starting test router decisions: durable_kv_events=%s, use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, event_plane=%s",
         durable_kv_events,
         use_kv_events,
         use_remote_indexer,
         router_predicted_ttl_secs,
+        event_plane,
     )
 
     # Create mocker args dictionary with dp_size=4
@@ -794,18 +827,20 @@ def test_router_decisions(
         "durable_kv_events": durable_kv_events and use_kv_events,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=2,
-        request_plane=request_plane,
-        zmq_kv_events=zmq_kv_events,
-        standalone_indexer=zmq_kv_events,
-        model_name=MODEL_NAME,
-    ) as mockers:
-        logger.info(f"All mockers using endpoint: {mockers.endpoint}")
-
-        if use_remote_indexer:
+    process_kwargs = {
+        "num_mockers": NUM_MOCKERS,
+        "raw_kv_events": raw_kv_events,
+        "standalone_indexer": raw_kv_events,
+        "standalone_selector": raw_kv_events,
+        "model_name": MODEL_NAME,
+    }
+    if use_remote_indexer:
+        with MockerProcess(
+            request,
+            mocker_args=mocker_args,
+            request_plane=request_plane,
+            **process_kwargs,
+        ) as mockers:
             _test_remote_indexer_decisions(
                 mockers,
                 MODEL_NAME,
@@ -815,22 +850,27 @@ def test_router_decisions(
                 request_plane=request_plane,
                 router_predicted_ttl_secs=router_predicted_ttl_secs,
             )
-            return
+        return
 
-        runtime = get_runtime(request_plane=request_plane)
-        endpoint = runtime.endpoint(f"{mockers.namespace}.mocker.generate")
-
-        _test_router_decisions(
-            mockers,
-            endpoint,
-            MODEL_NAME,
-            request,
-            test_dp_rank=True,
-            use_kv_events=use_kv_events,
-            durable_kv_events=durable_kv_events,
-            standalone_indexer_url=mockers.standalone_indexer_url,
-            router_predicted_ttl_secs=router_predicted_ttl_secs,
-        )
+    run_router_decisions_test(
+        engine_process_cls=MockerProcess,
+        engine_args_name="mocker_args",
+        engine_args=mocker_args,
+        request=request,
+        request_plane=request_plane,
+        model_name=MODEL_NAME,
+        block_size=8,
+        component_name="mocker",
+        num_workers=NUM_MOCKERS,
+        single_gpu=False,
+        test_dp_rank=True,
+        engine_process_kwargs=process_kwargs,
+        test_kwargs={
+            "use_kv_events": use_kv_events,
+            "durable_kv_events": durable_kv_events,
+            "router_predicted_ttl_secs": router_predicted_ttl_secs,
+        },
+    )
 
 
 @pytest.mark.timeout(300)
@@ -852,26 +892,28 @@ def test_router_decisions_router_aic(
         "durable_kv_events": False,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=2,
+    run_router_decisions_test(
+        engine_process_cls=MockerProcess,
+        engine_args_name="mocker_args",
+        engine_args=mocker_args,
+        request=request,
         request_plane=request_plane,
         model_name=MODEL_NAME,
-    ) as mockers:
-        runtime = get_runtime(request_plane=request_plane)
-        endpoint = runtime.endpoint(f"{mockers.namespace}.mocker.generate")
-
-        _test_router_decisions(
-            mockers,
-            endpoint,
-            MODEL_NAME,
-            request,
-            test_dp_rank=True,
-            use_kv_events=True,
-            durable_kv_events=False,
-            router_aic_config=router_aic_config,
-        )
+        block_size=8,
+        component_name="mocker",
+        num_workers=NUM_MOCKERS,
+        single_gpu=False,
+        test_dp_rank=True,
+        engine_process_kwargs={
+            "num_mockers": NUM_MOCKERS,
+            "model_name": MODEL_NAME,
+        },
+        test_kwargs={
+            "use_kv_events": True,
+            "durable_kv_events": False,
+            "router_aic_config": router_aic_config,
+        },
+    )
 
 
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
@@ -901,10 +943,6 @@ def test_router_decisions_disagg(
         f"(registration_order={registration_order}, bootstrap={enable_disagg_bootstrap})"
     )
 
-    # Generate shared namespace for prefill and decode workers
-    namespace_suffix = generate_random_suffix()
-    shared_namespace = f"test-namespace-{namespace_suffix}"
-
     # Create mocker args - use NATS Core with local indexer (default mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
@@ -912,103 +950,90 @@ def test_router_decisions_disagg(
         # durable_kv_events defaults to False (NATS Core mode)
     }
 
-    with _launch_disagg_workers(
-        request,
-        shared_namespace,
-        registration_order,
-        prefill_mocker_args=mocker_args,
-        decode_mocker_args=mocker_args,
-        num_prefill_mockers=4,
-        num_decode_mockers=4,
-        enable_disagg_bootstrap=enable_disagg_bootstrap,
-    ) as (prefill_workers, decode_workers):
-        frontend_port = get_unique_ports(
-            request, num_ports=1, registration_order=registration_order
-        )[0]
-        _test_router_decisions_disagg(
-            prefill_workers=prefill_workers,
-            decode_workers=decode_workers,
-            block_size=BLOCK_SIZE,
-            request=request,
-            frontend_port=frontend_port,
-            test_payload=TEST_PAYLOAD,
-            request_plane="nats",
-            enable_bootstrap=enable_disagg_bootstrap,
-        )
+    run_disagg_router_decisions_test(
+        engine_process_cls=DisaggMockerProcess,
+        engine_args_name="mocker_args",
+        engine_args=mocker_args,
+        request=request,
+        request_plane="nats",
+        model_name=MODEL_NAME,
+        block_size=BLOCK_SIZE,
+        num_prefill_workers=4,
+        num_decode_workers=4,
+        worker_context_factory=lambda namespace: launch_disagg_workers(
+            request,
+            namespace,
+            registration_order,
+            prefill_mocker_args=mocker_args,
+            decode_mocker_args=mocker_args,
+            num_prefill_mockers=4,
+            num_decode_mockers=4,
+            enable_disagg_bootstrap=enable_disagg_bootstrap,
+        ),
+        test_payload=TEST_PAYLOAD,
+        test_kwargs={"enable_bootstrap": enable_disagg_bootstrap},
+    )
 
 
-@pytest.mark.timeout(180)
-@pytest.mark.parametrize("discovery_backend", ["etcd"], indirect=True)
-@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)
-def test_disagg_background_prefill_sticky(
+)  # Use NATS Core (local indexer)
+@pytest.mark.parametrize("overload_case", ROUTER_DISAGG_OVERLOAD_529_CASES)
+@pytest.mark.timeout(120)
+def test_mocker_disagg_router_overload_529(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
-    discovery_backend,
-    request_plane,
     durable_kv_events,
+    monkeypatch,
+    overload_case,
 ):
-    """Sticky session affinity pins disagg background prefill on TCP/NATS."""
-    _ = (runtime_services_dynamic_ports, predownload_tokenizers, durable_kv_events)
+    """Disaggregated load shedding: clients get 529 when the gated pool is busy.
+
+    - prefill-tokens: a low ``--active-prefill-tokens-threshold`` must gate the
+      PREFILL pool. This was previously a silent no-op in disagg (the
+      overloaded set landed on the decode pool and the prefill router never saw
+      it), so this case is the regression guard for that fix.
+    - decode-blocks: a low ``--active-decode-blocks-threshold`` must gate the
+      DECODE pool (the path that already worked).
+    """
+    monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
+    logger.info("Starting disagg mocker router overload 529 test")
 
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
-    prefill_mocker_args = {
-        "speedup_ratio": SPEEDUP_RATIO,
-        "block_size": BLOCK_SIZE,
-        "dp_size": 2,
-    }
-    decode_mocker_args = {
-        "speedup_ratio": SPEEDUP_RATIO,
-        "block_size": BLOCK_SIZE,
-    }
 
-    frontend_port = get_unique_ports(
+    # Per-stage args: limited blocks, with only the gated stage slow (speed
+    # isolation — see _SLOW_SPEEDUP/_FAST_SPEEDUP).
+    def _stage_args(speedup: float) -> Dict[str, Any]:
+        return {
+            "speedup_ratio": speedup,
+            "block_size": 4,
+            "num_gpu_blocks": 64,
+            "durable_kv_events": durable_kv_events,
+        }
+
+    with launch_disagg_workers(
         request,
-        num_ports=1,
-        store_backend=discovery_backend,
-        request_plane=request_plane,
-    )[0]
-    with FrontendRouterProcess(
-        request,
-        BLOCK_SIZE,
-        frontend_port,
         shared_namespace,
-        discovery_backend,
-        enforce_disagg=True,
-        request_plane=request_plane,
-        event_plane="nats",
-        durable_kv_events=False,
-    ):
-        time.sleep(1.0)
-        with _launch_disagg_workers(
-            request,
-            shared_namespace,
-            "prefill_first",
-            prefill_mocker_args=prefill_mocker_args,
-            decode_mocker_args=decode_mocker_args,
-            num_prefill_mockers=3,
-            num_decode_mockers=2,
-            enable_disagg_bootstrap=True,
-            store_backend=discovery_backend,
-            request_plane=request_plane,
-            event_plane="nats",
-        ) as (prefill_workers, decode_workers):
-            _test_disagg_background_prefill_sticky_routing(
-                prefill_workers=prefill_workers,
-                decode_workers=decode_workers,
-                block_size=BLOCK_SIZE,
-                request=request,
-                frontend_port=frontend_port,
-                model_name=MODEL_NAME,
-                store_backend=discovery_backend,
-                request_plane=request_plane,
-                event_plane="nats",
-                frontend_already_running=True,
-            )
+        registration_order="prefill_first",
+        prefill_mocker_args=_stage_args(overload_case["prefill_speedup"]),
+        decode_mocker_args=_stage_args(overload_case["decode_speedup"]),
+        num_prefill_mockers=overload_case["num_prefill"],
+        num_decode_mockers=overload_case["num_decode"],
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        frontend_port = allocate_frontend_ports(request, 1)[0]
+        _test_disagg_router_overload_529(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=4,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=TEST_PAYLOAD,
+            max_tokens=overload_case["max_tokens"],
+            **overload_case["thresholds"],
+        )
 
 
 @pytest.mark.timeout(180)
@@ -1084,7 +1109,7 @@ def test_disagg_topology_required_prefill_pin_match_and_mismatch(
                 )
                 logger.info("Decode zone-a worker ids: %s", decode_ids)
 
-                frontend_port = get_unique_ports(request, num_ports=1)[0]
+                frontend_port = allocate_frontend_ports(request, 1)[0]
                 _test_disagg_topology_required_prefill_pin_match_and_mismatch(
                     decode_workers=decode_workers,
                     block_size=BLOCK_SIZE,
@@ -1131,9 +1156,7 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
     }
 
     def run_case(prefill_workers, decode_workers):
-        frontend_port = get_unique_ports(
-            request, num_ports=1, registration_order=registration_order
-        )[0]
+        frontend_port = allocate_frontend_ports(request, 1)[0]
         _test_router_decisions_disagg_round_robin_prefill_dp_rank(
             prefill_workers=prefill_workers,
             decode_workers=decode_workers,
@@ -1145,7 +1168,7 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
             request_plane="nats",
         )
 
-    with _launch_disagg_workers(
+    with launch_disagg_workers(
         request,
         shared_namespace,
         registration_order,
@@ -1168,48 +1191,34 @@ def test_router_decisions_disagg_router_aic(
     logger.info("Starting disaggregated router prefix reuse test with router-side AIC")
 
     router_aic_config = _require_router_aic()
-    namespace_suffix = generate_random_suffix()
-    shared_namespace = f"test-namespace-{namespace_suffix}"
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
     }
 
-    with DisaggMockerProcess(
-        request,
-        namespace=shared_namespace,
-        worker_type="prefill",
-        mocker_args=mocker_args,
-        num_mockers=4,
+    run_disagg_router_decisions_test(
+        engine_process_cls=DisaggMockerProcess,
+        engine_args_name="mocker_args",
+        engine_args=mocker_args,
+        request=request,
         request_plane="nats",
-        enable_bootstrap=False,
-    ) as prefill_workers:
-        logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
-
-        with DisaggMockerProcess(
+        model_name=MODEL_NAME,
+        block_size=BLOCK_SIZE,
+        num_prefill_workers=4,
+        num_decode_workers=4,
+        worker_context_factory=lambda namespace: launch_disagg_workers(
             request,
-            namespace=shared_namespace,
-            worker_type="decode",
-            mocker_args=mocker_args,
-            num_mockers=4,
-            request_plane="nats",
-        ) as decode_workers:
-            logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
-
-            frontend_port = get_unique_ports(
-                request, num_ports=1, registration_order="prefill_first"
-            )[0]
-
-            _test_router_decisions_disagg(
-                prefill_workers=prefill_workers,
-                decode_workers=decode_workers,
-                block_size=BLOCK_SIZE,
-                request=request,
-                frontend_port=frontend_port,
-                test_payload=TEST_PAYLOAD,
-                request_plane="nats",
-                router_aic_config=router_aic_config,
-            )
+            namespace,
+            registration_order="prefill_first",
+            prefill_mocker_args=mocker_args,
+            decode_mocker_args=mocker_args,
+            num_prefill_mockers=4,
+            num_decode_mockers=4,
+            enable_disagg_bootstrap=False,
+        ),
+        test_payload=TEST_PAYLOAD,
+        test_kwargs={"router_aic_config": router_aic_config},
+    )
 
 
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
@@ -1229,7 +1238,7 @@ def test_busy_threshold_endpoint(
     TODO: This doesn't actually test any e2e rejection for now. A proper test would:
     1. Set a very low threshold
     2. Send enough requests to exceed the threshold
-    3. Verify that subsequent requests are rejected with 503
+    3. Verify that subsequent requests are rejected with 529
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
     """
@@ -1254,9 +1263,7 @@ def test_busy_threshold_endpoint(
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
-        frontend_port = get_unique_ports(
-            request, num_ports=1, request_plane=request_plane
-        )[0]
+        frontend_port = allocate_frontend_ports(request, 1)[0]
 
         _test_busy_threshold_endpoint(
             engine_workers=mockers,
@@ -1278,7 +1285,8 @@ def test_disagg_direct_mode_epp_headers(
 
     This test verifies the EPP-driven routing path used in the GAIE deploy recipe:
       - Frontend runs with --router-mode direct (no autonomous worker selection)
-      - Worker IDs are supplied via x-worker-instance-id / x-prefill-instance-id headers
+      - Worker IDs are supplied via x-dynamo-worker-instance-id /
+        x-dynamo-prefill-instance-id headers
 
     Validates:
       1. Requests with explicit headers succeed and report correct worker IDs
@@ -1294,36 +1302,25 @@ def test_disagg_direct_mode_epp_headers(
         "block_size": BLOCK_SIZE,
     }
 
-    with DisaggMockerProcess(
+    with launch_disagg_workers(
         request,
-        namespace=shared_namespace,
-        worker_type="prefill",
-        mocker_args=mocker_args,
-        num_mockers=2,
-        request_plane="nats",
-    ) as prefill_workers:
-        logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
-
-        with DisaggMockerProcess(
-            request,
-            namespace=shared_namespace,
-            worker_type="decode",
-            mocker_args=mocker_args,
-            num_mockers=2,
+        shared_namespace,
+        registration_order="prefill_first",
+        prefill_mocker_args=mocker_args,
+        decode_mocker_args=mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        frontend_port = allocate_frontend_ports(request, 1)[0]
+        _test_disagg_direct_mode(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=TEST_PAYLOAD,
             request_plane="nats",
-        ) as decode_workers:
-            logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
-
-            frontend_port = get_unique_ports(request, num_ports=1)[0]
-
-            _test_disagg_direct_mode(
-                prefill_workers=prefill_workers,
-                decode_workers=decode_workers,
-                request=request,
-                frontend_port=frontend_port,
-                test_payload=TEST_PAYLOAD,
-                request_plane="nats",
-            )
+        )
 
 
 def test_router_per_worker_config(
@@ -1342,7 +1339,7 @@ def test_router_per_worker_config(
     logger.info("Starting per-worker router config override test")
 
     with CounterWorkerProcess(request) as workers:
-        frontend_port = get_unique_ports(request, num_ports=1)[0]
+        frontend_port = allocate_frontend_ports(request, 1)[0]
         _test_router_override_router_config(
             endpoint=workers.endpoint_path,
             engine_workers=workers,

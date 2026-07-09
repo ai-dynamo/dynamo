@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{KvbmSequenceHashProvider, tinylfu::TinyLFUTracker};
+use crate::{
+    KvbmSequenceHashProvider,
+    events::EventEmissionPolicy,
+    tinylfu::{FrequencyTracker, TinyLFUTracker},
+};
 
 use super::attachments::AttachmentError;
 use super::*;
@@ -9,6 +13,7 @@ use super::*;
 use crate::testing::{self, MetadataA, MetadataB, MetadataC, TestMeta};
 use crate::{BlockManager, blocks::BlockDuplicationPolicy};
 
+use parking_lot::Mutex;
 use std::any::TypeId;
 use std::sync::Arc;
 
@@ -17,6 +22,43 @@ type TestMetadata = TestMeta;
 /// Helper to create a token block for testing (auto block_size).
 fn create_test_token_block(tokens: &[u32]) -> dynamo_tokens::TokenBlock {
     testing::create_test_token_block(tokens, tokens.len() as u32)
+}
+
+fn sequence_hash_at(position: u64, current: u64) -> SequenceHash {
+    SequenceHash::new(current, position.checked_sub(1), position)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistrationHook {
+    Event(u128),
+    Touch(u128),
+}
+
+struct RecordingEventPolicy {
+    hooks: Arc<Mutex<Vec<RegistrationHook>>>,
+}
+
+impl EventEmissionPolicy for RecordingEventPolicy {
+    fn should_emit(&self, seq_hash: SequenceHash) -> bool {
+        self.hooks
+            .lock()
+            .push(RegistrationHook::Event(seq_hash.as_u128()));
+        true
+    }
+}
+
+struct RecordingFrequencyTracker {
+    hooks: Arc<Mutex<Vec<RegistrationHook>>>,
+}
+
+impl FrequencyTracker<u128> for RecordingFrequencyTracker {
+    fn touch(&self, key: u128) {
+        self.hooks.lock().push(RegistrationHook::Touch(key));
+    }
+
+    fn count(&self, _key: u128) -> u32 {
+        0
+    }
 }
 
 /// Helper to construct a manager seeded with a registry that the test owns.
@@ -44,6 +86,111 @@ fn register_one<T: crate::blocks::BlockMetadata + Sync>(
     let tb = create_test_token_block(tokens);
     let complete = mutable.complete(&tb).expect("complete");
     manager.register_block(complete)
+}
+
+#[test]
+fn test_batch_registration_preserves_order_and_reuses_duplicate_handle() {
+    let registry = BlockRegistry::new();
+    let first = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
+    let second = create_test_token_block(&[5, 6, 7, 8]).kvbm_sequence_hash();
+    let handles = registry.register_sequence_hashes([first, second, first]);
+
+    assert_eq!(
+        handles
+            .iter()
+            .map(BlockRegistrationHandle::seq_hash)
+            .collect::<Vec<_>>(),
+        vec![first, second, first]
+    );
+    handles[0].attach_unique(17_u64).unwrap();
+    assert_eq!(
+        handles[2].get::<u64>().with_unique(|value| *value),
+        Some(17)
+    );
+}
+
+#[test]
+fn test_batch_registration_monotonic_positions_groups_adjacent_equals() {
+    let registry = BlockRegistry::new();
+    let hashes = [
+        sequence_hash_at(0, 10),
+        sequence_hash_at(1, 20),
+        sequence_hash_at(1, 21),
+        sequence_hash_at(2, 30),
+    ];
+
+    let handles = registry.register_sequence_hashes(hashes);
+
+    assert_eq!(
+        handles
+            .iter()
+            .map(BlockRegistrationHandle::seq_hash)
+            .collect::<Vec<_>>(),
+        hashes
+    );
+    assert_eq!(registry.registered_count(), hashes.len());
+}
+
+#[test]
+fn test_batch_registration_out_of_order_reuses_existing_and_duplicate_handles() {
+    let registry = BlockRegistry::new();
+    let first = sequence_hash_at(0, 10);
+    let second = sequence_hash_at(1, 20);
+    let third = sequence_hash_at(2, 30);
+    let existing = registry.register_sequence_hash(second);
+
+    let hashes = [third, first, second, third];
+    let handles = registry.register_sequence_hashes(hashes);
+
+    assert_eq!(
+        handles
+            .iter()
+            .map(BlockRegistrationHandle::seq_hash)
+            .collect::<Vec<_>>(),
+        hashes
+    );
+    assert!(Arc::ptr_eq(&handles[2].inner, &existing.inner));
+    assert!(Arc::ptr_eq(&handles[0].inner, &handles[3].inner));
+    assert_eq!(registry.registered_count(), 3);
+}
+
+#[test]
+fn test_batch_registration_runs_observers_in_original_input_order() {
+    let hooks = Arc::new(Mutex::new(Vec::new()));
+    let event_manager = Arc::new(
+        EventsManager::builder()
+            .policy(Arc::new(RecordingEventPolicy {
+                hooks: hooks.clone(),
+            }))
+            .build(),
+    );
+    let tracker = Arc::new(RecordingFrequencyTracker {
+        hooks: hooks.clone(),
+    });
+    let registry = BlockRegistry::builder()
+        .event_manager(event_manager)
+        .frequency_tracker(tracker)
+        .build();
+
+    let existing_hash = sequence_hash_at(0, 10);
+    let later_hash = sequence_hash_at(2, 30);
+    let middle_hash = sequence_hash_at(1, 20);
+    let _existing = registry.register_sequence_hash(existing_hash);
+    hooks.lock().clear();
+
+    let handles =
+        registry.register_sequence_hashes([later_hash, existing_hash, middle_hash, later_hash]);
+
+    assert_eq!(
+        *hooks.lock(),
+        vec![
+            RegistrationHook::Event(later_hash.as_u128()),
+            RegistrationHook::Touch(later_hash.as_u128()),
+            RegistrationHook::Event(middle_hash.as_u128()),
+            RegistrationHook::Touch(middle_hash.as_u128()),
+        ]
+    );
+    assert!(Arc::ptr_eq(&handles[0].inner, &handles[3].inner));
 }
 
 #[test]
@@ -489,8 +636,6 @@ fn test_touch_no_callbacks_is_noop() {
 
 #[test]
 fn test_touch_callback_receives_correct_hash() {
-    use parking_lot::Mutex;
-
     let registry = BlockRegistry::new();
     let seq_hash = create_test_token_block(&[13, 14, 15, 16]).kvbm_sequence_hash();
     let handle = registry.register_sequence_hash(seq_hash);

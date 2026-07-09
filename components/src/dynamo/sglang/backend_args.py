@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# TODO(DIS-2240): Remove deprecated multimodal flags across engine
+
 """Dynamo SGLang wrapper configuration ArgGroup."""
 
 import argparse
+import logging
+import warnings
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -15,6 +19,13 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 from dynamo.common.constants import EmbeddingTransferMode
 
 from . import __version__
+
+logger = logging.getLogger(__name__)
+
+
+def _warn_deprecated(message: str) -> None:
+    logger.warning(message)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
 class DynamoSGLangArgGroup(ArgGroup):
@@ -49,14 +60,41 @@ class DynamoSGLangArgGroup(ArgGroup):
             flag_name="--multimodal-encode-worker",
             env_var="DYN_SGL_MULTIMODAL_ENCODE_WORKER",
             default=False,
-            help="Run as multimodal encode worker component for processing images/videos.",
+            help="DEPRECATED: use --enable-multimodal --disaggregation-mode=encode.",
         )
         add_negatable_bool_argument(
             g,
             flag_name="--multimodal-worker",
             env_var="DYN_SGL_MULTIMODAL_WORKER",
             default=False,
-            help="Run as multimodal worker component for LLM inference with multimodal data.",
+            help=(
+                "DEPRECATED: use --enable-multimodal --dedicated-mm-encoder "
+                "with --disaggregation-mode=pd/prefill/decode."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-multimodal",
+            env_var="DYN_SGL_ENABLE_MULTIMODAL",
+            default=False,
+            help=(
+                "Enable multimodal processing. This is a capability flag for "
+                "raw multimodal inputs; use --dedicated-mm-encoder when this "
+                "worker is part of the internal encode-worker topology."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--dedicated-mm-encoder",
+            env_var="DYN_SGL_DEDICATED_MM_ENCODER",
+            default=False,
+            help=(
+                "Select the internal SGLang topology with a dedicated "
+                "multimodal encode worker. Required on PD/P/D workers that "
+                "consume or forward precomputed embeddings from that encode "
+                "worker. Do not use it for native P/D workers that receive "
+                "raw media metadata."
+            ),
         )
 
         add_argument(
@@ -134,6 +172,8 @@ class DynamoSGLangConfig(ConfigBase):
     use_sglang_tokenizer: bool
     multimodal_encode_worker: bool
     multimodal_worker: bool
+    enable_multimodal: bool = False
+    dedicated_mm_encoder: bool = False
     embedding_transfer_mode: EmbeddingTransferMode
     embedding_worker: bool
     image_diffusion_worker: bool
@@ -157,13 +197,45 @@ class DynamoSGLangConfig(ConfigBase):
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."
             )
 
+        self.validate_multimodal_topology()
+
+        if self.multimodal_encode_worker:
+            _warn_deprecated(
+                "--multimodal-encode-worker is deprecated; use "
+                "--enable-multimodal --disaggregation-mode=encode. "
+                "This release will map the legacy flag to the new arguments."
+            )
+            self.enable_multimodal = True
+        if self.multimodal_worker:
+            _warn_deprecated(
+                "--multimodal-worker is deprecated; use --enable-multimodal "
+                "--dedicated-mm-encoder with --disaggregation-mode=pd, "
+                "--disaggregation-mode=prefill, or --disaggregation-mode=decode. "
+                "This release will map the legacy flag to the new arguments."
+            )
+            self.enable_multimodal = True
+
+        self.validate_dedicated_mm_encoder()
+
+    def validate_dedicated_mm_encoder(self) -> None:
+        if self.dedicated_mm_encoder and not self.enable_multimodal:
+            raise ValueError(
+                "--dedicated-mm-encoder requires --enable-multimodal. The "
+                "dedicated encoder flag selects the internal encode-worker "
+                "topology; it is not a standalone multimodal capability switch."
+            )
+
+    def validate_multimodal_topology(self) -> None:
         if self.frontend_decoding and (
-            self.multimodal_encode_worker or self.multimodal_worker
+            self.multimodal_encode_worker
+            or self.multimodal_worker
+            or self.dedicated_mm_encoder
         ):
             raise ValueError(
                 "--frontend-decoding is incompatible with the EPD multimodal topology "
-                "(--multimodal-encode-worker / --multimodal-worker). The encode worker "
-                "needs URLs to run MMEncoder, while --frontend-decoding ships pre-decoded "
-                "pixels. Use --frontend-decoding on the default aggregated decode worker "
-                "(no --multimodal-* flag) instead."
+                "(--dedicated-mm-encoder / --multimodal-encode-worker / "
+                "--multimodal-worker). The encode worker needs URLs to run "
+                "MMEncoder, while --frontend-decoding ships pre-decoded pixels. "
+                "Use --frontend-decoding on a native worker that does not use "
+                "the dedicated encode-worker topology instead."
             )

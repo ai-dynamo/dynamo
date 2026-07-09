@@ -333,9 +333,11 @@ type KVRouterSpec struct {
 
 // FeaturesSpec controls optional Dynamo platform features in the generated deployment.
 type FeaturesSpec struct {
-	// Planner is the raw SLA planner configuration passed to the planner service.
+	// Planner contains the raw Planner configuration passed to the Planner service.
 	// Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
-	// Go treats this as opaque bytes; the Planner service validates it at startup.
+	// See https://docs.dynamo.nvidia.com/dynamo/components/planner/planner-guide#plannerconfig-reference.
+	// DGDR passes this object through without field-level validation; the Planner
+	// service validates it at startup.
 	// The presence of this field (non-null) enables the planner in the generated DGD.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -445,7 +447,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (planner image).
-	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0".
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".
 	// For Dynamo < 1.1.0, use dynamo-frontend.
 	// +optional
 	Image string `json:"image,omitempty"`
@@ -491,8 +493,9 @@ type DynamoGraphDeploymentRequestSpec struct {
 	AutoApply *bool `json:"autoApply,omitempty"`
 }
 
-// ParetoConfig represents a single Pareto-optimal deployment configuration
-// discovered during profiling.
+// ParetoConfig is retained for compatibility with status objects produced by
+// older profiler releases.
+// Deprecated: The profiler no longer generates Pareto configurations.
 type ParetoConfig struct {
 	// Config is the full deployment configuration for this Pareto point.
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -502,8 +505,8 @@ type ParetoConfig struct {
 
 // ProfilingResultsStatus contains the output of the profiling process.
 type ProfilingResultsStatus struct {
-	// Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.
-	// Each entry represents a different cost/performance trade-off.
+	// Pareto is retained for compatibility with existing status objects.
+	// Deprecated: The controller no longer populates this field.
 	// +optional
 	Pareto []ParetoConfig `json:"pareto,omitempty"`
 
@@ -553,8 +556,8 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
-	// ProfilingResults contains the output of the profiling process including
-	// Pareto-optimal configurations and the selected deployment configuration.
+	// ProfilingResults contains the selected deployment configuration produced by profiling.
+	// Deprecated compatibility fields may remain on objects created by older releases.
 	// +optional
 	ProfilingResults *ProfilingResultsStatus `json:"profilingResults,omitempty"`
 

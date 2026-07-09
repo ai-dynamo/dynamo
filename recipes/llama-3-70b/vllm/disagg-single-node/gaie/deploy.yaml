@@ -60,12 +60,10 @@ spec:
             value: "128"
           - name: DYN_MODEL_NAME
             value: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
-          - name: DYN_ENFORCE_DISAGG
-            value: "true"
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
   - name: VllmPrefillWorker
     type: prefill
     replicas: 2
@@ -106,7 +104,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           resources:
             limits:
               nvidia.com/gpu: "2"
@@ -125,7 +123,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
@@ -173,7 +171,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           resources:
             limits:
               nvidia.com/gpu: "4"
@@ -192,7 +190,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu

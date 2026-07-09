@@ -2,25 +2,43 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::connector::Connector;
+use crate::runtime::Runtime;
 use etcd_client::{LeaseKeepAliveStream, LeaseKeeper};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// Create an etcd lease with the given TTL, attach it to the provided cancellation token,
+/// Create an etcd lease with the given TTL, tie its lifetime to the [`Runtime`],
 /// spawn a keep-alive task, and return the lease id (u64).
 ///
-/// Note: this function spawns a background task that maintains the lease until the token is
-/// cancelled or an unrecoverable error occurs.
+/// Note: this function spawns a background task that maintains the lease until the runtime is
+/// shut down or an unrecoverable error occurs. On an unrecoverable error the runtime is shut
+/// down, honoring the contract that a lost lease shuts the worker down.
 pub async fn create_lease(
     connector: Arc<Connector>,
     ttl: u64,
-    token: CancellationToken,
+    runtime: Runtime,
 ) -> anyhow::Result<u64> {
+    let token = runtime.primary_token();
+    if token.is_cancelled() {
+        anyhow::bail!("lease creation cancelled");
+    }
+
     let mut lease_client = connector.get_client().lease_client();
     let lease = lease_client.grant(ttl as i64, None).await?;
 
     let id = lease.id() as u64;
+    if token.is_cancelled() {
+        if let Err(e) = lease_client.revoke(id as i64).await {
+            tracing::warn!(
+                lease_id = id,
+                error = %e,
+                "Failed to revoke lease after cancellation during creation"
+            );
+        }
+        anyhow::bail!("lease creation cancelled");
+    }
+
     let ttl = lease.ttl() as u64;
     let child = token.child_token();
 
@@ -32,7 +50,9 @@ pub async fn create_lease(
                     error = %e,
                     "Unable to maintain lease. Check etcd server status"
                 );
-                token.cancel();
+                // Phased shutdown (endpoint drain -> backend teardown), not a
+                // bare primary-token cancel, so teardown is ordered.
+                runtime.shutdown();
             }
         }
     });
@@ -187,5 +207,46 @@ async fn keep_alive_with_stream(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lease-loss teardown path (`runtime.shutdown()`) must be phased:
+    /// Phase 1 cancels the endpoint token promptly, but Phase 3 (primary token
+    /// + backend teardown) waits for outstanding graceful tasks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lease_loss_shutdown_is_phased() {
+        let runtime = Runtime::from_current().unwrap();
+
+        // Stands in for a serving endpoint; Phase 1 cancels the endpoint
+        // shutdown token, cascading to this child.
+        let endpoint_token = runtime.child_token();
+        let primary_token = runtime.primary_token();
+
+        // Hold a graceful task so Phase 2 cannot advance to Phase 3 yet.
+        let guard = runtime.graceful_shutdown_tracker().register_task();
+
+        runtime.shutdown();
+
+        // Phase 1 cancels the endpoint token promptly.
+        tokio::time::timeout(Duration::from_secs(5), endpoint_token.cancelled())
+            .await
+            .expect("Phase 1 must cancel the endpoint token on lease loss");
+
+        // While the graceful task is outstanding, Phase 3 must not have torn
+        // down the primary token. A bare-cancel regression fails this assert.
+        assert!(
+            !primary_token.is_cancelled(),
+            "primary token must not be cancelled while a graceful task is outstanding"
+        );
+
+        // Releasing the task lets Phase 3 proceed and cancel the primary token.
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(5), primary_token.cancelled())
+            .await
+            .expect("Phase 3 must cancel the primary token once graceful tasks complete");
     }
 }

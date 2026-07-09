@@ -16,8 +16,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, compute_seq_hash_for_block,
+    BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, compute_block_hash_for_seq,
+    compute_seq_hash_for_block,
 };
 use dynamo_kv_router::services::indexer::registry::{IndexerKey, WorkerRegistry};
 use dynamo_kv_router::services::indexer::server::{AppState, create_router};
@@ -163,13 +164,17 @@ async fn spawn_indexer_http(
 fn make_app_state(registry: Arc<WorkerRegistry>) -> Arc<AppState> {
     Arc::new(AppState {
         registry,
+        access_log_sink: None,
         prom_registry: prometheus::Registry::new(),
     })
 }
 
 #[cfg(not(feature = "metrics"))]
 fn make_app_state(registry: Arc<WorkerRegistry>) -> Arc<AppState> {
-    Arc::new(AppState { registry })
+    Arc::new(AppState {
+        registry,
+        access_log_sink: None,
+    })
 }
 
 /// `/query_by_hash` against a populated registry must surface both the legacy
@@ -252,6 +257,124 @@ async fn query_by_hash_returns_per_instance_tier_breakdown() {
     );
     assert_eq!(inst8["longest_matched"], (2 * BLOCK_SIZE) as u64);
 
+    let null_salt_resp = client
+        .post(format!("{base_url}/query_by_hash"))
+        .json(&json!({
+            "block_hashes": [11_i64, 12, 13],
+            "model_name": MODEL,
+            "tenant_id": TENANT,
+            "cache_salt": null,
+        }))
+        .send()
+        .await
+        .expect("POST /query_by_hash with null cache_salt");
+    assert_eq!(null_salt_resp.status(), reqwest::StatusCode::OK);
+
+    cancel.cancel();
+    task.await.expect("server task join");
+}
+
+/// `/query` owns token hashing, so equal tokens under different cache salts must match only the
+/// worker whose stored blocks used the same salt.
+#[tokio::test]
+async fn query_isolates_cache_salts() {
+    const BLOCK_SIZE: u32 = 4;
+    const MODEL: &str = "test-model";
+    const TENANT: &str = "default";
+    let tokens = vec![1_u32, 2, 3, 4, 5, 6, 7, 8];
+
+    let hashes_a = compute_block_hash_for_seq(
+        &tokens,
+        BLOCK_SIZE,
+        BlockHashOptions {
+            cache_namespace: Some("tenant-a"),
+            ..Default::default()
+        },
+    );
+    let hashes_b = compute_block_hash_for_seq(
+        &tokens,
+        BLOCK_SIZE,
+        BlockHashOptions {
+            cache_namespace: Some("tenant-b"),
+            ..Default::default()
+        },
+    );
+    let events = vec![
+        store_event(
+            7,
+            0,
+            1,
+            &[],
+            &hashes_a.iter().map(|hash| hash.0).collect::<Vec<_>>(),
+            StorageTier::Device,
+        ),
+        store_event(
+            8,
+            0,
+            1,
+            &[],
+            &hashes_b.iter().map(|hash| hash.0).collect::<Vec<_>>(),
+            StorageTier::Device,
+        ),
+    ];
+    let registry = registry_with_events(MODEL, TENANT, BLOCK_SIZE, events).await;
+    let state = make_app_state(registry);
+    let (base_url, cancel, task) = spawn_indexer_http(state).await;
+    let client = reqwest::Client::new();
+
+    for (salt, expected_worker, other_worker) in [("tenant-a", "7", "8"), ("tenant-b", "8", "7")] {
+        let resp = client
+            .post(format!("{base_url}/query"))
+            .json(&json!({
+                "token_ids": tokens.clone(),
+                "model_name": MODEL,
+                "tenant_id": TENANT,
+                "cache_salt": salt,
+            }))
+            .send()
+            .await
+            .expect("POST /query with cache_salt");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("parse /query body");
+        assert_eq!(body["scores"][expected_worker]["0"], tokens.len() as u64);
+        assert!(body["scores"].get(other_worker).is_none());
+    }
+
+    cancel.cancel();
+    task.await.expect("server task join");
+}
+
+/// `/query_by_hash` cannot apply a cache salt after token hashes have already been produced.
+#[tokio::test]
+async fn query_by_hash_rejects_cache_salt() {
+    const MODEL: &str = "test-model";
+    const TENANT: &str = "default";
+    let registry = registry_with_events(MODEL, TENANT, 4, Vec::new()).await;
+    let state = make_app_state(registry);
+    let (base_url, cancel, task) = spawn_indexer_http(state).await;
+    let client = reqwest::Client::new();
+
+    for cache_salt in ["tenant-a", ""] {
+        let resp = client
+            .post(format!("{base_url}/query_by_hash"))
+            .json(&json!({
+                "block_hashes": [11_i64, 12],
+                "model_name": MODEL,
+                "tenant_id": TENANT,
+                "cache_salt": cache_salt,
+            }))
+            .send()
+            .await
+            .expect("POST /query_by_hash with cache_salt");
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = resp.json().await.expect("parse rejection body");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("block_hashes must already include"))
+        );
+    }
+
     cancel.cancel();
     task.await.expect("server task join");
 }
@@ -290,20 +413,53 @@ async fn query_returns_404_for_unknown_model() {
     task.await.expect("server task join");
 }
 
-/// Smoke test that the axum router is wired correctly end-to-end and
-/// reports `/health` 200. Catches misuse of feature flags / route gates.
+#[cfg(feature = "metrics")]
 #[tokio::test]
-async fn health_returns_ok() {
-    let registry = Arc::new(WorkerRegistry::new(1));
-    let state = make_app_state(registry);
-    let (base_url, cancel, task) = spawn_indexer_http(state).await;
+async fn duplicate_store_warning_is_exported() {
+    const BLOCK_SIZE: u32 = 4;
+    const MODEL: &str = "test-model";
+    const TENANT: &str = "default";
 
-    let resp = reqwest::Client::new()
-        .get(format!("{base_url}/health"))
+    let state = Arc::new(AppState::new(4).expect("create app state"));
+    state.registry.signal_ready();
+
+    let key = IndexerKey {
+        model_name: MODEL.to_string(),
+        tenant_id: TENANT.to_string(),
+    };
+    let indexer = state
+        .registry
+        .get_or_create_indexer(key.clone(), BLOCK_SIZE);
+    indexer
+        .apply_event_routed(store_event(7, 0, 1, &[], &[11, 12], StorageTier::Device))
+        .await;
+    indexer
+        .apply_event_routed(store_event(7, 0, 2, &[], &[11, 12], StorageTier::Device))
+        .await;
+
+    let entry = state
+        .registry
+        .get_indexer(&key)
+        .expect("indexer should exist");
+    drop(entry.indexer.dump_events().await.expect("dump events"));
+    drop(entry);
+
+    let (base_url, cancel, task) = spawn_indexer_http(state).await;
+    let body = reqwest::Client::new()
+        .get(format!("{base_url}/metrics"))
         .send()
         .await
-        .expect("GET /health");
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        .expect("GET /metrics")
+        .text()
+        .await
+        .expect("read metrics body");
+
+    assert!(
+        body.lines().any(|line| {
+            line == "dynamo_kvrouter_kv_cache_event_warnings{warning_kind=\"duplicate_store\"} 1"
+        }),
+        "duplicate-store warning metric missing from /metrics:\n{body}"
+    );
 
     cancel.cancel();
     task.await.expect("server task join");
@@ -342,6 +498,7 @@ fn raw_block_stored(
         block_size,
         medium: Some(medium.to_string()),
         lora_name: None,
+        cache_namespace: None,
         block_mm_infos: None,
         is_eagle: None,
         group_idx: None,

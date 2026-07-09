@@ -14,8 +14,8 @@ use rustc_hash::FxHashMap;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    BLOCK_SIZE, NUM_EVENT_WORKERS, NormalizedOverlapScores, ReplayEntryKind, WorkerReplayArtifacts,
-    collect_replay_entries,
+    BLOCK_SIZE, KvEventReplayEntryKind, NUM_EVENT_WORKERS, NormalizedOverlapScores,
+    WorkerReplayArtifacts, collect_kv_event_replay_entries,
 };
 
 fn additive_device_and_host_pinned_scores(
@@ -236,7 +236,7 @@ pub(crate) async fn collect_tiered_replay_scores(
 )> {
     let reference = ReferenceTieredReplay::new();
     let crtc_lower_tier = CrtcLowerTierReplay::new();
-    let entries = collect_replay_entries(artifacts);
+    let entries = collect_kv_event_replay_entries(artifacts);
     let mut reference_scores = Vec::new();
     let mut crtc_scores = Vec::new();
     let mut idx = 0;
@@ -245,11 +245,11 @@ pub(crate) async fn collect_tiered_replay_scores(
         let timestamp_us = entries[idx].timestamp_us;
         while idx < entries.len() && entries[idx].timestamp_us == timestamp_us {
             match &entries[idx].kind {
-                ReplayEntryKind::Request(request) => {
+                KvEventReplayEntryKind::Request(request) => {
                     reference_scores.push(reference.find_matches(request).await?);
                     crtc_scores.push(crtc_lower_tier.find_matches(request));
                 }
-                ReplayEntryKind::Event {
+                KvEventReplayEntryKind::Event {
                     event,
                     storage_tier,
                 } => {
@@ -259,9 +259,6 @@ pub(crate) async fn collect_tiered_replay_scores(
                     crtc_lower_tier
                         .apply_event(entries[idx].worker_id, event.clone(), *storage_tier)
                         .await;
-                }
-                ReplayEntryKind::ApproxWrite(_) => {
-                    anyhow::bail!("approximate writes are not part of KV-event replay artifacts")
                 }
             }
             idx += 1;

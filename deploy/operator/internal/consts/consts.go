@@ -42,6 +42,11 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
+	// PodCliqueSet update strategy while the long-term DGD API is settled.
+	// Supported values match Grove exactly: "RollingRecreate" and "OnDelete".
+	KubeAnnotationGroveUpdateStrategy = "nvidia.com/grove-update-strategy"
+
 	// KubeAnnotationIstioSidecarInject is the standard Istio annotation that
 	// controls whether the mutating webhook injects an istio-proxy sidecar into
 	// a pod. Setting it to "false" opts the pod out of sidecar injection even
@@ -116,11 +121,20 @@ const (
 	EnvTopologyEnabled   = "DYN_TOPOLOGY_ENABLED"
 	EnvTopologyMountPath = "DYN_TOPOLOGY_MOUNT_PATH"
 
-	// KubeAnnotationTopologyLabelKey is set on worker pods when
-	// spec.experimental.kvTransferPolicy.labelKey is configured. The topology
-	// label controller watches for pods with this annotation and copies the
-	// corresponding node label onto the pod after scheduling.
+	// Topology source annotations are set on worker pods when spec.experimental.kvTransferPolicy is
+	// configured. The topology label controller watches for pods being scheduled with these annotations
+	// and uses the annotation value to determine the node label(s) to copy onto the pod. The copied labels
+	// are projected through a Downward API volume for the runtime to consume (i.e. zone="us-east-1a")
+	//
+	// KubeAnnotationTopologyLabelKey defines a single node label key (i.e. "topology.kubernetes.io/zone") to copy
+	// onto the pod under the same label key.
 	KubeAnnotationTopologyLabelKey = "nvidia.com/topology-label-key"
+
+	// KubeAnnotationTopologyClusterTopologyName specifies the Grove ClusterTopology resource that defines domains to node labels mappings
+	// (i.e. zone -> "nvidia.com/topology.zone"). The topology label controller copies each domain's node label(s) onto the pod under
+	// KubeLabelDynamoTopologyPrefix + domain (i.e. nvidia.com/dynamo-topology.zone)
+	KubeAnnotationTopologyClusterTopologyName = "nvidia.com/topology-cluster-topology-name"
+	KubeLabelDynamoTopologyPrefix             = "nvidia.com/dynamo-topology."
 
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
@@ -183,6 +197,11 @@ const (
 	KaiSchedulerName                = "kai-scheduler"                  // Scheduler name for kai-scheduler
 	DefaultKaiSchedulerQueue        = "dynamo"                         // Default queue name when none specified
 
+	// Volcano scheduler related constants
+	KubeAnnotationVolcanoQueue  = "nvidia.com/volcano-queue" // User-provided annotation to specify Volcano queue name
+	GroveAnnotationVolcanoQueue = "scheduling.grove.io/volcano-queue"
+	VolcanoSchedulerName        = "volcano"
+
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
@@ -216,24 +235,6 @@ const (
 	ResourceStateReady    = "ready"
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
-
-	// Pod identity (Downward API) ---
-	// After CRIU restore, env vars contain stale values from the checkpoint pod.
-	// The Downward API files at /etc/podinfo always reflect the current pod.
-	PodInfoVolumeName = "podinfo"
-	PodInfoMountPath  = "/etc/podinfo"
-
-	// Downward API field paths
-	PodInfoFieldPodName      = "metadata.name"
-	PodInfoFieldPodUID       = "metadata.uid"
-	PodInfoFieldPodNamespace = "metadata.namespace"
-
-	// Downward API file names for restore identity
-	PodInfoFileDynNamespace             = "dyn_namespace"
-	PodInfoFileDynNamespaceWorkerSuffix = "dyn_namespace_worker_suffix"
-	PodInfoFileDynComponent             = "dyn_component"
-	PodInfoFileDynParentDGDName         = "dyn_parent_dgd_k8s_name"
-	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
 
 	// Worker hash rolling-update annotations are controller-owned annotations on
 	// DynamoGraphDeployment. They record the active worker generation and must not
@@ -273,6 +274,21 @@ const (
 	MultinodeDeploymentTypeGrove MultinodeDeploymentType = "grove"
 	MultinodeDeploymentTypeLWS   MultinodeDeploymentType = "lws"
 )
+
+// DynamoTopologyLabelKey returns the Dynamo-owned pod label key used to expose
+// a ClusterTopology domain through the Downward API.
+func DynamoTopologyLabelKey(domain string) string {
+	return KubeLabelDynamoTopologyPrefix + domain
+}
+
+// KubeTopologySourceAnnotationKeys returns pod annotations consumed by the
+// topology label controller.
+func KubeTopologySourceAnnotationKeys() []string {
+	return []string{
+		KubeAnnotationTopologyLabelKey,
+		KubeAnnotationTopologyClusterTopologyName,
+	}
+}
 
 // GroupVersionResources for external APIs
 var (

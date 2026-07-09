@@ -19,6 +19,34 @@ fn get_text(content: &ChatCompletionMessageContent) -> &str {
 }
 use dynamo_llm::protocols::openai::DeltaGeneratorExt;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_parsers::tool_calling::jail::{Annotated as JailAnnotated, JailedStream};
+
+// The jail moved to dynamo-parsers, where it operates on the shared
+// CreateChatCompletionStreamResponse. Drive it with dynamo `Nv` stream
+// responses by unwrapping to `inner` on the way in and re-wrapping on the way
+// out (mirrors OpenAIPreprocessor::apply_tool_calling_jail).
+fn drive_moved_jail(
+    jail: JailedStream,
+    nv_inputs: Vec<NvCreateChatCompletionStreamResponse>,
+) -> impl futures::Stream<Item = NvCreateChatCompletionStreamResponse> {
+    use futures::StreamExt;
+    let input = futures::stream::iter(nv_inputs.into_iter().map(|nv| JailAnnotated {
+        data: Some(nv.inner),
+        id: None,
+        event: None,
+        comment: None,
+        error: None,
+    }));
+    jail.apply_with_finish_reason(input)
+        .filter_map(|a| async move {
+            a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                inner,
+                nvext: None,
+                llm_metrics: None,
+            })
+        })
+}
 
 fn create_test_request() -> NvCreateChatCompletionRequest {
     let messages = vec![ChatCompletionRequestMessage::User(
@@ -50,18 +78,7 @@ async fn apply_jail_transformation(
     raw_response: dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
     tool_choice: Option<ChatCompletionToolChoiceOption>,
 ) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
-    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use dynamo_runtime::protocols::annotated::Annotated;
     use futures::StreamExt;
-    use futures::stream;
-
-    let input_stream = stream::iter(vec![Annotated {
-        data: Some(raw_response),
-        id: None,
-        event: None,
-        comment: None,
-        error: None,
-    }]);
 
     let mut builder = JailedStream::builder();
 
@@ -76,10 +93,10 @@ async fn apply_jail_transformation(
     }
 
     let jail = builder.build();
-    let output_stream = jail.apply_with_finish_reason(input_stream);
+    let output_stream = drive_moved_jail(jail, vec![raw_response]);
 
     tokio::pin!(output_stream);
-    output_stream.next().await.unwrap().data.unwrap()
+    output_stream.next().await.unwrap()
 }
 
 async fn apply_jail_transformation_streaming(
@@ -88,18 +105,7 @@ async fn apply_jail_transformation_streaming(
     >,
     tool_choice: Option<ChatCompletionToolChoiceOption>,
 ) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
-    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use dynamo_runtime::protocols::annotated::Annotated;
     use futures::StreamExt;
-    use futures::stream;
-
-    let input_stream = stream::iter(raw_responses.into_iter().map(|r| Annotated {
-        data: Some(r),
-        id: None,
-        event: None,
-        comment: None,
-        error: None,
-    }));
 
     let mut builder = JailedStream::builder();
 
@@ -114,13 +120,7 @@ async fn apply_jail_transformation_streaming(
     }
 
     let jail = builder.build();
-    let output_stream = jail.apply_with_finish_reason(input_stream);
-
-    tokio::pin!(output_stream);
-    output_stream
-        .filter_map(|ann| async move { ann.data })
-        .collect()
-        .await
+    drive_moved_jail(jail, raw_responses).collect().await
 }
 
 fn build_backend_output(text: &str) -> BackendOutput {
@@ -136,6 +136,7 @@ fn build_backend_output(text: &str) -> BackendOutput {
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        encoder_result: None,
         worker_trace_link: None,
         engine_data: None,
         routing_data: None,
@@ -307,6 +308,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
@@ -377,6 +379,7 @@ async fn test_streaming_required_tool_parallel() {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
@@ -449,6 +452,7 @@ fn test_no_tool_choice_outputs_normal_text() {
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        encoder_result: None,
         worker_trace_link: None,
         engine_data: None,
         routing_data: None,
@@ -510,6 +514,7 @@ fn make_text_chunk(
             service_tier: None,
         },
         nvext: None,
+        llm_metrics: None,
     }
 }
 
@@ -521,28 +526,13 @@ async fn apply_jail_named_with_parser(
     parser: &str,
     named_tool: &str,
 ) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
-    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use dynamo_runtime::protocols::annotated::Annotated;
     use futures::StreamExt;
-    use futures::stream;
-
-    let input = stream::iter(chunks.into_iter().map(|r| Annotated {
-        data: Some(r),
-        id: None,
-        event: None,
-        comment: None,
-        error: None,
-    }));
 
     let jail = JailedStream::builder()
         .tool_call_parser(parser)
         .named_tool_filter(named_tool)
         .build();
-    let out = jail.apply_with_finish_reason(input);
-    tokio::pin!(out);
-    out.filter_map(|ann| async move { ann.data })
-        .collect()
-        .await
+    drive_moved_jail(jail, chunks).collect().await
 }
 
 /// When tool_choice=named, a tool_call_parser is configured, and the model emits
@@ -641,20 +631,9 @@ async fn apply_jail_with_parser_and_choice(
     parser: &str,
     tool_choice: Option<ChatCompletionToolChoiceOption>,
 ) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
-    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use dynamo_runtime::protocols::annotated::Annotated;
     use futures::StreamExt;
-    use futures::stream;
 
     let chunks = vec![make_text_chunk(payload, false), make_text_chunk("", true)];
-
-    let input = stream::iter(chunks.into_iter().map(|r| Annotated {
-        data: Some(r),
-        id: None,
-        event: None,
-        comment: None,
-        error: None,
-    }));
 
     let mut builder = JailedStream::builder().tool_call_parser(parser);
     match tool_choice {
@@ -668,11 +647,7 @@ async fn apply_jail_with_parser_and_choice(
     }
     let jail = builder.build();
 
-    let out = jail.apply_with_finish_reason(input);
-    tokio::pin!(out);
-    out.filter_map(|ann| async move { ann.data })
-        .collect()
-        .await
+    drive_moved_jail(jail, chunks).collect().await
 }
 
 /// Collect every emitted tool call across all chunks in the response stream.

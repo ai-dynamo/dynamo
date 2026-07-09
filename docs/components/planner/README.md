@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner
+subtitle: Autoscaler that adjusts prefill and decode replicas using engine performance models and traffic prediction to meet TTFT and ITL SLAs.
 ---
 
 ## Why LLM Inference Needs a Different Autoscaler
@@ -113,8 +114,8 @@ features:
 ```
 
 The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest,
-which automatically profiles your model. See [Planner Examples](planner-examples.md)
-for copyable DGDR manifests.
+which automatically profiles your model. See
+[DGDR Examples](../../kubernetes/dgdr-examples.md) for copyable DGDR manifests.
 
 See [Planner Guide](planner-guide.md) for the full workflow.
 
@@ -128,7 +129,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 
 - **vLLM** — supported. Automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set.
 - **TensorRT-LLM** — supported for non-attention-DP workers (`attention_dp_size == 1`); gated off when `attention_dp_size > 1` pending per-rank FPM emission.
-- **SGLang** — pipeline wired in Dynamo, but the upstream SGLang FPM module is not included in the current 1.2.0 SGLang runtime image. See the [SGLang FPM section](../../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) for the runtime-image prerequisite.
+- **SGLang** — supported. Enabled when `DYN_FORWARDPASS_METRIC_PORT` is set; requires the upstream FPM module, which ships in the SGLang runtime as of `sglang==0.5.13.post1` (SGLang >= v0.5.13). See the [SGLang FPM section](../../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm).
 
 ### General
 
@@ -140,7 +141,8 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 |----------|-------------|
 | [Planner Guide](planner-guide.md) | Deployment, configuration, integration |
 | [Planner Design](../../design-docs/planner-design.md) | Architecture and algorithm internals |
-| [Planner Examples](planner-examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
+| [Planner Examples](planner-examples.md) | Planner-specific configuration examples |
+| [DGDR Examples](../../kubernetes/dgdr-examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
 | [Global Planner Guide](global-planner.md) | Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments |
 
 ## Configuration Reference

@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner Guide
+subtitle: Configures Planner optimization targets, scaling modes, and PlannerConfig fields for production deployments.
 ---
-
-<p align="left">
-  <a href="./planner-guide.zh-CN.md" hreflang="zh-CN"><img src="../../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
 
 The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance models to decide when to scale up or down.
 
@@ -30,35 +27,41 @@ The planner supports four optimization targets that determine how scaling decisi
 
 ## PlannerConfig Reference
 
-The planner is configured via a `PlannerConfig` JSON/YAML object. When using the profiler, this is placed under the `features.planner` section of the DGDR spec:
+The planner is configured via a `PlannerConfig` JSON/YAML object. When using the
+profiler, place this under `spec.features.planner` in the DGDR spec. Any
+PlannerConfig field listed below can be set there; DGDR passes that object to
+the Planner service for validation.
 
 ```yaml
-features:
-  planner:
-    mode: disagg
-    backend: vllm
-    # optimization_target defaults to "throughput" — works out of the box
+spec:
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+      # optimization_target defaults to "throughput" — works out of the box
 ```
 
 For SLA-based scaling:
 
 ```yaml
-features:
-  planner:
-    optimization_target: sla
-    enable_throughput_scaling: true
-    enable_load_scaling: false
-    pre_deployment_sweeping_mode: rapid
-    mode: disagg
-    backend: vllm
+spec:
+  features:
+    planner:
+      optimization_target: sla
+      enable_throughput_scaling: true
+      enable_load_scaling: false
+      pre_deployment_sweeping_mode: rapid
+      mode: disagg
+      backend: vllm
 ```
 
 To evaluate Planner behavior without changing replica counts, turn on advisory mode:
 
 ```yaml
-features:
-  planner:
-    advisory: true
+spec:
+  features:
+    planner:
+      advisory: true
 ```
 
 Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment.
@@ -237,6 +240,7 @@ In the current workflow, run profiling independently for each intended pool, the
 
 - [Planner overview](README.md) — Why LLM inference needs a different autoscaler
 - [Planner Design](../../design-docs/planner-design.md) — Architecture and algorithm internals
-- [Planner Examples](planner-examples.md) — DGDR YAML examples, sample configurations, advanced patterns
+- [Planner Examples](planner-examples.md) — Planner-specific configuration examples
+- [DGDR Examples](../../kubernetes/dgdr-examples.md) — DGDR YAML examples, sample configurations, advanced patterns
 - [Global Planner Guide](global-planner.md) — Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments
 - [Profiler Guide](../profiler/profiler-guide.md) — How profiling data is generated

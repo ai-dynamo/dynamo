@@ -20,15 +20,18 @@ use dynamo_kv_router::{
 pub(crate) use dynamo_kv_router::indexer::TieredMatchDetails;
 #[allow(unused_imports)]
 pub(crate) use dynamo_kv_router::indexer::WireTieredMatchDetails;
-use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
+use dynamo_runtime::component::Component;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
+mod embedding_cache;
 mod lookup;
 mod recording;
 mod recovery;
 pub mod remote;
 mod side;
 
+pub use self::embedding_cache::{EmbeddingCacheIndexer, try_build_cache_indexer};
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
@@ -66,11 +69,16 @@ pub enum Indexer {
 }
 
 impl Indexer {
+    pub(crate) fn supports_overlap_refresh(&self) -> bool {
+        matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
+    }
+
     pub async fn new(
         component: &Component,
         kv_router_config: &KvRouterConfig,
         block_size: u32,
         model_name: Option<&str>,
+        cancellation_token: CancellationToken,
     ) -> Result<Self> {
         if kv_router_config.overlap_score_credit == 0.0 {
             return Ok(Self::None);
@@ -97,7 +105,12 @@ impl Indexer {
             );
             let remote =
                 RemoteIndexer::new(component, model_name, kv_router_config.use_kv_events).await?;
-            let approx = SideIndexer::new_predict_on_route(component, kv_router_config, block_size);
+            let approx = SideIndexer::new_predict_on_route(
+                component,
+                kv_router_config,
+                block_size,
+                cancellation_token.child_token(),
+            );
             return Ok(Self::Remote {
                 primary: Arc::new(remote),
                 approx,
@@ -116,33 +129,42 @@ impl Indexer {
                         ConcurrentRadixTreeCompressed::new(),
                         kv_router_config.router_event_threads as usize,
                         block_size,
-                        Some(kv_indexer_metrics),
+                        Some(kv_indexer_metrics.clone()),
                         prune_config,
                     )),
-                    lower_tier: LowerTierIndexers::new(
+                    lower_tier: LowerTierIndexers::new_with_metrics(
                         kv_router_config.router_event_threads as usize,
                         block_size,
+                        Some(kv_indexer_metrics),
                     ),
                     approx: None,
                     primary_records_routing_decisions: true,
                 });
             }
 
-            let cancellation_token = component.drt().primary_token();
             return Ok(Self::KvIndexer {
                 primary: KvIndexer::new_with_pruning(
-                    cancellation_token,
+                    cancellation_token.child_token(),
                     block_size,
-                    kv_indexer_metrics,
+                    kv_indexer_metrics.clone(),
                     prune_config,
                 ),
-                lower_tier: LowerTierIndexers::new(1, block_size),
+                lower_tier: LowerTierIndexers::new_with_metrics(
+                    1,
+                    block_size,
+                    Some(kv_indexer_metrics),
+                ),
                 approx: None,
                 primary_records_routing_decisions: true,
             });
         }
 
-        let approx = SideIndexer::new_predict_on_route(component, kv_router_config, block_size);
+        let approx = SideIndexer::new_predict_on_route(
+            component,
+            kv_router_config,
+            block_size,
+            cancellation_token.child_token(),
+        );
 
         if kv_router_config.router_event_threads > 1 {
             let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
@@ -151,11 +173,12 @@ impl Indexer {
                     ConcurrentRadixTreeCompressed::new(),
                     kv_router_config.router_event_threads as usize,
                     block_size,
-                    Some(kv_indexer_metrics),
+                    Some(kv_indexer_metrics.clone()),
                 )),
-                lower_tier: LowerTierIndexers::new(
+                lower_tier: LowerTierIndexers::new_with_metrics(
                     kv_router_config.router_event_threads as usize,
                     block_size,
+                    Some(kv_indexer_metrics),
                 ),
                 approx,
                 primary_records_routing_decisions: false,
@@ -163,16 +186,18 @@ impl Indexer {
         }
 
         let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
-        let cancellation_token = component.drt().primary_token();
-
         Ok(Self::KvIndexer {
             primary: KvIndexer::new_with_pruning(
-                cancellation_token,
+                cancellation_token.child_token(),
                 block_size,
-                kv_indexer_metrics,
+                kv_indexer_metrics.clone(),
                 None,
             ),
-            lower_tier: LowerTierIndexers::new(1, block_size),
+            lower_tier: LowerTierIndexers::new_with_metrics(
+                1,
+                block_size,
+                Some(kv_indexer_metrics),
+            ),
             approx,
             primary_records_routing_decisions: false,
         })
@@ -459,6 +484,13 @@ mod tests {
             approx: None,
             primary_records_routing_decisions: true,
         }
+    }
+
+    #[test]
+    fn overlap_refresh_is_limited_to_local_indexers() {
+        assert!(make_test_indexer().supports_overlap_refresh());
+        assert!(make_test_concurrent_indexer().supports_overlap_refresh());
+        assert!(!Indexer::None.supports_overlap_refresh());
     }
 
     async fn flush_indexer(indexer: &Indexer) {

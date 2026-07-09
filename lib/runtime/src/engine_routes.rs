@@ -33,7 +33,7 @@ impl EngineRouteRegistry {
         }
     }
 
-    /// Register a callback for a route (e.g., "start_profile" for /engine/start_profile)
+    /// Register a callback for a route (e.g., "control/start_profile" for /engine/control/start_profile)
     ///
     /// A route name is expected to be registered exactly once. Re-registering an
     /// existing name overwrites the previous callback and emits a warning, since

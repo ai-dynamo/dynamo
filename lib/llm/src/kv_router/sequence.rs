@@ -16,13 +16,13 @@ pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
 use dynamo_runtime::component::Component;
-use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tokio_util::sync::CancellationToken;
 
-use super::metrics::WORKER_LOAD_METRICS;
+use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 #[cfg(test)]
@@ -32,6 +32,7 @@ use dynamo_kv_router::protocols::PrefillLoadHint;
 pub struct RuntimeSequencePublisher {
     event_publisher: EventPublisher,
     metrics_publisher: Arc<EventPublisher>,
+    worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
 }
 
 impl SequencePublisher for RuntimeSequencePublisher {
@@ -82,6 +83,16 @@ impl SequencePublisher for RuntimeSequencePublisher {
             tokens,
         );
     }
+
+    fn observe_worker_registered(&self, worker: &WorkerWithDpRank, worker_type: &str) {
+        self.worker_status_metrics
+            .set_registered(worker.worker_id, worker.dp_rank, worker_type);
+    }
+
+    fn observe_worker_removed(&self, worker: &WorkerWithDpRank, worker_type: &str) {
+        self.worker_status_metrics
+            .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
+    }
 }
 
 /// Concrete [`SequenceSubscriber`] backed by NATS typed event stream.
@@ -122,15 +133,18 @@ pub async fn create_multi_worker_sequences(
     replica_sync: bool,
     router_id: u64,
     worker_type: &'static str,
+    cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
     let event_publisher =
         EventPublisher::for_component(&component, ACTIVE_SEQUENCES_SUBJECT).await?;
     let metrics_publisher =
         Arc::new(EventPublisher::for_namespace(component.namespace(), KV_METRICS_SUBJECT).await?);
+    let worker_status_metrics = RouterWorkerStatusMetrics::from_component(&component);
 
     let publisher = RuntimeSequencePublisher {
         event_publisher,
         metrics_publisher,
+        worker_status_metrics,
     };
 
     let dp_range: HashMap<u64, (u32, u32)> = workers_with_configs
@@ -159,12 +173,10 @@ pub async fn create_multi_worker_sequences(
             .await?
             .typed::<ActiveSequenceEvent>();
         let subscriber = RuntimeSequenceSubscriber { inner: subscriber };
-        let cancel_token = component.drt().runtime().child_token();
-        arc.start_replica_sync(subscriber, cancel_token);
+        arc.start_replica_sync(subscriber, cancellation_token.child_token());
     }
 
-    let expiry_cancel = component.drt().runtime().child_token();
-    arc.start_periodic_force_expiry_across_all_workers(expiry_cancel);
+    arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());
 
     Ok(arc)
 }
@@ -211,6 +223,7 @@ mod tests {
             true,
             1,
             crate::discovery::WORKER_TYPE_DECODE,
+            CancellationToken::new(),
         )
         .await?;
         let seq_manager_2 = create_multi_worker_sequences(
@@ -220,6 +233,7 @@ mod tests {
             true,
             2,
             crate::discovery::WORKER_TYPE_DECODE,
+            CancellationToken::new(),
         )
         .await?;
 
@@ -365,6 +379,7 @@ mod tests {
             true,
             1,
             crate::discovery::WORKER_TYPE_DECODE,
+            CancellationToken::new(),
         )
         .await?;
         let seq_manager_2 = create_multi_worker_sequences(
@@ -374,6 +389,7 @@ mod tests {
             true,
             2,
             crate::discovery::WORKER_TYPE_DECODE,
+            CancellationToken::new(),
         )
         .await?;
 

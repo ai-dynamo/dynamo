@@ -583,7 +583,7 @@ The integration patches `torch_memory_saver` to route both weight and KV-cache o
 
 Both integrations support releasing and reclaiming GPU memory for shadow engine patterns. The API names differ by framework:
 
-- **vLLM**: `sleep` / `wake_up` (via `/engine/sleep` and `/engine/wake_up` HTTP endpoints)
+- **vLLM**: `sleep` / `wake_up` (via `/engine/control/sleep` and `/engine/control/wake_up` HTTP endpoints)
 - **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
 
 Under the hood, pausing calls `unmap_all_vas()` + `abort()` to release GPU memory while preserving VA reservations. Resuming is tag-specific:

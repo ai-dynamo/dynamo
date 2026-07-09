@@ -63,6 +63,8 @@ mod local;
 mod lower_tier;
 mod lower_tier_indexers;
 mod metrics;
+#[cfg(feature = "bench")]
+mod observation;
 mod thread_pool;
 mod traits;
 mod types;
@@ -83,6 +85,8 @@ pub use local::*;
 pub use lower_tier::*;
 pub use lower_tier_indexers::*;
 pub use metrics::*;
+#[cfg(feature = "bench")]
+pub use observation::*;
 pub use thread_pool::*;
 pub use traits::*;
 pub use types::*;
