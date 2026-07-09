@@ -3,18 +3,18 @@
 
 """Tests for all three planner actuation knobs:
 
-  Knob 1  Worker replica counts  — KubernetesConnector.set_component_replicas
-          (replica scaling itself is covered in test_kubernetes_connector.py;
-           this file covers the _apply_scaling_targets advisory guard.)
+Knob 1  Worker replica counts  — KubernetesConnector.set_component_replicas
+        (replica scaling itself is covered in test_kubernetes_connector.py;
+         this file covers the _apply_scaling_targets advisory guard.)
 
-  Knob 2  Per-GPU power cap (TGP)  — NativePlannerBase._apply_power_annotations
-          → KubernetesAPI.patch_pod_annotation on each worker pod.
+Knob 2  Per-GPU power cap (TGP)  — NativePlannerBase._apply_power_annotations
+        → KubernetesAPI.patch_pod_annotation on each worker pod.
 
-  Knob 3  Admission-control thresholds  — KubernetesConnector.post_busy_threshold
-          → HTTP POST /busy_threshold to each frontend pod with three sub-fields:
-            active_decode_blocks_threshold  (θ_decode)
-            active_prefill_tokens_threshold_frac  (θ_prefill_frac)
-            active_prefill_tokens_threshold  (θ_prefill_abs, absolute defense-in-depth)
+Knob 3  Admission-control thresholds  — KubernetesConnector.post_busy_threshold
+        → HTTP POST /busy_threshold to each frontend pod with three sub-fields:
+          active_decode_blocks_threshold  (θ_decode)
+          active_prefill_tokens_threshold_frac  (θ_prefill_frac)
+          active_prefill_tokens_threshold  (θ_prefill_abs, absolute defense-in-depth)
 """
 
 import logging
