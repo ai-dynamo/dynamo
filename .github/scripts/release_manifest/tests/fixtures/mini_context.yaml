@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Hazard-preserving excerpt of container/context.yaml for validator tests:
+# dotted keys (cuda13.0), nixl_ref at two depths with different values,
+# inline comments, quoted values, URL-valued keys.
+
+dynamo:
+  nixl_ref: v1.0.1
+  nats_version: v2.10.28
+  python_version: "3.12"
+  repo_url: https://github.com/example/repo.git
+
+vllm:
+  cuda13.0:
+    base_image: nvcr.io/nvidia/cuda-dl-base
+    base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
+    runtime_image_tag: v0.24.0-ubuntu2404  # keep in sync with upstream
+  nixl_ref: v1.1.0
+
+sglang:
+  xpu:
+    # XPU needs a newer NIXL than the framework default; scoped here
+    # to avoid affecting sglang-cuda.
+    nixl_ref: v1.1.0
+  nixl_ref: v1.0.1
+  modelexpress_version: "0.4.0"

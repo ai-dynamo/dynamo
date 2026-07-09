@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Guards freshly cut mainline release branches (release/X.Y.Z) against
+# stale dependency pins declared in .github/release-manifest.yaml:
+#   - stale pins with auto_upgrade: true are rewritten and pushed as the
+#     first commit on the new branch (the OPS_BOT_PAT push retriggers
+#     pre-merge / post-merge CI, which a GITHUB_TOKEN push would not);
+#   - any other violation turns this run red and alerts the release
+#     Slack channel. The branch already exists at that point, but the
+#     release-manifest-gate job in release.yml blocks it from ever
+#     publishing an RC until the pins (or the manifest) are fixed.
+# Suffixed dev branches (release/1.3.0-*-dev.N) and patch trains cut
+# from release branches are out of scope and skipped.
+
+name: Release Branch Guard
+
+on: create
+
+permissions:
+  contents: read  # the push uses OPS_BOT_PAT via the checkout token
+
+jobs:
+  guard:
+    name: Validate release pins
+    if: github.ref_type == 'branch' && startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scope to mainline release branches
+        id: scope
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${BRANCH#release/}"
+          if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "mainline=true" >> "$GITHUB_OUTPUT"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "mainline=false" >> "$GITHUB_OUTPUT"
+            echo "Branch $BRANCH is not a mainline release/X.Y.Z cut; skipping." \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Checkout release branch
+        if: steps.scope.outputs.mainline == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.ref }}
+          token: ${{ secrets.OPS_BOT_PAT }}
+
+      - name: Set up Python
+        if: steps.scope.outputs.mainline == 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Check release pins
+        if: steps.scope.outputs.mainline == 'true'
+        id: check
+        env:
+          VERSION: ${{ steps.scope.outputs.version }}
+        run: |
+          set -euo pipefail
+          pip install pyyaml
+          python3 .github/scripts/release_manifest/check_release_pins.py \
+            --check --version "$VERSION"
+
+      - name: Apply pin auto-upgrades
+        if: steps.scope.outputs.mainline == 'true' && steps.check.outputs.auto_upgrades != '[]'
+        env:
+          VERSION: ${{ steps.scope.outputs.version }}
+        run: |
+          set -euo pipefail
+          CHANGED=$(python3 .github/scripts/release_manifest/check_release_pins.py --apply)
+          if [ -z "$CHANGED" ]; then
+            echo "Nothing to apply."
+            exit 0
+          fi
+          git config user.name  "dynamo-ops"
+          git config user.email "170655669+dynamo-ops@users.noreply.github.com"
+          echo "$CHANGED" | xargs git add --
+          git commit -s -m "chore: apply release-manifest pin upgrades for ${VERSION}"
+          git push origin "HEAD:refs/heads/release/${VERSION}"
+
+      - name: Notify Slack (guard passed)
+        if: steps.scope.outputs.mainline == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
+          VERSION: ${{ steps.scope.outputs.version }}
+          PIN_TABLE: ${{ steps.check.outputs.pin_table }}
+          AUTO_UPGRADES: ${{ steps.check.outputs.auto_upgrades }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [ -n "${SLACK_WEBHOOK_URL:-}" ] || { echo "Error: RELEASE_WEBHOOK_URL not configured"; exit 1; }
+          MSG="$(printf ':scissors: *release/%s* cut - release-pin manifest check passed.\n%s' \
+            "$VERSION" "$PIN_TABLE")"
+          if [ "${AUTO_UPGRADES}" != "[]" ]; then
+            MSG="$(printf '%s\n:warning: Auto-upgraded pins pushed as the first commit on the branch: %s. Please port these pin changes to main.' \
+              "$MSG" "$AUTO_UPGRADES")"
+          fi
+          MSG="$(printf '%s\nDetails: %s' "$MSG" "$RUN_URL")"
+          curl -sSf -X POST -H "Content-Type: application/json" \
+            -d "$(jq -n --arg t "$MSG" '{text:$t}')" "$SLACK_WEBHOOK_URL"
+
+      - name: Notify Slack (guard blocked)
+        if: failure() && steps.scope.outputs.mainline == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.RELEASE_WEBHOOK_URL }}
+          BRANCH: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [ -n "${SLACK_WEBHOOK_URL:-}" ] || { echo "Error: RELEASE_WEBHOOK_URL not configured"; exit 1; }
+          MSG=":rotating_light: *${BRANCH}* was cut but the release-pin guard FAILED (stale non-auto-upgradable pins, release-manifest.yaml not updated for this release, or a guard error). RCs from this branch are blocked at publish until fixed. Details: ${RUN_URL}"
+          curl -sSf -X POST -H "Content-Type: application/json" \
+            -d "$(jq -n --arg t "$MSG" '{text:$t}')" "$SLACK_WEBHOOK_URL"
