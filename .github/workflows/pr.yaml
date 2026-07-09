@@ -518,8 +518,7 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
-      # Exclude h100 tests: they need >24 GiB and run on the H100 lane below.
-      gpu_test_markers: pre_merge and sglang and gpu_1 and not h100
+      gpu_test_markers: pre_merge and sglang and gpu_1
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -541,26 +540,6 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
       gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
-      gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  sglang-h100-test:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: sglang
-      test_type: H100 Test
-      # 80 GiB H100 cluster (aws-dev-02); hosts sglang tests that exceed the
-      # 24 GiB gpu_1 lane (e.g. diffusion_llada / LLaDA2.0). PR validation for a
-      # future nightly H100 lane.
-      amd_runner: aws-dev-02-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64"]'
-      run_sanity_check: false
-      gpu_test_markers: pre_merge and sglang and h100 and gpu_1
       gpu_test_timeout_minutes: 60
     secrets: inherit
 

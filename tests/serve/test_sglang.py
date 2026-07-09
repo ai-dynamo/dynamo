@@ -803,11 +803,18 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.h100,
-            pytest.mark.profiled_vram_gib(31.6),
-            # Diffusion decoding is slow (iterative denoising); H100 run of the
-            # 128-token smoke exceeded 360s, so give generous headroom.
+            # --mem-fraction-static 0.7 makes sglang reserve ~0.7*80 = 56 GiB on
+            # the H100. This is the reservation the VRAM-aware packer must budget
+            # (not the ~32 GiB transient peak), so co-packing another large test
+            # is correctly prevented.
+            pytest.mark.profiled_vram_gib(56.0),
+            # Diffusion decoding is iterative; the 32-token H100 smoke runs ~135s.
+            # Keep generous headroom for cold starts / model download.
             pytest.mark.timeout(900),
-            pytest.mark.pre_merge,
+            # Runs on the nightly H100 lane (sglang-h100-test in nightly-ci.yml),
+            # not PR/post-merge: the model needs >24 GiB so it can't use the
+            # standard gpu_1 lanes.
+            pytest.mark.nightly,
         ],
         model="inclusionAI/LLaDA2.0-mini-preview",
         env={},
