@@ -50,7 +50,6 @@ vllm_omni_configs = {
             "--vae-use-tiling",
         ],
         marks=[
-
             pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
