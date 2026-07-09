@@ -85,7 +85,7 @@ Set your environment variables:
 
 ```bash
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=1.0.2  # match a version from https://github.com/ai-dynamo/dynamo/releases
+export RELEASE_VERSION=1.2.1  # match a version from https://github.com/ai-dynamo/dynamo/releases
 ```
 
 ```bash

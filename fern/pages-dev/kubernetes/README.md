@@ -81,7 +81,7 @@ Optionally, verify your cluster is ready:
 export NAMESPACE=dynamo-system
 helm install dynamo-platform \
   oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
-  --version "1.0.2" \
+  --version "1.2.1" \
   --namespace "$NAMESPACE" \
   --create-namespace
 ```
