@@ -12,7 +12,7 @@ import pytest
 
 from dynamo.llm import KvRouter, KvRouterConfig
 from tests.router.common import _create_kv_router_with_timeout
-from tests.router.helper import get_runtime, wait_for_workers_ready
+from tests.router.helper import managed_runtime, wait_for_workers_ready
 from tests.router.mocker_process import MockerProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 
@@ -210,14 +210,16 @@ def test_mocker_output_replay_generate_from_request_multi_turn(
         "response_replay_trace_path": replay_trace_path,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=NUM_MOCKERS,
-        request_plane=request_plane,
-    ) as mockers:
+    with (
+        MockerProcess(
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            request_plane=request_plane,
+        ) as mockers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
         logger.info("Started mocker replay test endpoint: %s", mockers.endpoint)
-        runtime = get_runtime(request_plane=request_plane)
         endpoint = runtime.endpoint(
             f"{mockers.namespace}.{mockers.component_name}.generate"
         )

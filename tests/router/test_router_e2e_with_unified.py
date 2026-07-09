@@ -85,6 +85,16 @@ class UnifiedVLLMProcess(VLLMProcess):
     cleanup_name = "Unified vLLM worker resources"
 
 
+class UnifiedVLLMRouterOnlyProcess(UnifiedVLLMProcess):
+    """Unified vLLM workers without unrelated forward-pass instrumentation."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        for process in self.worker_processes:
+            if process.env is not None:
+                process.env.pop("DYN_FORWARDPASS_METRIC_PORT", None)
+
+
 class UnifiedSGLangProcess(SGLangProcess):
     """SGLang workers launched via ``dynamo.sglang.unified_main``."""
 
@@ -231,10 +241,11 @@ def test_unified_vllm_cache_salt_isolation(
     """Cache-salted vLLM events remain isolated in the router index.
 
     This crosses the real unified vLLM engine and its KV-event publisher, then
-    queries the router index independently for each tenant namespace.
+    queries the router index independently for each tenant namespace. Forward-
+    pass metrics are disabled because they are unrelated to cache routing.
     """
     run_cache_salt_isolation_test(
-        engine_process_cls=UnifiedVLLMProcess,
+        engine_process_cls=UnifiedVLLMRouterOnlyProcess,
         engine_args_name="vllm_args",
         engine_args=VLLM_ARGS,
         request=request,

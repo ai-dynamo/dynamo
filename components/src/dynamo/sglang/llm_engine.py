@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Optional
@@ -60,6 +61,7 @@ from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_K
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
+from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
     compute_bootstrap_address,
@@ -401,6 +403,7 @@ class SglangLLMEngine(LLMEngine):
             **input_param,
             sampling_params=sampling_params,
             stream=True,
+            **require_reasoning_kwargs(self.engine, request),
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
             **telemetry.engine_trace_kwargs(
@@ -1001,7 +1004,21 @@ class SglangLLMEngine(LLMEngine):
         if isinstance(guided_decoding, dict):
             json_schema = guided_decoding.get("json")
             if json_schema is not None:
-                return {"json_schema": json.dumps(json_schema)}
+                if not isinstance(json_schema, str):
+                    json_schema = json.dumps(json_schema)
+                return {"json_schema": json_schema}
+            regex = guided_decoding.get("regex")
+            if regex is not None:
+                return {"regex": regex}
+            grammar = guided_decoding.get("grammar")
+            if grammar is not None:
+                return {"ebnf": grammar}
+            choice = guided_decoding.get("choice")
+            if choice:
+                valid_choices = [item for item in choice if item is not None]
+                if valid_choices:
+                    alternatives = "|".join(re.escape(item) for item in valid_choices)
+                    return {"regex": f"({alternatives})"}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:
                 return {"structural_tag": serialize_structural_tag(structural_tag)}

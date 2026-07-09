@@ -147,11 +147,10 @@ Observability:
 
 Request handling:
 - Guided decoding — wired per-engine on the request side with
-  engine-specific coverage. vLLM (`StructuredOutputsParams`) and
-  TRT-LLM (`GuidedDecodingParams`) cover JSON schema / regex / grammar
-  / choice; SGLang (`_get_guided_decoding_params`) covers JSON schema
-  only — regex / grammar / choice are silently dropped today (see the
-  SGLang-specific gaps in the package README)
+  JSON schema, regex, grammar, and choice coverage. vLLM uses
+  `StructuredOutputsParams`, TRT-LLM uses `GuidedDecodingParams`, and
+  SGLang maps the constraints to `json_schema`, `regex`, and `ebnf`;
+  SGLang translates choices to an escaped regex alternation
 - Structural tag generation via `WorkerConfig.structural_tag_{mode,
   scope, schema}` and `serialize_structural_tag`
 - Custom Jinja chat templates via
@@ -941,11 +940,10 @@ Observability:
 Request handling:
 - Guided decoding — request shape carries
   `SamplingOptions::guided_decoding` (`GuidedDecodingOptions`);
-  engine-side coverage on the existing Python-bridged engines is:
-  vLLM and TRT-LLM forward JSON schema / regex / grammar / choice;
-  SGLang forwards JSON schema only (regex / grammar / choice are
-  silently dropped today). A new Rust engine should forward whichever
-  variants its backend supports
+  vLLM, SGLang, and TRT-LLM forward JSON schema, regex, grammar, and
+  choice. SGLang translates grammar to `ebnf` and choices to an escaped
+  regex alternation. A new Rust engine should forward whichever variants
+  its backend supports
 - Structural tag generation — `WorkerConfig::structural_tag_{mode,
   scope, schema}` (typed enums)
 - Custom Jinja chat templates — `WorkerConfig::custom_jinja_template`

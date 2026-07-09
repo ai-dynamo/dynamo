@@ -40,7 +40,11 @@ from gpu_memory_service.integrations.common.utils import (
     get_gms_ro_connect_timeout_ms,
 )
 from gpu_memory_service.integrations.vllm.model_loader import (
+    abort_pending_gms_write,
+    get_imported_weights_bytes,
     get_mx_load_context,
+    has_pending_gms_write,
+    publish_pending_gms_write,
     register_gms_loader,
 )
 from gpu_memory_service.integrations.vllm.patches import (
@@ -154,19 +158,44 @@ class GMSWorker(Worker):
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
 
+    @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """
         Determine actual available memory for the engine.
 
         During a failover scenario, this function may be called while there is an active engine colocated on the same device.
         We want our assessment to ignore the kv cache allocation of the active engine if there is one.
+
+        A first writer defers its GMS commit until profiling completes here:
+        waiting RO consumers (snapshot saver, peer engines) would otherwise
+        attach to the device mid-profile and perturb vLLM's memory accounting.
+        On failure the pending write is released and the error propagates;
+        the GMS server also clears an uncommitted layout if this process dies.
         """
+        try:
+            available = self._determine_available_memory_before_gms_publish()
+        except BaseException:
+            try:
+                abort_pending_gms_write()
+            except BaseException:
+                logger.exception("[GMS] Failed to release pending write")
+            raise
+        publish_pending_gms_write()
+        return available
+
+    def _determine_available_memory_before_gms_publish(self) -> int:
         if not is_scratch_kv_enabled():
             return super().determine_available_memory()
 
         import vllm.envs as envs
         from vllm.config import CUDAGraphMode
         from vllm.platforms import current_platform
+
+        # A pending first writer's GMS MemPool and private rebound
+        # allocations are both visible in PyTorch's absolute peak. An RO
+        # import's GMS mappings are not, so only those imported bytes need
+        # adding below.
+        has_pending_write = has_pending_gms_write()
 
         torch.cuda.reset_peak_memory_stats()
         self.model_runner.profile_run()
@@ -186,14 +215,10 @@ class GMSWorker(Worker):
         )
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
-        # GMS weights mapped via cuMemMap are invisible to PyTorch's memory
-        # stats on RO engines. Add them explicitly. On RW engines, torch_peak
-        # already includes weights so skip to avoid double-counting.
-        weights_memory = int(getattr(self.model_runner, "model_memory_usage", 0))
-        if torch_peak < weights_memory:
-            non_kv_cache_memory = torch_peak + weights_memory
-        else:
-            non_kv_cache_memory = torch_peak
+        invisible_weights_memory = (
+            0 if has_pending_write else get_imported_weights_bytes()
+        )
+        non_kv_cache_memory = torch_peak + invisible_weights_memory
 
         projected_available = (
             self.requested_memory
@@ -205,14 +230,14 @@ class GMSWorker(Worker):
         msg = (
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
-            "torch_peak=%.2f GiB, weights=%.2f GiB, "
+            "torch_peak=%.2f GiB, invisible_weights=%.2f GiB, "
             "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)"
             % (
                 projected_available / (1 << 30),
                 self.requested_memory / (1 << 30),
                 non_kv_cache_memory / (1 << 30),
                 torch_peak / (1 << 30),
-                weights_memory / (1 << 30),
+                invisible_weights_memory / (1 << 30),
                 cudagraph_memory_estimate / (1 << 30),
                 cudagraph_memory_estimate_applied / (1 << 30),
             )
@@ -231,6 +256,10 @@ class GMSWorker(Worker):
         enable_sleep_mode the manager connects RW at init and allocates real
         backing immediately.
         """
+        # EngineCore can skip determine_available_memory for models with no
+        # KV cache. Publish before connector setup, allocation, or warm-up.
+        publish_pending_gms_write()
+
         from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
@@ -273,11 +302,11 @@ class GMSWorker(Worker):
 
             imported_weights_bytes = get_imported_weights_bytes()
             memory_usage_offset_bytes = get_model_memory_usage_offset_bytes()
-            # The offset is not committed/restored GMS weight state. It is the
-            # load-time allocation footprint pruned before commit. vLLM uses
-            # model_memory_usage for KV-cache sizing, not only as a literal
-            # live-weight counter; reporting committed GMS bytes only can
-            # overestimate safe KV capacity and allocate an oversized cache.
+            # The offset is not committed/restored GMS weight state. It is
+            # load-time memory excluded from committed GMS bytes (pruned
+            # load-time allocations plus private rebound clones). vLLM uses
+            # model_memory_usage for KV sizing, so omitting it can allocate
+            # an oversized cache.
             model_memory_usage_bytes = int(
                 imported_weights_bytes + memory_usage_offset_bytes
             )

@@ -16,11 +16,11 @@ pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
 use dynamo_runtime::component::Component;
-use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tokio_util::sync::CancellationToken;
 
 use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
@@ -133,6 +133,7 @@ pub async fn create_multi_worker_sequences(
     replica_sync: bool,
     router_id: u64,
     worker_type: &'static str,
+    cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
     let event_publisher =
         EventPublisher::for_component(&component, ACTIVE_SEQUENCES_SUBJECT).await?;
@@ -172,12 +173,10 @@ pub async fn create_multi_worker_sequences(
             .await?
             .typed::<ActiveSequenceEvent>();
         let subscriber = RuntimeSequenceSubscriber { inner: subscriber };
-        let cancel_token = component.drt().runtime().child_token();
-        arc.start_replica_sync(subscriber, cancel_token);
+        arc.start_replica_sync(subscriber, cancellation_token.child_token());
     }
 
-    let expiry_cancel = component.drt().runtime().child_token();
-    arc.start_periodic_force_expiry_across_all_workers(expiry_cancel);
+    arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());
 
     Ok(arc)
 }
@@ -224,6 +223,7 @@ mod tests {
             true,
             1,
             crate::discovery::WORKER_TYPE_DECODE,
+            CancellationToken::new(),
         )
         .await?;
         let seq_manager_2 = create_multi_worker_sequences(
@@ -233,6 +233,7 @@ mod tests {
             true,
             2,
             crate::discovery::WORKER_TYPE_DECODE,
+            CancellationToken::new(),
         )
         .await?;
 
@@ -378,6 +379,7 @@ mod tests {
             true,
             1,
             crate::discovery::WORKER_TYPE_DECODE,
+            CancellationToken::new(),
         )
         .await?;
         let seq_manager_2 = create_multi_worker_sequences(
@@ -387,6 +389,7 @@ mod tests {
             true,
             2,
             crate::discovery::WORKER_TYPE_DECODE,
+            CancellationToken::new(),
         )
         .await?;
 

@@ -120,6 +120,11 @@ report JSON to disk.
 
 ## Input Format
 
+> [!NOTE]
+> The `mooncake-delta`, `agentic_mooncake`, and `dynamo` trace formats were added after the v1.2.1
+> release. The `ai-dynamo` 1.2.x wheels on PyPI accept only `--trace-format mooncake` and
+> `--trace-format applied_compute_agentic`.
+
 The trace file must be Mooncake-style JSONL. Each line should contain:
 
 - `timestamp` or `created_time`
@@ -251,6 +256,7 @@ The dedicated DynoSim CLI exposes:
 - `--arrival-interval-ms`
 - `--arrival-speedup-ratio`
 - `--trace-format mooncake|mooncake-delta|agentic_mooncake|applied_compute_agentic|dynamo`
+  (release availability differs; see the note in [Input Format](#input-format))
 - `--trace-block-size`
 - `--turns-per-session`
 - `--shared-prefix-ratio`
@@ -577,6 +583,12 @@ If you violate those constraints, DynoSim fails immediately with a validation er
 - trace-file workloads can use different values for `--trace-block-size` and engine `block_size`
 - Mooncake/toolagent traces typically use `--trace-block-size 512`, while engine `block_size`
   often stays `64`
+- on Apple Silicon, run the `aarch64` wheel natively (`docker run --platform linux/arm64 ...`);
+  amd64 emulation under Rosetta hits an Apple translation defect that segfaults multi-worker
+  multi-turn runs ([issue #11228](https://github.com/ai-dynamo/dynamo/issues/11228)). To run
+  `linux/amd64` anyway, disable Docker Desktop's Rosetta option to fall back to QEMU. Bare
+  `docker run` defaults to the native arm64 image but silently reuses a previously pulled amd64
+  image under the same tag; pass `--platform linux/arm64` explicitly after running amd64 variants
 
 ## When To Use This vs AIPerf
 

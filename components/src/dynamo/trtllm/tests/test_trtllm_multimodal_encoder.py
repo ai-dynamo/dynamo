@@ -34,8 +34,10 @@ def trtllm_engine_module(monkeypatch):
     class _FakeBaseLLM:
         pass
 
-    class _FakeAutoConfig:
-        pass
+    class _FakePretrainedConfig:
+        @classmethod
+        def get_config_dict(cls, model_path):
+            return {}, {}
 
     trtllm_module = ModuleType("tensorrt_llm")
     trtllm_module.__path__ = []  # type: ignore[attr-defined]
@@ -47,7 +49,7 @@ def trtllm_engine_module(monkeypatch):
     llm_module = ModuleType("tensorrt_llm.llmapi.llm")
     llm_module.BaseLLM = _FakeBaseLLM  # type: ignore[attr-defined]
     transformers_module = ModuleType("transformers")
-    transformers_module.AutoConfig = _FakeAutoConfig  # type: ignore[attr-defined]
+    transformers_module.PretrainedConfig = _FakePretrainedConfig  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "tensorrt_llm", trtllm_module)
     monkeypatch.setitem(sys.modules, "tensorrt_llm.llmapi", llmapi_module)

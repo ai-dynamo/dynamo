@@ -101,8 +101,10 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 					DGDRProfilingClusterRoleName: "test-cluster-role",
 				},
 			},
-			RuntimeConfig: &commonController.RuntimeConfig{},
-			RBACManager:   &MockRBACManager{},
+			RuntimeConfig:           &commonController.RuntimeConfig{},
+			OperatorImage:           "registry.example/operator:test",
+			OperatorImagePullPolicy: corev1.PullAlways,
+			RBACManager:             &MockRBACManager{},
 		}
 	})
 
@@ -306,6 +308,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			}
 			Expect(profilerEnvNames).ShouldNot(HaveKey("NATS_SERVER"))
 			Expect(profilerEnvNames).ShouldNot(HaveKey("ETCD_ENDPOINTS"))
+			Expect(profilerEnvNames).ShouldNot(HaveKey(EnvDGDOverrideToolPath))
+			Expect(job.Spec.Template.Spec.InitContainers).Should(BeEmpty())
 
 			// Verify emptyDir volume (not PVC)
 			Expect(job.Spec.Template.Spec.Volumes).Should(ContainElement(
@@ -318,6 +322,91 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			))
 
 			// Clean up job
+			_ = k8sClient.Delete(ctx, job)
+		})
+
+		It("Should deliver the version-matched override tool when a DGD override is present", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-override-tool"
+			namespace := defaultNamespace
+
+			sa := &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      ServiceAccountProfilingJob,
+					Namespace: namespace,
+				},
+			}
+			Expect(k8sClient.Create(ctx, sa)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, sa) }()
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
+					},
+					Overrides: &nvidiacomv1beta1.OverridesSpec{
+						DGD: &runtime.RawExtension{Raw: []byte(`{
+							"apiVersion":"nvidia.com/v1beta1",
+							"kind":"DynamoGraphDeployment",
+							"spec":{"components":[]}
+						}`)},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			job := &batchv1.Job{}
+			jobName := getProfilingJobName(dgdr)
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: jobName, Namespace: namespace}, job)
+			}, timeout, interval).Should(Succeed())
+
+			installer := findContainer(job.Spec.Template.Spec.InitContainers, ContainerNameDGDOverrideInstaller)
+			Expect(installer).ShouldNot(BeNil())
+			Expect(installer.Image).Should(Equal("registry.example/operator:test"))
+			Expect(installer.ImagePullPolicy).Should(Equal(corev1.PullAlways))
+			Expect(installer.Args).Should(Equal([]string{"--install-to", DGDOverrideToolPath}))
+
+			profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+			Expect(profiler).ShouldNot(BeNil())
+			Expect(findEnv(profiler.Env, EnvDGDOverrideToolPath)).Should(Equal(
+				&corev1.EnvVar{Name: EnvDGDOverrideToolPath, Value: DGDOverrideToolPath},
+			))
+			profilerMount := findVolumeMount(profiler.VolumeMounts, VolumeNameDGDOverrideTool)
+			Expect(profilerMount).ShouldNot(BeNil())
+			Expect(profilerMount.ReadOnly).Should(BeTrue())
+			toolVolume := findVolume(job.Spec.Template.Spec.Volumes, VolumeNameDGDOverrideTool)
+			Expect(toolVolume).ShouldNot(BeNil())
+			Expect(toolVolume.EmptyDir).ShouldNot(BeNil())
+			Expect(job.Spec.Template.Spec.ImagePullSecrets).Should(Equal(
+				[]corev1.LocalObjectReference{{Name: "nvcr-imagepullsecret"}},
+			))
+
 			_ = k8sClient.Delete(ctx, job)
 		})
 

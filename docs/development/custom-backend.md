@@ -20,6 +20,8 @@ start the engine, stream generated chunks, handle cancellation, drain, and clean
 up. The Dynamo framework owns runtime registration, signal handling, model
 registration, and graceful shutdown.
 
-Use the lower-level Python worker path when your backend needs features that are still outside the unified contract, such as multimodal, LoRA adapter management, logprobs, guided decoding, engine-specific routes, or custom request handling.
+Use the lower-level Python worker path when your backend needs features that are
+still outside the unified contract, such as multimodal, LoRA adapter management,
+logprobs, engine-specific routes, or custom request handling.
 
 If your custom engine wants KV-cache-aware routing, also implement [KV Events for Custom Engines](../integrations/kv-events-custom-engines.md) so the Dynamo router can track which workers hold each prefix.

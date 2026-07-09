@@ -64,6 +64,7 @@ class OmniParallelKwargs:
     ring_degree: int = 1
     cfg_parallel_size: int = 1
     vae_patch_parallel_size: int = 1
+    vae_parallel_mode: str = "tile"
     use_hsdp: bool = False
     hsdp_shard_size: int = -1
     hsdp_replicate_size: int = 1
@@ -267,6 +268,14 @@ class OmniArgGroup(ArgGroup):
             default=1,
             arg_type=int,
             help="Number of ranks used for VAE patch/tile parallelism during decode/encode.",
+        )
+        add_argument(
+            g,
+            flag_name="--vae-parallel-mode",
+            env_var="DYN_OMNI_VAE_PARALLEL_MODE",
+            default="tile",
+            arg_type=str,
+            help=("VAE parallelism mode for diffusion stages (for example: tile)."),
         )
         add_negatable_bool_argument(
             g,

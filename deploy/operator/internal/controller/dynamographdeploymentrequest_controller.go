@@ -65,8 +65,9 @@ const (
 	JobNamePrefixAIC    = "profile-aic-"
 
 	// Container names
-	ContainerNameProfiler     = "profiler"
-	ContainerNameOutputCopier = "output-copier"
+	ContainerNameProfiler             = "profiler"
+	ContainerNameOutputCopier         = "output-copier"
+	ContainerNameDGDOverrideInstaller = "dgd-override-installer"
 
 	// ServiceAccount
 	ServiceAccountProfilingJob = "dgdr-profiling-job"
@@ -95,6 +96,7 @@ const (
 	VolumeNameProfilingConfig            = "profiling-config"
 	VolumeNameModelCache                 = "model-cache"
 	VolumeNameOutputCopierKubeAPIAccess  = "output-copier-kube-api-access"
+	VolumeNameDGDOverrideTool            = "dgd-override-tool"
 	ConfigMapNameKubeRootCA              = "kube-root-ca.crt"
 	ServiceAccountTokenExpirationSeconds = 3600
 
@@ -105,6 +107,9 @@ const (
 	ProfilingConfigDefaultKey  = "disagg.yaml"
 	DefaultModelCacheMountPath = "/opt/model-cache"
 	ServiceAccountTokenPath    = "/var/run/secrets/kubernetes.io/serviceaccount"
+	DGDOverrideToolMountPath   = "/opt/dynamo/bin"
+	DGDOverrideToolPath        = DGDOverrideToolMountPath + "/dgd-apply-overrides"
+	EnvDGDOverrideToolPath     = "DYNAMO_DGD_APPLY_OVERRIDES_BIN"
 
 	// Command line arguments
 	ArgModel   = "--model"
@@ -383,12 +388,14 @@ func isValidProfilingPhase(phase string) bool {
 // DynamoGraphDeploymentRequestReconciler reconciles a DynamoGraphDeploymentRequest object
 type DynamoGraphDeploymentRequestReconciler struct {
 	client.Client
-	APIReader         client.Reader
-	Recorder          record.EventRecorder
-	Config            *configv1alpha1.OperatorConfiguration
-	RuntimeConfig     *commonController.RuntimeConfig
-	GPUDiscoveryCache *gpu.GPUDiscoveryCache
-	GPUDiscovery      *gpu.GPUDiscovery
+	APIReader               client.Reader
+	Recorder                record.EventRecorder
+	Config                  *configv1alpha1.OperatorConfiguration
+	RuntimeConfig           *commonController.RuntimeConfig
+	GPUDiscoveryCache       *gpu.GPUDiscoveryCache
+	GPUDiscovery            *gpu.GPUDiscovery
+	OperatorImage           string
+	OperatorImagePullPolicy corev1.PullPolicy
 	// RBACMgr handles RBAC setup for profiling jobs
 	RBACManager RBACManager
 }
@@ -1655,6 +1662,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		}
 		applyProfilingJobOverrides(job, jobOverrides)
 		ensureOutputCopierKubeAPIAccess(job)
+		if dgdr.Spec.Overrides != nil && dgdr.Spec.Overrides.DGD != nil {
+			if err := ensureDGDOverrideTool(
+				job,
+				r.OperatorImage,
+				r.OperatorImagePullPolicy,
+			); err != nil {
+				return nil, false, err
+			}
+		}
 
 		return job, false, nil
 	})

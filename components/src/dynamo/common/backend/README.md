@@ -598,14 +598,13 @@ Observability:
 
 Request handling:
 - **Guided decoding / structured outputs** — wired per-engine on the
-  request side, with engine-specific coverage:
+  request side with JSON schema, regex, grammar, and choice coverage:
   - vLLM (`build_sampling_params` → `StructuredOutputsParams`):
     JSON schema, regex, grammar, choice.
   - TRT-LLM (`GuidedDecodingParams`): JSON schema, regex, grammar,
     choice, `json_object`.
-  - SGLang (`_get_guided_decoding_params`): JSON schema only;
-    regex / grammar / choice are silently dropped (see SGLang gaps
-    below).
+  - SGLang (`_get_guided_decoding_params`): JSON schema, regex,
+    grammar through `ebnf`, and choice through an escaped regex.
 - **Structural tag generation** — `WorkerConfig.structural_tag_{mode,
   scope, schema}` + `serialize_structural_tag` helper
 - **Custom Jinja chat templates** — `WorkerConfig.custom_jinja_template`
@@ -656,7 +655,6 @@ Request handling:
 | `protocol.py` Pydantic models | `EmbeddingRequest`, `DisaggPreprocessedRequest`, multimodal content types |
 | `--disagg-config` YAML override | `--disagg-config` / `--disagg-config-key` for YAML-based disagg config |
 | `--enable-rl` | RL support via `call_tokenizer_manager` route |
-| Guided-decoding constraint coverage | `_get_guided_decoding_params` forwards only `json` (and `structural_tag`); `regex` / `grammar` / `choice` are silently dropped on the unified path even though SGLang's engine accepts them |
 
 ### TRT-LLM-specific gaps
 

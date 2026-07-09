@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -583,6 +584,19 @@ def get_runtime(
     return DistributedRuntime(
         loop, store_backend, request_plane, event_plane=event_plane
     )
+
+
+@contextlib.contextmanager
+def managed_runtime(
+    store_backend: str = "etcd",
+    request_plane: str = "tcp",
+    event_plane: Optional[str] = None,
+):
+    runtime = get_runtime(store_backend, request_plane, event_plane)
+    try:
+        yield runtime
+    finally:
+        runtime.shutdown()
 
 
 async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
