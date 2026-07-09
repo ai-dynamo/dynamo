@@ -253,6 +253,15 @@ class TrtllmLLMEngine(LLMEngine):
             "enable_iter_perf_stats": True,
         }
 
+        # Match the legacy worker path: select TRT-LLM's guided-decoding
+        # implementation at engine startup, before generic engine-arg overrides.
+        if config.guided_decoding_backend is not None:
+            engine_args["guided_decoding_backend"] = config.guided_decoding_backend
+            logger.info(
+                "Guided decoding enabled with backend: %s",
+                config.guided_decoding_backend,
+            )
+
         # Apply --extra-engine-args / --override-engine-args. Match the
         # legacy `dynamo.trtllm` path so profiler/parallel-scheduler
         # overrides behave the same way.

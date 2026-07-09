@@ -208,23 +208,30 @@ impl<'a> VllmTitoEnvelope<'a> {
 /// `extra_args.vllm_tito`. The backend remains the authority for interpreting
 /// every vLLM-specific field.
 fn preprocessed_from_generate(
-    request: &GenerateRequest,
+    request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
     request_id: &str,
 ) -> anyhow::Result<PreprocessedRequest> {
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
+    let min_tokens = sampling.min_tokens();
+    let ignore_eos = sampling.ignore_eos();
     let routing_priority = dynamo_routing_priority(request.priority);
-    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(request, request_id))?;
+    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
+    let GenerateRequest {
+        token_ids,
+        cache_salt,
+        ..
+    } = request;
 
     PreprocessedRequest::builder()
         .model(model.to_string())
-        .token_ids(request.token_ids.clone())
+        .token_ids(token_ids)
         .stop_conditions(StopConditions {
             max_tokens,
-            min_tokens: sampling.min_tokens(),
-            ignore_eos: Some(sampling.ignore_eos()),
+            min_tokens,
+            ignore_eos: Some(ignore_eos),
             ..Default::default()
         })
         .sampling_options(SamplingOptions {
@@ -235,7 +242,7 @@ fn preprocessed_from_generate(
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
             expected_output_tokens: max_tokens,
-            cache_namespace: request.cache_salt.clone(),
+            cache_namespace: cache_salt,
             // `priority_jump` is a boost-only scheduler input. Preserve penalties
             // in signed `priority`, matching the standard preprocessor projection.
             priority_jump: Some(routing_priority.max(0) as f64),
@@ -318,7 +325,7 @@ async fn handler_generate(
 
     let request_context = resolve_generate_request_context(&headers, request.request_id.as_deref());
     let preprocessed = match preprocessed_from_generate(
-        &request,
+        request,
         &model,
         request_context.data_parallel_rank,
         &request_context.request_id,
@@ -837,7 +844,7 @@ mod tests {
             serde_json::from_value(raw.clone()).expect("deserialize request");
 
         let preprocessed =
-            preprocessed_from_generate(&request, "test-model", None, "resolved-request")
+            preprocessed_from_generate(request, "test-model", None, "resolved-request")
                 .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
@@ -898,7 +905,7 @@ mod tests {
         .expect("deserialize request");
 
         let preprocessed =
-            preprocessed_from_generate(&request, "test-model", None, "resolved-request")
+            preprocessed_from_generate(request, "test-model", None, "resolved-request")
                 .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, None);
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
@@ -921,7 +928,7 @@ mod tests {
         .expect("deserialize request");
 
         let preprocessed =
-            preprocessed_from_generate(&request, "test-model", None, "resolved-request")
+            preprocessed_from_generate(request, "test-model", None, "resolved-request")
                 .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
     }
@@ -1128,7 +1135,7 @@ mod tests {
         .expect("deserialize request");
 
         let preprocessed =
-            preprocessed_from_generate(&request, "test-model", Some(3), "resolved-request")
+            preprocessed_from_generate(request, "test-model", Some(3), "resolved-request")
                 .expect("build request");
         let routing = preprocessed.routing.as_ref().expect("routing hints");
 
