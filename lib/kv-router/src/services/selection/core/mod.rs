@@ -824,19 +824,23 @@ impl SelectionCore {
         pending: PendingSelection,
         inserted_at: Instant,
     ) -> Result<ReservationResponse, SelectionError> {
-        match self.validate_cached_booking(&pending) {
-            Ok(prefill_load_hint) => {
+        match self.resolve_cached_booking(&pending) {
+            Ok((entry, endpoint, prefill_load_hint)) => {
                 let track_prefill_tokens = pending.track_prefill_tokens;
-                self.finalize_reservation(ReservationBooking {
-                    key: pending.key,
-                    reservation_id: req.reservation_id,
-                    worker: pending.worker,
-                    sequence_hashes: pending.sequence_hashes,
-                    prefill_load_hint: track_prefill_tokens.then_some(prefill_load_hint),
-                    expected_output_tokens: pending.expected_output_tokens,
-                    track_prefill_tokens,
-                    lora_name: pending.lora_name,
-                })
+                self.finalize_reservation(
+                    entry,
+                    endpoint,
+                    ReservationBooking {
+                        key: pending.key,
+                        reservation_id: req.reservation_id,
+                        worker: pending.worker,
+                        sequence_hashes: pending.sequence_hashes,
+                        prefill_load_hint: track_prefill_tokens.then_some(prefill_load_hint),
+                        expected_output_tokens: pending.expected_output_tokens,
+                        track_prefill_tokens,
+                        lora_name: pending.lora_name,
+                    },
+                )
                 .await
             }
             Err(error) => {
@@ -847,27 +851,35 @@ impl SelectionCore {
         }
     }
 
-    /// Fallible checks for a cached booking, run before the selection is consumed.
-    fn validate_cached_booking(
+    /// Resolve everything a cached booking needs (ready entry, schedulable
+    /// endpoint, prefill hint) before the selection is consumed, so the only
+    /// fallible step left in `finalize_reservation` is the scheduler call.
+    fn resolve_cached_booking(
         &self,
         pending: &PendingSelection,
-    ) -> Result<PrefillLoadHint, SelectionError> {
-        self.ready_entry(&pending.key)?;
-        if self
-            .catalog
-            .schedulable_endpoint(pending.worker.worker_id, &pending.key)
-            .is_none()
-        {
-            return Err(SelectionError::NotFound(format!(
-                "schedulable worker {} not found for {}",
-                pending.worker.worker_id, pending.key
-            )));
-        }
-        prefill_load_hint_from_effective_tokens(
+    ) -> Result<(Arc<SelectionEntry>, String, PrefillLoadHint), SelectionError> {
+        let entry = self.ready_entry(&pending.key)?;
+        let endpoint = self.schedulable_endpoint(pending.worker.worker_id, &pending.key)?;
+        let prefill_load_hint = prefill_load_hint_from_effective_tokens(
             pending.isl_tokens,
             pending.effective_prefill_tokens,
         )
-        .map_err(|error| SelectionError::BadRequest(error.to_string()))
+        .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
+        Ok((entry, endpoint, prefill_load_hint))
+    }
+
+    fn schedulable_endpoint(
+        &self,
+        worker_id: WorkerId,
+        key: &SelectionKey,
+    ) -> Result<String, SelectionError> {
+        self.catalog
+            .schedulable_endpoint(worker_id, key)
+            .ok_or_else(|| {
+                SelectionError::NotFound(format!(
+                    "schedulable worker {worker_id} not found for {key}"
+                ))
+            })
     }
 
     /// Book a reservation from a self-contained request (explicit worker_id and prompt).
@@ -888,6 +900,8 @@ impl SelectionCore {
                     .map_err(|error| SelectionError::BadRequest(error.to_string()))
             })
             .transpose()?;
+        let worker = WorkerWithDpRank::new(worker_id, req.dp_rank.unwrap_or(0));
+        let endpoint = self.schedulable_endpoint(worker.worker_id, &key)?;
         let track_prefill_tokens = req.effective_prefill_tokens.is_some()
             || req
                 .router_config_override
@@ -895,21 +909,29 @@ impl SelectionCore {
                 .and_then(|cfg| cfg.track_prefill_tokens)
                 .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
 
-        self.finalize_reservation(ReservationBooking {
-            key,
-            reservation_id: req.reservation_id,
-            worker: WorkerWithDpRank::new(worker_id, req.dp_rank.unwrap_or(0)),
-            sequence_hashes: normalized.sequence_hashes,
-            prefill_load_hint,
-            expected_output_tokens: req.expected_output_tokens,
-            track_prefill_tokens,
-            lora_name: req.prompt.lora_name,
-        })
+        self.finalize_reservation(
+            entry,
+            endpoint,
+            ReservationBooking {
+                key,
+                reservation_id: req.reservation_id,
+                worker,
+                sequence_hashes: normalized.sequence_hashes,
+                prefill_load_hint,
+                expected_output_tokens: req.expected_output_tokens,
+                track_prefill_tokens,
+                lora_name: req.prompt.lora_name,
+            },
+        )
         .await
     }
 
+    /// Register the booking with the scheduler. All fallible resolution happens
+    /// in the caller, so this consumes the selection only when it will land.
     async fn finalize_reservation(
         &self,
+        entry: Arc<SelectionEntry>,
+        endpoint: String,
         booking: ReservationBooking,
     ) -> Result<ReservationResponse, SelectionError> {
         let ReservationBooking {
@@ -922,17 +944,6 @@ impl SelectionCore {
             track_prefill_tokens,
             lora_name,
         } = booking;
-
-        let entry = self.ready_entry(&key)?;
-        let endpoint = self
-            .catalog
-            .schedulable_endpoint(worker.worker_id, &key)
-            .ok_or_else(|| {
-                SelectionError::NotFound(format!(
-                    "schedulable worker {} not found for {key}",
-                    worker.worker_id
-                ))
-            })?;
 
         entry
             .scheduler
