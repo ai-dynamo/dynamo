@@ -1,6 +1,9 @@
 package types
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func validAgentConfig() *AgentConfig {
 	return &AgentConfig{
@@ -12,6 +15,32 @@ func validAgentConfig() *AgentConfig {
 			NSRestorePath:         "/usr/local/bin/nsrestore",
 			RestoreTimeoutSeconds: 60,
 		},
+	}
+}
+
+func TestAgentConfigValidateRootFSWorkers(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		cfg := validAgentConfig()
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() error = %v", err)
+		}
+		if cfg.RootFS.Workers != DefaultRootFSWorkers {
+			t.Fatalf(
+				"RootFS.Workers = %d, want %d",
+				cfg.RootFS.Workers,
+				DefaultRootFSWorkers,
+			)
+		}
+	})
+
+	for _, workers := range []int{-1, MaxRootFSWorkers + 1} {
+		t.Run(fmt.Sprintf("rejects_%d", workers), func(t *testing.T) {
+			cfg := validAgentConfig()
+			cfg.RootFS.Workers = workers
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("Validate() accepted %d workers", workers)
+			}
+		})
 	}
 }
 

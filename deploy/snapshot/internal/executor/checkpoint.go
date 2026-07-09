@@ -87,7 +87,16 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	phaseTimings.PrepareDuration = time.Since(prepareStart)
 
 	// Phase 3: Capture — CRIU dump, rootfs diff
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
+	captureTimings, err := captureCheckpoint(
+		ctx,
+		criuOpts,
+		&cfg.CRIU,
+		cfg.RootFS.Workers,
+		data,
+		state,
+		tmpDir,
+		log,
+	)
 	if err != nil {
 		return err
 	}
@@ -250,7 +259,7 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, rootfsWorkers int, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
@@ -268,19 +277,21 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 	}
 	timings.CRIUDumpDuration = criuDumpDuration
 
-	// Overlay rootfs diff capture is best-effort. Failures are logged but not
-	// propagated — a checkpoint without overlay diffs is still valid for restore
-	// (the base container image provides the filesystem).
-	if state.UpperDir != "" {
-		overlayCaptureStart := time.Now()
-		if _, err := snapshotruntime.CaptureRootfsDiff(state.UpperDir, checkpointDir, data.Overlay.Exclusions, data.Overlay.BindMountDests); err != nil {
-			log.Error(err, "Failed to capture rootfs diff")
-		}
-		if _, err := snapshotruntime.CaptureDeletedFiles(state.UpperDir, checkpointDir); err != nil {
-			log.Error(err, "Failed to capture deleted files")
-		}
-		timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
+	// Publishing without the rootfs artifact would silently lose filesystem
+	// changes, so capture and deleted-file errors abort the checkpoint.
+	overlayCaptureStart := time.Now()
+	if _, err := snapshotruntime.CaptureRootfsDiff(
+		ctx,
+		state.UpperDir,
+		checkpointDir,
+		data.Overlay.Exclusions,
+		data.Overlay.BindMountDests,
+		rootfsWorkers,
+		log,
+	); err != nil {
+		return nil, fmt.Errorf("failed to capture rootfs diff: %w", err)
 	}
+	timings.OverlayCaptureDuration = time.Since(overlayCaptureStart)
 
 	return timings, nil
 }

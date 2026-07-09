@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: snapshot agent configuration
+templates:
+  - templates/configmap.yaml
+tests:
+  - it: renders the rootfs worker count
+    set:
+      config.rootfs.workers: 23
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: "rootfs:\n  workers: 23"

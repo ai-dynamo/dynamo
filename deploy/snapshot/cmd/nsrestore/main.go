@@ -20,10 +20,14 @@ func main() {
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
+	rootfsWorkers := flag.Int("rootfs-workers", 0, "Rootfs directory copy workers")
 	flag.Parse()
 
 	if *checkpointPath == "" {
 		fatal(log, nil, "--checkpoint-path is required")
+	}
+	if *rootfsWorkers < 1 {
+		fatal(log, nil, "--rootfs-workers must be greater than zero")
 	}
 
 	opts := executor.RestoreOptions{
@@ -32,6 +36,7 @@ func main() {
 		CgroupRoot:     *cgroupRoot,
 		TargetPodIP:    *targetPodIP,
 		ProcRoot:       "/proc",
+		RootFSWorkers:  *rootfsWorkers,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

@@ -35,6 +35,7 @@ type RestoreRequest struct {
 	TargetPodIP                 string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
+	RootFSWorkers               int
 }
 
 // Restore performs external restore for the given request.
@@ -192,10 +193,16 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
+func nsRestoreArgs(
+	req RestoreRequest,
+	snap *types.RestoreContainerSnapshot,
+) ([]string, error) {
 	checkpointPath := req.ContainerCheckpointLocation
 	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
-		return nil, fmt.Errorf("container checkpoint location must be absolute: %q", checkpointPath)
+		return nil, fmt.Errorf(
+			"container checkpoint location must be absolute: %q",
+			checkpointPath,
+		)
 	}
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
@@ -207,6 +214,7 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 		"-m", "-u", "-i", "-n", "-p",
 		"--", req.NSRestorePath,
 		"--checkpoint-path", checkpointPath,
+		"--rootfs-workers", strconv.Itoa(req.RootFSWorkers),
 	}
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
@@ -217,7 +225,14 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
+	return args, nil
+}
 
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
+	args, err := nsRestoreArgs(req, snap)
+	if err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()

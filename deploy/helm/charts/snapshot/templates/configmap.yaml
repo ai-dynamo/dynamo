@@ -16,6 +16,9 @@ metadata:
     {{- include "snapshot.labels" . | nindent 4 }}
 data:
   config.yaml: |
+    rootfs:
+      workers: {{ .Values.config.rootfs.workers }}
+
     storage:
       type: {{ .Values.storage.type | quote }}
       accessMode: {{ .Values.storage.accessMode | quote }}

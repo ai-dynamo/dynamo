@@ -159,10 +159,13 @@ rbac:
 # Static configuration (loaded from ConfigMap)
 # Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables
 config:
+  rootfs:
+    # Bounded workers used for directory artifact capture and restore.
+    workers: 16
+
   overlay:
-    # Rootfs diff tar exclusions. Absolute-looking paths are normalized
-    # relative to the tar root, and patterns starting with * are passed
-    # through as tar globs unchanged.
+    # Rootfs diff exclusions. Absolute-looking paths are relative to the
+    # artifact root; patterns starting with * match at any depth.
     exclusions:
       - /proc
       - /sys

@@ -113,9 +113,15 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
 | `openshift.enabled` | OpenShift RBAC / SCC-related chart pieces | `false` |
+| `config.rootfs.workers` | Bounded rootfs directory copy workers | `16` |
 
 Reserved `s3` and `oci` values remain chart-owned placeholders for future
 snapshot backends, but only `pvc` is implemented today.
+
+The rootfs performance experiment stores only directories, dense regular
+files, and symlinks. It fails closed on hardlinks, sparse files, xattrs,
+special files, native/opaque overlay whiteouts, and nested mountpoints.
+Tar-only or incomplete rootfs artifacts are unsupported.
 
 When using `storage.accessMode=podMount`, configure the Dynamo operator with
 the same workload PVC name and mount path. The snapshot chart value is

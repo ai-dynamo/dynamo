@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,6 +16,27 @@ import (
 type restoreFakeRuntime struct {
 	resolvedID      string
 	resolveByPodHit bool
+}
+
+func TestNSRestoreArgsIncludeRootFSWorkers(t *testing.T) {
+	args, err := nsRestoreArgs(
+		RestoreRequest{
+			NSRestorePath: "/usr/local/bin/nsrestore",
+			RootFSWorkers: 23,
+			TargetPodIP:   "10.0.0.1",
+		},
+		&types.RestoreContainerSnapshot{
+			CheckpointPath: "/checkpoints/checkpoint",
+			PlaceholderPID: 42,
+		},
+	)
+	if err != nil {
+		t.Fatalf("nsRestoreArgs: %v", err)
+	}
+	index := slices.Index(args, "--rootfs-workers")
+	if index < 0 || index+1 >= len(args) || args[index+1] != "23" {
+		t.Fatalf("--rootfs-workers not propagated in %v", args)
+	}
 }
 
 func (r *restoreFakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {

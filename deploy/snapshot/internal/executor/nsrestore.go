@@ -22,6 +22,7 @@ type RestoreOptions struct {
 	CgroupRoot     string
 	TargetPodIP    string
 	ProcRoot       string
+	RootFSWorkers  int
 }
 
 type RestoreInNamespaceResult struct {
@@ -101,12 +102,18 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	// Apply rootfs diff inside the namespace (target root is /)
 	nsrestoreSetupStart := time.Now()
-	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", log); err != nil {
+	if err := snapshotruntime.ApplyRootfsDiff(
+		ctx,
+		opts.CheckpointPath,
+		"/",
+		opts.RootFSWorkers,
+		log,
+	); err != nil {
 		return nil, 0, fmt.Errorf("rootfs diff failed: %w", err)
 	}
 
 	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
-		log.Error(err, "Failed to apply deleted files")
+		return nil, 0, fmt.Errorf("deleted files failed: %w", err)
 	}
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content

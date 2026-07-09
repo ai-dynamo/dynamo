@@ -14,12 +14,21 @@ type AgentConfig struct {
 	NodeName            string          `yaml:"-"`
 	RestrictedNamespace string          `yaml:"-"`
 	Storage             StorageSpec     `yaml:"storage"`
+	RootFS              RootFSSettings  `yaml:"rootfs"`
 	Overlay             OverlaySettings `yaml:"overlay"`
 	Restore             RestoreSpec     `yaml:"restore"`
 	CRIU                CRIUSettings    `yaml:"criu"`
 }
 
+// RootFSSettings configures rootfs directory artifact copying.
+type RootFSSettings struct {
+	Workers int `yaml:"workers"`
+}
+
 const (
+	DefaultRootFSWorkers = 16
+	MaxRootFSWorkers     = 128
+
 	// StorageAccessModeAgentMount means the snapshot-agent pod mounts the
 	// checkpoint store directly at Storage.BasePath.
 	StorageAccessModeAgentMount = "agentMount"
@@ -70,6 +79,18 @@ func (c *AgentConfig) Validate() error {
 		return &ConfigError{
 			Field:   "criu",
 			Message: "tcpClose and tcpEstablished cannot both be true",
+		}
+	}
+	if c.RootFS.Workers == 0 {
+		c.RootFS.Workers = DefaultRootFSWorkers
+	}
+	if c.RootFS.Workers < 1 || c.RootFS.Workers > MaxRootFSWorkers {
+		return &ConfigError{
+			Field: "rootfs.workers",
+			Message: fmt.Sprintf(
+				"must be between 1 and %d",
+				MaxRootFSWorkers,
+			),
 		}
 	}
 	return c.Restore.Validate()
