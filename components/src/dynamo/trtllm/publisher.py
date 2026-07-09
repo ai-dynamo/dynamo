@@ -421,9 +421,9 @@ class Publisher:
         # the publisher is shut down and None'd. Prevents silent planner poison
         # when running against a TRT-LLM version that predates #13199.
         self._fpm_schema_checked: bool = False
-        self.kv_event_publishers: Optional[
-            Dict[int, KvEventPublisher]
-        ] = None  # One per attention_dp_rank
+        self.kv_event_publishers: Optional[Dict[int, KvEventPublisher]] = (
+            None  # One per attention_dp_rank
+        )
         self.zmq_kv_event_publisher = None  # ZMQ publisher for consolidator
         self.publish_kv_cache_events_thread: Optional[ManagedThread] = None
         self.publish_stats_thread: Optional[ManagedThread] = None
@@ -559,22 +559,33 @@ class Publisher:
         max_sleep: float,
         backoff_factor: float,
         batch_size_handler_fn=None,
+        batch_handler_fn=None,
     ):
         sleep_s = min_sleep
         while not self._stop_event.is_set():
             had_data = False
             batch_size = 0
+            batch = []
             try:
                 async for item in fetch_fn():
                     had_data = True
                     batch_size += 1
-                    handler_fn(item)
+                    if batch_handler_fn is None:
+                        handler_fn(item)
+                    else:
+                        batch.append(item)
             except (asyncio.TimeoutError, TimeoutError, asyncio.QueueEmpty):
                 pass
             except Exception as e:
                 logging.warning(f"Publisher polling loop error: {e}", exc_info=True)
                 raise
 
+            if batch and batch_handler_fn is not None:
+                try:
+                    batch_handler_fn(batch)
+                except Exception as e:
+                    logging.warning(f"Publisher polling loop error: {e}", exc_info=True)
+                    raise
             if batch_size and batch_size_handler_fn is not None:
                 batch_size_handler_fn(batch_size)
 
@@ -780,6 +791,7 @@ class Publisher:
             _KV_EVENTS_MAX_SLEEP_SEC,
             _KV_EVENTS_BACKOFF_FACTOR,
             self._record_kv_event_drain_batch,
+            None if self.zmq_kv_event_publisher else self._handle_kv_event_batch,
         )
         return True
 
@@ -787,7 +799,7 @@ class Publisher:
         if self.additional_metrics is not None:
             self.additional_metrics.record_kv_event_drain_batch(batch_size)
 
-    def _handle_kv_event(self, event):
+    def _normalize_kv_event(self, event):
         event_id = event["event_id"]
         attention_dp_rank = event.get("attention_dp_rank", 0)
 
@@ -896,39 +908,16 @@ class Publisher:
                 cache_salt is not None,
                 parent_hash is not None,
             )
-            # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
-            # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
-            if self.zmq_kv_event_publisher:
-                # Consolidator enabled: publish to ZMQ only
-                self.zmq_kv_event_publisher.publish_stored(
-                    token_ids,
-                    num_block_tokens,
-                    block_hashes,
-                    parent_hash,
-                    block_mm_infos,
-                    attention_dp_rank,
-                    lora_name,
-                    cache_salt,
-                )
-            elif self.kv_event_publishers:
-                # No consolidator: publish to NATS (router subscribes directly)
-                # Route to correct publisher based on attention_dp_rank
-                publisher = self.kv_event_publishers.get(attention_dp_rank)
-                if publisher:
-                    publisher.publish_stored(
-                        token_ids,
-                        num_block_tokens,
-                        block_hashes,
-                        parent_hash,
-                        block_mm_infos,
-                        lora_name=lora_name,
-                        cache_salt=cache_salt,
-                    )
-                else:
-                    logging.warning(
-                        f"No publisher for attention_dp_rank={attention_dp_rank}, "
-                        f"available ranks: {list(self.kv_event_publishers.keys())}"
-                    )
+            return attention_dp_rank, {
+                "type": "stored",
+                "token_ids": token_ids,
+                "num_block_tokens": num_block_tokens,
+                "block_hashes": block_hashes,
+                "parent_hash": parent_hash,
+                "block_mm_infos": block_mm_infos,
+                "lora_name": lora_name,
+                "cache_salt": cache_salt,
+            }
         elif data["type"] == "removed":
             self.processing_initial_created_events = False
             removed_block_hashes: list[int] = []
@@ -954,26 +943,71 @@ class Publisher:
             if not removed_block_hashes:
                 return
 
-            # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
-            # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
-            if self.zmq_kv_event_publisher:
-                # Consolidator enabled: publish to ZMQ only
-                self.zmq_kv_event_publisher.publish_removed(
-                    removed_block_hashes, attention_dp_rank
-                )
-            elif self.kv_event_publishers:
-                # No consolidator: publish to NATS (router subscribes directly)
-                # Route to correct publisher based on attention_dp_rank
-                publisher = self.kv_event_publishers.get(attention_dp_rank)
-                if publisher:
-                    publisher.publish_removed(removed_block_hashes)
-                else:
-                    logging.warning(
-                        f"No publisher for attention_dp_rank={attention_dp_rank}, "
-                        f"available ranks: {list(self.kv_event_publishers.keys())}"
-                    )
+            return attention_dp_rank, {
+                "type": "removed",
+                "block_hashes": removed_block_hashes,
+            }
         elif data["type"] == "created" and self.processing_initial_created_events:
             self.update_max_window_size(event)
+        return None
+
+    def _handle_kv_event(self, event):
+        """Keep consolidator publishing singleton-based; batch direct publishers."""
+        normalized = self._normalize_kv_event(event)
+        if normalized is None:
+            return
+        attention_dp_rank, normalized_event = normalized
+
+        if self.zmq_kv_event_publisher:
+            if normalized_event["type"] == "stored":
+                self.zmq_kv_event_publisher.publish_stored(
+                    normalized_event["token_ids"],
+                    normalized_event["num_block_tokens"],
+                    normalized_event["block_hashes"],
+                    normalized_event["parent_hash"],
+                    normalized_event["block_mm_infos"],
+                    attention_dp_rank,
+                    normalized_event["lora_name"],
+                    normalized_event["cache_salt"],
+                )
+            else:
+                self.zmq_kv_event_publisher.publish_removed(
+                    normalized_event["block_hashes"], attention_dp_rank
+                )
+            return
+
+        self._publish_direct_kv_batch(attention_dp_rank, [normalized_event])
+
+    def _handle_kv_event_batch(self, events):
+        events_by_rank: dict[int, list[dict[str, Any]]] = {}
+        for event in events:
+            try:
+                normalized = self._normalize_kv_event(event)
+            except Exception as error:
+                logger.warning(
+                    "Dropping malformed KV event while normalizing native drain: %s",
+                    error,
+                    exc_info=True,
+                )
+                continue
+            if normalized is not None:
+                attention_dp_rank, normalized_event = normalized
+                events_by_rank.setdefault(attention_dp_rank, []).append(
+                    normalized_event
+                )
+
+        for attention_dp_rank, normalized_events in events_by_rank.items():
+            self._publish_direct_kv_batch(attention_dp_rank, normalized_events)
+
+    def _publish_direct_kv_batch(self, attention_dp_rank, events):
+        publisher = (self.kv_event_publishers or {}).get(attention_dp_rank)
+        if publisher:
+            publisher.publish_batch(events)
+        else:
+            logging.warning(
+                f"No publisher for attention_dp_rank={attention_dp_rank}, "
+                f"available ranks: {list((self.kv_event_publishers or {}).keys())}"
+            )
 
     def start(self) -> None:
         # Each ManagedThread owns its own asyncio loop now, so we no longer

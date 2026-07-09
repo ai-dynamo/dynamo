@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use pythonize::{depythonize, pythonize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::sync::Arc;
@@ -864,6 +865,59 @@ pub(crate) struct KvEventPublisher {
     warning_count: Arc<AtomicU32>,
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum KvEventInput {
+    Stored {
+        token_ids: Vec<u32>,
+        num_block_tokens: Vec<u64>,
+        block_hashes: Vec<i64>,
+        parent_hash: Option<i64>,
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        lora_name: Option<String>,
+        is_eagle: Option<bool>,
+        cache_salt: Option<String>,
+    },
+    Removed {
+        block_hashes: Vec<i64>,
+    },
+}
+
+#[cfg(test)]
+mod kv_event_input_tests {
+    use super::KvEventInput;
+
+    #[test]
+    fn deserializes_typed_stored_and_removed_batch() {
+        let inputs: Vec<KvEventInput> = serde_json::from_value(serde_json::json!([
+            {
+                "type": "stored",
+                "token_ids": [1, 2],
+                "num_block_tokens": [2],
+                "block_hashes": [10],
+                "parent_hash": 9,
+                "cache_salt": "tenant-a"
+            },
+            {"type": "removed", "block_hashes": [10]}
+        ]))
+        .unwrap();
+
+        assert_eq!(inputs.len(), 2);
+        assert!(matches!(inputs[0], KvEventInput::Stored { .. }));
+        assert!(matches!(inputs[1], KvEventInput::Removed { .. }));
+    }
+
+    #[test]
+    fn rejects_complete_batch_when_any_record_is_invalid() {
+        let result = serde_json::from_value::<Vec<KvEventInput>>(serde_json::json!([
+            {"type": "removed", "block_hashes": [10]},
+            {"type": "stored", "token_ids": [1], "num_block_tokens": [1]}
+        ]));
+
+        assert!(result.is_err());
+    }
+}
+
 impl KvEventPublisher {
     /// Wrap an already-constructed Rust publisher as the Python pyclass.
     ///
@@ -881,6 +935,55 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stored_event(
+        &self,
+        event_id: u64,
+        token_ids: &[u32],
+        num_block_tokens: &[u64],
+        block_hashes: &[i64],
+        parent_hash: Option<i64>,
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        lora_name: Option<&str>,
+        is_eagle: Option<bool>,
+        cache_salt: Option<&str>,
+    ) -> KvCacheEvent {
+        let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&hash| hash as u64).collect();
+        KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                start_position: None,
+                blocks: create_stored_blocks(
+                    self.kv_block_size as u32,
+                    token_ids,
+                    num_block_tokens,
+                    &block_hashes_u64,
+                    lora_name,
+                    cache_salt,
+                    &self.warning_count,
+                    block_mm_infos,
+                    is_eagle,
+                    None, // image_token_id: publish path keeps caller-supplied mm_infos
+                ),
+            }),
+            dp_rank: self.dp_rank,
+        }
+    }
+
+    fn removed_event(&self, event_id: u64, block_hashes: Vec<i64>) -> KvCacheEvent {
+        KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: block_hashes
+                    .into_iter()
+                    .map(ExternalSequenceBlockHash::from)
+                    .collect(),
+            }),
+            dp_rank: self.dp_rank,
         }
     }
 }
@@ -902,9 +1005,10 @@ impl KvEventPublisher {
     ///     zmq_topic: ZMQ topic filter (default "").
     ///     batching_timeout_ms: Maximum time (in **milliseconds**) to accumulate
     ///         events into a single batch before flushing.
-    ///         ``None`` disables batching: every event is published immediately.
+    ///         ``None`` coalesces within each submitted source list and flushes at
+    ///         that list boundary without added latency.
     ///         ``50`` to enable batching with a 50 ms window.
-    ///         ``0`` is treated as ``None`` (also disables batching).
+    ///         ``0`` is treated as ``None``.
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
     #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]
@@ -967,9 +1071,6 @@ impl KvEventPublisher {
         is_eagle: Option<bool>,
         cache_salt: Option<String>,
     ) -> PyResult<()> {
-        let kv_block_size = self.kv_block_size as u32;
-        let dp_rank = self.dp_rank;
-        let warning_count = self.warning_count.clone();
         let inner = self.inner.clone();
 
         let event_id = inner.next_event_id();
@@ -979,53 +1080,72 @@ impl KvEventPublisher {
             .map(depythonize_block_mm_infos)
             .transpose()?;
 
-        py.allow_threads(|| {
-            let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
-            let event = KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
-                    start_position: None,
-                    blocks: create_stored_blocks(
-                        kv_block_size,
-                        &token_ids,
-                        &num_block_tokens,
-                        &block_hashes_u64,
-                        lora_name.as_deref(),
-                        cache_salt.as_deref(),
-                        &warning_count,
-                        mm_infos.as_deref(),
-                        is_eagle,
-                        None, // image_token_id: publish path keeps caller-supplied mm_infos
-                    ),
-                }),
-                dp_rank,
-            };
+        let event = self.stored_event(
+            event_id,
+            &token_ids,
+            &num_block_tokens,
+            &block_hashes,
+            parent_hash,
+            mm_infos.as_deref(),
+            lora_name.as_deref(),
+            is_eagle,
+            cache_salt.as_deref(),
+        );
 
-            inner.publish(event).map_err(to_pyerr)
-        })
+        py.allow_threads(|| inner.publish(event).map_err(to_pyerr))
     }
 
     fn publish_removed(&self, py: Python, block_hashes: Vec<i64>) -> PyResult<()> {
-        let dp_rank = self.dp_rank;
         let inner = self.inner.clone();
 
         // Use shared monotonic event_id counter from the inner publisher
         let event_id = inner.next_event_id();
+        let event = self.removed_event(event_id, block_hashes);
 
-        py.allow_threads(|| {
-            let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
-                .into_iter()
-                .map(ExternalSequenceBlockHash::from)
-                .collect();
-            let event = KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
-                dp_rank,
+        py.allow_threads(|| inner.publish(event).map_err(to_pyerr))
+    }
+
+    /// Publish an ordered list of typed KV events as one processor input.
+    ///
+    /// The complete Python list is deserialized and converted before anything
+    /// is enqueued, so invalid input cannot partially publish a batch.
+    fn publish_batch(&self, py: Python, events: Bound<PyAny>) -> PyResult<()> {
+        let inputs: Vec<KvEventInput> = depythonize(&events)
+            .map_err(|error| PyValueError::new_err(format!("invalid KV event batch: {error}")))?;
+        let mut converted = Vec::with_capacity(inputs.len());
+
+        for input in inputs {
+            let event_id = self.inner.next_event_id();
+            let event = match input {
+                KvEventInput::Stored {
+                    token_ids,
+                    num_block_tokens,
+                    block_hashes,
+                    parent_hash,
+                    block_mm_infos,
+                    lora_name,
+                    is_eagle,
+                    cache_salt,
+                } => self.stored_event(
+                    event_id,
+                    &token_ids,
+                    &num_block_tokens,
+                    &block_hashes,
+                    parent_hash,
+                    block_mm_infos.as_deref(),
+                    lora_name.as_deref(),
+                    is_eagle,
+                    cache_salt.as_deref(),
+                ),
+                KvEventInput::Removed { block_hashes } => {
+                    self.removed_event(event_id, block_hashes)
+                }
             };
+            converted.push(event);
+        }
 
-            inner.publish(event).map_err(to_pyerr)
-        })
+        let inner = self.inner.clone();
+        py.allow_threads(|| inner.publish_batch(converted).map_err(to_pyerr))
     }
 
     fn shutdown(&mut self) {

@@ -512,21 +512,46 @@ class TrtllmLLMEngine(LLMEngine):
                 continue
             if self._additional_metrics is not None:
                 self._additional_metrics.record_kv_event_drain_batch(len(events))
-            for event in events:
-                try:
-                    self._dispatch_kv_event(event)
-                except Exception as e:
-                    if not self._warned_dispatch_failed:
-                        self._warned_dispatch_failed = True
-                        logger.exception(
-                            "Failed to dispatch KV event; suppressing further "
-                            "tracebacks (last error: %s)",
-                            e,
-                        )
+            self._dispatch_kv_events(events)
+
+    def _dispatch_kv_events(self, events: list[dict[str, Any]]) -> None:
+        events_by_rank: dict[int, list[dict[str, Any]]] = {}
+        for event in events:
+            try:
+                normalized = self._normalize_kv_event(event)
+            except Exception as error:
+                self._warn_kv_dispatch_failed(error)
+                continue
+            if normalized is not None:
+                rank, normalized_event = normalized
+                events_by_rank.setdefault(rank, []).append(normalized_event)
+
+        for rank, normalized_events in events_by_rank.items():
+            try:
+                self._kv_publishers[rank].publish_batch(normalized_events)
+            except Exception as error:
+                self._warn_kv_dispatch_failed(error)
+
+    def _warn_kv_dispatch_failed(self, error: Exception) -> None:
+        if not self._warned_dispatch_failed:
+            self._warned_dispatch_failed = True
+            logger.exception(
+                "Failed to dispatch KV event; suppressing further "
+                "tracebacks (last error: %s)",
+                error,
+            )
 
     def _dispatch_kv_event(self, event: dict[str, Any]) -> None:
-        """Forward stored / removed events to the right publisher. Other
-        event types are dropped — the Python publisher has no path for them."""
+        """Normalize and publish one event for compatibility with direct callers."""
+        normalized = self._normalize_kv_event(event)
+        if normalized is not None:
+            rank, normalized_event = normalized
+            self._kv_publishers[rank].publish_batch([normalized_event])
+
+    def _normalize_kv_event(
+        self, event: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]] | None:
+        """Normalize one engine event into the typed Rust publisher input."""
         rank = int(event.get("attention_dp_rank", 0))
         event_id = event.get("event_id")
         if event_id is not None:
@@ -585,14 +610,15 @@ class TrtllmLLMEngine(LLMEngine):
                 token_ids.extend(int(t["token_id"]) for t in block_tokens)
             if not block_hashes:
                 return
-            publisher.publish_stored(
-                token_ids,
-                num_block_tokens,
-                block_hashes,
-                parent_hash,
-                lora_name=data.get("lora_name"),
-                cache_salt=stored_event_cache_salt(data),
-            )
+            return rank, {
+                "type": "stored",
+                "token_ids": token_ids,
+                "num_block_tokens": num_block_tokens,
+                "block_hashes": block_hashes,
+                "parent_hash": parent_hash,
+                "lora_name": data.get("lora_name"),
+                "cache_salt": stored_event_cache_salt(data),
+            }
         elif kind == "removed":
             partial = self._partial_block_hashes_by_rank.get(rank)
             removed: list[int] = []
@@ -605,7 +631,8 @@ class TrtllmLLMEngine(LLMEngine):
                     continue
                 removed.append(block_hash)
             if removed:
-                publisher.publish_removed(removed)
+                return rank, {"type": "removed", "block_hashes": removed}
+        return None
 
     def supported_controls(self) -> set[str]:
         return {"release_memory_occupation", "resume_memory_occupation"}
@@ -670,9 +697,8 @@ class TrtllmLLMEngine(LLMEngine):
         async with self._pause_lock:
             if controller.is_paused:
                 return {"status": "ok", "message": "Memory already released"}
-            if (
-                self._resume_recovery_required
-                or self._controller_needs_resume_recovery(controller)
+            if self._resume_recovery_required or self._controller_needs_resume_recovery(
+                controller
             ):
                 return {
                     "status": "error",
