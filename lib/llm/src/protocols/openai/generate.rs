@@ -321,7 +321,7 @@ pub(crate) struct GenerateResponseOptions {
 struct GenerateChoiceAcc {
     index: u32,
     token_ids: Vec<crate::protocols::TokenIdType>,
-    logprobs: Option<Vec<dynamo_protocols::types::ChatCompletionTokenLogprob>>,
+    logprobs: Option<Vec<Value>>,
     finish_reason: Option<String>,
     routed_experts: Option<String>,
 }
@@ -348,16 +348,21 @@ impl GenerateChoiceAcc {
             }
         }
         if options.include_logprobs {
-            match completion_logprobs_from_output(output)? {
-                Some(mut chunk_logprobs) => self
-                    .logprobs
-                    .get_or_insert_with(Vec::new)
-                    .append(&mut chunk_logprobs),
-                None if !output.token_ids.is_empty() => anyhow::bail!(
+            let has_logprobs = if let Some(content) = self.logprobs.as_mut() {
+                append_completion_logprobs_from_output(output, content)?
+            } else {
+                let mut content = Vec::new();
+                let has_logprobs = append_completion_logprobs_from_output(output, &mut content)?;
+                if has_logprobs {
+                    self.logprobs = Some(content);
+                }
+                has_logprobs
+            };
+            if !has_logprobs && !output.token_ids.is_empty() {
+                anyhow::bail!(
                     "generate choice {} requested logprobs but a token-bearing delta returned none",
                     self.index
-                ),
-                None => {}
+                );
             }
         }
         self.token_ids.extend_from_slice(&output.token_ids);
@@ -382,7 +387,9 @@ impl GenerateChoiceAcc {
                 content.len(),
                 token_ids.len()
             );
-            Some(serde_json::json!({"content": content}))
+            let mut logprobs = Map::with_capacity(1);
+            logprobs.insert("content".to_string(), Value::Array(content));
+            Some(Value::Object(logprobs))
         } else {
             None
         };
@@ -401,15 +408,16 @@ fn clamp_vllm_logprob(logprob: f32) -> f32 {
     logprob.max(-9999.0)
 }
 
-fn completion_logprobs_from_output(
+fn append_completion_logprobs_from_output(
     output: &LLMEngineOutput,
-) -> Result<Option<Vec<dynamo_protocols::types::ChatCompletionTokenLogprob>>> {
+    content: &mut Vec<Value>,
+) -> Result<bool> {
     let Some(log_probs) = output.log_probs.as_ref() else {
         anyhow::ensure!(
             output.top_logprobs.is_none(),
             "generate output returned top_logprobs without selected-token logprobs"
         );
-        return Ok(None);
+        return Ok(false);
     };
     anyhow::ensure!(
         log_probs.len() == output.token_ids.len(),
@@ -426,40 +434,48 @@ fn completion_logprobs_from_output(
         );
     }
     if output.token_ids.is_empty() {
-        return Ok(None);
+        return Ok(false);
     }
 
-    let content = output
-        .token_ids
-        .iter()
-        .zip(log_probs)
-        .enumerate()
-        .map(|(position, (token_id, logprob))| {
-            let token = format!("token_id:{token_id}");
-            let top_logprobs = output
-                .top_logprobs
-                .as_ref()
-                .map_or(&[][..], |all| all[position].as_slice());
-            let top_logprobs = top_logprobs
-                .iter()
-                .cloned()
-                .map(|mut entry| {
-                    entry.logprob = f64::from(clamp_vllm_logprob(entry.logprob as f32));
-                    entry
-                })
-                .collect::<Vec<_>>();
-            let logprob = clamp_vllm_logprob(*logprob as f32);
-            let top_logprobs =
-                convert_backend_top_logprobs(&top_logprobs, &token, *token_id, logprob, true);
-            dynamo_protocols::types::ChatCompletionTokenLogprob {
-                bytes: token_to_utf8_bytes(&token),
-                token,
-                logprob,
-                top_logprobs,
-            }
-        })
-        .collect();
-    Ok(Some(content))
+    content.reserve(output.token_ids.len());
+    for (position, (token_id, logprob)) in output.token_ids.iter().zip(log_probs).enumerate() {
+        let token = format!("token_id:{token_id}");
+        let backend_top_logprobs = output
+            .top_logprobs
+            .as_ref()
+            .map_or(&[][..], |all| all[position].as_slice());
+        let logprob = clamp_vllm_logprob(*logprob as f32);
+        let mut top_logprobs =
+            convert_backend_top_logprobs(backend_top_logprobs, &token, *token_id, logprob, true);
+        for entry in &mut top_logprobs {
+            entry.logprob = clamp_vllm_logprob(entry.logprob);
+        }
+        let bytes = bytes_value(token_to_utf8_bytes(&token));
+        let mut token_logprob = Map::with_capacity(4);
+        token_logprob.insert("token".to_string(), Value::String(token));
+        token_logprob.insert("logprob".to_string(), Value::from(logprob));
+        token_logprob.insert("bytes".to_string(), bytes);
+        token_logprob.insert(
+            "top_logprobs".to_string(),
+            Value::Array(top_logprobs.into_iter().map(top_logprob_value).collect()),
+        );
+        content.push(Value::Object(token_logprob));
+    }
+    Ok(true)
+}
+
+fn top_logprob_value(entry: dynamo_protocols::types::TopLogprobs) -> Value {
+    let mut value = Map::with_capacity(3);
+    value.insert("token".to_string(), Value::String(entry.token));
+    value.insert("logprob".to_string(), Value::from(entry.logprob));
+    value.insert("bytes".to_string(), bytes_value(entry.bytes));
+    Value::Object(value)
+}
+
+fn bytes_value(bytes: Option<Vec<u8>>) -> Value {
+    bytes.map_or(Value::Null, |bytes| {
+        Value::Array(bytes.into_iter().map(Value::from).collect())
+    })
 }
 
 fn prompt_logprobs_from_output(output: &LLMEngineOutput) -> Result<Option<PromptLogprobs>> {
