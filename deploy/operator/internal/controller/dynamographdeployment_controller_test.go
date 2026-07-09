@@ -4845,3 +4845,167 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 		})
 	}
 }
+
+func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
+	base := func() *grovev1alpha1.PodClique {
+		return &grovev1alpha1.PodClique{
+			Spec: grovev1alpha1.PodCliqueSpec{Replicas: 3},
+			Status: grovev1alpha1.PodCliqueStatus{
+				Replicas:              3,
+				ReadyReplicas:         1,
+				UpdatedReplicas:       3,
+				ScheduledReplicas:     1,
+				ScheduleGatedReplicas: 0,
+				ObservedGeneration:    ptr.To(int64(1)),
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(pc *grovev1alpha1.PodClique)
+		want   bool
+	}{
+		{
+			name:   "no change is filtered",
+			mutate: func(pc *grovev1alpha1.PodClique) {},
+			want:   false,
+		},
+		{
+			// The regression this predicate change fixes: scheduling advances
+			// 1/3 -> 3/3 while ready/updated/replicas and the condition are flat.
+			name:   "scheduled-only advance is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.ScheduledReplicas = 3 },
+			want:   true,
+		},
+		{
+			name:   "ready change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.ReadyReplicas = 3 },
+			want:   true,
+		},
+		{
+			name:   "updated change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.UpdatedReplicas = 2 },
+			want:   true,
+		},
+		{
+			name:   "replicas change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.Replicas = 2 },
+			want:   true,
+		},
+		{
+			name:   "schedule-gated change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.ScheduleGatedReplicas = 1 },
+			want:   true,
+		},
+		{
+			name:   "spec replicas change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Spec.Replicas = 5 },
+			want:   true,
+		},
+		{
+			name:   "observedGeneration change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) { pc.Status.ObservedGeneration = ptr.To(int64(2)) },
+			want:   true,
+		},
+		{
+			name: "scheduling condition change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) {
+				pc.Status.Conditions = []metav1.Condition{{
+					Type:               groveconstants.ConditionTypePodCliqueScheduled,
+					Status:             metav1.ConditionFalse,
+					Reason:             groveconstants.ConditionReasonInsufficientScheduledPods,
+					LastTransitionTime: metav1.Now(),
+				}}
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldPC := base()
+			newPC := base()
+			tt.mutate(newPC)
+			assert.Equal(t, tt.want, podCliqueStatusChangeIsSignificant(oldPC, newPC))
+		})
+	}
+}
+
+func TestPCSGStatusChangeIsSignificant(t *testing.T) {
+	base := func() *grovev1alpha1.PodCliqueScalingGroup {
+		return &grovev1alpha1.PodCliqueScalingGroup{
+			Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 3},
+			Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+				Replicas:           3,
+				AvailableReplicas:  1,
+				UpdatedReplicas:    3,
+				ScheduledReplicas:  1,
+				ObservedGeneration: ptr.To(int64(1)),
+			},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(pcsg *grovev1alpha1.PodCliqueScalingGroup)
+		want   bool
+	}{
+		{
+			name:   "no change is filtered",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {},
+			want:   false,
+		},
+		{
+			name:   "scheduled-only advance is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.ScheduledReplicas = 3 },
+			want:   true,
+		},
+		{
+			name:   "available change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.AvailableReplicas = 3 },
+			want:   true,
+		},
+		{
+			name:   "updated change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.UpdatedReplicas = 2 },
+			want:   true,
+		},
+		{
+			name:   "replicas change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.Replicas = 2 },
+			want:   true,
+		},
+		{
+			name:   "spec replicas change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Spec.Replicas = 5 },
+			want:   true,
+		},
+		{
+			name:   "observedGeneration change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.ObservedGeneration = ptr.To(int64(2)) },
+			want:   true,
+		},
+		{
+			name: "MinAvailableBreached condition change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {
+				pcsg.Status.Conditions = []metav1.Condition{{
+					Type:               groveconstants.ConditionTypeMinAvailableBreached,
+					Status:             metav1.ConditionFalse,
+					Reason:             groveconstants.ConditionReasonInsufficientScheduledPCSGReplicas,
+					LastTransitionTime: metav1.Now(),
+				}}
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldPCSG := base()
+			newPCSG := base()
+			tt.mutate(newPCSG)
+			assert.Equal(t, tt.want, pcsgStatusChangeIsSignificant(oldPCSG, newPCSG))
+		})
+	}
+}

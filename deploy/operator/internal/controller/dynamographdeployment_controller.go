@@ -2721,25 +2721,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 						if !okOld || !okNew {
 							return false
 						}
-						// Mirrors the readiness gates in CheckPodCliqueReady
-						// (dynamo/grove.go): ObservedGeneration, Status.Replicas,
-						// UpdatedReplicas, and ReadyReplicas. Without the
-						// non-ReadyReplicas signals, the DGD can stay stale at the
-						// tail of a rolling update when ReadyReplicas is flat.
-						//
-						// ScheduleGatedReplicas and the PodCliqueScheduled condition
-						// are also tracked because the Ready-reason classification
-						// (REQ 1) reads them: a component whose only change is
-						// scheduling (gated pods clearing, or the scheduling
-						// condition flipping) must re-wake the DGD so its Ready
-						// reason is reclassified.
-						return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
-							oldPC.Status.UpdatedReplicas != newPC.Status.UpdatedReplicas ||
-							oldPC.Status.Replicas != newPC.Status.Replicas ||
-							oldPC.Status.ScheduleGatedReplicas != newPC.Status.ScheduleGatedReplicas ||
-							oldPC.Spec.Replicas != newPC.Spec.Replicas ||
-							!ptrInt64Equal(oldPC.Status.ObservedGeneration, newPC.Status.ObservedGeneration) ||
-							groveScheduledConditionChanged(oldPC.Status.Conditions, newPC.Status.Conditions)
+						return podCliqueStatusChangeIsSignificant(oldPC, newPC)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
@@ -2762,19 +2744,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 						if !okOld || !okNew {
 							return false
 						}
-						// CheckPCSGReady tracks ObservedGeneration for "spec not yet processed" while
-						// ObservedGeneration < Generation). A PCSG spec edit that does
-						// not change Spec.Replicas (e.g. template/topology edits) would
-						// otherwise not wake the DGD when Grove catches up.
-						// The MinAvailableBreached condition is tracked in case of a
-						// PCSG-level scheduling shortfall; a change to only that
-						// condition must re-wake the DGD for reclassification.
-						return oldPCSG.Status.AvailableReplicas != newPCSG.Status.AvailableReplicas ||
-							oldPCSG.Status.UpdatedReplicas != newPCSG.Status.UpdatedReplicas ||
-							oldPCSG.Status.Replicas != newPCSG.Status.Replicas ||
-							oldPCSG.Spec.Replicas != newPCSG.Spec.Replicas ||
-							!ptrInt64Equal(oldPCSG.Status.ObservedGeneration, newPCSG.Status.ObservedGeneration) ||
-							groveScheduledConditionChanged(oldPCSG.Status.Conditions, newPCSG.Status.Conditions)
+						return pcsgStatusChangeIsSignificant(oldPCSG, newPCSG)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
@@ -2924,4 +2894,42 @@ func groveScheduledConditionChanged(oldConds, newConds []metav1.Condition) bool 
 		}
 	}
 	return false
+}
+
+// podCliqueStatusChangeIsSignificant reports whether a PodClique status update
+// affects the DGD's Grove readiness/classification and therefore must not be
+// filtered out by the watch predicate.
+//
+// It mirrors every field CheckPodCliqueReady (dynamo/grove.go) reads: the
+// replica counters gate readiness and rolling-update detection; ScheduledReplicas
+// and ScheduleGatedReplicas feed the InsufficientCapacity classification and the
+// exposed status.components[*].scheduledReplicas; the PodCliqueScheduled
+// condition is another capacity signal; ObservedGeneration gates "spec not yet
+// processed". In particular, scheduling can advance (e.g. 1/N -> N/N) while the
+// ready/updated/replica counters and the condition stay flat, so ScheduledReplicas
+// must be compared or that event would be dropped and the DGD left stale.
+func podCliqueStatusChangeIsSignificant(oldPC, newPC *grovev1alpha1.PodClique) bool {
+	return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
+		oldPC.Status.UpdatedReplicas != newPC.Status.UpdatedReplicas ||
+		oldPC.Status.Replicas != newPC.Status.Replicas ||
+		oldPC.Status.ScheduledReplicas != newPC.Status.ScheduledReplicas ||
+		oldPC.Status.ScheduleGatedReplicas != newPC.Status.ScheduleGatedReplicas ||
+		oldPC.Spec.Replicas != newPC.Spec.Replicas ||
+		!ptrInt64Equal(oldPC.Status.ObservedGeneration, newPC.Status.ObservedGeneration) ||
+		groveScheduledConditionChanged(oldPC.Status.Conditions, newPC.Status.Conditions)
+}
+
+// pcsgStatusChangeIsSignificant is the PodCliqueScalingGroup analogue of
+// podCliqueStatusChangeIsSignificant. It mirrors every field CheckPCSGReady
+// reads, including ScheduledReplicas (capacity classification + exposed counter)
+// and the MinAvailableBreached condition, so a scheduling-only advance re-wakes
+// the DGD.
+func pcsgStatusChangeIsSignificant(oldPCSG, newPCSG *grovev1alpha1.PodCliqueScalingGroup) bool {
+	return oldPCSG.Status.AvailableReplicas != newPCSG.Status.AvailableReplicas ||
+		oldPCSG.Status.UpdatedReplicas != newPCSG.Status.UpdatedReplicas ||
+		oldPCSG.Status.Replicas != newPCSG.Status.Replicas ||
+		oldPCSG.Status.ScheduledReplicas != newPCSG.Status.ScheduledReplicas ||
+		oldPCSG.Spec.Replicas != newPCSG.Spec.Replicas ||
+		!ptrInt64Equal(oldPCSG.Status.ObservedGeneration, newPCSG.Status.ObservedGeneration) ||
+		groveScheduledConditionChanged(oldPCSG.Status.Conditions, newPCSG.Status.Conditions)
 }
