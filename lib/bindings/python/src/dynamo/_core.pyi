@@ -14,9 +14,10 @@ from typing import (
     Optional,
     Sequence,
     Set,
-    TypedDict,
     Tuple,
+    TypedDict,
 )
+
 from typing_extensions import NotRequired
 
 # Import from specialized modules

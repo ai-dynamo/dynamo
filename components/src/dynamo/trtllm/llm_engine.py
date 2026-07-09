@@ -77,6 +77,7 @@ from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisio
 if TYPE_CHECKING:
     from tensorrt_llm.metrics import MetricsCollector
 
+    from dynamo._core import KvRemovedEventInput, KvStoredEventInput
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
     from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
@@ -515,7 +516,7 @@ class TrtllmLLMEngine(LLMEngine):
             self._dispatch_kv_events(events)
 
     def _dispatch_kv_events(self, events: list[dict[str, Any]]) -> None:
-        events_by_rank: dict[int, list[dict[str, Any]]] = {}
+        events_by_rank: dict[int, list[KvStoredEventInput | KvRemovedEventInput]] = {}
         for event in events:
             try:
                 normalized = self._normalize_kv_event(event)
@@ -550,7 +551,7 @@ class TrtllmLLMEngine(LLMEngine):
 
     def _normalize_kv_event(
         self, event: dict[str, Any]
-    ) -> tuple[int, dict[str, Any]] | None:
+    ) -> tuple[int, KvStoredEventInput | KvRemovedEventInput] | None:
         """Normalize one engine event into the typed Rust publisher input."""
         rank = int(event.get("attention_dp_rank", 0))
         event_id = event.get("event_id")
@@ -578,7 +579,7 @@ class TrtllmLLMEngine(LLMEngine):
                     rank,
                     sorted(self._kv_publishers.keys()),
                 )
-            return
+            return None
         data = event.get("data") or {}
         kind = data.get("type")
         if kind == "stored":
@@ -596,7 +597,7 @@ class TrtllmLLMEngine(LLMEngine):
                         token_num,
                         kv_block_size,
                     )
-                    return
+                    return None
                 block_hash = _to_signed_i64(block.get("block_hash"))
                 if block_hash is None:
                     continue
@@ -609,8 +610,8 @@ class TrtllmLLMEngine(LLMEngine):
                 block_hashes.append(block_hash)
                 token_ids.extend(int(t["token_id"]) for t in block_tokens)
             if not block_hashes:
-                return
-            return rank, {
+                return None
+            stored_event: KvStoredEventInput = {
                 "type": "stored",
                 "token_ids": token_ids,
                 "num_block_tokens": num_block_tokens,
@@ -619,6 +620,7 @@ class TrtllmLLMEngine(LLMEngine):
                 "lora_name": data.get("lora_name"),
                 "cache_salt": stored_event_cache_salt(data),
             }
+            return rank, stored_event
         elif kind == "removed":
             partial = self._partial_block_hashes_by_rank.get(rank)
             removed: list[int] = []
@@ -631,7 +633,11 @@ class TrtllmLLMEngine(LLMEngine):
                     continue
                 removed.append(block_hash)
             if removed:
-                return rank, {"type": "removed", "block_hashes": removed}
+                removed_event: KvRemovedEventInput = {
+                    "type": "removed",
+                    "block_hashes": removed,
+                }
+                return rank, removed_event
         return None
 
     def supported_controls(self) -> set[str]:
@@ -697,8 +703,9 @@ class TrtllmLLMEngine(LLMEngine):
         async with self._pause_lock:
             if controller.is_paused:
                 return {"status": "ok", "message": "Memory already released"}
-            if self._resume_recovery_required or self._controller_needs_resume_recovery(
-                controller
+            if (
+                self._resume_recovery_required
+                or self._controller_needs_resume_recovery(controller)
             ):
                 return {
                     "status": "error",
