@@ -602,13 +602,6 @@ class SglangProcessor:
                             "object": "chat.completion.chunk",
                         }
                         if pending_usage:
-                            # Report reasoning tokens. The worker's completion_usage
-                            # has no completion_tokens_details (the bare-Engine path
-                            # cannot count reasoning), and the per-request reasoning
-                            # parser here is the only correct source. Emit only when a
-                            # reasoning parser is active for this request
-                            # (separate_reasoning honored); reasoning_tokens=0 is still
-                            # correct for a request that reasoned nothing.
                             if post.reasoning_parser is not None:
                                 completion_details = dict(
                                     pending_usage.get("completion_tokens_details") or {}
