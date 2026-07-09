@@ -348,6 +348,8 @@ impl GenerateChoiceAcc {
             }
         }
         if options.include_logprobs {
+            // Keep `None` until a logprob-bearing delta arrives: `into_response`
+            // distinguishes missing logprobs from an empty content array.
             let has_logprobs = if let Some(content) = self.logprobs.as_mut() {
                 append_completion_logprobs_from_output(output, content)?
             } else {
@@ -855,6 +857,113 @@ mod tests {
         assert_eq!(round.choices.len(), 1);
         assert_eq!(round.choices[0].token_ids, None);
         assert_eq!(round.choices[0].finish_reason, None);
+    }
+
+    #[test]
+    fn completion_logprobs_match_typed_wire_shape() {
+        let output = LLMEngineOutput {
+            token_ids: vec![100],
+            log_probs: Some(vec![-1.0e30]),
+            top_logprobs: Some(vec![vec![
+                crate::protocols::common::llm_backend::TopLogprob {
+                    rank: 1,
+                    token_id: 7,
+                    token: None,
+                    logprob: -1.0e30,
+                    bytes: None,
+                },
+            ]]),
+            ..Default::default()
+        };
+        let mut content = Vec::new();
+
+        assert!(
+            append_completion_logprobs_from_output(&output, &mut content)
+                .expect("build completion logprobs")
+        );
+
+        let expected = dynamo_protocols::types::ChatCompletionTokenLogprob {
+            token: "token_id:100".to_string(),
+            logprob: -9999.0,
+            bytes: Some(b"token_id:100".to_vec()),
+            top_logprobs: vec![
+                dynamo_protocols::types::TopLogprobs {
+                    token: "token_id:7".to_string(),
+                    logprob: -9999.0,
+                    bytes: Some(b"token_id:7".to_vec()),
+                },
+                dynamo_protocols::types::TopLogprobs {
+                    token: "token_id:100".to_string(),
+                    logprob: -9999.0,
+                    bytes: Some(b"token_id:100".to_vec()),
+                },
+            ],
+        };
+
+        assert_eq!(
+            content,
+            vec![serde_json::to_value(expected).expect("serialize typed logprob")]
+        );
+    }
+
+    #[test]
+    fn completion_logprobs_reject_malformed_output() {
+        let cases = [
+            (
+                LLMEngineOutput {
+                    token_ids: vec![100],
+                    top_logprobs: Some(vec![vec![]]),
+                    ..Default::default()
+                },
+                "top_logprobs without selected-token logprobs",
+            ),
+            (
+                LLMEngineOutput {
+                    token_ids: vec![100, 101],
+                    log_probs: Some(vec![-0.25]),
+                    ..Default::default()
+                },
+                "1 selected-token logprobs for 2 tokens",
+            ),
+            (
+                LLMEngineOutput {
+                    token_ids: vec![100, 101],
+                    log_probs: Some(vec![-0.25, -0.5]),
+                    top_logprobs: Some(vec![vec![]]),
+                    ..Default::default()
+                },
+                "1 top-logprob positions for 2 tokens",
+            ),
+        ];
+
+        for (output, expected_error) in cases {
+            let mut content = vec![json!("existing")];
+
+            let error = append_completion_logprobs_from_output(&output, &mut content)
+                .expect_err("malformed output must fail");
+
+            assert!(
+                error.to_string().contains(expected_error),
+                "unexpected error: {error}"
+            );
+            assert_eq!(content, vec![json!("existing")]);
+        }
+    }
+
+    #[test]
+    fn empty_completion_logprobs_do_not_modify_content() {
+        let output = LLMEngineOutput {
+            log_probs: Some(vec![]),
+            top_logprobs: Some(vec![]),
+            ..Default::default()
+        };
+        let mut content = vec![json!("existing")];
+
+        assert!(
+            !append_completion_logprobs_from_output(&output, &mut content)
+                .expect("empty output is valid")
+        );
+        assert_eq!(content, vec![json!("existing")]);
     }
 
     #[tokio::test]
