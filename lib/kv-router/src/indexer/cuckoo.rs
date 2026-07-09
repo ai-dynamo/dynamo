@@ -18,7 +18,10 @@ pub use relay::{
     TransposedCkfReplica,
 };
 
-pub(crate) const DC_COUNT: usize = 16;
+/// Fixed number of DC lanes in the transposed CKF replica.
+pub const CKF_LANE_COUNT: usize = 16;
+
+pub(crate) const DC_COUNT: usize = CKF_LANE_COUNT;
 pub(crate) const MAX_KICKS: usize = 4096;
 pub(crate) const MAX_VERIFICATION_WINDOW: usize = 8;
 
@@ -96,6 +99,7 @@ impl Default for CkfConfig {
 }
 
 /// Construction failures for [`EventTransposedCkfIndexer`].
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CkfBuildError {
     #[error("duplicate CKF worker identity: {worker:?}")]

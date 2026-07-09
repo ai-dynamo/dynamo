@@ -258,9 +258,9 @@ fn due_net_reversion_is_unchanged_and_applies_no_batch() {
     let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
     let mut batch = index.pipeline.new_batch();
 
-    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    let _ = index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
     index.pipeline.flush_pending(&mut batch);
-    index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
+    let _ = index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
     let outcome = index.apply_event_with_batch(store_event(workers[0], &[10], 2), &mut batch);
 
     assert!(!outcome.batch_applied());
@@ -277,10 +277,10 @@ fn partially_net_reverted_window_emits_only_changed_buckets() {
     let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
     let mut batch = index.pipeline.new_batch();
 
-    index.apply_event_with_batch(store_event(workers[0], &[10, 20], 1), &mut batch);
+    let _ = index.apply_event_with_batch(store_event(workers[0], &[10, 20], 1), &mut batch);
     index.pipeline.flush_pending(&mut batch);
-    index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
-    index.apply_event_with_batch(store_event(workers[0], &[10], 2), &mut batch);
+    let _ = index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
+    let _ = index.apply_event_with_batch(store_event(workers[0], &[10], 2), &mut batch);
     let outcome = index.apply_event_with_batch(remove_event(workers[0], &[20]), &mut batch);
 
     assert!(outcome.batch_applied());
@@ -314,7 +314,7 @@ fn unpublished_empty_populated_empty_window_emits_nothing() {
     let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
     let mut batch = index.pipeline.new_batch();
 
-    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    let _ = index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
     let outcome = index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
 
     assert!(!outcome.batch_applied());
@@ -330,9 +330,9 @@ fn published_nonempty_lane_emptied_at_boundary_emits_reset() {
     let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
     let mut batch = index.pipeline.new_batch();
 
-    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    let _ = index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
     index.pipeline.flush_pending(&mut batch);
-    index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
+    let _ = index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
     let outcome = index.apply_event_with_batch(store_event(workers[0], &[], 2), &mut batch);
 
     assert!(outcome.batch_applied());
@@ -361,7 +361,7 @@ fn partial_failure_preserves_pending_successes_until_due_publication() {
         Some(crate::protocols::KvCacheEventError::CapacityExhausted)
     ));
     assert!(second.batch_applied());
-    assert_eq!(index.pipeline.memory_snapshot().actual_contributions, 8);
+    assert_eq!(index.pipeline.memory_snapshot().actual_contributions(), 8);
     assert_ne!(
         index
             .pipeline
@@ -404,8 +404,8 @@ fn flush_reserves_only_pending_images_and_empty_flush_stays_allocation_free() {
     let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
     let mut event_batch = index.pipeline.new_batch();
 
-    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut event_batch);
-    index.apply_event_with_batch(store_event(workers[1], &[20], 2), &mut event_batch);
+    let _ = index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut event_batch);
+    let _ = index.apply_event_with_batch(store_event(workers[1], &[20], 2), &mut event_batch);
 
     let mut flush_batch = index.pipeline.new_batch();
     assert_eq!(flush_batch.image_capacity(), 0);
@@ -417,7 +417,7 @@ fn flush_reserves_only_pending_images_and_empty_flush_stays_allocation_free() {
     assert!(!index.pipeline.flush_pending(&mut empty_batch));
     assert_eq!(empty_batch.image_capacity(), 0);
 
-    index.apply_event_with_batch(store_event(workers[2], &[30], 3), &mut event_batch);
+    let _ = index.apply_event_with_batch(store_event(workers[2], &[30], 3), &mut event_batch);
     let mut direct_batch = index.pipeline.new_batch();
     direct_batch.force_reserve_failure();
     assert!(index.pipeline.flush_pending(&mut direct_batch));
@@ -441,7 +441,7 @@ fn lifecycle_removal_forces_pending_publication() {
     let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
     let mut batch = index.pipeline.new_batch();
 
-    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    let _ = index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
     index.pipeline.flush_pending(&mut batch);
     let outcome = index.pipeline.remove_worker_rank(workers[0], &mut batch);
     assert!(outcome.batch_applied());
@@ -462,7 +462,7 @@ fn lifecycle_removal_uses_direct_publication_when_batch_reserve_fails() {
     let workers = workers();
     let index = EventTransposedCkfIndexer::new(workers, CkfConfig::new(32)).unwrap();
     let mut event_batch = index.pipeline.new_batch();
-    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut event_batch);
+    let _ = index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut event_batch);
 
     let mut lifecycle_batch = index.pipeline.new_batch();
     lifecycle_batch.force_reserve_failure();
@@ -490,10 +490,10 @@ fn empty_then_repopulated_window_cancels_stale_reset() {
     let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
     let mut batch = index.pipeline.new_batch();
 
-    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    let _ = index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
     index.pipeline.flush_pending(&mut batch);
-    index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
-    index.apply_event_with_batch(store_event(workers[0], &[20], 2), &mut batch);
+    let _ = index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
+    let _ = index.apply_event_with_batch(store_event(workers[0], &[20], 2), &mut batch);
     let outcome = index.apply_event_with_batch(store_event(workers[0], &[], 3), &mut batch);
 
     assert!(outcome.batch_applied());
@@ -533,7 +533,7 @@ fn shared_dc_hash_survives_until_the_final_owner_is_removed() {
     assert!(!second_store.batch_applied());
     assert!(batch.images().is_empty());
 
-    pipeline.apply_event(remove_event(first, &[10]), &mut batch);
+    let _ = pipeline.apply_event(remove_event(first, &[10]), &mut batch);
     assert_ne!(
         pipeline
             .replica()
@@ -542,7 +542,7 @@ fn shared_dc_hash_survives_until_the_final_owner_is_removed() {
             & 1,
         0
     );
-    pipeline.apply_event(remove_event(second, &[10]), &mut batch);
+    let _ = pipeline.apply_event(remove_event(second, &[10]), &mut batch);
     assert_ne!(batch.reset_lanes() & 1, 0);
 }
 
@@ -557,8 +557,8 @@ fn clear_one_owner_preserves_another_owner_in_the_same_dc() {
     .unwrap();
     let mut batch = pipeline.new_batch();
 
-    pipeline.apply_event(store_event(first, &[10], 1), &mut batch);
-    pipeline.apply_event(store_event(second, &[10], 2), &mut batch);
+    let _ = pipeline.apply_event(store_event(first, &[10], 1), &mut batch);
+    let _ = pipeline.apply_event(store_event(second, &[10], 2), &mut batch);
     let outcome = pipeline.apply_event(clear_event(first.worker_id), &mut batch);
 
     assert!(outcome.first_error().is_none());
@@ -588,9 +588,9 @@ fn worker_wide_clear_spans_lanes_and_preserves_unrelated_members() {
             .unwrap();
     let mut batch = pipeline.new_batch();
 
-    pipeline.apply_event(store_event(rank_zero, &[10], 1), &mut batch);
-    pipeline.apply_event(store_event(other, &[10], 2), &mut batch);
-    pipeline.apply_event(store_event(rank_one, &[20], 3), &mut batch);
+    let _ = pipeline.apply_event(store_event(rank_zero, &[10], 1), &mut batch);
+    let _ = pipeline.apply_event(store_event(other, &[10], 2), &mut batch);
+    let _ = pipeline.apply_event(store_event(rank_one, &[20], 3), &mut batch);
     let mut clear = clear_event(rank_zero.worker_id);
     clear.event.dp_rank = 999;
     let outcome = pipeline.apply_event(clear, &mut batch);
@@ -638,14 +638,14 @@ fn shared_hash_stats_are_per_member_and_model_instances_are_isolated() {
     let first_model = make_pipeline();
     let second_model = make_pipeline();
     let mut batch = first_model.new_batch();
-    first_model.apply_event(store_event(first, &[10], 1), &mut batch);
-    first_model.apply_event(store_event(second, &[10], 2), &mut batch);
+    let _ = first_model.apply_event(store_event(first, &[10], 1), &mut batch);
+    let _ = first_model.apply_event(store_event(second, &[10], 2), &mut batch);
 
     let worker_ids = FxHashSet::from_iter([first.worker_id, second.worker_id]);
     let stats = first_model.worker_stats(&worker_ids);
     assert_eq!(stats.block_count_for_worker(first), Some(1));
     assert_eq!(stats.block_count_for_worker(second), Some(1));
-    assert_eq!(first_model.memory_snapshot().actual_contributions, 2);
+    assert_eq!(first_model.memory_snapshot().actual_contributions(), 2);
     assert_eq!(
         second_model
             .replica()
@@ -1350,7 +1350,7 @@ fn digest_updates_roll_back_when_ckf_mutation_fails() {
         index.apply_event(store_event(workers[0], &[8], 2000), None),
         Err(crate::protocols::KvCacheEventError::CapacityExhausted)
     ));
-    assert_eq!(index.pipeline.memory_snapshot().actual_contributions, 8);
+    assert_eq!(index.pipeline.memory_snapshot().actual_contributions(), 8);
     assert!(
         !index
             .pipeline

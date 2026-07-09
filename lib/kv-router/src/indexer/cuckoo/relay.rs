@@ -258,6 +258,7 @@ impl CkfDeltaBatch {
     }
 }
 
+#[must_use = "inspect the CKF event outcome for aggregation or publication failures"]
 #[derive(Debug)]
 pub struct CkfEventOutcome {
     first_error: Option<KvCacheEventError>,
@@ -322,19 +323,66 @@ impl CkfEventOutcome {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CkfMemorySnapshot {
-    pub configured_unique_capacity: usize,
-    pub configured_contribution_capacity: usize,
-    pub actual_contributions: usize,
-    pub member_set_capacity: usize,
-    pub dc_refcount_capacity: usize,
-    pub owned_filter_bytes: usize,
-    pub replica_bytes: usize,
-    pub dirty_tracking_bytes: usize,
-    pub aggregator_occupancy_bytes: usize,
-    pub replica_occupancy_bytes: usize,
-    pub insertion_scratch_capacity: usize,
+    configured_unique_capacity: usize,
+    configured_contribution_capacity: usize,
+    actual_contributions: usize,
+    member_set_capacity: usize,
+    dc_refcount_capacity: usize,
+    owned_filter_bytes: usize,
+    replica_bytes: usize,
+    dirty_tracking_bytes: usize,
+    aggregator_occupancy_bytes: usize,
+    replica_occupancy_bytes: usize,
+    insertion_scratch_capacity: usize,
+}
+
+impl CkfMemorySnapshot {
+    pub fn configured_unique_capacity(self) -> usize {
+        self.configured_unique_capacity
+    }
+
+    pub fn configured_contribution_capacity(self) -> usize {
+        self.configured_contribution_capacity
+    }
+
+    pub fn actual_contributions(self) -> usize {
+        self.actual_contributions
+    }
+
+    pub fn member_set_capacity(self) -> usize {
+        self.member_set_capacity
+    }
+
+    pub fn dc_refcount_capacity(self) -> usize {
+        self.dc_refcount_capacity
+    }
+
+    pub fn owned_filter_bytes(self) -> usize {
+        self.owned_filter_bytes
+    }
+
+    pub fn replica_bytes(self) -> usize {
+        self.replica_bytes
+    }
+
+    pub fn dirty_tracking_bytes(self) -> usize {
+        self.dirty_tracking_bytes
+    }
+
+    pub fn aggregator_occupancy_bytes(self) -> usize {
+        self.aggregator_occupancy_bytes
+    }
+
+    pub fn replica_occupancy_bytes(self) -> usize {
+        self.replica_occupancy_bytes
+    }
+
+    pub fn insertion_scratch_capacity(self) -> usize {
+        self.insertion_scratch_capacity
+    }
 }
 
 // One bit per bucket plus first-touch order keeps publication-window draining O(touched).
@@ -670,6 +718,10 @@ impl RelayLaneState {
     }
 }
 
+/// Exact aggregation state owned by the router-local Relay-shaped pipeline.
+///
+/// A standalone publisher API is intentionally deferred. Construct a
+/// [`RouterLocalCkfPipeline`] so aggregation and replica application remain ordered in-process.
 #[derive(Debug)]
 pub struct CkfRelayAggregator {
     manifest: RelayManifest,
