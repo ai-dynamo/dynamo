@@ -139,18 +139,22 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
 
                     batching_state.last_dp_rank = event.dp_rank;
                     batching_state.last_storage_tier = storage_tier;
+
+                    // Bound coalesced output without splitting an individual source
+                    // event or returning to `select!` midway through the native list.
+                    if batching_state.has_pending()
+                        && batching_state.pending_block_count() >= max_batch_blocks
+                    {
+                        batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                    }
                 }
 
-                // The cap is deliberately a boundary flush trigger, not a hard
-                // output-size limit. It is checked only after the complete native
-                // input list, which may therefore produce a larger output event.
+                // Without a timeout, flush the compatible tail at the native-list
+                // boundary. With a timeout, retain it for possible cross-list batching.
                 if batching_state.has_pending()
                     && match timeout_ms {
                         None => true,
-                        Some(ms) => {
-                            batching_state.is_timeout_elapsed(ms)
-                                || batching_state.pending_block_count() > max_batch_blocks
-                        }
+                        Some(ms) => batching_state.is_timeout_elapsed(ms),
                     }
                 {
                     batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
