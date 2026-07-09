@@ -32,7 +32,7 @@ from dynamo.vllm.args import (
     parse_args,
     update_engine_config_with_dynamo,
 )
-from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
@@ -367,6 +367,7 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         enable_multimodal=False,
         frontend_decoding=False,
         multimodal_embedding_cache_capacity_gb=0.0,
+        embedding_transfer_mode=EmbeddingTransferMode.LOCAL,
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
     )
@@ -663,6 +664,37 @@ def test_disaggregation_mode_decode(mock_vllm_cli):
     assert config.disaggregation_mode == DisaggregationMode.DECODE
     assert config.is_prefill_worker is False
     assert config.is_decode_worker is True
+
+
+def test_disaggregation_mode_encode_requires_multimodal_opt_in(mock_vllm_cli):
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--disaggregation-mode", "encode")
+    with pytest.raises(ValueError, match="require --enable-multimodal"):
+        parse_args()
+
+
+def test_disaggregation_mode_encode_accepts_multimodal_opt_in(mock_vllm_cli):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disaggregation-mode",
+        "encode",
+        "--enable-multimodal",
+    )
+    config = parse_args()
+    assert config.disaggregation_mode == DisaggregationMode.ENCODE
+
+
+def test_route_to_encoder_rejects_decode_role(mock_vllm_cli):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--disaggregation-mode",
+        "decode",
+        "--enable-multimodal",
+        "--route-to-encoder",
+    )
+    with pytest.raises(ValueError, match="only valid"):
+        parse_args()
 
 
 def test_legacy_is_prefill_worker_emits_deprecation(mock_vllm_cli):

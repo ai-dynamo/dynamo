@@ -16,6 +16,8 @@ from dynamo.vllm.llm_engine import VllmLLMEngine  # noqa: E402
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
+    pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
 
@@ -39,7 +41,9 @@ def test_main_routes_headless_to_run_dynamo_headless():
 @pytest.mark.asyncio
 async def test_main_routes_normal_node_to_run():
     """A non-headless node drives the unified Worker via run(VllmLLMEngine)."""
-    config = SimpleNamespace(headless=False)
+    config = SimpleNamespace(
+        headless=False, disaggregation_mode=DisaggregationMode.AGGREGATED
+    )
     with (
         patch.object(unified_main, "parse_args", return_value=config) as parse_args,
         patch.object(unified_main, "run_dynamo_headless") as run_headless,
@@ -63,6 +67,30 @@ async def test_main_routes_normal_node_to_run():
         assert await engine_factory(["--model", "test-model"]) == expected
 
     from_args.assert_awaited_once_with(["--model", "test-model"], config=config)
+
+
+@pytest.mark.asyncio
+async def test_main_routes_encode_node_to_dedicated_engine():
+    config = SimpleNamespace(
+        headless=False, disaggregation_mode=DisaggregationMode.ENCODE
+    )
+    with (
+        patch.object(unified_main, "parse_args", return_value=config),
+        patch.object(unified_main, "run") as run,
+    ):
+        unified_main.main()
+
+    assert run.call_args.args == (unified_main.VllmEncodeEngine,)
+    engine_factory = run.call_args.kwargs["engine_factory"]
+    expected = (MagicMock(), MagicMock())
+    with patch.object(
+        unified_main.VllmEncodeEngine,
+        "from_args",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as from_args:
+        assert await engine_factory([]) == expected
+    from_args.assert_awaited_once_with([], config=config)
 
 
 @pytest.mark.asyncio
