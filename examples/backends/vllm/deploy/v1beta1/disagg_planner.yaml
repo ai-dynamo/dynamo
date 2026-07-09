@@ -48,6 +48,10 @@ spec:
           - dynamo.vllm
           - --model
           - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           command:
           - python3
           envFrom:
