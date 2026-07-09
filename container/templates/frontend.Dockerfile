@@ -55,6 +55,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         git-lfs \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
+        # TEMPORARY: benchmarks (installed below) pulls aiconfigurator from a Git
+        # URL, which now ships a Rust core (aiconfigurator-core) and forces a
+        # from-source build via maturin — cargo needs a C linker (`cc`), else the
+        # build fails with "error: linker `cc` not found". libc6-dev is required
+        # explicitly because it is only a Recommends of gcc, so
+        # --no-install-recommends would skip it and the build fails with
+        # "fatal error: stdlib.h: No such file or directory". Mirrors the same fix
+        # in planner.Dockerfile. Revert (together with the gcc/libc6-dev here)
+        # once aiconfigurator 0.10.0 is published to PyPI and the benchmarks dep
+        # switches back to a versioned wheel.
+        gcc \
+        libc6-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

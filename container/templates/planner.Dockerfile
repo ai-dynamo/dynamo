@@ -13,32 +13,33 @@
 FROM ${PLANNER_BUILD_IMAGE}:${PLANNER_BUILD_IMAGE_TAG} AS planner_builder
 
 ARG PYTHON_VERSION
-ARG TARGETARCH
 
 # Install only the packages needed to resolve and install the planner runtime
-# dependencies in the builder stage. git/git-lfs are only needed because
+# dependencies in the builder stage. git/git-lfs are needed because
 # aiconfigurator is currently installed from a Git URL with LFS-backed assets.
-# On arm64, gcc + libc6-dev are added so aiperf's `crick` dep can compile
-# from sdist (crick==0.0.8 publishes no manylinux aarch64 wheel); on amd64
-# the prebuilt wheel from PyPI is used and the toolchain is skipped
-# entirely. Python headers come from the base image's
-# /usr/local/include/python${PYTHON_VERSION} (python:3.X-slim bundles them
-# directly — no apt python*-dev needed, and python${PYTHON_VERSION}-dev is
-# not available in this base's apt index anyway). libc6-dev is required
+# gcc + libc6-dev are installed on ALL arches: aiconfigurator now ships a Rust
+# core (aiconfigurator-core) and the Git URL forces a from-source build via
+# maturin, so cargo needs a C linker (`cc`) to link the extension — otherwise
+# the build fails with "error: linker `cc` not found". (This was previously
+# arm64-only, for aiperf's `crick` sdist — crick==0.0.8 publishes no manylinux
+# aarch64 wheel — while amd64 used prebuilt wheels and skipped the toolchain;
+# the Git-URL source build removed that shortcut.) libc6-dev is required
 # explicitly because on Debian it's a Recommends of gcc, not a Depends, so
 # --no-install-recommends would otherwise skip it and the build fails with
-# "fatal error: stdlib.h: No such file or directory". The toolchain stays
-# in this builder stage and never reaches the final image.
+# "fatal error: stdlib.h: No such file or directory". Python headers come from
+# the base image's /usr/local/include/python${PYTHON_VERSION} (python:3.X-slim
+# bundles them directly — no apt python*-dev needed, and python${PYTHON_VERSION}-dev
+# is not available in this base's apt index anyway). The toolchain stays in this
+# builder stage and never reaches the final image.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y && \
-    EXTRA_PKGS=""; \
-    if [ "$TARGETARCH" = "arm64" ]; then EXTRA_PKGS="gcc libc6-dev"; fi; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         git \
         git-lfs \
         libgomp1 \
-        $EXTRA_PKGS && \
+        gcc \
+        libc6-dev && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

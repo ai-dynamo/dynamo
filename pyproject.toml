@@ -76,8 +76,11 @@ sglang = [
 ]
 
 mocker = [
-    # No direct URL: it blocks the wheel release (PyPI/Warehouse rejects direct references).
-    "aiconfigurator>=0.9.0",
+    # TEMPORARY: direct git URL until aiconfigurator 0.10.0 is published to PyPI.
+    # A direct reference blocks the wheel release (PyPI/Warehouse rejects direct
+    # references), so this MUST be switched back to a versioned pin
+    # ("aiconfigurator>=0.10.0") before dynamo publishes. AIC publishes 0.10.0 first.
+    "aiconfigurator @ git+https://github.com/ai-dynamo/aiconfigurator.git@0828d6b",
 ]
 
 [project.entry-points.pytest11]
