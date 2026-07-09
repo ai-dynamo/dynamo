@@ -68,7 +68,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	}
 	configureDuration := time.Since(configureStart)
 
-	// Phase 2: Execute — rootfs, CRIU restore, CUDA restore
+	// Phase 2: Execute — CRIU restore, CUDA restore
 	executeTimings, restoredPID, err := executeRestore(ctx, criuOpts, m, opts, log)
 	if err != nil {
 		return nil, err
@@ -99,12 +99,7 @@ type nsrestorePhaseTimings struct {
 func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
 	timings := &nsrestorePhaseTimings{}
 
-	// Apply rootfs diff inside the namespace (target root is /)
 	nsrestoreSetupStart := time.Now()
-	if err := snapshotruntime.ApplyRootfsDiff(opts.CheckpointPath, "/", log); err != nil {
-		return nil, 0, fmt.Errorf("rootfs diff failed: %w", err)
-	}
-
 	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
 		log.Error(err, "Failed to apply deleted files")
 	}

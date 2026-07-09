@@ -110,6 +110,7 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `daemonset.image.repository` | Snapshot-agent image repository | `nvcr.io/nvidia/ai-dynamo/snapshot-agent` |
 | `daemonset.image.tag` | Snapshot-agent image tag | `1.0.0` |
 | `daemonset.imagePullSecrets` | Image pull secrets for the agent | `[{name: ngc-secret}]` |
+| `daemonset.rootfsWorkers` | Bounded worker count for rootfs directory capture and restore | `16` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
 | `openshift.enabled` | OpenShift RBAC / SCC-related chart pieces | `false` |

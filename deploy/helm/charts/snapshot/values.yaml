@@ -86,6 +86,9 @@ daemonset:
   # Snapshot agent and nsrestore log level (trace, debug, info, warn, error)
   snapshotLogLevel: info
 
+  # Bounded worker count for rootfs directory capture and restore.
+  rootfsWorkers: 16
+
   # Image pull secrets
   imagePullSecrets:
     - name: ngc-secret
@@ -160,9 +163,8 @@ rbac:
 # Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables
 config:
   overlay:
-    # Rootfs diff tar exclusions. Absolute-looking paths are normalized
-    # relative to the tar root, and patterns starting with * are passed
-    # through as tar globs unchanged.
+    # Rootfs diff exclusions. Absolute-looking paths are normalized relative
+    # to the artifact root; patterns use glob syntax.
     exclusions:
       - /proc
       - /sys

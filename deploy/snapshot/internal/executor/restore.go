@@ -39,8 +39,8 @@ type RestoreRequest struct {
 
 // Restore performs external restore for the given request.
 // Returns the namespace-relative PID of the restored process.
-// The DaemonSet side inspects the placeholder and launches nsrestore,
-// which handles rootfs application, CRIU restore, and CUDA restore inside the namespace.
+// The DaemonSet side inspects the placeholder, applies the rootfs artifact,
+// and launches nsrestore for CRIU and CUDA restore inside the namespace.
 //
 // Returns the placeholder container's host PID so callers can reach into the
 // container's mount namespace (e.g. to write sentinels under /snapshot-control)
@@ -62,17 +62,33 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	hostInspectDuration := time.Since(hostInspectStart)
 
-	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
+	// Phase 2: Apply rootfs from the agent so placeholder images do not need the
+	// directory copier. TargetRoot is the resolved placeholder root on host proc.
+	rootfsRestoreStart := time.Now()
+	if err := snapshotruntime.ApplyRootfsDiffContext(
+		ctx,
+		snap.CheckpointPath,
+		snap.TargetRoot,
+		log,
+	); err != nil {
+		return 0, fmt.Errorf("rootfs diff failed: %w", err)
+	}
+	rootfsRestoreDuration := time.Since(rootfsRestoreStart)
+
+	// Phase 3: Execute CRIU and CUDA restore inside the namespace.
 	result, err := execNSRestore(ctx, log, req, snap)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
+	restoreDuration := hostInspectDuration + rootfsRestoreDuration +
+		result.NSRestoreSetupDuration + result.CRIURestoreDuration +
+		result.CUDADuration
 	log.Info("Restore timing summary",
 		"restore", map[string]any{
 			"duration": restoreDuration.String(),
 			"phases": map[string]string{
 				"host_inspect_duration":    hostInspectDuration.String(),
+				"rootfs_restore_duration":  rootfsRestoreDuration.String(),
 				"nsrestore_setup_duration": result.NSRestoreSetupDuration.String(),
 				"criu_restore_duration":    result.CRIURestoreDuration.String(),
 				"cuda_duration":            result.CUDADuration.String(),
