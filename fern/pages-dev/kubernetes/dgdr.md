@@ -74,7 +74,7 @@ spec:
 | `features.planner` | No | disabled | PlannerConfig passed to the Planner service; when present, the generated DGD includes Planner service/configuration |
 | `features.mocker` | No | disabled | Enable mocker mode for testing |
 | `overrides.profilingJob` | No | — | `batchv1.JobSpec` overrides for the profiling job (e.g., tolerations) |
-| `overrides.dgd` | No | — | Raw DGD override base applied to the generated deployment |
+| `overrides.dgd` | No | — | Partial `v1alpha1` or `v1beta1` DGD override applied to the generated deployment |
 
 For the complete CRD spec, see the [API Reference](api-reference.md).
 
@@ -140,11 +140,27 @@ router mode or KV-aware routing details, use a direct DGD, a tuned recipe, or
 ### Generated DGD Overrides
 
 Use `spec.overrides.dgd` when the generated `DynamoGraphDeployment` needs a
-field that DGDR does not expose directly. The value is a partial
-`nvidia.com/v1alpha1` DGD object that is merged into the profiler-generated
-deployment after Dynamo selects a configuration.
+field that DGDR does not expose directly. Provide a partial, versioned DGD with
+`kind: DynamoGraphDeployment` and either `apiVersion: nvidia.com/v1beta1` or
+`apiVersion: nvidia.com/v1alpha1`. Use `v1beta1` for new DGDRs.
 
-For example, to inject an environment variable into every generated service:
+The override is applied to each complete DGD that the profiler materializes:
+
+1. The profiler generates a complete DGD blueprint.
+2. If the blueprint and override use different API versions, Dynamo converts
+   the complete blueprint to the override's version.
+3. Dynamo merges the override according to that version's structural schema.
+4. Dynamo converts the complete merged result back to the blueprint's version.
+5. The DGDR controller records `.status.profilingResults.selectedConfig` as a
+   `nvidia.com/v1beta1` DGD and creates a `v1beta1` DGD when `autoApply` is
+   enabled.
+
+Dynamo never converts the partial override by itself. This avoids filling
+omitted fields with conversion defaults before the merge.
+
+For example, this `v1beta1` override sets a graph-level environment variable
+that is prepended to every generated component. The `spec.env` list is atomic,
+so include any generated graph-level entries that must be retained:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -157,30 +173,68 @@ spec:
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
-        envs:
+        env:
           - name: TRITON_PTXAS_PATH
             value: /usr/local/cuda/bin/ptxas
 ```
 
-Use `spec.envs` for variables that should apply to all generated services. To
-target a single service, override that service's `envs` entry instead:
+Use `spec.env` for variables that apply to all generated components. To target
+one component, identify it by `name`. Nested map lists, including `containers`
+and `env`, also merge by `name`:
 
 ```yaml
 spec:
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
-        services:
-          decode:  # replace with the generated service name
-            envs:
-              - name: CUSTOM_WORKER_ENV
-                value: "enabled"
+        components:
+          - name: VllmDecodeWorker  # replace with a generated component name
+            podTemplate:
+              spec:
+                containers:
+                  - name: main
+                    env:
+                      - name: CUSTOM_WORKER_ENV
+                        value: "enabled"
 ```
+
+Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` when
+you need the generated component names.
+
+Merge behavior depends on the override's declared API version:
+
+| Override version | Merge behavior |
+|---|---|
+| `v1beta1` | Uses the DGD structural schema. Map lists such as `spec.components`, pod-template containers, and container environment variables merge by `name`. Atomic lists such as graph-level `spec.env` and container `args` replace the generated list. |
+| `v1alpha1` | Preserves compatibility with existing overrides. `spec.services` entries merge by service name, and worker `extraPodSpec.mainContainer.args` values append to generated worker arguments. |
+
+Both versions follow these rules:
+
+- When overriding topology entries, an override can update only services or
+  components present in the generated blueprint. Dynamo ignores unknown names
+  and reports a warning; an override cannot add deployment topology.
+- `metadata.labels` and `metadata.annotations` merge into the generated DGD.
+  `metadata.name` selects the final DGD name. Other identity and runtime
+  metadata, such as `namespace` and `finalizers`, is ignored.
+- `status` overrides and `null` values for typed fields are rejected. Field
+  deletion is not supported.
+
+<Note>
+`v1alpha1` overrides remain supported for compatibility with existing
+configurations. Kubernetes DGDR resources must include both `apiVersion` and
+`kind` in `overrides.dgd`. When you run the profiler directly, an older
+override that omits both is treated as `v1alpha1` and produces a compatibility
+warning; an override that supplies only one is rejected.
+</Note>
+
+The operator injects the override helper into Kubernetes profiling jobs. For
+direct profiler runs, install the matching helper as described in
+[Local Runs with DGD Overrides](../components/profiler/profiler-guide.md#local-runs-with-dgd-overrides).
 
 <Note>
 `overrides.profilingJob` only customizes the profiling Job. Use
@@ -189,7 +243,7 @@ spec:
 
 ### Routing
 
-DGDR-generated deployments include a standalone `Frontend` service. That
+DGDR-generated deployments include a standalone `Frontend` component. That
 frontend runs Dynamo's embedded router and defaults to `round-robin` routing,
 which is often not optimal. Because DGDR does not yet expose a first-class
 router feature, configure the generated frontend with `spec.overrides.dgd`.
@@ -210,14 +264,18 @@ spec:
   backend: vllm
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
-        services:
-          Frontend:
-            envs:
-              - name: DYN_ROUTER_MODE
-                value: kv
+        components:
+          - name: Frontend
+            podTemplate:
+              spec:
+                containers:
+                  - name: main
+                    env:
+                      - name: DYN_ROUTER_MODE
+                        value: kv
 ```
 
 Use the same `Frontend` override for other frontend router modes, such as
@@ -237,16 +295,20 @@ do not configure worker KV-event publication, set
 spec:
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      apiVersion: nvidia.com/v1beta1
       kind: DynamoGraphDeployment
       spec:
-        services:
-          Frontend:
-            envs:
-              - name: DYN_ROUTER_MODE
-                value: kv
-              - name: DYN_ROUTER_USE_KV_EVENTS
-                value: "false"
+        components:
+          - name: Frontend
+            podTemplate:
+              spec:
+                containers:
+                  - name: main
+                    env:
+                      - name: DYN_ROUTER_MODE
+                        value: kv
+                      - name: DYN_ROUTER_USE_KV_EVENTS
+                        value: "false"
 ```
 
 For event-driven prefix-cache state, enable worker event publication only
@@ -254,18 +316,25 @@ where prefill happens: the single worker in aggregated serving, or prefill
 workers in disaggregated serving. Decode workers are scored by load
 (`dyn-decode-scorer`), not prefix overlap (`dyn-prefill-scorer`), so vLLM
 decode workers omit both `--enable-prefix-caching` and `--kv-events-config`.
-Service names depend on the selected backend and topology, so inspect the
+Component names depend on the selected backend and topology, so inspect the
 generated DGD first, especially when `autoApply: false`.
 
 For example, a generated vLLM disaggregated deployment may contain a
-`VllmPrefillWorker` service. This override appends the vLLM KV-event publishing
-arguments to that service while enabling the frontend KV router:
+`VllmPrefillWorker` component. This override appends the vLLM KV-event
+publishing arguments to that component while enabling the frontend KV router:
+
+<Info>
+This example deliberately uses the `v1alpha1` compatibility shape because
+worker `args` append in that version. In a `v1beta1` override, container
+`args` is atomic and replaces the generated argument list. To use `v1beta1`,
+inspect the generated DGD and supply the complete desired argument list.
+</Info>
 
 ```yaml
 spec:
   overrides:
     dgd:
-      apiVersion: nvidia.com/v1alpha1  # v1beta1 not yet supported for overrides
+      apiVersion: nvidia.com/v1alpha1
       kind: DynamoGraphDeployment
       spec:
         services:
@@ -313,8 +382,8 @@ are the same worker pod; if they differ, direct mode can still forward to the
 worker ID supplied by EPP.
 
 DGDR does not currently generate EPP components or frontend sidecars. Also,
-`overrides.dgd` only patches services that already exist in the generated DGD,
-so it cannot be used to add a missing `Epp` service to a DGDR-generated
+`overrides.dgd` only patches services or components that already exist in the
+generated DGD, so it cannot add a missing `Epp` component to a DGDR-generated
 deployment. Use a direct DGD manifest or a GAIE recipe for EPP deployments.
 For manifests, `frontendSidecar` configuration, direct routing, EPP routing
 variables such as `DYN_USE_KV_EVENTS`, and route setup, see
