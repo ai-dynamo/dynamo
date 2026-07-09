@@ -179,8 +179,10 @@ mod tests {
     /// Build an injectable env getter from key/value pairs — no process-global
     /// env mutation, so these tests are isolated and parallel-safe.
     fn getter(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         move |k| map.get(k).cloned()
     }
 
