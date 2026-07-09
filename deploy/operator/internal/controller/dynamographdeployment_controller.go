@@ -1235,7 +1235,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	}
 
 	// Check resource readiness
-	result := r.checkResourcesReadiness(dynamoDeployment, resources)
+	result := r.checkResourcesReadiness(resources)
 	return result, nil
 }
 
@@ -1540,7 +1540,7 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForComponent(ctx c
 	return updatedInProgress
 }
 
-func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(dgd *nvidiacomv1beta1.DynamoGraphDeployment, resources []Resource) ReconcileResult {
+func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Resource) ReconcileResult {
 	// Sort resources by name to ensure deterministic ordering
 	sort.Slice(resources, func(i, j int) bool {
 		return resources[i].GetName() < resources[j].GetName()
@@ -1670,7 +1670,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	}
 
 	// Check resource readiness
-	result := r.checkResourcesReadiness(dynamoDeployment, resources)
+	result := r.checkResourcesReadiness(resources)
 
 	// During rolling updates, aggregate old worker component statuses into the result
 	// so that Replicas, ReadyReplicas, etc. reflect the total across old and new DCDs.
