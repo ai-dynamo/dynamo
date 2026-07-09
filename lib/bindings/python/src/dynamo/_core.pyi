@@ -711,7 +711,7 @@ class SelectionService:
         """Book a request's load against a chosen worker.
 
         With a ``selection_id``, replays the matching ``select``'s cached
-        selection (same model/tenant), booked under ``reservation_id``; other
+        selection (same model/routing-group), booked under ``reservation_id``; other
         request fields are ignored. With a ``worker_id`` and the prompt, books
         explicitly and discards any cached selection for the id; ``worker_id``
         takes precedence when both are present. A request with neither raises

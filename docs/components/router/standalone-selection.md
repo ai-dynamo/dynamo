@@ -192,8 +192,8 @@ A `/select` that carries a `selection_id` caches its booking inputs (the
 chosen worker, the normalized prompt, `effective_prefill_tokens`,
 `expected_output_tokens`, and the prefill-tracking decision) on the selector
 that served it. A reservation that passes the same `selection_id`,
-`model_name`, and `tenant_id` replays the cached selection, booked under its
-own `reservation_id`, without re-sending the prompt:
+`model_name`, and `routing_group` replays the cached selection, booked under
+its own `reservation_id`, without re-sending the prompt:
 
 ```http
 POST /reservations
@@ -203,7 +203,7 @@ Content-Type: application/json
   "selection_id": "select-123",
   "reservation_id": "request-123",
   "model_name": "model",
-  "tenant_id": "default"
+  "routing_group": "default"
 }
 ```
 
@@ -223,8 +223,8 @@ Content-Type: application/json
   request fields are ignored. Supplying `worker_id` switches to the explicit
   form.
 
-On any miss (expired, already consumed, wrong model or tenant, or a different
-replica) the call returns `404`; fall back to the explicit form.
+On any miss (expired, already consumed, wrong model or routing group, or a
+different replica) the call returns `404`; fall back to the explicit form.
 
 ### Explicit form
 
