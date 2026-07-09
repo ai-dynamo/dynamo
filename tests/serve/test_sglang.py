@@ -792,6 +792,8 @@ sglang_configs = {
         # diffusion_llada.sh forwards "$@"; 0.4 OOMs the sglang scheduler, 0.7 boots.
         script_args=["--mem-fraction-static", "0.7"],
         marks=[
+            # Text diffusion LM (not image/video), so component marker is core.
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.h100,
             pytest.mark.profiled_vram_gib(56.0),
