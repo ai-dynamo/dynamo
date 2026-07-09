@@ -15,7 +15,7 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestOutcome, ScheduleMode,
         ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
     },
@@ -76,7 +76,6 @@ pub enum FindBestMatchOutcome {
         effective_overlap_blocks: f64,
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
-        admission_managed: bool,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -728,7 +727,6 @@ where
             effective_overlap_blocks: response.effective_overlap_blocks,
             cached_tokens: response.cached_tokens,
             routing_hashes,
-            admission_managed: response.admission_managed,
         })
     }
 
@@ -842,24 +840,16 @@ where
         self.scheduler.mark_dispatched(request_id).await;
     }
 
-    pub fn record_output_tokens(&self, request_id: &str, output_tokens: usize) {
-        self.scheduler
-            .record_output_tokens(request_id, output_tokens);
-    }
-
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
     }
 
-    pub(crate) async fn free_without_admission(
+    pub(crate) async fn finish(
         &self,
         request_id: &str,
+        outcome: RequestOutcome,
     ) -> Result<(), SequenceError> {
-        self.scheduler.free_without_admission(request_id).await
-    }
-
-    pub async fn finish(&self, request_id: &str, total_tokens: usize) -> Result<(), SequenceError> {
-        self.scheduler.finish(request_id, total_tokens).await
+        self.scheduler.finish(request_id, outcome).await
     }
 
     /// Number of requests currently parked in the scheduler queue.

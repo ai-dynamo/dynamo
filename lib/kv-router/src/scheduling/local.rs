@@ -19,8 +19,8 @@ use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::queue_admission::PolicyClassAdmissionStrategies;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, RequestOutcome, ScheduleMode,
+    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -486,33 +486,29 @@ where
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.finish(request_id, 0).await
-    }
-
-    pub async fn free_without_admission(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
-        let result = self.slots.free(&request_id, Instant::now());
+        self.slots.free(&request_id, Instant::now())?;
         match worker {
             Some(worker) => self.queue.update_worker(worker).await,
             None => self.queue.update().await,
         }
-        result
+        Ok(())
     }
 
     pub async fn mark_dispatched(&self, request_id: &str) {
         self.queue.dispatched(request_id).await;
     }
 
-    pub fn record_output_tokens(&self, request_id: &str, output_tokens: usize) {
-        self.queue.progress(request_id, output_tokens);
-    }
-
-    pub async fn finish(&self, request_id: &str, total_tokens: usize) -> Result<(), SequenceError> {
+    pub async fn finish(
+        &self,
+        request_id: &str,
+        outcome: RequestOutcome,
+    ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
         let result = self.slots.free(&request_id, Instant::now());
-        self.queue.finish(&request_id, total_tokens).await;
+        self.queue.finish(&request_id, outcome).await;
         match worker {
             Some(worker) => self.queue.update_worker(worker).await,
             None => self.queue.update().await,

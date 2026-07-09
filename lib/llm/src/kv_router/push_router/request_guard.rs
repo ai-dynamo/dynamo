@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use dynamo_kv_router::scheduling::RequestOutcome;
 use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     protocols::annotated::Annotated,
@@ -26,41 +27,23 @@ struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
     scheduler_tracked: bool,
-    admission_managed: bool,
-    total_tokens: usize,
     freed: bool,
 }
 
 impl RequestCleanup {
-    fn new(
-        chooser: Arc<KvRouter>,
-        context_id: String,
-        scheduler_tracked: bool,
-        admission_managed: bool,
-        input_tokens: usize,
-    ) -> Self {
+    fn new(chooser: Arc<KvRouter>, context_id: String, scheduler_tracked: bool) -> Self {
         Self {
             chooser,
             context_id,
             scheduler_tracked,
-            admission_managed,
-            total_tokens: input_tokens,
             freed: false,
         }
     }
 
-    async fn finish(&mut self, total_tokens: usize) {
-        self.total_tokens = total_tokens;
-        let result = if !self.scheduler_tracked {
-            Ok(())
-        } else if self.admission_managed {
-            self.chooser
-                .finish(&self.context_id, self.total_tokens)
-                .await
-        } else {
-            self.chooser.free_without_admission(&self.context_id).await
-        };
-        if let Err(error) = result {
+    async fn finish(&mut self, outcome: RequestOutcome) {
+        if self.scheduler_tracked
+            && let Err(error) = self.chooser.finish(&self.context_id, outcome).await
+        {
             tracing::warn!(
                 request_id = %self.context_id,
                 %error,
@@ -88,15 +71,8 @@ impl Drop for RequestCleanup {
 
         let chooser = self.chooser.clone();
         let context_id = self.context_id.clone();
-        let total_tokens = self.total_tokens;
-        let admission_managed = self.admission_managed;
         handle.spawn(async move {
-            let result = if admission_managed {
-                chooser.finish(&context_id, total_tokens).await
-            } else {
-                chooser.free_without_admission(&context_id).await
-            };
-            if let Err(error) = result {
+            if let Err(error) = chooser.finish(&context_id, RequestOutcome::Aborted).await {
                 tracing::warn!(
                     request_id = %context_id,
                     %error,
@@ -112,7 +88,7 @@ struct RequestObservability {
     tracker: Option<Arc<RequestTracker>>,
     request_metrics: Arc<RouterRequestMetrics>,
     cumulative_osl: usize,
-    authoritative_total_tokens: Option<usize>,
+    authoritative_context_tokens: Option<usize>,
     metrics_recorded: bool,
     first_token_recorded: bool,
     dispatch_guard: Option<StageGuard>,
@@ -128,7 +104,7 @@ impl RequestObservability {
             tracker,
             request_metrics,
             cumulative_osl: 0,
-            authoritative_total_tokens: None,
+            authoritative_context_tokens: None,
             metrics_recorded: false,
             first_token_recorded: false,
             dispatch_guard: None,
@@ -182,13 +158,13 @@ impl RequestObservability {
         self.cumulative_osl
     }
 
-    fn observe_total_tokens(&mut self, total_tokens: usize) {
-        self.authoritative_total_tokens = Some(total_tokens);
+    fn observe_context_tokens(&mut self, context_tokens: usize) {
+        self.authoritative_context_tokens = Some(context_tokens);
     }
 
-    fn total_tokens(&self, input_tokens: usize) -> usize {
-        self.authoritative_total_tokens
-            .unwrap_or_else(|| input_tokens.saturating_add(self.cumulative_osl))
+    fn context_tokens(&self, initial_context_tokens: usize) -> usize {
+        self.authoritative_context_tokens
+            .unwrap_or_else(|| initial_context_tokens.saturating_add(self.cumulative_osl))
     }
 
     fn observe_output_block_boundary(&self) {
@@ -233,13 +209,11 @@ impl RequestObservability {
 
 struct OutputBlockUpdate {
     decay_fraction: Option<f64>,
-    update_scheduler: bool,
 }
 
 /// Tracks when streamed output grows into a new scheduler accounting block.
 struct OutputBlockTracker {
     track_output_blocks: bool,
-    track_admission_progress: bool,
     current_total_blocks: usize,
     isl_tokens: usize,
     block_size: usize,
@@ -249,14 +223,12 @@ struct OutputBlockTracker {
 impl OutputBlockTracker {
     fn new(
         track_output_blocks: bool,
-        track_admission_progress: bool,
         isl_tokens: usize,
         block_size: usize,
         expected_output_tokens: Option<u32>,
     ) -> Self {
         Self {
             track_output_blocks,
-            track_admission_progress,
             current_total_blocks: isl_tokens.div_ceil(block_size),
             isl_tokens,
             block_size,
@@ -265,7 +237,7 @@ impl OutputBlockTracker {
     }
 
     fn observe(&mut self, cumulative_osl: usize) -> Option<OutputBlockUpdate> {
-        if !self.track_output_blocks && !self.track_admission_progress {
+        if !self.track_output_blocks {
             return None;
         }
 
@@ -279,10 +251,7 @@ impl OutputBlockTracker {
         let decay_fraction = self
             .expected_output_tokens
             .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
-        Some(OutputBlockUpdate {
-            decay_fraction,
-            update_scheduler: self.track_output_blocks,
-        })
+        Some(OutputBlockUpdate { decay_fraction })
     }
 }
 
@@ -294,8 +263,7 @@ pub(super) struct RequestGuard {
     cleanup: RequestCleanup,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
-    input_tokens: usize,
-    admission_tracked: bool,
+    initial_context_tokens: usize,
     prefill_marked: bool,
 }
 
@@ -305,7 +273,6 @@ impl RequestGuard {
         context_id: String,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
-        admission_managed: bool,
     ) -> Self {
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
@@ -317,28 +284,19 @@ impl RequestGuard {
             .and_then(|routing| routing.expected_output_tokens);
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
-        let admission_tracked = scheduler_tracked && admission_managed;
         let request_metrics =
             RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
         Self {
-            cleanup: RequestCleanup::new(
-                chooser,
-                context_id,
-                scheduler_tracked,
-                admission_managed,
-                isl_tokens,
-            ),
+            cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
-                admission_tracked,
                 isl_tokens,
                 block_size,
                 expected_output_tokens,
             ),
-            input_tokens: isl_tokens,
-            admission_tracked,
+            initial_context_tokens: isl_tokens,
             prefill_marked: false,
         }
     }
@@ -356,7 +314,7 @@ impl RequestGuard {
     }
 
     pub(super) async fn mark_dispatched(&mut self) {
-        if self.admission_tracked {
+        if self.cleanup.scheduler_tracked {
             self.cleanup
                 .chooser
                 .mark_dispatched(&self.cleanup.context_id)
@@ -374,7 +332,7 @@ impl RequestGuard {
             .and_then(|data| data.completion_usage.as_ref())
         {
             self.observability
-                .observe_total_tokens(usage.total_tokens as usize);
+                .observe_context_tokens(usage.total_tokens as usize);
         }
 
         if !self.prefill_marked {
@@ -402,19 +360,12 @@ impl RequestGuard {
 
         let new_tokens = item.data.as_ref().map_or(0, |data| data.token_ids.len());
         self.observability.observe_tokens(new_tokens);
-        let cumulative_osl = self.observability.cumulative_osl();
-        let Some(update) = self.output_blocks.observe(cumulative_osl) else {
+        let Some(update) = self
+            .output_blocks
+            .observe(self.observability.cumulative_osl())
+        else {
             return;
         };
-
-        if self.admission_tracked {
-            self.cleanup
-                .chooser
-                .record_output_tokens(&self.cleanup.context_id, cumulative_osl);
-        }
-        if !update.update_scheduler {
-            return;
-        }
 
         if let Err(error) = self
             .cleanup
@@ -434,20 +385,22 @@ impl RequestGuard {
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability.record_metrics();
-        let total_tokens = self.observability.total_tokens(self.input_tokens);
-        self.cleanup.finish(total_tokens).await;
+        let context_tokens = self
+            .observability
+            .context_tokens(self.initial_context_tokens);
+        self.cleanup
+            .finish(RequestOutcome::Completed { context_tokens })
+            .await;
     }
 
     pub(super) async fn abort(&mut self) {
-        let total_tokens = self.observability.total_tokens(self.input_tokens);
-        self.cleanup.finish(total_tokens).await;
+        self.cleanup.finish(RequestOutcome::Aborted).await;
     }
 }
 
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         // RequestCleanup drops immediately afterward and performs resource cleanup.
-        self.cleanup.total_tokens = self.observability.total_tokens(self.input_tokens);
         self.observability.record_metrics();
     }
 }

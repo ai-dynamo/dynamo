@@ -28,7 +28,6 @@ pub(super) struct WorkerSelection {
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) scheduler_tracked: bool,
-    pub(super) admission_managed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -103,7 +102,6 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
-                admission_managed,
             } => Ok(WorkerSelection {
                 instance_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
@@ -112,7 +110,6 @@ impl KvPushRouter {
                 cached_tokens,
                 routing_hashes,
                 scheduler_tracked: args.scheduler_tracked,
-                admission_managed,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }

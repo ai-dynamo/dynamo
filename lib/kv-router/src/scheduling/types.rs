@@ -75,8 +75,12 @@ pub struct SchedulingResponse {
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
-    /// Whether this request has an admission-strategy lifecycle.
-    pub admission_managed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOutcome {
+    Completed { context_tokens: usize },
+    Aborted,
 }
 
 #[derive(Debug, Clone)]

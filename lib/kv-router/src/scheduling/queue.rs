@@ -24,8 +24,8 @@ use super::queue_admission::{
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
-    SchedulingResponse,
+    KvSchedulerError, OverloadedWorkerProvider, RequestOutcome, SchedulingContext,
+    SchedulingRequest, SchedulingResponse,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -75,13 +75,9 @@ enum AdmissionCommand {
     Dispatched {
         request_id: String,
     },
-    Progress {
-        request_id: String,
-        output_tokens: usize,
-    },
     Finished {
         request_id: String,
-        total_tokens: usize,
+        outcome: RequestOutcome,
     },
 }
 
@@ -477,17 +473,7 @@ impl<
             .await;
     }
 
-    pub(crate) fn progress(&self, request_id: &str, output_tokens: usize) {
-        if !self.admission_enabled {
-            return;
-        }
-        let _ = self.admission_tx.try_send(AdmissionCommand::Progress {
-            request_id: request_id.to_owned(),
-            output_tokens,
-        });
-    }
-
-    pub(crate) async fn finish(&self, request_id: &str, total_tokens: usize) {
+    pub(crate) async fn finish(&self, request_id: &str, outcome: RequestOutcome) {
         if !self.admission_enabled {
             return;
         }
@@ -495,7 +481,7 @@ impl<
             .admission_tx
             .send(AdmissionCommand::Finished {
                 request_id: request_id.to_owned(),
-                total_tokens,
+                outcome,
             })
             .await;
     }
@@ -585,19 +571,11 @@ impl<
                         self.handle_update(None).await;
                     }
                 }
-                AdmissionCommand::Progress {
-                    request_id,
-                    output_tokens,
-                } => {
-                    if self.handle_progress(&request_id, output_tokens) {
-                        self.handle_update(None).await;
-                    }
-                }
                 AdmissionCommand::Finished {
                     request_id,
-                    total_tokens,
+                    outcome,
                 } => {
-                    if self.handle_finished(&request_id, total_tokens) {
+                    if self.handle_finished(&request_id, outcome) {
                         self.handle_update(None).await;
                     }
                 }
@@ -693,7 +671,7 @@ impl<
                 AdmissionDecision::Ready(placement) => {
                     if let Err(error) = apply_admission_placement(&mut request, placement) {
                         request.respond(Err(error));
-                        return self.finish_admission(ticket, 0);
+                        return self.abort_admission(ticket);
                     }
                 }
                 AdmissionDecision::Defer => deferred = true,
@@ -749,7 +727,7 @@ impl<
         if let Err((rejection, queued)) = enqueue {
             let made_ready = queued
                 .admission
-                .is_some_and(|ticket| self.finish_admission(ticket, 0));
+                .is_some_and(|ticket| self.abort_admission(ticket));
             let mut request = queued.request;
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
             return made_ready;
@@ -795,23 +773,25 @@ impl<
         self.apply_admission_actions(actions)
     }
 
-    fn handle_progress(&mut self, request_id: &str, output_tokens: usize) -> bool {
-        let Some(active) = self.active_admissions.get(request_id).copied() else {
-            return false;
-        };
-        let actions = self.admission.progress(active.ticket, output_tokens);
-        self.apply_admission_actions(actions)
-    }
-
-    fn handle_finished(&mut self, request_id: &str, total_tokens: usize) -> bool {
+    fn handle_finished(&mut self, request_id: &str, outcome: RequestOutcome) -> bool {
         let Some(active) = self.active_admissions.remove(request_id) else {
             return false;
         };
-        self.finish_admission(active.ticket, total_tokens)
+        match outcome {
+            RequestOutcome::Completed { context_tokens } => {
+                self.complete_admission(active.ticket, context_tokens)
+            }
+            RequestOutcome::Aborted => self.abort_admission(active.ticket),
+        }
     }
 
-    fn finish_admission(&mut self, ticket: AdmissionTicket, total_tokens: usize) -> bool {
-        let actions = self.admission.finished(ticket, total_tokens);
+    fn complete_admission(&mut self, ticket: AdmissionTicket, context_tokens: usize) -> bool {
+        let actions = self.admission.completed(ticket, context_tokens);
+        self.apply_admission_actions(actions)
+    }
+
+    fn abort_admission(&mut self, ticket: AdmissionTicket) -> bool {
+        let actions = self.admission.aborted(ticket);
         self.apply_admission_actions(actions)
     }
 
@@ -846,7 +826,7 @@ impl<
                 self.subtract_pending_counters(class_action.class_index, snapshot);
                 let mut queued = entry.into_payload();
                 if let Some(ticket) = queued.admission {
-                    actions.extend(self.admission.finished(ticket, 0));
+                    actions.extend(self.admission.aborted(ticket));
                 }
                 queued.request.respond(Err(error));
                 continue;
@@ -889,7 +869,7 @@ impl<
             let snapshot = entry.snapshot();
             self.subtract_pending_counters(class_index, snapshot);
             if let Some(ticket) = entry.payload().admission {
-                actions.extend(self.admission.finished(ticket, 0));
+                actions.extend(self.admission.aborted(ticket));
             }
         }
         actions.extend(self.admission.reconcile());
@@ -1022,7 +1002,7 @@ impl<
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
                 request.respond(Err(e));
-                return admission.is_some_and(|ticket| self.finish_admission(ticket, 0));
+                return admission.is_some_and(|ticket| self.abort_admission(ticket));
             }
         };
 
@@ -1031,7 +1011,6 @@ impl<
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
             selected_worker_tiers,
-            admission_managed: admission.is_some(),
         };
 
         if !request.mode.is_tracked() {
@@ -1076,7 +1055,7 @@ impl<
                     },
                 );
             } else {
-                return self.finish_admission(ticket, 0);
+                return self.abort_admission(ticket);
             }
         }
         false
@@ -1820,9 +1799,10 @@ mod tests {
     struct GateState {
         deferred: Option<AdmissionId>,
         session_id: Option<String>,
-        input_tokens: usize,
+        context_tokens: usize,
         dispatched: Vec<WorkerWithDpRank>,
-        finished_total_tokens: Vec<usize>,
+        completed_context_tokens: Vec<usize>,
+        aborted: Vec<AdmissionId>,
     }
 
     struct ReconcileGate {
@@ -1834,7 +1814,7 @@ mod tests {
             let mut state = self.state.lock().unwrap();
             state.deferred = Some(request.id());
             state.session_id = request.session_id().map(str::to_owned);
-            state.input_tokens = request.input_tokens();
+            state.context_tokens = request.context_tokens();
             AdmissionDecision::Defer
         }
 
@@ -1845,12 +1825,18 @@ mod tests {
                     state.dispatched.push(worker);
                     Vec::new()
                 }
-                AdmissionEvent::OutputTokens { .. } => Vec::new(),
-                AdmissionEvent::Finished { id, total_tokens } => {
+                AdmissionEvent::Completed { id, context_tokens } => {
                     if state.deferred == Some(id) {
                         state.deferred = None;
                     }
-                    state.finished_total_tokens.push(total_tokens);
+                    state.completed_context_tokens.push(context_tokens);
+                    Vec::new()
+                }
+                AdmissionEvent::Aborted { id } => {
+                    if state.deferred == Some(id) {
+                        state.deferred = None;
+                    }
+                    state.aborted.push(id);
                     Vec::new()
                 }
                 AdmissionEvent::Reconcile => state
@@ -1955,7 +1941,7 @@ policy_classes:
         {
             let state = state.lock().unwrap();
             assert_eq!(state.session_id.as_deref(), Some("session-a"));
-            assert_eq!(state.input_tokens, 64);
+            assert_eq!(state.context_tokens, 64);
             assert!(state.dispatched.is_empty());
         }
 
@@ -1964,12 +1950,14 @@ policy_classes:
         assert_eq!(selected.best_worker, WorkerWithDpRank::new(0, 0));
         assert_eq!(queue.pending_count(), 0);
         queue.dispatched("deferred").await;
-        queue.finish("deferred", 17).await;
+        queue
+            .finish("deferred", RequestOutcome::Completed { context_tokens: 17 })
+            .await;
         queue.update().await;
         {
             let state = state.lock().unwrap();
             assert_eq!(state.dispatched, vec![WorkerWithDpRank::new(0, 0)]);
-            assert_eq!(state.finished_total_tokens, vec![17]);
+            assert_eq!(state.completed_context_tokens, vec![17]);
         }
 
         slots.free(&"deferred".to_owned(), decay_now()).unwrap();
@@ -1992,7 +1980,7 @@ policy_classes:
         assert_eq!(queue.pending_count(), 0);
         let state = state.lock().unwrap();
         assert!(state.dispatched.is_empty());
-        assert_eq!(state.finished_total_tokens, vec![0]);
+        assert_eq!(state.aborted, vec![AdmissionId::new(0)]);
     }
 
     struct ReadyGate {
@@ -2008,10 +1996,11 @@ policy_classes:
             let mut state = self.state.lock().unwrap();
             match event {
                 AdmissionEvent::Dispatched { worker, .. } => state.dispatched.push(worker),
-                AdmissionEvent::Finished { total_tokens, .. } => {
-                    state.finished_total_tokens.push(total_tokens);
+                AdmissionEvent::Completed { context_tokens, .. } => {
+                    state.completed_context_tokens.push(context_tokens);
                 }
-                AdmissionEvent::OutputTokens { .. } | AdmissionEvent::Reconcile => {}
+                AdmissionEvent::Aborted { id } => state.aborted.push(id),
+                AdmissionEvent::Reconcile => {}
             }
             Vec::new()
         }
@@ -2040,14 +2029,15 @@ policy_classes:
         }));
         let (mut request, response) = make_request("bypassed", 64);
         request.policy_class = Some("agents".to_owned());
-        let response = {
+        {
             queue.enqueue(request).await;
-            response.await.unwrap().unwrap()
-        };
-        assert!(!response.admission_managed);
+            response.await.unwrap().unwrap();
+        }
 
         queue.dispatched("bypassed").await;
-        queue.finish("bypassed", 64).await;
+        queue
+            .finish("bypassed", RequestOutcome::Completed { context_tokens: 64 })
+            .await;
         queue.update().await;
         assert_eq!(events.load(Ordering::Relaxed), 0);
         slots.free(&"bypassed".to_owned(), decay_now()).unwrap();
@@ -2071,8 +2061,9 @@ policy_classes:
         }
 
         fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
-            let AdmissionEvent::Finished { id, .. } = event else {
-                return Vec::new();
+            let id = match event {
+                AdmissionEvent::Completed { id, .. } | AdmissionEvent::Aborted { id } => id,
+                _ => return Vec::new(),
             };
             if self.first != Some(id) {
                 return Vec::new();
@@ -2106,7 +2097,12 @@ policy_classes:
         slots
             .free(&"first-admitted".to_owned(), decay_now())
             .unwrap();
-        queue.finish("first-admitted", 64).await;
+        queue
+            .finish(
+                "first-admitted",
+                RequestOutcome::Completed { context_tokens: 64 },
+            )
+            .await;
         tokio::time::timeout(Duration::from_secs(1), second_response)
             .await
             .expect("finish action did not drain the queue")
@@ -2221,7 +2217,7 @@ policy_classes:
         assert_eq!(queue.pending_count(), 0);
         let state = state.lock().unwrap();
         assert!(state.dispatched.is_empty());
-        assert_eq!(state.finished_total_tokens, vec![0]);
+        assert_eq!(state.aborted, vec![AdmissionId::new(0)]);
         slots.free(&"blocker".to_owned(), decay_now()).unwrap();
     }
 
@@ -2237,12 +2233,12 @@ policy_classes:
         queue.enqueue(request).await;
         queue.reconcile().await;
         response.await.unwrap().unwrap();
-        queue.finish("backend-abort", 64).await;
+        queue.finish("backend-abort", RequestOutcome::Aborted).await;
         queue.update().await;
 
         let state = state.lock().unwrap();
         assert!(state.dispatched.is_empty());
-        assert_eq!(state.finished_total_tokens, vec![64]);
+        assert_eq!(state.aborted, vec![AdmissionId::new(0)]);
         slots
             .free(&"backend-abort".to_owned(), decay_now())
             .unwrap();

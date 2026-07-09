@@ -52,7 +52,7 @@ impl PolicyClassAdmissionController {
         &mut self,
         class_index: usize,
         session_id: Option<&str>,
-        input_tokens: usize,
+        context_tokens: usize,
         worker_eligibility: WorkerEligibility,
     ) -> Option<(AdmissionTicket, AdmissionDecision)> {
         let strategy = self.strategies[class_index].as_mut()?;
@@ -62,7 +62,7 @@ impl PolicyClassAdmissionController {
         let decision = strategy.admit(AdmissionRequest::new(
             id,
             session_id,
-            input_tokens,
+            context_tokens,
             worker_eligibility,
         ));
         Some((ticket, decision))
@@ -82,32 +82,22 @@ impl PolicyClassAdmissionController {
         )
     }
 
-    pub fn finished(
+    pub fn completed(
         &mut self,
         ticket: AdmissionTicket,
-        total_tokens: usize,
+        context_tokens: usize,
     ) -> Vec<ClassAdmissionAction> {
         self.event(
             ticket,
-            AdmissionEvent::Finished {
+            AdmissionEvent::Completed {
                 id: ticket.id,
-                total_tokens,
+                context_tokens,
             },
         )
     }
 
-    pub fn progress(
-        &mut self,
-        ticket: AdmissionTicket,
-        output_tokens: usize,
-    ) -> Vec<ClassAdmissionAction> {
-        self.event(
-            ticket,
-            AdmissionEvent::OutputTokens {
-                id: ticket.id,
-                cumulative: output_tokens,
-            },
-        )
+    pub fn aborted(&mut self, ticket: AdmissionTicket) -> Vec<ClassAdmissionAction> {
+        self.event(ticket, AdmissionEvent::Aborted { id: ticket.id })
     }
 
     pub fn reconcile(&mut self) -> Vec<ClassAdmissionAction> {

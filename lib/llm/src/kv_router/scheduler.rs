@@ -7,7 +7,8 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
 };
 pub use dynamo_kv_router::scheduling::{
     KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PolicyClassAdmissionStrategies,
-    PotentialLoad, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    PotentialLoad, RequestOutcome, ScheduleRequest, SchedulingRequest, SchedulingResponse,
+    TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -392,22 +393,16 @@ where
         Ok(())
     }
 
-    pub async fn free_without_admission(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.inner.free_without_admission(request_id).await?;
-        self.update_queue_metrics();
-        Ok(())
-    }
-
     pub async fn mark_dispatched(&self, request_id: &str) {
         self.inner.mark_dispatched(request_id).await;
     }
 
-    pub fn record_output_tokens(&self, request_id: &str, output_tokens: usize) {
-        self.inner.record_output_tokens(request_id, output_tokens);
-    }
-
-    pub async fn finish(&self, request_id: &str, total_tokens: usize) -> Result<(), SequenceError> {
-        self.inner.finish(request_id, total_tokens).await?;
+    pub async fn finish(
+        &self,
+        request_id: &str,
+        outcome: RequestOutcome,
+    ) -> Result<(), SequenceError> {
+        self.inner.finish(request_id, outcome).await?;
         self.update_queue_metrics();
         Ok(())
     }

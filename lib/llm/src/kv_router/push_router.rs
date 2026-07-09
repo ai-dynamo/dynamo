@@ -211,7 +211,6 @@ impl KvPushRouter {
             context_id.clone(),
             request,
             selection.scheduler_tracked,
-            selection.admission_managed,
         );
 
         let record_result: Result<(), Error> = async {
@@ -351,26 +350,34 @@ impl KvPushRouter {
             let stopped = context_for_monitoring.stopped();
             tokio::pin!(stopped);
 
-            loop {
+            let completed = loop {
                 tokio::select! {
                     biased;
 
                     _ = &mut stopped => {
                         tracing::debug!("Request {context_id} cancelled, ending stream");
-                        break;
+                        break false;
                     }
 
                     item = response_stream.next() => {
                         let Some(item) = item else {
-                            break;
+                            break true;
                         };
+                        let failed = item.error.is_some() || item.event.as_deref() == Some("error");
                         guard.on_item(&item).await;
                         yield item;
+                        if failed {
+                            break false;
+                        }
                     }
                 }
-            }
+            };
 
-            guard.finish().await;
+            if completed {
+                guard.finish().await;
+            } else {
+                guard.abort().await;
+            }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }

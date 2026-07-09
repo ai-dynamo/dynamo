@@ -55,7 +55,7 @@ impl Default for Program {
 
 struct RequestState {
     session_id: String,
-    input_tokens: usize,
+    context_tokens: usize,
     worker_eligibility: WorkerEligibility,
     dispatched: bool,
     prior: Option<Program>,
@@ -120,7 +120,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             request.id(),
             RequestState {
                 session_id: session_id.clone(),
-                input_tokens: request.input_tokens(),
+                context_tokens: request.context_tokens(),
                 worker_eligibility: request.worker_eligibility().clone(),
                 dispatched: false,
                 prior: None,
@@ -151,7 +151,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let Some(request) = self.requests.get(&id) else {
             return AdmissionDecision::Defer;
         };
-        let input_tokens = request.input_tokens;
+        let context_tokens = request.context_tokens;
         let worker_eligibility = request.worker_eligibility.clone();
         let capacities = self.capacity.snapshot();
         let capacity_known = !capacities.is_empty();
@@ -170,8 +170,8 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             .current = Some(id);
         let program = self.programs.entry(session_id.to_owned()).or_default();
         program.step_count = program.step_count.saturating_add(1);
-        if input_tokens > 0 {
-            program.token_total = input_tokens;
+        if context_tokens > 0 {
+            program.token_total = context_tokens;
         }
         program.status = ProgramStatus::Reasoning;
         program.acting_since = None;
@@ -217,7 +217,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             return AdmissionDecision::Ready(WorkerPlacement::Any);
         }
 
-        let required = input_tokens.saturating_add(self.config.buffer_per_program);
+        let required = context_tokens.saturating_add(self.config.buffer_per_program);
         let usage = self.worker_usage(now);
         let selected = capacities
             .iter()
@@ -286,27 +286,19 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         }
     }
 
-    fn progress(&mut self, id: AdmissionId, output_tokens: usize) {
-        let Some(request) = self.requests.get(&id) else {
-            return;
-        };
-        if !request.dispatched {
-            return;
-        }
-        if self
-            .sessions
-            .get(&request.session_id)
-            .and_then(|requests| requests.current)
-            != Some(id)
-        {
-            return;
-        }
-        if let Some(program) = self.programs.get_mut(&request.session_id) {
-            program.token_total = request.input_tokens.saturating_add(output_tokens);
-        }
+    fn completed(&mut self, id: AdmissionId, context_tokens: usize) -> Vec<AdmissionAction> {
+        self.finish_request(id, Some(context_tokens))
     }
 
-    fn finished(&mut self, id: AdmissionId, total_tokens: usize) -> Vec<AdmissionAction> {
+    fn aborted(&mut self, id: AdmissionId) -> Vec<AdmissionAction> {
+        self.finish_request(id, None)
+    }
+
+    fn finish_request(
+        &mut self,
+        id: AdmissionId,
+        completed_context_tokens: Option<usize>,
+    ) -> Vec<AdmissionAction> {
         let Some(request) = self.requests.remove(&id) else {
             return Vec::new();
         };
@@ -328,7 +320,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             program.deferred_since = None;
         }
 
-        if !request.dispatched {
+        if !request.dispatched || completed_context_tokens.is_none() {
             match request.prior {
                 Some(prior) => {
                     let lifecycle = prior.lifecycle;
@@ -344,9 +336,9 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                     self.paused.shift_remove(&request.session_id);
                 }
             }
-        } else {
+        } else if let Some(context_tokens) = completed_context_tokens {
             if let Some(program) = self.programs.get_mut(&request.session_id) {
-                program.token_total = total_tokens;
+                program.token_total = context_tokens;
                 program.status = ProgramStatus::Acting;
                 program.acting_since = Some(Instant::now());
                 let pause = std::mem::take(&mut program.marked_for_pause);
@@ -836,11 +828,8 @@ impl<P: WorkerCapacityProvider> PolicyClassAdmissionStrategy for ThunderAgent<P>
                 self.dispatched(id, worker);
                 Vec::new()
             }
-            AdmissionEvent::OutputTokens { id, cumulative } => {
-                self.progress(id, cumulative);
-                Vec::new()
-            }
-            AdmissionEvent::Finished { id, total_tokens } => self.finished(id, total_tokens),
+            AdmissionEvent::Completed { id, context_tokens } => self.completed(id, context_tokens),
+            AdmissionEvent::Aborted { id } => self.aborted(id),
             AdmissionEvent::Reconcile => self.reconcile(),
             _ => Vec::new(),
         }
@@ -872,11 +861,11 @@ mod tests {
         WorkerWithDpRank::new(id, 0)
     }
 
-    fn request(id: u64, session_id: Option<&str>, input_tokens: usize) -> AdmissionRequest<'_> {
+    fn request(id: u64, session_id: Option<&str>, context_tokens: usize) -> AdmissionRequest<'_> {
         AdmissionRequest::new(
             AdmissionId::new(id),
             session_id,
-            input_tokens,
+            context_tokens,
             WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([worker(1), worker(2)])),
         )
     }
@@ -884,13 +873,13 @@ mod tests {
     fn filtered_request(
         id: u64,
         session_id: Option<&str>,
-        input_tokens: usize,
+        context_tokens: usize,
         eligible_workers: impl Fn() -> Vec<WorkerWithDpRank> + Send + Sync + 'static,
     ) -> AdmissionRequest<'_> {
         AdmissionRequest::new(
             AdmissionId::new(id),
             session_id,
-            input_tokens,
+            context_tokens,
             WorkerEligibility::new(move || WorkerEligibilitySnapshot::new(eligible_workers())),
         )
     }
@@ -898,13 +887,13 @@ mod tests {
     fn availability_request(
         id: u64,
         session_id: Option<&str>,
-        input_tokens: usize,
+        context_tokens: usize,
         workers: impl Fn() -> (Vec<WorkerWithDpRank>, Vec<WorkerWithDpRank>) + Send + Sync + 'static,
     ) -> AdmissionRequest<'_> {
         AdmissionRequest::new(
             AdmissionId::new(id),
             session_id,
-            input_tokens,
+            context_tokens,
             WorkerEligibility::new(move || {
                 let (structural, available) = workers();
                 WorkerEligibilitySnapshot::with_availability(
@@ -956,9 +945,9 @@ mod tests {
             id: AdmissionId::new(1),
             worker: worker(1),
         });
-        strategy.on_event(AdmissionEvent::Finished {
+        strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
-            total_tokens: 150,
+            context_tokens: 150,
         });
         assert_eq!(strategy.programs["a"].token_total, 150);
         assert_eq!(
@@ -1031,9 +1020,9 @@ mod tests {
             id: AdmissionId::new(1),
             worker: worker(1),
         });
-        strategy.on_event(AdmissionEvent::Finished {
+        strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
-            total_tokens: 150,
+            context_tokens: 150,
         });
 
         *current.lock().unwrap() = capacities(&[(2, 1_000)]);
@@ -1069,9 +1058,9 @@ mod tests {
             id: AdmissionId::new(1),
             worker: worker(1),
         });
-        strategy.on_event(AdmissionEvent::Finished {
+        strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
-            total_tokens: 150,
+            context_tokens: 150,
         });
 
         available.store(false, Ordering::Relaxed);
@@ -1117,9 +1106,9 @@ mod tests {
             id: AdmissionId::new(1),
             worker: worker(1),
         });
-        strategy.on_event(AdmissionEvent::Finished {
+        strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
-            total_tokens: 150,
+            context_tokens: 150,
         });
 
         current.lock().unwrap().clear();
@@ -1131,7 +1120,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_updates_reasoning_tokens_and_finish_uses_authoritative_total() {
+    fn completion_commits_authoritative_context_tokens() {
         let mut strategy =
             ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
         strategy.admit(request(1, Some("a"), 100));
@@ -1139,14 +1128,9 @@ mod tests {
             id: AdmissionId::new(1),
             worker: worker(1),
         });
-        strategy.on_event(AdmissionEvent::OutputTokens {
+        strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
-            cumulative: 25,
-        });
-        assert_eq!(strategy.programs["a"].token_total, 125);
-        strategy.on_event(AdmissionEvent::Finished {
-            id: AdmissionId::new(1),
-            total_tokens: 140,
+            context_tokens: 140,
         });
         assert_eq!(strategy.programs["a"].token_total, 140);
     }
@@ -1175,9 +1159,9 @@ mod tests {
                 id: AdmissionId::new(id),
                 worker: worker(1),
             });
-            strategy.on_event(AdmissionEvent::Finished {
+            strategy.on_event(AdmissionEvent::Completed {
                 id: AdmissionId::new(id),
-                total_tokens: input + output,
+                context_tokens: input + output,
             });
         }
 
@@ -1296,10 +1280,38 @@ mod tests {
             strategy.admit(request(1, Some("existing"), 300)),
             AdmissionDecision::Ready(_)
         ));
-        strategy.on_event(AdmissionEvent::Finished {
+        strategy.on_event(AdmissionEvent::Aborted {
             id: AdmissionId::new(1),
-            total_tokens: 0,
         });
+        let program = &strategy.programs["existing"];
+        assert_eq!(program.status, ProgramStatus::Acting);
+        assert_eq!(program.token_total, 200);
+        assert_eq!(program.step_count, 3);
+    }
+
+    #[test]
+    fn cancellation_after_dispatch_restores_prior_program_state() {
+        let mut strategy =
+            ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
+        strategy.programs.insert(
+            "existing".to_owned(),
+            Program {
+                status: ProgramStatus::Acting,
+                assigned_worker: Some(worker(1)),
+                token_total: 200,
+                step_count: 3,
+                ..Program::default()
+            },
+        );
+        strategy.admit(request(1, Some("existing"), 300));
+        strategy.on_event(AdmissionEvent::Dispatched {
+            id: AdmissionId::new(1),
+            worker: worker(1),
+        });
+        strategy.on_event(AdmissionEvent::Aborted {
+            id: AdmissionId::new(1),
+        });
+
         let program = &strategy.programs["existing"];
         assert_eq!(program.status, ProgramStatus::Acting);
         assert_eq!(program.token_total, 200);
@@ -1323,9 +1335,8 @@ mod tests {
 
         assert!(
             strategy
-                .on_event(AdmissionEvent::Finished {
+                .on_event(AdmissionEvent::Aborted {
                     id: AdmissionId::new(2),
-                    total_tokens: 0,
                 })
                 .is_empty()
         );
@@ -1333,9 +1344,9 @@ mod tests {
             id: AdmissionId::new(1),
             worker: worker(1),
         });
-        strategy.on_event(AdmissionEvent::Finished {
+        strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
-            total_tokens: 150,
+            context_tokens: 150,
         });
         assert_eq!(strategy.programs["same"].token_total, 150);
         assert_eq!(strategy.programs["same"].step_count, 1);
@@ -1355,9 +1366,8 @@ mod tests {
         );
 
         assert_eq!(
-            strategy.on_event(AdmissionEvent::Finished {
+            strategy.on_event(AdmissionEvent::Aborted {
                 id: AdmissionId::new(1),
-                total_tokens: 0,
             }),
             vec![AdmissionAction::MakeReady {
                 id: AdmissionId::new(2),
