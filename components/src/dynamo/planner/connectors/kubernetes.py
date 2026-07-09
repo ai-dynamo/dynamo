@@ -429,6 +429,7 @@ class KubernetesConnector(PlannerConnector):
         (semantic role, robust to service-key naming variation across DGDs).
         Used by the planner's admission-control fanout.
         Returns an empty list when no frontend service is running.
+        Raises ApiException on transient apiserver errors (callers must handle).
         """
         label_selector = (
             f"nvidia.com/dynamo-graph-deployment-name={self.graph_deployment_name},"
@@ -499,11 +500,11 @@ class KubernetesConnector(PlannerConnector):
                 "Install it with: pip install httpx"
             ) from exc
 
-        pod_ip = pod.status.pod_ip
-        if not pod_ip:
+        if not pod.status or not pod.status.pod_ip:
             raise ValueError(
                 f"Pod {pod.metadata.name} has no pod IP; cannot POST /busy_threshold"
             )
+        pod_ip = pod.status.pod_ip
 
         # IPv6 literals must be bracketed in a URL authority (RFC 3986);
         # an IPv6 pod IP always contains ':', IPv4 and hostnames never do.

@@ -306,14 +306,27 @@ class KubernetesAPI:
     def list_pods_by_label(self, label_selector: str) -> list:
         """List all pods in the current namespace matching label_selector.
 
-        Returns the `.items` list from the K8s API response.  Used by
+        Returns all matching pods, paginating transparently with the K8s
+        continue-token protocol so results are not silently truncated at the
+        server's default page size.  Used by
         KubernetesConnector.get_component_pods() to enumerate the worker pods
         that belong to a specific prefill or decode service.
         """
-        return self.core_api.list_namespaced_pod(
-            namespace=self.current_namespace,
-            label_selector=label_selector,
-        ).items
+        items = []
+        _continue = None
+        while True:
+            kwargs = {
+                "namespace": self.current_namespace,
+                "label_selector": label_selector,
+            }
+            if _continue:
+                kwargs["_continue"] = _continue
+            resp = self.core_api.list_namespaced_pod(**kwargs)
+            items.extend(resp.items)
+            _continue = (resp.metadata or {}) and resp.metadata._continue
+            if not _continue:
+                break
+        return items
 
     async def wait_for_graph_deployment_ready(
         self,

@@ -111,6 +111,7 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     prefill_engine_gpu_power_limit: int = 300  # watts per GPU, prefill replicas
     decode_engine_gpu_power_limit: int = 300  # watts per GPU, decode replicas
     power_agent_safe_default_watts: Optional[int] = None
+    power_annotation_interval_seconds: float = 60.0
 
 
 class SubComponentType(str, Enum):

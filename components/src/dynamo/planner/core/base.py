@@ -1016,6 +1016,8 @@ class NativePlannerBase:
         stays consistent with the logged summary.
         Scale-downs and holds return False because they create no pods.
         """
+        if self._last_worker_counts is None:
+            return False
         decision = effects.scale_to
         if decision is None:
             return False
@@ -1070,6 +1072,14 @@ class NativePlannerBase:
 
         p_gpu = self.config.prefill_engine_num_gpu or 0
         d_gpu = self.config.decode_engine_num_gpu or 0
+        if (self.require_prefill and p_gpu == 0) or (self.require_decode and d_gpu == 0):
+            logger.warning(
+                "power_projected_watts will be zero or partial: "
+                "prefill_engine_num_gpu=%s, decode_engine_num_gpu=%s are not set. "
+                "Set these fields to get accurate power budget metrics.",
+                self.config.prefill_engine_num_gpu,
+                self.config.decode_engine_num_gpu,
+            )
         projected = (
             num_p * self.config.prefill_engine_gpu_power_limit * p_gpu
             + num_d * self.config.decode_engine_gpu_power_limit * d_gpu

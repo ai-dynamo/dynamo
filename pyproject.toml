@@ -24,6 +24,7 @@ dependencies = [
     # typing.Self is 3.11+; declared minimum is 3.10 (see requires-python),
     # so back-port Self via typing_extensions in dynamo.common.configuration.
     "typing_extensions>=4.10.0",
+    "httpx>=0.27.0",
 ]
 
 classifiers = [
