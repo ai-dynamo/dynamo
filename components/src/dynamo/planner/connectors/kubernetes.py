@@ -58,7 +58,6 @@ CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
 CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
 LEGACY_WORKER_HASH = "legacy"
 WORKER_COMPONENT_TYPES = {"worker", "prefill", "decode"}
-GROVE_COMPONENT_KINDS = {"PodClique", "PodCliqueScalingGroup"}
 WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment"}
 
 
@@ -158,8 +157,6 @@ class KubernetesConnector(PlannerConnector):
         if not worker_status:
             return False
         component_kind = worker_status.get("componentKind", "")
-        if component_kind in GROVE_COMPONENT_KINDS:
-            return False
         return component_kind in WORKER_SUFFIX_COMPONENT_KINDS
 
     async def add_component(
