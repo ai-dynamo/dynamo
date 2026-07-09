@@ -125,6 +125,7 @@ def test_echo(start_services_with_echo_worker) -> None:
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
 @pytest.mark.parallel
+@pytest.mark.timeout(60)
 @pytest.mark.parametrize(
     "request_params",
     [
