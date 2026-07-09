@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright contributors to the sgl-project/sglang project
+# SPDX-License-Identifier: Apache-2.0
+
+From: Jie Hao <jihao@nvidia.com>
+Date: Thu, 9 Jul 2026 00:00:00 +0000
+Subject: [PATCH] fix(nixl): make the agent progress thread configurable
+
+NIXL's LIBFABRIC progress thread can deadlock with EFA descriptor posting.
+Expose the existing NIXL agent option through an SGLang environment variable
+so affected prefill workers can use NIXL's caller-driven progress path.
+
+The default remains enabled, preserving upstream behavior unless the operator
+explicitly opts into the workaround.
+
+Tracks: https://github.com/ai-dynamo/nixl/issues/1921
+---
+ python/sglang/srt/disaggregation/nixl/conn.py | 12 ++++++++++--
+ python/sglang/srt/environ.py                  |  1 +
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/python/sglang/srt/disaggregation/nixl/conn.py b/python/sglang/srt/disaggregation/nixl/conn.py
+--- a/python/sglang/srt/disaggregation/nixl/conn.py
++++ b/python/sglang/srt/disaggregation/nixl/conn.py
+@@ -267,7 +267,12 @@ class NixlKVManager(CommonKVManager):
+                 "SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS must be a JSON object "
+                 "with string keys and string values"
+             )
+-        agent_config = nixl_agent_config(backends=[], num_threads=num_threads)
++        enable_prog_thread = (
++            envs.SGLANG_DISAGGREGATION_NIXL_ENABLE_PROG_THREAD.get()
++        )
++        agent_config = nixl_agent_config(
++            backends=[], num_threads=num_threads, enable_prog_thread=enable_prog_thread
++        )
+         self.agent = nixl_agent(str(uuid.uuid4()), agent_config)
+         if num_threads > 0:
+             # TODO: Remove this once NIXL passes thread parameters from
+@@ -286,7 +291,10 @@ class NixlKVManager(CommonKVManager):
+                 f"NIXL backend '{backend}' not found. Available: {available_plugins}. "
+                 f"Please install the required NIXL plugin or choose from: {available_plugins}"
+             )
+-        logger.info(f"NIXL KVManager initialized with backend: {backend}")
++        logger.info(
++            f"NIXL KVManager initialized with backend: {backend}, "
++            f"progress thread enabled: {enable_prog_thread}"
++        )
+
+         self.register_buffer_to_engine()
+
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -307,6 +307,7 @@ class Envs:
+     SGLANG_DISAGGREGATION_WAITING_TIMEOUT = EnvInt(300)
+     SGLANG_DISAGGREGATION_NIXL_BACKEND = EnvStr("UCX")
+     SGLANG_DISAGGREGATION_NIXL_BACKEND_PARAMS = EnvStr("{}")
++    SGLANG_DISAGGREGATION_NIXL_ENABLE_PROG_THREAD = EnvBool(True)
+     SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER = EnvBool(False)
+     SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK = EnvBool(False)

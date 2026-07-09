@@ -162,6 +162,52 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
+{% if device == "cuda" %}
+# Apply downstream fixes to the exact SGLang version supplied by the upstream
+# runtime image. Fail closed on version drift or rejected hunks so a future
+# SGLang image update cannot silently lose a required workaround.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=bind,source=./container/deps/sglang/patches,target=/tmp/sglang-patches,readonly \
+    set -eu; \
+    if ! command -v patch >/dev/null 2>&1; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends patch; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    SGLANG_VERSION="$(python3 -c 'from importlib.metadata import version; print(version("sglang"))')"; \
+    PATCH_DIR="/tmp/sglang-patches/v${SGLANG_VERSION}"; \
+    if [ ! -d "${PATCH_DIR}" ]; then \
+        echo "No downstream patches registered for SGLang ${SGLANG_VERSION}" >&2; \
+        exit 1; \
+    fi; \
+    PATCH_COUNT=0; \
+    for PATCH_FILE in "${PATCH_DIR}"/*.patch; do \
+        [ -f "${PATCH_FILE}" ] || continue; \
+        PATCH_COUNT=$((PATCH_COUNT + 1)); \
+        echo "Applying $(basename "${PATCH_FILE}") to SGLang ${SGLANG_VERSION}"; \
+        if patch --batch --forward --fuzz=0 --dry-run -p2 -d /sgl-workspace/sglang/python < "${PATCH_FILE}" >/dev/null; then \
+            patch --batch --forward --fuzz=0 -p2 -d /sgl-workspace/sglang/python < "${PATCH_FILE}"; \
+        elif patch --batch --reverse --fuzz=0 --dry-run -p2 -d /sgl-workspace/sglang/python < "${PATCH_FILE}" >/dev/null; then \
+            echo "$(basename "${PATCH_FILE}") is already applied"; \
+        else \
+            echo "Patch does not apply cleanly: ${PATCH_FILE}" >&2; \
+            patch --batch --forward --fuzz=0 --dry-run -p2 -d /sgl-workspace/sglang/python < "${PATCH_FILE}" || true; \
+            exit 1; \
+        fi; \
+    done; \
+    if [ "${PATCH_COUNT}" -eq 0 ]; then \
+        echo "No downstream patch files found for SGLang ${SGLANG_VERSION}" >&2; \
+        exit 1; \
+    fi; \
+    python3 -m py_compile \
+        /sgl-workspace/sglang/python/sglang/srt/environ.py \
+        /sgl-workspace/sglang/python/sglang/srt/disaggregation/nixl/conn.py; \
+    python3 -c 'from sglang.srt.environ import envs; assert envs.SGLANG_DISAGGREGATION_NIXL_ENABLE_PROG_THREAD.get() is True'; \
+    SGLANG_DISAGGREGATION_NIXL_ENABLE_PROG_THREAD=false \
+        python3 -c 'from sglang.srt.environ import envs; assert envs.SGLANG_DISAGGREGATION_NIXL_ENABLE_PROG_THREAD.get() is False'; \
+    python3 -c 'from nixl._api import nixl_agent_config; config = nixl_agent_config(enable_prog_thread=False); assert config.enable_pthread is False'
+{% endif %}
+
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
