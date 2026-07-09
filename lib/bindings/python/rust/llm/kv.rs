@@ -126,9 +126,13 @@ struct KvIndexerCli {
     #[arg(long, default_value = "default")]
     model_name: String,
 
-    /// Tenant ID for initial workers registered via --workers
+    /// Routing group for initial workers registered via --workers
     #[arg(long, default_value = "default")]
-    tenant_id: String,
+    routing_group: String,
+
+    /// Legacy compatibility input; accepted but ignored
+    #[arg(long = "tenant-id", default_value = "default", hide = true)]
+    _tenant_id: String,
 
     /// Comma-separated peer URLs for P2P recovery (e.g. "http://host1:8090,http://host2:8091")
     #[arg(long)]
@@ -174,7 +178,7 @@ where
             threads: cli.threads,
             workers: cli.workers,
             model_name: cli.model_name,
-            tenant_id: cli.tenant_id,
+            routing_group: cli.routing_group,
             peers: cli.peers,
             access_log: cli.access_log,
             trace_id_header,
@@ -483,17 +487,17 @@ impl SelectionService {
         })
     }
 
-    /// List catalog records, optionally filtered by model and tenant.
-    #[pyo3(signature = (*, model_name = None, tenant_id = None))]
+    /// List catalog records, optionally filtered by model and routing group.
+    #[pyo3(signature = (*, model_name = None, routing_group = None))]
     fn list_workers(
         &self,
         py: Python<'_>,
         model_name: Option<String>,
-        tenant_id: Option<String>,
+        routing_group: Option<String>,
     ) -> PyResult<PyObject> {
         let workers = self
             .inner
-            .list_workers(model_name.as_deref(), tenant_id.as_deref());
+            .list_workers(model_name.as_deref(), routing_group.as_deref());
         pythonize(py, &workers)
             .map(|o| o.unbind())
             .map_err(to_pyerr)
@@ -608,16 +612,16 @@ impl SelectionService {
     }
 
     /// Current per-model active load (pending counts + per-worker potential loads).
-    #[pyo3(signature = (*, model_name = None, tenant_id = None))]
+    #[pyo3(signature = (*, model_name = None, routing_group = None))]
     fn loads(
         &self,
         py: Python<'_>,
         model_name: Option<String>,
-        tenant_id: Option<String>,
+        routing_group: Option<String>,
     ) -> PyResult<PyObject> {
         let loads = self
             .inner
-            .loads(model_name.as_deref(), tenant_id.as_deref());
+            .loads(model_name.as_deref(), routing_group.as_deref());
         pythonize(py, &loads).map(|o| o.unbind()).map_err(to_pyerr)
     }
 
@@ -730,7 +734,7 @@ fn init_standalone_logging() {
 }
 
 #[pyfunction]
-#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None, is_eagle=None))]
+#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None, is_eagle=None, cache_namespace=None))]
 pub fn compute_block_hash_for_seq_py(
     _py: Python,
     tokens: Vec<u32>,
@@ -738,6 +742,7 @@ pub fn compute_block_hash_for_seq_py(
     block_mm_infos: Option<Bound<PyAny>>,
     lora_name: Option<String>,
     is_eagle: Option<bool>,
+    cache_namespace: Option<String>,
 ) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -756,6 +761,7 @@ pub fn compute_block_hash_for_seq_py(
         BlockHashOptions {
             block_mm_infos: mm_infos.as_deref(),
             lora_name: lora_name.as_deref(),
+            cache_namespace: cache_namespace.as_deref(),
             is_eagle,
         },
     );
@@ -953,7 +959,7 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None, cache_salt=None))]
     fn publish_stored(
         &self,
         py: Python,
@@ -964,6 +970,7 @@ impl KvEventPublisher {
         block_mm_infos: Option<Bound<PyAny>>,
         lora_name: Option<String>,
         is_eagle: Option<bool>,
+        cache_salt: Option<String>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
         let dp_rank = self.dp_rank;
@@ -990,6 +997,7 @@ impl KvEventPublisher {
                         &num_block_tokens,
                         &block_hashes_u64,
                         lora_name.as_deref(),
+                        cache_salt.as_deref(),
                         &warning_count,
                         mm_infos.as_deref(),
                         is_eagle,
@@ -1809,7 +1817,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None, strict_priority=0, policy_class=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None, strict_priority=0, policy_class=None, cache_namespace=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -1822,6 +1830,7 @@ impl KvRouter {
         routing_constraints: Option<RoutingConstraints>,
         strict_priority: u32,
         policy_class: Option<String>,
+        cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: RouterConfigOverride =
@@ -1848,6 +1857,7 @@ impl KvRouter {
                     update_states,
                     false,
                     lora_name.clone(),
+                    cache_namespace.clone(),
                     0.0,
                     strict_priority,
                     policy_class,
@@ -1881,6 +1891,10 @@ impl KvRouter {
                     }
                     if let Some(lora_name) = lora_name.as_ref() {
                         tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
+                    }
+                    if let Some(cache_namespace) = cache_namespace.as_ref() {
+                        tokens_with_hashes =
+                            tokens_with_hashes.with_cache_namespace(cache_namespace.clone());
                     }
                     chooser
                         .record_routing_decision(tokens_with_hashes, best_worker)
@@ -1920,13 +1934,14 @@ impl KvRouter {
         })
     }
 
-    #[pyo3(signature = (token_ids, block_mm_infos=None, lora_name=None))]
+    #[pyo3(signature = (token_ids, block_mm_infos=None, lora_name=None, cache_namespace=None))]
     fn get_potential_loads<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
@@ -1940,6 +1955,7 @@ impl KvRouter {
                     None,
                     block_mm_infos.as_deref(),
                     lora_name.as_deref(),
+                    cache_namespace.as_deref(),
                 )
                 .await
                 .map_err(to_pyerr)?;
@@ -1954,7 +1970,8 @@ impl KvRouter {
         })
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None, block_mm_infos=None, lora_name=None, include_shared=true))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (token_ids, router_config_override=None, block_mm_infos=None, lora_name=None, include_shared=true, cache_namespace=None))]
     fn get_overlap_scores<'p>(
         &self,
         py: Python<'p>,
@@ -1963,6 +1980,7 @@ impl KvRouter {
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
         include_shared: bool,
+        cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: RouterConfigOverride =
@@ -1983,6 +2001,7 @@ impl KvRouter {
                     router_config_override.as_ref(),
                     block_mm_infos.as_deref(),
                     lora_name.as_deref(),
+                    cache_namespace.as_deref(),
                     include_shared,
                 )
                 .await

@@ -8,6 +8,7 @@ import logging
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
+from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
 from dynamo import prometheus_names
@@ -21,10 +22,22 @@ from dynamo.llm import ModelInput, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
+from dynamo.vllm.omni.connectors import register_dynamoomni_nixl_connector
 from dynamo.vllm.omni.output_formatter import OutputFormatter
-from dynamo.vllm.omni.stage_worker import _resolve_model_type
+from dynamo.vllm.omni.stage_worker import (
+    _connector_key,
+    _ensure_stage_connectors,
+    _resolve_model_type,
+    _restore_completion_output_attrs,
+    _uses_nixl_connector,
+)
 from dynamo.vllm.omni.types import StageOutput
-from dynamo.vllm.omni.utils import shm_deserialize
+from dynamo.vllm.omni.utils import (
+    ensure_awaited,
+    is_empty_payload,
+    shm_deserialize,
+    unwrap_connector_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +51,40 @@ class OmniStageRouter:
         stage_configs_path: str,
     ) -> None:
         self.config = config
-        _, self.stage_configs = load_and_resolve_stage_configs(
+        self.connectors: dict[tuple[str, str], Any] = {}
+        (
+            resolved_stage_configs_path,
+            self.stage_configs,
+        ) = load_and_resolve_stage_configs(
             config.model,
             stage_configs_path,
             kwargs={},
         )
         self.stage_clients: Dict[str, Any] = {}
+
+        # Initialize connectors so the router can fetch final-stage output
+        # via connector.get() instead of SHM -- enabling multi-node deployments.
+        connector_configs_path = _ensure_stage_connectors(
+            resolved_stage_configs_path,
+            self.stage_configs,
+        )
+        # Only register NixlConnector if it's actually used in stage configs
+        if _uses_nixl_connector(connector_configs_path, self.stage_configs):
+            try:
+                register_dynamoomni_nixl_connector()
+            except Exception as e:
+                logger.error("Router: failed to register NixlConnector: %s", e)
+                raise
+
+        try:
+            _, self.connectors = initialize_orchestrator_connectors(connector_configs_path)  # type: ignore[arg-type]
+        except FileNotFoundError:
+            logger.warning(
+                "Router: connector config %s not found; continuing without connectors",
+                connector_configs_path,
+            )
+            self.connectors = {}
+        logger.info("Router: initialized %d connector(s)", len(self.connectors))
 
         media_fs = (
             get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
@@ -105,8 +146,23 @@ class OmniStageRouter:
                 return
 
         final = stage_outputs[-1]
-        if not final.shm_meta:
-            yield {"error": "No SHM output from final stage", "finished": True}
+        connectors = getattr(self, "connectors", {})
+        # Accept either connector-based output (multi-node) or SHM (single-node legacy).
+        # Connector path: final stage wrote via connector.put(to_stage="router") and
+        # returned stage_connector_refs[last_stage_id] = metadata.
+        final_stage_id = self.stage_configs[-1].stage_id
+        has_connector_output = (
+            final.stage_connector_refs is not None
+            and str(final_stage_id) in final.stage_connector_refs
+            and connectors.get(_connector_key(final_stage_id, "router")) is not None
+        )
+        if not has_connector_output and not final.shm_meta:
+            error_msg = (
+                "No output from final stage (no connector ref and no SHM)"
+                if connectors
+                else "No SHM output from final stage"
+            )
+            yield {"error": error_msg, "finished": True}
             return
 
         # Build formatting context from the original request
@@ -135,7 +191,11 @@ class OmniStageRouter:
             fmt_ctx["output_format"] = output_format
 
         async for chunk in self._format_output(
-            final, request_id, request_type, fmt_ctx
+            final,
+            request_id,
+            request_type,
+            fmt_ctx,
+            final_stage_id=self.stage_configs[-1].stage_id,
         ):
             yield chunk
 
@@ -145,14 +205,57 @@ class OmniStageRouter:
         request_id: str,
         request_type: RequestType,
         ctx: dict,
+        final_stage_id: int = 0,
     ) -> AsyncGenerator[dict, None]:
-        """Read OmniRequestOutput from SHM and format via OutputFormatter."""
-        shm_meta = stage_output.shm_meta
-        if not shm_meta:
-            logger.warning("Router: no shm_meta in stage output")
-            return
+        """Read OmniRequestOutput from connector (multi-node) or SHM (single-node) and format."""
+        # --- Connector path (multi-node: router and final stage on different machines) ---
+        router_connector = getattr(self, "connectors", {}).get(
+            _connector_key(final_stage_id, "router")
+        )
+        meta_k = (
+            stage_output.stage_connector_refs.get(str(final_stage_id))
+            if stage_output.stage_connector_refs
+            else None
+        )
+        if router_connector is not None and meta_k is not None:
+            try:
+                get_result = await ensure_awaited(
+                    router_connector.get(
+                        str(final_stage_id),
+                        "router",
+                        request_id,
+                        metadata=meta_k,
+                    )
+                )
+                payload_data = unwrap_connector_payload(get_result)
+                if is_empty_payload(payload_data):
+                    raise RuntimeError("empty payload returned by connector.get()")
 
-        result = shm_deserialize(shm_meta)
+                if isinstance(payload_data, dict) and "engine_inputs" in payload_data:
+                    result = payload_data["engine_inputs"]
+                    _restore_completion_output_attrs(
+                        result,
+                        payload_data.get("_dynamo_completion_output_attrs"),
+                    )
+                else:
+                    result = payload_data
+                logger.debug(
+                    "Router: fetched final output via connector for %s", request_id
+                )
+            except Exception as e:
+                logger.error("Router: connector.get() failed for %s: %s", request_id, e)
+                yield {
+                    "error": f"Router connector.get() failed: {e}",
+                    "finished": True,
+                }
+                return
+        else:
+            # --- SHM fallback (single-node: router and final stage on same machine) ---
+            shm_meta = stage_output.shm_meta
+            if not shm_meta:
+                logger.warning("Router: no shm_meta in stage output")
+                return
+            result = shm_deserialize(shm_meta)
         chunk = await self._formatter.format(
             result, request_id, request_type=request_type, **ctx
         )

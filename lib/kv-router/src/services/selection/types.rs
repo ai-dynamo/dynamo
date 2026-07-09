@@ -18,7 +18,7 @@ use crate::services::overlap::MooncakeOverlapSummary;
 use super::input::PromptRequest;
 
 const DEFAULT_MODEL_NAME: &str = "default";
-const DEFAULT_TENANT_ID: &str = "default";
+const DEFAULT_ROUTING_GROUP: &str = "default";
 pub(super) const WORKER_TYPE: &str = "select";
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
@@ -26,35 +26,39 @@ fn default_model_name() -> String {
     DEFAULT_MODEL_NAME.to_string()
 }
 
-fn default_tenant_id() -> String {
-    DEFAULT_TENANT_ID.to_string()
+fn default_routing_group() -> String {
+    DEFAULT_ROUTING_GROUP.to_string()
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
 pub struct SelectionKey {
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
 }
 
 impl SelectionKey {
-    pub(super) fn new(model_name: impl Into<String>, tenant_id: impl Into<String>) -> Self {
+    pub(super) fn new(model_name: impl Into<String>, routing_group: impl Into<String>) -> Self {
         Self {
             model_name: model_name.into(),
-            tenant_id: tenant_id.into(),
+            routing_group: routing_group.into(),
         }
     }
 
     pub(super) fn indexer_key(&self) -> IndexerKey {
         IndexerKey {
             model_name: self.model_name.clone(),
-            tenant_id: self.tenant_id.clone(),
+            routing_group: self.routing_group.clone(),
         }
     }
 }
 
 impl fmt::Display for SelectionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "model={} tenant={}", self.model_name, self.tenant_id)
+        write!(
+            f,
+            "model={} routing_group={}",
+            self.model_name, self.routing_group
+        )
     }
 }
 
@@ -131,7 +135,7 @@ impl WorkerConfigLike for SelectionWorkerConfig {
 pub struct WorkerCatalogRecord {
     pub worker_id: WorkerId,
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub lifecycle: WorkerLifecycle,
     pub endpoint: Option<String>,
     pub kv_events_endpoint: Option<String>,
@@ -161,7 +165,7 @@ impl WorkerCatalogRecord {
         Self {
             worker_id: req.worker_id,
             model_name: req.model_name,
-            tenant_id: req.tenant_id,
+            routing_group: req.routing_group,
             lifecycle: WorkerLifecycle::Incomplete,
             endpoint: req.endpoint,
             kv_events_endpoint: req.kv_events_endpoint,
@@ -184,7 +188,7 @@ impl WorkerCatalogRecord {
     }
 
     pub(super) fn key(&self) -> SelectionKey {
-        SelectionKey::new(self.model_name.clone(), self.tenant_id.clone())
+        SelectionKey::new(self.model_name.clone(), self.routing_group.clone())
     }
 
     pub(super) fn dp_start(&self) -> u32 {
@@ -270,8 +274,8 @@ pub struct WorkerRequest {
     pub worker_id: WorkerId,
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     #[serde(default)]
     pub endpoint: Option<String>,
     #[serde(default)]
@@ -399,8 +403,8 @@ impl WorkerCatalogRecord {
 pub struct SelectRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     #[serde(default)]
     pub selection_id: Option<String>,
     #[serde(flatten)]
@@ -427,8 +431,8 @@ pub struct SelectRequest {
 pub struct SelectAndReserveRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     #[serde(default)]
     pub selection_id: Option<String>,
     #[serde(default)]
@@ -460,8 +464,8 @@ pub struct SelectAndReserveRequest {
 pub struct ReservationRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     pub reservation_id: String,
     /// The matching `select`'s `selection_id` to replay (same model/tenant).
     /// Required unless `worker_id` is supplied.
@@ -493,8 +497,8 @@ pub struct OutputBlockRequest {
 pub struct PotentialLoadsRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     #[serde(flatten)]
     pub prompt: PromptRequest,
     #[serde(default)]
@@ -505,8 +509,8 @@ pub struct PotentialLoadsRequest {
 pub struct OverlapScoresRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     #[serde(flatten)]
     pub prompt: PromptRequest,
     #[serde(default)]
@@ -520,7 +524,7 @@ pub struct SelectResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reservation_id: Option<String>,
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
     pub endpoint: String,
@@ -533,7 +537,7 @@ pub struct SelectResponse {
 pub struct ReservationResponse {
     pub reservation_id: String,
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
     pub endpoint: String,
@@ -549,7 +553,7 @@ pub struct ReadyResponse {
 #[derive(Debug, Serialize)]
 pub struct ModelLoadResponse {
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub loads: Vec<PotentialLoad>,
     pub pending_count: usize,
     pub pending_isl_tokens: usize,
