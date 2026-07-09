@@ -9,4 +9,10 @@ so that existing imports from dynamo.vllm.constants continue to work.
 
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 
-__all__ = ["DisaggregationMode", "EmbeddingTransferMode"]
+MAX_BENCHMARK_GRID_POINTS = 4096
+
+__all__ = [
+    "DisaggregationMode",
+    "EmbeddingTransferMode",
+    "MAX_BENCHMARK_GRID_POINTS",
+]

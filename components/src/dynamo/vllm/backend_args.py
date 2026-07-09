@@ -17,12 +17,14 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import (
+    MAX_BENCHMARK_GRID_POINTS,
+    DisaggregationMode,
+    EmbeddingTransferMode,
+)
 
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
-MAX_BENCHMARK_AXIS_GRANULARITY = 1024
-MAX_BENCHMARK_GRID_POINTS = 4096
 
 
 def _warn_deprecated(message: str) -> None:
@@ -226,71 +228,13 @@ class DynamoVllmArgGroup(ArgGroup):
             choices=["prefill", "decode", "agg"],
             help=(
                 "Run self-benchmark on startup before accepting requests. "
-                "Sweeps prefill (ISL x KV-read tokens x batch_size) and/or decode "
-                "(context_length x batch_size) points, collecting "
-                "ForwardPassMetrics at each operating point."
-            ),
-        )
-        add_argument(
-            g,
-            flag_name="--benchmark-prefill-granularity",
-            env_var="DYN_BENCHMARK_PREFILL_GRANULARITY",
-            default=16,
-            type=int,
-            help="Number of ISL sample points for prefill sweep (default: 16).",
-        )
-        add_argument(
-            g,
-            flag_name="--benchmark-prefill-kv-read-granularity",
-            env_var="DYN_BENCHMARK_PREFILL_KV_READ_GRANULARITY",
-            default=1,
-            arg_type=int,
-            help=(
-                "Maximum number of initial KV-read samples per prefill ISL "
-                f"(1 to {MAX_BENCHMARK_AXIS_GRANULARITY}). For values greater "
-                "than 1, candidate samples are "
-                "evenly spaced from 0 to the largest usable KV-read prefix below "
-                "the ISL, rounded down to KV-block boundaries, and deduplicated; "
-                "therefore fewer samples may result. A value of 1 samples only 0 "
-                "(cache miss; default: 1). Values greater than 1 require prefix "
-                "caching. The total benchmark grid is limited to "
+                "Sweeps iteration-total prefill tokens/KV reads/batch size and/or "
+                "decode total-KV/batch-size points. CUDA graph axes include every "
+                "{capture size, capture size + 1} boundary and continue "
+                "geometrically to the engine limit. KV-read axes use complete "
+                "power-of-two block ladders plus their exact feasible maxima. "
+                "The resolved grid is deterministic and limited to "
                 f"{MAX_BENCHMARK_GRID_POINTS} points."
-            ),
-        )
-        add_argument(
-            g,
-            flag_name="--benchmark-prefill-batch-granularity",
-            env_var="DYN_BENCHMARK_PREFILL_BATCH_GRANULARITY",
-            default=1,
-            arg_type=int,
-            help=(
-                "Maximum number of batch-size samples per prefill ISL and "
-                f"KV-read point (1 to {MAX_BENCHMARK_AXIS_GRANULARITY}). "
-                "Samples are evenly spaced from 1 to the largest homogeneous "
-                "batch that fits the request-count, uncached-token, and KV-cache "
-                "limits, then deduplicated; therefore fewer samples may result. "
-                "A value of 1 samples only batch size 1 (default: 1). The total "
-                f"benchmark grid is limited to {MAX_BENCHMARK_GRID_POINTS} points."
-            ),
-        )
-        add_argument(
-            g,
-            flag_name="--benchmark-decode-length-granularity",
-            env_var="DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY",
-            default=6,
-            type=int,
-            help=(
-                "Number of context length sample points for decode sweep (default: 6)."
-            ),
-        )
-        add_argument(
-            g,
-            flag_name="--benchmark-decode-batch-granularity",
-            env_var="DYN_BENCHMARK_DECODE_BATCH_GRANULARITY",
-            default=6,
-            type=int,
-            help=(
-                "Number of batch size sample points per context length (default: 6)."
             ),
         )
         add_argument(
@@ -364,11 +308,6 @@ class DynamoVllmConfig(ConfigBase):
 
     # Benchmark / self-profiling
     benchmark_mode: Optional[str] = None
-    benchmark_prefill_granularity: int = 16
-    benchmark_prefill_kv_read_granularity: int = 1
-    benchmark_prefill_batch_granularity: int = 1
-    benchmark_decode_length_granularity: int = 6
-    benchmark_decode_batch_granularity: int = 6
     benchmark_warmup_iterations: int = 5
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 300
@@ -381,54 +320,6 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
-        self._validate_benchmark_config()
-
-    def _validate_benchmark_config(self) -> None:
-        if self.benchmark_mode is None:
-            return
-
-        axes = {
-            "benchmark_prefill_granularity": int(self.benchmark_prefill_granularity),
-            "benchmark_prefill_kv_read_granularity": int(
-                self.benchmark_prefill_kv_read_granularity
-            ),
-            "benchmark_prefill_batch_granularity": int(
-                self.benchmark_prefill_batch_granularity
-            ),
-            "benchmark_decode_length_granularity": int(
-                self.benchmark_decode_length_granularity
-            ),
-            "benchmark_decode_batch_granularity": int(
-                self.benchmark_decode_batch_granularity
-            ),
-        }
-        for name, value in axes.items():
-            flag = f"--{name.replace('_', '-')}"
-            if not 1 <= value <= MAX_BENCHMARK_AXIS_GRANULARITY:
-                raise ValueError(
-                    f"{flag} must be between 1 and "
-                    f"{MAX_BENCHMARK_AXIS_GRANULARITY} when --benchmark-mode "
-                    "is set."
-                )
-
-        point_counts = {
-            "prefill": axes["benchmark_prefill_granularity"]
-            * axes["benchmark_prefill_kv_read_granularity"]
-            * axes["benchmark_prefill_batch_granularity"],
-            "decode": axes["benchmark_decode_length_granularity"]
-            * axes["benchmark_decode_batch_granularity"],
-        }
-        requested_points = (
-            sum(point_counts.values())
-            if self.benchmark_mode == "agg"
-            else point_counts[self.benchmark_mode]
-        )
-        if requested_points > MAX_BENCHMARK_GRID_POINTS:
-            raise ValueError(
-                f"--benchmark-mode {self.benchmark_mode} requests "
-                f"{requested_points} grid points; the maximum is "
-                f"{MAX_BENCHMARK_GRID_POINTS}."
-            )
 
     def _resolve_embedding_transfer_mode(self) -> None:
         """Resolve embedding_transfer_mode from string to enum."""

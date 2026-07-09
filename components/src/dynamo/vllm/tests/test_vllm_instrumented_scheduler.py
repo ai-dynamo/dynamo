@@ -13,12 +13,12 @@ spinning up vLLM engine internals.
 from __future__ import annotations
 
 import json
-import math
 from collections import deque
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from vllm.config import CUDAGraphMode  # noqa: E402
 from vllm.v1.request import RequestStatus  # noqa: E402
 
 # Module-level import: triggers real site-packages ``vllm`` to load before
@@ -602,7 +602,7 @@ def test_bench_inject_fake_decode_pads_prompt_for_async_placeholder():
 
     stub.kv_cache_manager.allocate_slots = _allocate_slots
 
-    InstrumentedScheduler._bench_inject_fake_decode(stub, ctx_len=16, batch_size=1)
+    InstrumentedScheduler._bench_inject_fake_decode(stub, context_lengths=[16])
 
     # Critical regression assertion: the +1 padding is applied.
     assert captured_num_new_tokens == [17], (
@@ -630,15 +630,19 @@ def _grid_stub_with_kv_capacity(num_gpu_blocks: int, block_size: int):
     ``_bench_generate_decode_grid`` reads."""
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_grid = []
-    stub._bench_config = SimpleNamespace(
-        decode_length_granularity=2,
-        decode_batch_size_granularity=2,
+    stub._bench_config = SimpleNamespace()
+    stub.cache_config = SimpleNamespace(
+        num_gpu_blocks=num_gpu_blocks,
+        enable_prefix_caching=True,
     )
-    stub.cache_config = SimpleNamespace(num_gpu_blocks=num_gpu_blocks)
     stub.block_size = block_size
     stub.max_model_len = 256
+    stub.max_num_scheduled_tokens = 10_000
     # Generous so the KV cap (not max_num_running_reqs) drives the boundary.
     stub.max_num_running_reqs = 10_000
+    stub._bench_decode_capture_sizes = [8]
+    stub._bench_decode_cudagraph_mode = "FULL"
+    stub._bench_feasible_max_decode_batch_size = 0
     return stub
 
 
@@ -658,17 +662,15 @@ def test_decode_grid_sizes_max_batch_from_padded_allocation():
 
     assert len(stub._bench_grid) > 0, "decode grid should produce points"
     for point in stub._bench_grid:
-        ctx_len = point.context_length
-        bs = point.batch_size
-        blocks_per_req = -(-(ctx_len + 1) // block_size)  # ceil
-        # vLLM permanently reserves one physical block as its null sentinel.
-        max_feasible = (num_gpu_blocks - 1) // blocks_per_req
-        assert bs <= max_feasible, (
-            f"point ctx_len={ctx_len} batch_size={bs} would exceed KV "
-            f"capacity: needs {bs * blocks_per_req} blocks, only "
-            f"{num_gpu_blocks - 1} usable "
-            f"(blocks_per_req={blocks_per_req}, max_feasible={max_feasible})."
+        assert InstrumentedScheduler._bench_decode_point_feasible(
+            stub, point.batch_size, point.total_kv_read_tokens
+        ), (
+            f"point total_kv={point.total_kv_read_tokens} "
+            f"batch_size={point.batch_size} exceeds live KV capacity"
         )
+    assert stub._bench_feasible_max_decode_batch_size == num_gpu_blocks - 1
+    batch_sizes = {point.batch_size for point in stub._bench_grid}
+    assert {8, 9, 16, 32, num_gpu_blocks - 1}.issubset(batch_sizes)
 
 
 def test_decode_grid_first_ctx_yields_block_aligned_capacity():
@@ -680,17 +682,10 @@ def test_decode_grid_first_ctx_yields_block_aligned_capacity():
     num_gpu_blocks = 100
     stub = _grid_stub_with_kv_capacity(num_gpu_blocks, block_size)
 
-    InstrumentedScheduler._bench_generate_decode_grid(stub)
-
-    boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
-    assert (
-        len(boundary_points) > 0
-    ), f"grid missing ctx_len={block_size} entries: {stub._bench_grid}"
     # One of the 100 blocks is the null sentinel, leaving 99 // 2 == 49.
-    assert max(p.batch_size for p in boundary_points) <= 49, (
-        f"boundary ctx_len={block_size}: max batch must not exceed "
-        f"(num_gpu_blocks - 1) // 2 = 49; got "
-        f"{[p.batch_size for p in boundary_points]}"
+    assert InstrumentedScheduler._bench_decode_point_feasible(stub, 49, 49 * block_size)
+    assert not InstrumentedScheduler._bench_decode_point_feasible(
+        stub, 50, 50 * block_size
     )
 
 
@@ -707,11 +702,11 @@ def test_decode_grid_accounts_for_all_hybrid_kv_cache_groups():
         )
     )
 
-    InstrumentedScheduler._bench_generate_decode_grid(stub)
-
-    boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
     # A 17-token allocation uses 2 + 1 blocks across the two groups.
-    assert max(p.batch_size for p in boundary_points) <= 33
+    assert InstrumentedScheduler._bench_decode_point_feasible(stub, 33, 33 * block_size)
+    assert not InstrumentedScheduler._bench_decode_point_feasible(
+        stub, 34, 34 * block_size
+    )
 
 
 def test_decode_block_footprint_excludes_cross_attention_groups():
@@ -739,11 +734,11 @@ def test_decode_grid_leaves_kv_cache_watermark_free():
     stub = _grid_stub_with_kv_capacity(num_gpu_blocks=100, block_size=block_size)
     stub.kv_cache_manager = SimpleNamespace(watermark_blocks=3)
 
-    InstrumentedScheduler._bench_generate_decode_grid(stub)
-
-    boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
     # 100 total - 1 null - 3 watermark leaves 96 blocks, or 48 requests.
-    assert max(p.batch_size for p in boundary_points) <= 48
+    assert InstrumentedScheduler._bench_decode_point_feasible(stub, 48, 48 * block_size)
+    assert not InstrumentedScheduler._bench_decode_point_feasible(
+        stub, 49, 49 * block_size
+    )
 
 
 def test_decode_grid_uses_live_free_block_count_after_manager_reservations():
@@ -754,11 +749,11 @@ def test_decode_grid_uses_live_free_block_count_after_manager_reservations():
         block_pool=SimpleNamespace(get_num_free_blocks=lambda: 90),
     )
 
-    InstrumentedScheduler._bench_generate_decode_grid(stub)
-
-    boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
     # The pool has already removed null/sink reservations: (90 - 3) // 2.
-    assert max(p.batch_size for p in boundary_points) <= 43
+    assert InstrumentedScheduler._bench_decode_point_feasible(stub, 43, 43 * block_size)
+    assert not InstrumentedScheduler._bench_decode_point_feasible(
+        stub, 44, 44 * block_size
+    )
 
 
 @pytest.mark.parametrize(
@@ -798,6 +793,30 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
 
     assert stub._bench_expected_points == prefill_points + decode_points
     assert stub._bench_missing_phases == expected_missing_phases
+
+
+def test_benchmark_grid_cap_reports_expanded_dimension_counts():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_grid = deque()
+    stub._bench_grid_built = False
+    stub._bench_missing_phases = []
+    stub._bench_grid_error = None
+
+    def generate_prefill_grid():
+        stub._bench_grid.extend(
+            BenchmarkPoint(point_type="prefill", total_prefill_tokens=index)
+            for index in range(1, 4098)
+        )
+
+    stub._bench_generate_prefill_grid = generate_prefill_grid
+
+    InstrumentedScheduler._bench_build_grid(stub)
+
+    assert stub._bench_expected_points == 4097
+    assert stub._bench_phase == _BenchPhase.DONE
+    assert not stub._bench_grid
+    assert "prefill(P=4097, Rp=1, Kp=1, points=4097)" in stub._bench_grid_error
 
 
 # ---------------------------------------------------------------------------
@@ -869,196 +888,295 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
     block_hasher_factory.assert_called_once_with(16, caching_hash_fn)
 
 
+def test_agg_resolves_piecewise_prefill_and_full_decode_capture_views(tmp_path):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._fpm_dp_rank = 0
+    stub.max_num_running_reqs = 8
+    stub._bench_hash_block_size = 16
+    stub.cache_config = SimpleNamespace(enable_prefix_caching=False)
+    vllm_config = SimpleNamespace(
+        additional_config={
+            "benchmark": {"mode": "agg", "output_path": str(tmp_path / "out.json")}
+        },
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_capture_sizes=[1, 2, 4, 8, 16],
+            max_cudagraph_capture_size=16,
+        ),
+        speculative_config=None,
+    )
+
+    InstrumentedScheduler._bench_init(stub, vllm_config)
+
+    assert stub._bench_prefill_cudagraph_mode == "PIECEWISE"
+    assert stub._bench_prefill_capture_sizes == [1, 2, 4, 8, 16]
+    assert stub._bench_decode_cudagraph_mode == "FULL"
+    assert stub._bench_decode_capture_sizes == [1, 2, 4, 8]
+    assert stub._bench_max_cudagraph_capture_size == 16
+
+
+def test_cudagraph_disabled_uses_geometric_fallback(tmp_path):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._fpm_dp_rank = 0
+    stub.max_num_running_reqs = 8
+    stub._bench_hash_block_size = 16
+    stub.cache_config = SimpleNamespace(enable_prefix_caching=False)
+    vllm_config = SimpleNamespace(
+        additional_config={
+            "benchmark": {
+                "mode": "prefill",
+                "output_path": str(tmp_path / "out.json"),
+            }
+        },
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.NONE,
+            cudagraph_capture_sizes=[],
+            max_cudagraph_capture_size=0,
+        ),
+        speculative_config=None,
+    )
+
+    InstrumentedScheduler._bench_init(stub, vllm_config)
+
+    assert stub._bench_prefill_cudagraph_mode == "NONE"
+    assert stub._bench_decode_cudagraph_mode == "NONE"
+    assert instrumented_scheduler_module._cudagraph_axis_points([], 10) == [
+        1,
+        2,
+        4,
+        8,
+        10,
+    ]
+
+
+def test_decode_benchmark_rejects_speculative_decoding(tmp_path):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._fpm_dp_rank = 0
+    stub.max_num_running_reqs = 8
+    stub._bench_hash_block_size = 16
+    stub.cache_config = SimpleNamespace(enable_prefix_caching=False)
+    vllm_config = SimpleNamespace(
+        additional_config={
+            "benchmark": {
+                "mode": "decode",
+                "output_path": str(tmp_path / "out.json"),
+            }
+        },
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.NONE,
+            cudagraph_capture_sizes=[],
+            max_cudagraph_capture_size=0,
+        ),
+        speculative_config=object(),
+    )
+
+    with pytest.raises(ValueError, match="does not yet support speculative"):
+        InstrumentedScheduler._bench_init(stub, vllm_config)
+
+
 def _prefill_grid_stub(
     *,
-    kv_read_granularity: int,
-    batch_granularity: int = 1,
     block_size: int = 8,
     num_gpu_blocks: int = 64,
 ):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_grid = []
-    stub._bench_config = SimpleNamespace(
-        prefill_isl_granularity=2,
-        prefill_kv_read_granularity=kv_read_granularity,
-        prefill_batch_size_granularity=batch_granularity,
-    )
+    stub._bench_config = SimpleNamespace()
     stub.max_num_scheduled_tokens = 40
     stub.max_num_running_reqs = 8
+    stub.max_model_len = 128
     stub.cache_config = SimpleNamespace(num_gpu_blocks=num_gpu_blocks)
     stub.block_size = block_size
+    stub._bench_hash_block_size = block_size
+    stub._bench_prefill_capture_sizes = [8, 16]
+    stub._bench_prefill_cudagraph_mode = "PIECEWISE"
     stub.num_lookahead_tokens = 0
     return stub
 
 
-def test_prefill_kv_read_grid_default_preserves_miss_only_sweep():
-    stub = _prefill_grid_stub(kv_read_granularity=1)
-
-    InstrumentedScheduler._bench_generate_prefill_grid(stub)
-
-    assert [(p.isl, p.kv_read_tokens, p.batch_size) for p in stub._bench_grid] == [
-        (10, 0, 1),
-        (40, 0, 1),
+def test_cudagraph_axis_keeps_all_boundaries_and_geometric_tail():
+    assert instrumented_scheduler_module._cudagraph_axis_points([1, 2, 4, 8], 32) == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        8,
+        9,
+        16,
+        32,
     ]
 
 
-def test_prefill_kv_read_grid_crosses_with_isl_and_aligns_to_blocks():
-    stub = _prefill_grid_stub(kv_read_granularity=3, block_size=8)
+def test_cudagraph_axis_appends_exact_non_power_of_two_limit():
+    assert instrumented_scheduler_module._cudagraph_axis_points([256], 1000) == [
+        256,
+        257,
+        512,
+        1000,
+    ]
+
+
+def test_cudagraph_axis_does_not_add_eager_tail_below_larger_capture():
+    assert instrumented_scheduler_module._cudagraph_axis_points([8, 64], 32) == [
+        8,
+        9,
+        32,
+    ]
+
+
+def test_iteration_totals_are_distributed_evenly_and_exactly():
+    assert instrumented_scheduler_module._balanced_partition(513, 4) == [
+        129,
+        128,
+        128,
+        128,
+    ]
+    assert instrumented_scheduler_module._balanced_partition(
+        40, 3, unit=8, minimum_units=1
+    ) == [16, 16, 8]
+    assert InstrumentedScheduler._bench_decode_context_lengths(10, 3) == [4, 3, 3]
+
+
+def test_prefill_grid_uses_total_tokens_and_piecewise_boundaries():
+    stub = _prefill_grid_stub()
 
     InstrumentedScheduler._bench_generate_prefill_grid(stub)
 
-    assert [(p.isl, p.kv_read_tokens, p.batch_size) for p in stub._bench_grid] == [
-        (10, 0, 1),
-        (10, 8, 1),
-        (40, 0, 1),
-        (40, 16, 1),
-        (40, 32, 1),
+    total_tokens = {point.total_prefill_tokens for point in stub._bench_grid}
+    assert total_tokens == {8, 9, 16, 17, 32, 40}
+    assert any(point.total_kv_read_tokens == 0 for point in stub._bench_grid)
+    assert any(point.total_kv_read_tokens > 0 for point in stub._bench_grid)
+    assert all(
+        sum(
+            InstrumentedScheduler._bench_prefill_new_token_lengths(
+                point.total_prefill_tokens, point.batch_size
+            )
+        )
+        == point.total_prefill_tokens
+        for point in stub._bench_grid
+    )
+    post_capture = next(
+        point
+        for point in stub._bench_grid
+        if point.total_prefill_tokens == 9 and point.batch_size == 1
+    )
+    assert post_capture.expected_capture_size == 16
+    assert post_capture.padding_tokens == 7
+    assert post_capture.sample_reasons == ["post_capture"]
+    eager_tail = next(
+        point
+        for point in stub._bench_grid
+        if point.total_prefill_tokens == 32 and point.batch_size == 1
+    )
+    assert eager_tail.expected_capture_size is None
+    assert eager_tail.expected_cudagraph_mode == "NONE"
+    assert eager_tail.sample_reasons == ["eager_tail", "geometric_tail"]
+    engine_limit = next(
+        point
+        for point in stub._bench_grid
+        if point.total_prefill_tokens == 40 and point.batch_size == 1
+    )
+    assert engine_limit.sample_reasons == ["eager_tail", "engine_limit"]
+
+
+def test_agg_grid_contains_piecewise_prefill_then_full_decode_points():
+    stub = _prefill_grid_stub()
+    stub._bench_grid = deque()
+    stub._bench_grid_built = False
+    stub._bench_missing_phases = []
+    stub._bench_grid_error = None
+    stub._bench_feasible_max_decode_batch_size = 0
+    stub._bench_config.mode = "agg"
+    stub._bench_decode_capture_sizes = [1, 2, 4, 8]
+    stub._bench_decode_cudagraph_mode = "FULL"
+
+    InstrumentedScheduler._bench_build_grid(stub)
+
+    points = list(stub._bench_grid)
+    point_types = [point.point_type for point in points]
+    first_decode = point_types.index("decode")
+    assert all(point_type == "prefill" for point_type in point_types[:first_decode])
+    assert all(point_type == "decode" for point_type in point_types[first_decode:])
+    assert {
+        point.expected_cudagraph_mode
+        for point in points
+        if point.point_type == "prefill" and point.expected_capture_size is not None
+    } == {"PIECEWISE"}
+    assert {
+        point.expected_cudagraph_mode
+        for point in points
+        if point.point_type == "prefill" and point.expected_capture_size is None
+    } == {"NONE"}
+    assert {
+        point.expected_cudagraph_mode
+        for point in points
+        if point.point_type == "decode"
+    } == {"FULL"}
+
+
+def test_prefill_kv_read_ladder_is_total_block_aligned():
+    stub = _prefill_grid_stub(block_size=8)
+
+    points = InstrumentedScheduler._bench_prefill_kv_read_points(stub, 16, 3)
+
+    assert points == [0, 24, 32, 64, 128, 256, 360]
+    assert all(total % stub._bench_hash_block_size == 0 for total in points)
+    for total in points[1:]:
+        per_request = InstrumentedScheduler._bench_prefill_kv_read_lengths(
+            stub, total, 3
+        )
+        assert sum(per_request) == total
+        assert max(per_request) - min(per_request) <= stub._bench_hash_block_size
+
+
+def test_decode_kv_read_ladder_keeps_every_power_of_two_and_exact_maximum():
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
+
+    assert InstrumentedScheduler._bench_decode_kv_read_points(stub, 9) == [
+        9,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        999,
     ]
-    assert all(p.kv_read_tokens % stub.block_size == 0 for p in stub._bench_grid)
-    assert all(p.kv_read_tokens <= p.isl - 1 for p in stub._bench_grid)
 
 
-def test_prefill_batch_grid_crosses_with_isl_and_kv_reads_within_limits():
+def test_prefill_kv_read_ladder_falls_back_to_miss_when_cache_is_disabled():
+    stub = _prefill_grid_stub(block_size=8)
+    stub.cache_config.enable_prefix_caching = False
+
+    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 16, 3) == [0]
+
+
+def test_prefill_batch_axis_uses_powers_of_two_plus_legal_maximum():
     stub = _prefill_grid_stub(
-        kv_read_granularity=3,
-        batch_granularity=3,
         block_size=8,
+        num_gpu_blocks=8,
     )
 
-    InstrumentedScheduler._bench_generate_prefill_grid(stub)
-
-    assert [(p.isl, p.kv_read_tokens, p.batch_size) for p in stub._bench_grid] == [
-        (10, 0, 1),
-        (10, 0, 2),
-        (10, 0, 4),
-        (10, 8, 1),
-        (10, 8, 4),
-        (10, 8, 8),
-        (40, 0, 1),
-        (40, 16, 1),
-        (40, 32, 1),
-        (40, 32, 3),
-        (40, 32, 5),
+    assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, 10) == [
+        1,
+        2,
+        4,
+        7,
     ]
-    for point in stub._bench_grid:
-        assert point.batch_size <= stub.max_num_running_reqs
-        assert (
-            point.batch_size * (point.isl - point.kv_read_tokens)
-            <= stub.max_num_scheduled_tokens
-        )
-        blocks_per_req = math.ceil(point.isl / stub.block_size)
-        assert point.batch_size * blocks_per_req <= stub.cache_config.num_gpu_blocks
 
 
-@pytest.mark.parametrize(
-    ("stub_kwargs", "attrs", "point", "expected"),
-    [
-        (
-            {"batch_granularity": 3, "num_gpu_blocks": 8},
-            {"num_lookahead_tokens": 8},
-            (10, 0),
-            [1, 2],
-        ),
-        ({"batch_granularity": 2, "num_gpu_blocks": 4}, {}, (10, 0), [1]),
-        (
-            {"batch_granularity": 2, "num_gpu_blocks": 11},
-            {"kv_cache_manager": SimpleNamespace(watermark_blocks=3)},
-            (10, 0),
-            [1, 3],
-        ),
-        (
-            {"batch_granularity": 2, "num_gpu_blocks": 13},
-            {
-                "kv_cache_manager": SimpleNamespace(
-                    coordinator=SimpleNamespace(
-                        single_type_managers=[
-                            SimpleNamespace(block_size=8),
-                            SimpleNamespace(block_size=16),
-                        ]
-                    )
-                )
-            },
-            (16, 8),
-            [1, 4],
-        ),
-        (
-            {"batch_granularity": 2, "num_gpu_blocks": 22},
-            {
-                "kv_cache_manager": SimpleNamespace(
-                    coordinator=SimpleNamespace(
-                        single_type_managers=[
-                            SimpleNamespace(block_size=8),
-                            SimpleNamespace(
-                                block_size=8,
-                                mamba_cache_mode="align",
-                                num_speculative_blocks=0,
-                            ),
-                        ]
-                    )
-                )
-            },
-            (40, 32),
-            [1, 3],
-        ),
-        (
-            {"batch_granularity": 2, "num_gpu_blocks": 10},
-            {
-                "kv_cache_manager": SimpleNamespace(
-                    coordinator=SimpleNamespace(
-                        single_type_managers=[
-                            SimpleNamespace(
-                                block_size=8,
-                                _max_admission_blocks_per_request=2,
-                            )
-                        ]
-                    )
-                )
-            },
-            (40, 32),
-            [1, 4],
-        ),
-        (
-            {"batch_granularity": 3},
-            {"scheduler_config": SimpleNamespace(long_prefill_token_threshold=8)},
-            (40, 16),
-            [1, 3, 5],
-        ),
-        (
-            {"batch_granularity": 3},
-            {
-                "need_mamba_block_aligned_split": True,
-                "kv_cache_manager": SimpleNamespace(use_eagle=False),
-            },
-            (10, 0),
-            [1, 3, 5],
-        ),
-    ],
-    ids=[
-        "lookahead",
-        "null-block",
-        "watermark",
-        "hybrid-groups",
-        "align-mamba",
-        "recycling-cap",
-        "long-prefill-threshold",
-        "mamba-aligned-split",
-    ],
-)
-def test_prefill_batch_grid_respects_scheduler_capacity_constraints(
-    stub_kwargs, attrs, point, expected
-):
-    stub = _prefill_grid_stub(kv_read_granularity=1, block_size=8, **stub_kwargs)
-    stub.cache_config.block_size = 8
-    for name, value in attrs.items():
-        setattr(stub, name, value)
+def test_prefill_batch_axis_filters_per_request_model_length():
+    stub = _prefill_grid_stub()
+    stub.max_model_len = 5
 
-    assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, *point) == expected
+    assert not InstrumentedScheduler._bench_prefill_point_feasible(stub, 8, 1, 0)
+    assert InstrumentedScheduler._bench_prefill_point_feasible(stub, 8, 2, 0)
+    assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, 8) == [2, 4, 8]
 
 
 def test_prefill_batch_grid_uses_live_free_block_count_after_manager_reservations():
     stub = _prefill_grid_stub(
-        kv_read_granularity=1,
-        batch_granularity=2,
         block_size=8,
         num_gpu_blocks=100,
     )
@@ -1066,25 +1184,25 @@ def test_prefill_batch_grid_uses_live_free_block_count_after_manager_reservation
         block_pool=SimpleNamespace(get_num_free_blocks=lambda: 7)
     )
 
-    # A 10-token request consumes two blocks, so the live pool admits at most
-    # three requests despite the configured total reporting 100 blocks.
-    assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, 10, 0) == [1, 3]
+    # The live pool, rather than configured capacity, determines the legal max.
+    assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, 10) == [1, 2, 4, 7]
 
 
 def test_prefill_kv_read_grid_accounts_for_eagle_cache_block_drop():
-    stub = _prefill_grid_stub(kv_read_granularity=3, block_size=8)
+    stub = _prefill_grid_stub(block_size=8)
     stub.kv_cache_manager = SimpleNamespace(use_eagle=True)
 
-    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 40) == [
-        0,
-        8,
-        24,
-    ]
+    points = InstrumentedScheduler._bench_prefill_kv_read_points(stub, 40, 1)
+    assert points[0] == 0
+    assert all(point % 8 == 0 for point in points)
     assert InstrumentedScheduler._bench_seed_prompt_len(stub, 16) == 24
+
+    # The extra seed block must also fit under max_model_len.
+    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 1, 1)[-1] == 112
 
 
 def test_mamba_connector_uses_scheduler_per_group_cache_lookup():
-    stub = _prefill_grid_stub(kv_read_granularity=3, block_size=8)
+    stub = _prefill_grid_stub(block_size=8)
     coordinator = SimpleNamespace(
         find_longest_cache_hit_per_group=MagicMock(return_value=(([], []), (16, 8)))
     )
@@ -1106,7 +1224,7 @@ def test_mamba_connector_uses_scheduler_per_group_cache_lookup():
 
 
 def test_prefill_kv_read_validation_does_not_record_prefix_cache_stats():
-    stub = _prefill_grid_stub(kv_read_granularity=3, block_size=8)
+    stub = _prefill_grid_stub(block_size=8)
     coordinator = SimpleNamespace(
         find_longest_cache_hit=MagicMock(return_value=(([],), 16))
     )
@@ -1130,7 +1248,10 @@ def test_prefill_kv_read_validation_does_not_record_prefix_cache_stats():
 
 def test_prefill_kv_read_seed_drains_then_measures_with_distinct_salts():
     point = BenchmarkPoint(
-        point_type="prefill", isl=40, kv_read_tokens=16, batch_size=3
+        point_type="prefill",
+        total_prefill_tokens=25,
+        total_kv_read_tokens=40,
+        batch_size=3,
     )
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_grid = deque([point])
@@ -1142,6 +1263,7 @@ def test_prefill_kv_read_seed_drains_then_measures_with_distinct_salts():
     stub._bench_pending_seed_salts = None
     stub._bench_drain_pending = False
     stub._bench_seq = 7
+    stub._bench_hash_block_size = 8
     stub._schedule_times = deque()
     stub.requests = {}
 
@@ -1150,7 +1272,7 @@ def test_prefill_kv_read_seed_drains_then_measures_with_distinct_salts():
     def inject(**kwargs):
         calls.append(kwargs)
         stub._bench_active_req_ids.add(f"request-{len(calls)}")
-        return kwargs.get("n", 1)
+        return len(kwargs["prompt_lens"])
 
     stub._bench_inject_prefill = inject
     stub._bench_cleanup_requests = stub._bench_active_req_ids.clear
@@ -1159,9 +1281,8 @@ def test_prefill_kv_read_seed_drains_then_measures_with_distinct_salts():
 
     assert stub._bench_current_point is None
     assert stub._bench_pending_seed_point is point
-    assert calls[0]["prompt_len"] == point.kv_read_tokens
+    assert calls[0]["prompt_lens"] == [16, 16, 8]
     assert calls[0]["max_tokens"] == 1
-    assert calls[0]["n"] == point.batch_size
     seed_salts = calls[0]["cache_salts"]
     assert len(seed_salts) == point.batch_size
     assert len(set(seed_salts)) == point.batch_size
@@ -1172,21 +1293,23 @@ def test_prefill_kv_read_seed_drains_then_measures_with_distinct_salts():
     assert stub._bench_drain_pending is True
     assert len(calls) == 1
 
-    # After the drain, the full ISL request is measured against the seeded KV.
+    # After the drain, heterogeneous prompts preserve both iteration totals.
     InstrumentedScheduler._bench_step_prefill(stub)
     assert stub._bench_current_point is point
     assert calls[1] == {
-        "prompt_len": point.isl,
+        "prompt_lens": [25, 24, 16],
         "max_tokens": 1,
-        "n": point.batch_size,
         "cache_salts": seed_salts,
-        "expected_kv_read_tokens": point.kv_read_tokens,
+        "expected_kv_read_tokens": [16, 16, 8],
     }
 
 
 def test_prefill_kv_read_validation_miss_skips_measured_point():
     point = BenchmarkPoint(
-        point_type="prefill", isl=40, kv_read_tokens=16, batch_size=3
+        point_type="prefill",
+        total_prefill_tokens=25,
+        total_kv_read_tokens=40,
+        batch_size=3,
     )
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_grid = deque()
@@ -1197,6 +1320,7 @@ def test_prefill_kv_read_validation_miss_skips_measured_point():
     stub._bench_pending_seed_point = point
     stub._bench_pending_seed_salts = ["seed-0", "seed-1", "seed-2"]
     stub._bench_drain_pending = False
+    stub._bench_hash_block_size = 8
     stub._schedule_times = deque()
     stub._bench_skipped_points = []
     stub._bench_inject_prefill = MagicMock(return_value=0)
@@ -1207,11 +1331,10 @@ def test_prefill_kv_read_validation_miss_skips_measured_point():
     assert stub._bench_pending_seed_point is None
     assert stub._bench_skipped_points[0].reason == "seed_cache_validation_failed"
     stub._bench_inject_prefill.assert_called_once_with(
-        prompt_len=point.isl,
+        prompt_lens=[25, 24, 16],
         max_tokens=1,
-        n=point.batch_size,
         cache_salts=["seed-0", "seed-1", "seed-2"],
-        expected_kv_read_tokens=point.kv_read_tokens,
+        expected_kv_read_tokens=[16, 16, 8],
     )
 
 
@@ -1237,11 +1360,10 @@ def test_prefill_batch_validation_is_atomic(monkeypatch):
 
     injected = InstrumentedScheduler._bench_inject_prefill(
         stub,
-        prompt_len=40,
+        prompt_lens=[40, 41, 42],
         max_tokens=1,
-        n=3,
         cache_salts=["seed-0", "seed-1", "seed-2"],
-        expected_kv_read_tokens=16,
+        expected_kv_read_tokens=[16, 16, 16],
     )
 
     assert injected == 0
@@ -1252,7 +1374,11 @@ def test_prefill_batch_validation_is_atomic(monkeypatch):
 
 
 def test_benchmark_output_marks_skipped_kv_point_invalid(tmp_path):
-    point = BenchmarkPoint(point_type="prefill", isl=40, kv_read_tokens=16)
+    point = BenchmarkPoint(
+        point_type="prefill",
+        total_prefill_tokens=24,
+        total_kv_read_tokens=16,
+    )
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_config = BenchmarkConfig(output_path=str(output_path))
@@ -1271,6 +1397,7 @@ def test_benchmark_output_marks_skipped_kv_point_invalid(tmp_path):
     InstrumentedScheduler._bench_write_results(stub)
 
     output = json.loads(output_path.read_text())
+    assert output["schema_version"] == 2
     assert output["valid"] is False
     assert output["coverage"] == {
         "expected_points": 1,
@@ -1310,7 +1437,11 @@ def test_benchmark_output_marks_requested_empty_phase_invalid(tmp_path):
 
 
 def test_prefill_point_with_measured_kv_mismatch_is_skipped():
-    point = BenchmarkPoint(point_type="prefill", isl=40, kv_read_tokens=16)
+    point = BenchmarkPoint(
+        point_type="prefill",
+        total_prefill_tokens=24,
+        total_kv_read_tokens=16,
+    )
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_current_point = point
     stub._bench_current_fpms = [
@@ -1335,7 +1466,10 @@ def test_prefill_point_with_measured_kv_mismatch_is_skipped():
 
 def test_prefill_point_with_exact_batch_shape_is_saved():
     point = BenchmarkPoint(
-        point_type="prefill", isl=40, kv_read_tokens=16, batch_size=3
+        point_type="prefill",
+        total_prefill_tokens=24,
+        total_kv_read_tokens=48,
+        batch_size=3,
     )
     fpms = [
         {
@@ -1369,7 +1503,10 @@ def test_prefill_point_with_exact_batch_shape_is_saved():
 
 def test_prefill_point_with_measured_batch_size_mismatch_is_skipped():
     point = BenchmarkPoint(
-        point_type="prefill", isl=40, kv_read_tokens=16, batch_size=3
+        point_type="prefill",
+        total_prefill_tokens=48,
+        total_kv_read_tokens=32,
+        batch_size=3,
     )
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_current_point = point
@@ -1394,7 +1531,7 @@ def test_prefill_point_with_measured_batch_size_mismatch_is_skipped():
 
 
 def test_decode_point_with_exact_shape_is_saved():
-    point = BenchmarkPoint(point_type="decode", context_length=16, batch_size=3)
+    point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=48, batch_size=3)
     fpms = [
         {
             "scheduled_requests": {
@@ -1418,7 +1555,7 @@ def test_decode_point_with_exact_shape_is_saved():
 
 
 def test_decode_point_with_measured_batch_size_mismatch_is_skipped():
-    point = BenchmarkPoint(point_type="decode", context_length=16, batch_size=3)
+    point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=48, batch_size=3)
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_current_point = point
     stub._bench_current_fpms = [
@@ -1441,7 +1578,7 @@ def test_decode_point_with_measured_batch_size_mismatch_is_skipped():
 
 
 def test_decode_point_with_measured_context_mismatch_is_skipped():
-    point = BenchmarkPoint(point_type="decode", context_length=16, batch_size=3)
+    point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=48, batch_size=3)
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_current_point = point
     stub._bench_current_fpms = [
@@ -1464,7 +1601,7 @@ def test_decode_point_with_measured_context_mismatch_is_skipped():
 
 
 def test_zero_request_decode_injection_is_skipped_immediately():
-    point = BenchmarkPoint(point_type="decode", context_length=16, batch_size=3)
+    point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=48, batch_size=3)
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_drain_if_pending = MagicMock(return_value=False)
     stub._bench_active_req_ids = set()
@@ -1472,6 +1609,7 @@ def test_zero_request_decode_injection_is_skipped_immediately():
     stub._bench_current_point = None
     stub._bench_current_fpms = []
     stub._bench_skipped_points = []
+    stub._bench_cleanup_requests = MagicMock()
     stub._bench_inject_fake_decode = MagicMock(
         return_value=SimpleNamespace(total_num_scheduled_tokens=0)
     )
@@ -1483,3 +1621,5 @@ def test_zero_request_decode_injection_is_skipped_immediately():
     assert stub._bench_skipped_points == [
         SkippedBenchmarkPoint(point=point, reason="decode_injection_failed")
     ]
+    stub._bench_inject_fake_decode.assert_called_once_with([16, 16, 16])
+    stub._bench_cleanup_requests.assert_called_once_with()
