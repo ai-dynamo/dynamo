@@ -662,6 +662,27 @@ class TestDisaggRequestId:
         )
         assert params.request_type == "context_and_generation"
 
+    def test_decode_conditional_bypass_preserves_epd_params(self):
+        """Conditional-disagg bypass keeps EPD params for multimodal handling."""
+        handler = self._make_decode_handler()
+        ep_disaggregated_params = MagicMock()
+
+        (
+            params,
+            returned_ep_params,
+            epd_metadata,
+        ) = handler._setup_disaggregated_params_for_mode(
+            request={
+                "annotations": [BYPASS_REMOTE_PREFILL_ANNOTATION],
+                "disaggregated_params": {"request_type": "context_and_generation"},
+            },
+            ep_disaggregated_params=ep_disaggregated_params,
+        )
+
+        assert params.request_type == "context_and_generation"
+        assert returned_ep_params is ep_disaggregated_params
+        assert epd_metadata == {}
+
 
 class TestHealthCheckPriority:
     """Verify generate_locally forwards the correct priority to generate_async.

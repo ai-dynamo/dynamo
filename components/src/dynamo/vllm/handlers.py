@@ -2987,11 +2987,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
 
+        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
+            request.get("annotations") or []
+        ):
+            logger.debug(
+                "DECODE: conditional-disagg bypass annotation present; "
+                "running text-mode request as AGG (prefill+decode on this worker)."
+            )
+            is_decode_only = False
+
         # Mirror _generate_token_mode: in disagg decode mode route aborts through
         # the per-request deferred guard so engine_client.abort() never fires in
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
-        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
         async with _deferred_abort_guard(
             self.engine_client,
             request_id,

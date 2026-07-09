@@ -221,6 +221,10 @@ impl PrefillRouter {
             .as_ref()
             .and_then(|routing| routing.strict_priority)
             .unwrap_or(0);
+        let expected_output_tokens = req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.expected_output_tokens);
         let allowed_worker_ids = req
             .routing
             .as_ref()
@@ -238,14 +242,14 @@ impl PrefillRouter {
                 None,
                 routing_token_ids,
                 block_mm_infos,
-                None,
+                req.router_config_override.as_ref(),
                 false,
                 false,
                 lora_name,
                 cache_namespace,
                 priority_jump,
                 strict_priority,
-                None,
+                expected_output_tokens,
                 None,
                 allowed_worker_ids,
                 routing_constraints,

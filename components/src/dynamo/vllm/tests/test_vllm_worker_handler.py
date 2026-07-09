@@ -10,6 +10,7 @@
 import asyncio
 import base64
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -852,6 +853,55 @@ class TestDecodeWorkerMultimodalBranching:
 
         assert len(chunks) == 1
         assert chunks[0]["message"] == "stop"
+
+    async def test_decode_only_bypass_annotation_text_mode_runs_as_agg(self):
+        """Text-mode conditional-disagg bypass is not treated as decode-only."""
+        handler = _make_decode_handler(disaggregation_mode="DECODE")
+        handler.input_param_manager = MagicMock()
+        handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
+        handler.engine_client = MagicMock()
+        handler.default_sampling_params = {}
+
+        async def _empty_generate(*args, **kwargs):
+            if False:
+                yield None
+
+        handler.engine_client.generate = _empty_generate
+
+        killed_future = asyncio.get_event_loop().create_future()
+        killed_future.set_result(None)
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+        context.trace_headers.return_value = {}
+
+        decode_only_values = []
+
+        @asynccontextmanager
+        async def _capture_guard(
+            engine_client,
+            request_id,
+            is_decode_only,
+            registry=None,
+            on_engine_dead=None,
+        ):
+            decode_only_values.append(is_decode_only)
+            yield None
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+
+        with patch.object(mod, "_deferred_abort_guard", _capture_guard):
+            chunks = []
+            async for chunk in handler._generate_text_mode(request, context, "req-1"):
+                chunks.append(chunk)
+
+        assert chunks == []
+        assert decode_only_values == [False]
 
     @pytest.mark.parametrize(
         "mm_processor_kwargs",

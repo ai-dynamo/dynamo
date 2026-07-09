@@ -181,6 +181,12 @@ impl
         let metadata = context.metadata().clone();
         let engine_ctx = context.context();
 
+        // Conditional-disagg bypass is a router-owned decision. Drop any
+        // client-supplied marker before the policy runs so normal disagg
+        // requests cannot accidentally or maliciously skip remote prefill.
+        req.annotations
+            .retain(|annotation| annotation != BYPASS_REMOTE_PREFILL_ANNOTATION);
+
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
@@ -221,10 +227,8 @@ impl
                     routing.decode_worker_id = Some(decision.worker.worker_id);
                     routing.dp_rank = Some(decision.worker.dp_rank);
 
-                    if !req.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION) {
-                        req.annotations
-                            .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
-                    }
+                    req.annotations
+                        .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
 
                     let response_stream = next.generate(context.map(|_| req)).await?;
                     let ctx = response_stream.context();

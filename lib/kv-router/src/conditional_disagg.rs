@@ -107,14 +107,7 @@ pub fn make_conditional_disagg_policy(
 }
 
 pub fn policy_needs_prefill_worker_busy(config: Option<&KvRouterConfig>) -> bool {
-    let Some(config) = config else { return false };
-    if !config.conditional_disagg_enabled {
-        return false;
-    }
-    matches!(
-        config.conditional_disagg_policy,
-        ConditionalDisaggPolicyKind::PrefillLoad | ConditionalDisaggPolicyKind::IslOrLoad,
-    )
+    make_conditional_disagg_policy(config).needs_prefill_worker_busy()
 }
 
 /// v1 conditional-disagg policy. Bypasses to AGG when the request is both

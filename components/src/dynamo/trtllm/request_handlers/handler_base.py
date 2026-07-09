@@ -697,7 +697,11 @@ class HandlerBase(BaseGenerativeHandler):
         # context+generation request on a disagg-mode worker, so they use
         # the pre-built params and skip the normal prefill-result handoff.
         if use_request_disagg_params and request.get("disaggregated_params"):
-            return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
+            return (
+                LlmDisaggregatedParams(**request["disaggregated_params"]),
+                ep_disaggregated_params,
+                {},
+            )
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:

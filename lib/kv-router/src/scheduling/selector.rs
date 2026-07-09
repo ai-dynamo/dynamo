@@ -1309,6 +1309,33 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_worker_logit_credits_overlap_without_prefill_tracking() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request.track_prefill_tokens = false;
+        request.overlap.tier_overlap_blocks.device.insert(worker, 3);
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 10,
+                ..Default::default()
+            },
+        );
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "decode");
+        let weights = LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 0.0,
+        };
+
+        assert_eq!(
+            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
+            7.0
+        );
+    }
+
+    #[test]
     fn test_overlap_credit_decay_can_prefer_less_loaded_cold_worker() {
         use crate::test_utils::SimpleWorkerConfig;
 
