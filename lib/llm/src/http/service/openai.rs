@@ -539,7 +539,7 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
-fn context_from_headers<T: Send + Sync + 'static>(
+pub(super) fn context_from_headers<T: Send + Sync + 'static>(
     request: T,
     request_id: String,
     headers: &HeaderMap,
@@ -2484,6 +2484,21 @@ pub fn validate_response_unsupported_fields(
 ) -> Option<impl IntoResponse> {
     let inner = &request.inner;
 
+    if let Some(field) = request
+        .nvext
+        .as_ref()
+        .and_then(|nvext| nvext.extra_fields.as_ref())
+        .and_then(|fields| {
+            fields
+                .iter()
+                .find(|field| matches!(field.as_str(), "completion_token_ids" | "prompt_logprobs"))
+        })
+    {
+        return Some(ErrorMessage::not_implemented_error(format!(
+            "{VALIDATION_PREFIX}`nvext.extra_fields=[\"{field}\"]` is not supported by the Responses API."
+        )));
+    }
+
     if inner.background == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
@@ -3876,6 +3891,67 @@ mod tests {
             result.is_none(),
             "store should be supported for audit opt-in"
         );
+    }
+
+    #[tokio::test]
+    async fn test_validate_unsupported_fields_rejects_rl_nvext_fields() {
+        for field in ["completion_token_ids", "prompt_logprobs"] {
+            for stream in [false, true] {
+                let mut request = make_base_request();
+                request.inner.stream = Some(stream);
+                request.nvext = Some(
+                    NvExt::builder()
+                        .extra_fields(vec![field.to_string()])
+                        .build()
+                        .unwrap(),
+                );
+
+                let response = validate_response_unsupported_fields(&request)
+                    .expect("RL nvext response field should be rejected")
+                    .into_response();
+                assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+
+                let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+                    .await
+                    .unwrap();
+                let error: ErrorMessage = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "{VALIDATION_PREFIX}`nvext.extra_fields=[\"{field}\"]` is not supported by the Responses API."
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_rejects_mixed_nvext_fields() {
+        let mut request = make_base_request();
+        request.nvext = Some(
+            NvExt::builder()
+                .extra_fields(vec![
+                    "timing".to_string(),
+                    "completion_token_ids".to_string(),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        assert!(validate_response_unsupported_fields(&request).is_some());
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_accepts_supported_nvext_fields() {
+        let mut request = make_base_request();
+        request.nvext = Some(
+            NvExt::builder()
+                .extra_fields(vec!["timing".to_string(), "worker_id".to_string()])
+                .build()
+                .unwrap(),
+        );
+
+        assert!(validate_response_unsupported_fields(&request).is_none());
     }
 
     #[test]

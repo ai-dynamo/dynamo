@@ -31,7 +31,7 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.11` | `1.3.0rc19` | `0.24.0` | `1.0.1` (TRT-LLM); `1.1.0` (vLLM); `1.0.1` (SGLang) |
+| **main (ToT)** | `0.5.11` | `1.3.0rc20` | `0.24.0` | `1.0.1` (TRT-LLM); `1.1.0` (vLLM); `1.0.1` (SGLang) |
 | **v1.3.0-dev.1** *(experimental)* | `0.5.12.post1` | `1.3.0rc17` | `0.22.0` | `0.10.1` (TRT-LLM); `1.1.0` (vLLM); `1.0.1` (SGLang) |
 | **v1.2.1** | `0.5.11` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
 | **v1.2.0** | `0.5.11` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
@@ -212,7 +212,7 @@ For version-specific artifact details, installation commands, and release histor
   - [kvbm](https://pypi.org/project/kvbm/) as a standalone implementation.
 
 - **Dynamo Container Images**: We distribute multi-arch images (x86 & ARM64 compatible) on [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo):
-  - [Dynamo Frontend](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend) *(New in v0.8.0)*
+  - [Dynamo Frontend](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/containers/dynamo-frontend/-) *(New in v0.8.0)*
   - [SGLang Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime)
   - [SGLang Runtime (CUDA 13)](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=1.2.1-cuda13)
   - [TensorRT-LLM Runtime](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime)
