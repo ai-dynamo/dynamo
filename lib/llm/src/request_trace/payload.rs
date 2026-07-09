@@ -45,6 +45,7 @@ fn capture_http_headers_with_list(
             .get_all(name.as_str())
             .iter()
             .filter_map(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
             .collect::<Vec<_>>()
             .join(", ");
         if !joined.is_empty() {
@@ -245,6 +246,33 @@ mod tests {
         let captured = capture_http_headers_with_list(&headers, &capture_list)
             .expect("repeated header is captured");
         assert_eq!(captured.get("x-tag").map(String::as_str), Some("a, b"));
+    }
+
+    #[test]
+    fn capture_http_headers_omits_repeated_empty_values() {
+        let capture_list = vec!["x-tag".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.append("x-tag", "".parse().unwrap());
+        headers.append("x-tag", "".parse().unwrap());
+
+        assert!(
+            capture_http_headers_with_list(&headers, &capture_list).is_none(),
+            "repeated empty values must be omitted, not joined into \", \""
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_skips_empty_values_when_joining() {
+        let capture_list = vec!["x-tag".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.append("x-tag", "".parse().unwrap());
+        headers.append("x-tag", "tenant-a".parse().unwrap());
+
+        let captured = capture_http_headers_with_list(&headers, &capture_list)
+            .expect("non-empty value is captured");
+        assert_eq!(captured.get("x-tag").map(String::as_str), Some("tenant-a"));
     }
 
     /// Test-only constructor. `create_handle` gates on env vars + a cached

@@ -162,6 +162,7 @@ impl OtelRequestTraceSink {
 
         marker_payload(
             record,
+            max_payload_bytes,
             format!(
                 "otel_payload_too_large:max_bytes={}:actual_bytes={}",
                 max_payload_bytes,
@@ -173,6 +174,7 @@ impl OtelRequestTraceSink {
 
 fn marker_payload(
     record: &RequestTraceRecord,
+    max_payload_bytes: usize,
     reason: String,
 ) -> Option<(String, bool, Option<String>)> {
     let Some(payload) = record.payload.as_ref() else {
@@ -192,15 +194,37 @@ fn marker_payload(
         "request trace otel: emitting incomplete marker"
     );
 
+    // Keep captured headers for correlation unless the marker itself still exceeds the limit.
     let mut marker = record.clone();
     if let Some(payload) = marker.payload.as_mut() {
         payload.request = None;
         payload.response = None;
-        payload.http_request_headers = None;
         payload.payload_complete = false;
         payload.payload_drop_reason = Some(reason.clone());
     }
 
+    let serialized = match serde_json::to_string(&marker) {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            tracing::warn!(
+                target: "dynamo_llm::request_trace",
+                error = %error,
+                "request trace otel: marker serialize failed"
+            );
+            return None;
+        }
+    };
+    let has_headers = marker
+        .payload
+        .as_ref()
+        .is_some_and(|payload| payload.http_request_headers.is_some());
+    if serialized.len() <= max_payload_bytes || !has_headers {
+        return Some((serialized, false, Some(reason)));
+    }
+
+    if let Some(payload) = marker.payload.as_mut() {
+        payload.http_request_headers = None;
+    }
     match serde_json::to_string(&marker) {
         Ok(payload) => Some((payload, false, Some(reason))),
         Err(error) => {
@@ -359,6 +383,49 @@ mod tests {
                 payload_drop_reason: None,
             }),
         }
+    }
+
+    fn sample_payload_record_with_headers() -> RequestTraceRecord {
+        let mut record = sample_payload_record();
+        record.payload.as_mut().unwrap().http_request_headers = Some(Arc::new(
+            [("x-request-id".to_string(), "abc-123".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        record
+    }
+
+    #[test]
+    fn payload_over_limit_marker_preserves_headers_when_marker_fits() {
+        let record = sample_payload_record_with_headers();
+        let full_len = serde_json::to_string(&record).unwrap().len();
+
+        // Limit rejects the full record but fits the body-stripped marker.
+        let (payload, complete, drop_reason) =
+            OtelRequestTraceSink::payload_for_limit(&record, full_len - 1).unwrap();
+
+        assert!(!complete);
+        assert!(drop_reason.is_some());
+        let decoded: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert!(decoded["payload"].get("request").is_none());
+        assert_eq!(
+            decoded["payload"]["http_request_headers"]["x-request-id"],
+            "abc-123"
+        );
+    }
+
+    #[test]
+    fn payload_over_limit_marker_drops_headers_when_still_over_limit() {
+        let record = sample_payload_record_with_headers();
+
+        let (payload, complete, drop_reason) =
+            OtelRequestTraceSink::payload_for_limit(&record, 1).unwrap();
+
+        assert!(!complete);
+        assert!(drop_reason.is_some());
+        let decoded: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert!(decoded["payload"].get("http_request_headers").is_none());
+        assert_eq!(decoded["payload"]["request_id"], "req-otel");
     }
 
     #[test]

@@ -197,7 +197,8 @@ Payload row:
 For canceled streams, gateway timeouts, and aggregation failures, the row still
 contains `payload.request`; `payload.response` is omitted. If the `otel`
 sink drops an oversized payload body, the row contains
-`payload_complete=false` and `payload_drop_reason`.
+`payload_complete=false` and `payload_drop_reason`; captured HTTP headers are
+kept in the marker unless the marker itself still exceeds the limit.
 
 Optional harness tool events use the `RequestTraceToolEventIngress` payload below. Dynamo normalizes these events into request trace rows before writing them to sinks.
 
