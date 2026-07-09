@@ -18,6 +18,7 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
+from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
@@ -562,6 +563,76 @@ class TestMultimodalGuard:
         assert result["prompt"] == "describe image"
         assert result["prompt_token_ids"] == [1, 2, 3]
         assert result["multi_modal_data"] is None
+
+
+class TestPrefillPromptMetadata:
+    """Tests for prompt metadata in the legacy prefill handoff."""
+
+    def _make_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.multimodal_processor = MagicMock()
+        config.shutdown_event = None
+        return _ConcreteHandler(config)
+
+    def _pack_metadata(self, request, processed_input, prompt, prompt_token_ids):
+        params = DisaggregatedParams(request_type="context_only")
+        output = MagicMock(disaggregated_params=params)
+        result = MagicMock(prompt=prompt, prompt_token_ids=prompt_token_ids)
+
+        return self._make_handler()._encode_and_pack_disaggregated_params(
+            output,
+            params,
+            request,
+            result,
+            processed_input,
+        )
+
+    def test_text_only_prefill_omits_prompt_metadata(self):
+        result = self._pack_metadata(
+            request={"token_ids": [1, 2, 3]},
+            processed_input=[1, 2, 3],
+            prompt="text prompt",
+            prompt_token_ids=[1, 2, 3],
+        )
+
+        assert "_epd_metadata" not in result
+
+    def test_multimodal_prefill_preserves_prompt_metadata(self):
+        result = self._pack_metadata(
+            request={
+                "token_ids": [1, 2, 3],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "http://example.com/image.jpg"}]
+                },
+            },
+            processed_input={"prompt": "describe image"},
+            prompt="raw prompt",
+            prompt_token_ids=[1, 2, 3],
+        )
+
+        assert result["_epd_metadata"] == {
+            "_prefill_prompt": "describe image",
+            "_prefill_prompt_token_ids": [1, 2, 3],
+        }
+
+    def test_epd_prefill_preserves_encoder_metadata(self):
+        result = self._pack_metadata(
+            request={
+                "token_ids": [1, 2, 3],
+                "_epd_processed_prompt": "encoder prompt",
+                "_epd_prompt_token_ids": [1, 2, 3],
+            },
+            processed_input={"prompt": "encoder prompt"},
+            prompt="engine prompt",
+            prompt_token_ids=[4, 5, 6],
+        )
+
+        assert result["_epd_metadata"] == {
+            "_prefill_prompt": "encoder prompt",
+            "_prefill_prompt_token_ids": [4, 5, 6],
+            "_epd_processed_prompt": "engine prompt",
+            "_epd_prompt_token_ids": [4, 5, 6],
+        }
 
 
 class TestDisaggRequestId:
