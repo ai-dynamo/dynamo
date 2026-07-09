@@ -413,6 +413,63 @@ pub struct PlacementEvent {
     pub event: KvCacheEvent,
 }
 
+/// Worker-local token context aligned with one stored source block.
+///
+/// This is deliberately not serialized with [`PlacementEvent`]. Publishers use
+/// it to build larger routing blocks before the event reaches either the local
+/// indexer or the event plane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvCacheStoreBlockInput {
+    /// Canonical tokens used for routing-side hashing. EAGLE blocks contain
+    /// `source_block_size + 1` tokens; ordinary blocks contain exactly
+    /// `source_block_size` tokens.
+    pub token_ids: Vec<u32>,
+    pub lora_name: Option<String>,
+    pub cache_namespace: Option<String>,
+    pub is_eagle: bool,
+    /// Multimodal metadata to include in the token hash. This can differ from
+    /// the block's published `mm_extra_info`: image-token normalization replaces
+    /// placeholders with canonical pad values and therefore hashes without MM
+    /// metadata while still preserving that metadata on the stored block.
+    pub hash_mm_extra_info: Option<BlockExtraInfo>,
+}
+
+/// Worker-local store context, one entry per [`KvCacheStoreData::blocks`] item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KvCacheStoreInput {
+    pub blocks: Vec<KvCacheStoreBlockInput>,
+}
+
+/// Publisher ingress event. `store_input` is present only when a producer
+/// supplies token context for a stored event; it never crosses the network.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementEventInput {
+    pub event: PlacementEvent,
+    pub store_input: Option<KvCacheStoreInput>,
+}
+
+impl PlacementEventInput {
+    pub fn new(event: PlacementEvent, store_input: Option<KvCacheStoreInput>) -> Self {
+        Self { event, store_input }
+    }
+
+    pub fn without_store_input(event: PlacementEvent) -> Self {
+        Self::new(event, None)
+    }
+}
+
+impl From<PlacementEvent> for PlacementEventInput {
+    fn from(event: PlacementEvent) -> Self {
+        Self::without_store_input(event)
+    }
+}
+
+impl From<PlacementEventInput> for PlacementEvent {
+    fn from(input: PlacementEventInput) -> Self {
+        input.event
+    }
+}
+
 impl PlacementEvent {
     pub fn new(placement: Placement, event: KvCacheEvent) -> Self {
         Self { placement, event }

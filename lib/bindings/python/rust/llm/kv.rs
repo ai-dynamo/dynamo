@@ -39,7 +39,9 @@ use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
 use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
-use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
+use llm_rs::kv_router::publisher::{
+    KvEventSourceConfig, create_stored_blocks, create_stored_blocks_with_input,
+};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
@@ -862,6 +864,7 @@ pub(crate) struct KvEventPublisher {
     kv_block_size: usize,
     dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
+    coalescing_enabled: bool,
 }
 
 impl KvEventPublisher {
@@ -876,11 +879,13 @@ impl KvEventPublisher {
         dp_rank: DpRank,
     ) -> Self {
         let kv_block_size = inner.kv_block_size() as usize;
+        let coalescing_enabled = inner.routing_kv_block_size() != inner.kv_block_size();
         Self {
             inner,
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
+            coalescing_enabled,
         }
     }
 }
@@ -907,7 +912,7 @@ impl KvEventPublisher {
     ///         ``0`` is treated as ``None`` (also disables batching).
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_event_coalescing_block_size=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -919,6 +924,7 @@ impl KvEventPublisher {
         zmq_topic: Option<String>,
         batching_timeout_ms: Option<u64>,
         image_token_id: Option<u32>,
+        kv_event_coalescing_block_size: Option<u32>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
@@ -934,10 +940,11 @@ impl KvEventPublisher {
         let component = endpoint.inner.component().clone();
 
         let inner =
-            llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id(
+            llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_worker_id_and_coalescing(
                 component,
                 worker_id,
                 kv_block_size as u32,
+                kv_event_coalescing_block_size,
                 source_config,
                 enable_local_indexer,
                 dp_rank,
@@ -950,6 +957,8 @@ impl KvEventPublisher {
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
+            coalescing_enabled: kv_event_coalescing_block_size
+                .is_some_and(|target| target != kv_block_size as u32),
         })
     }
 
@@ -971,6 +980,7 @@ impl KvEventPublisher {
         let dp_rank = self.dp_rank;
         let warning_count = self.warning_count.clone();
         let inner = self.inner.clone();
+        let coalescing_enabled = self.coalescing_enabled;
 
         let event_id = inner.next_event_id();
 
@@ -981,12 +991,23 @@ impl KvEventPublisher {
 
         py.allow_threads(|| {
             let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
-            let event = KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
-                    start_position: None,
-                    blocks: create_stored_blocks(
+            let (blocks, store_input) = if coalescing_enabled {
+                let (blocks, input) = create_stored_blocks_with_input(
+                    kv_block_size,
+                    &token_ids,
+                    &num_block_tokens,
+                    &block_hashes_u64,
+                    lora_name.as_deref(),
+                    cache_salt.as_deref(),
+                    &warning_count,
+                    mm_infos.as_deref(),
+                    is_eagle,
+                    None, // image_token_id: publish path keeps caller-supplied mm_infos
+                );
+                (blocks, Some(input))
+            } else {
+                (
+                    create_stored_blocks(
                         kv_block_size,
                         &token_ids,
                         &num_block_tokens,
@@ -996,13 +1017,28 @@ impl KvEventPublisher {
                         &warning_count,
                         mm_infos.as_deref(),
                         is_eagle,
-                        None, // image_token_id: publish path keeps caller-supplied mm_infos
+                        None,
                     ),
+                    None,
+                )
+            };
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                    start_position: None,
+                    blocks,
                 }),
                 dp_rank,
             };
 
-            inner.publish(event).map_err(to_pyerr)
+            inner
+                .publish_with_storage_tier_and_input(
+                    event,
+                    StorageTier::Device,
+                    store_input,
+                )
+                .map_err(to_pyerr)
         })
     }
 

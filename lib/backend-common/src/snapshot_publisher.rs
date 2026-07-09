@@ -37,6 +37,8 @@ pub struct SnapshotPublisher {
     /// First-failure log per rank; suppresses noise on sustained NATS
     /// outages.
     warned_ranks: Mutex<HashSet<u32>>,
+    /// Number of engine source blocks represented by one router block.
+    block_ratio: u64,
 }
 
 impl SnapshotPublisher {
@@ -48,6 +50,21 @@ impl SnapshotPublisher {
             gauges,
             router_publishers,
             warned_ranks: Mutex::new(HashSet::new()),
+            block_ratio: 1,
+        }
+    }
+
+    pub(crate) fn new_with_block_ratio(
+        gauges: Arc<ComponentGauges>,
+        router_publishers: HashMap<u32, Arc<WorkerMetricsPublisher>>,
+        block_ratio: u64,
+    ) -> Self {
+        debug_assert!(block_ratio > 0);
+        Self {
+            gauges,
+            router_publishers,
+            warned_ranks: Mutex::new(HashSet::new()),
+            block_ratio,
         }
     }
 
@@ -59,6 +76,7 @@ impl SnapshotPublisher {
     /// emitting for an unknown rank is a misconfiguration the framework
     /// can't recover from cleanly).
     pub fn publish(&self, dp_rank: u32, snap: ComponentSnapshot) {
+        let snap = self.scale_snapshot(snap);
         self.gauges.update(&snap);
         if let Some(rp) = self.router_publishers.get(&dp_rank)
             && let Err(e) = rp.publish(Some(dp_rank), None, Some(snap.kv_used_blocks))
@@ -69,6 +87,12 @@ impl SnapshotPublisher {
                 tracing::debug!(dp_rank, error = %e, "router signal publish failed");
             }
         }
+    }
+
+    fn scale_snapshot(&self, mut snap: ComponentSnapshot) -> ComponentSnapshot {
+        snap.kv_used_blocks = snap.kv_used_blocks.div_ceil(self.block_ratio);
+        snap.kv_total_blocks /= self.block_ratio;
+        snap
     }
 
     /// Declared dp_ranks. Stable for the publisher's lifetime.
@@ -89,6 +113,20 @@ mod tests {
         let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
         let gauges = Arc::new(ComponentGauges::new(&metrics, &[0]).expect("component gauges"));
         SnapshotPublisher::new(gauges, HashMap::new())
+    }
+
+    #[test]
+    fn coalescing_scales_capacity_down_and_usage_up() {
+        let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
+        let gauges = Arc::new(ComponentGauges::new(&metrics, &[0]).expect("component gauges"));
+        let publisher = SnapshotPublisher::new_with_block_ratio(gauges, HashMap::new(), 16);
+        let scaled = publisher.scale_snapshot(ComponentSnapshot {
+            kv_used_blocks: 33,
+            kv_total_blocks: 33,
+            ..ComponentSnapshot::default()
+        });
+        assert_eq!(scaled.kv_used_blocks, 3);
+        assert_eq!(scaled.kv_total_blocks, 2);
     }
 
     /// Publishing for an undeclared rank is a no-op (no panic, no crash).

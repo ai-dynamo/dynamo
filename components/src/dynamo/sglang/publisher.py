@@ -26,7 +26,13 @@ from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
-from dynamo.sglang.capacity import kv_metrics_block_values, local_dp_rank_bounds
+from dynamo.sglang.capacity import (
+    kv_event_block_sizes,
+    kv_metrics_block_values,
+    local_dp_rank_bounds,
+    scale_kv_block_capacity,
+    scale_kv_block_usage,
+)
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -220,6 +226,15 @@ class DynamoSglangPublisher:
                 active_decode_blocks, total_blocks = kv_metrics_block_values(
                     kv_metrics, self.server_args.page_size
                 )
+                source_block_size, routing_block_size = kv_event_block_sizes(
+                    self.server_args, self.dynamo_args
+                )
+                active_decode_blocks = scale_kv_block_usage(
+                    active_decode_blocks, source_block_size, routing_block_size
+                )
+                total_blocks = scale_kv_block_capacity(
+                    total_blocks, source_block_size, routing_block_size
+                )
                 self.metrics_publisher.publish(
                     dp_rank, kv_used_blocks=active_decode_blocks
                 )
@@ -338,6 +353,11 @@ class DynamoSglangPublisher:
                     zmq_topic="",
                     enable_local_indexer=self.dynamo_args.enable_local_indexer,
                     dp_rank=dp_rank,
+                    kv_event_coalescing_block_size=getattr(
+                        self.dynamo_args,
+                        "kv_event_coalescing_block_size",
+                        None,
+                    ),
                 )
                 self.kv_publishers.append(publisher)
 

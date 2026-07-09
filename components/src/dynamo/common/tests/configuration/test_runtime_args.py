@@ -111,3 +111,17 @@ def test_fpm_trace_help_lists_flag_and_env(monkeypatch):
     assert "--fpm-trace" in help_text
     assert "--no-fpm-trace" in help_text
     assert "DYN_FPM_TRACE" in help_text
+
+
+def test_kv_event_coalescing_block_size_from_cli():
+    config, help_text = _parse_runtime_args(
+        ["--kv-event-coalescing-block-size", "32"]
+    )
+
+    assert config.kv_event_coalescing_block_size == 32
+    assert "DYN_KV_EVENT_COALESCING_BLOCK_SIZE" in help_text
+
+
+def test_kv_event_coalescing_block_size_must_be_positive():
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        _parse_runtime_args(["--kv-event-coalescing-block-size", "0"])

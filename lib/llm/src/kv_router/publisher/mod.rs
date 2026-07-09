@@ -10,9 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::indexer::{KvIndexerMetrics, LocalKvIndexer};
 use dynamo_kv_router::protocols::*;
-pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
 #[cfg(test)]
 use dynamo_kv_router::zmq_wire::*;
+pub use dynamo_kv_router::zmq_wire::{create_stored_blocks, create_stored_blocks_with_input};
 use dynamo_runtime::config::environment_names::nats as env_nats;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
@@ -26,6 +26,7 @@ use crate::kv_router::{
 };
 
 mod batching;
+mod coalescer;
 mod dedup;
 mod event_processor;
 mod multimodal_embedding_cache;
@@ -40,15 +41,21 @@ use batching::BatchingState;
 #[cfg(test)]
 use dedup::EventDedupFilter;
 #[cfg(test)]
-use event_processor::run_event_processor_loop;
-use event_processor::{start_event_processor, start_event_processor_jetstream};
+use event_processor::{
+    run_event_processor_loop, run_event_processor_loop_with_block_sizes, start_event_processor,
+};
+use event_processor::{
+    start_event_processor_jetstream_with_coalescing, start_event_processor_with_coalescing,
+};
 pub use multimodal_embedding_cache::{
     MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher,
     MultimodalEmbeddingCacheUpdate,
 };
 use sinks::EventPlanePublisher;
 pub use worker_metrics::WorkerMetricsPublisher;
+#[cfg(test)]
 use zmq_listener::start_zmq_listener;
+use zmq_listener::start_zmq_listener_with_input;
 
 const MAX_BATCHING_TIMEOUT_MS: u64 = 15_000;
 pub const DEFAULT_BATCHING_TIMEOUT_MS: Option<u64> = None;
@@ -95,8 +102,9 @@ impl KvEventSource {
         kv_block_size: u32,
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
-        tx: mpsc::UnboundedSender<PlacementEvent>,
+        tx: mpsc::UnboundedSender<PlacementEventInput>,
         next_event_id: Arc<AtomicU64>,
+        capture_store_input: bool,
     ) -> Result<Self> {
         match source_config {
             KvEventSourceConfig::Zmq {
@@ -104,20 +112,22 @@ impl KvEventSource {
                 topic,
                 image_token_id,
             } => {
-                let zmq_handle = component
-                    .drt()
-                    .runtime()
-                    .secondary()
-                    .spawn(start_zmq_listener(
-                        endpoint,
-                        topic,
-                        worker_id,
-                        tx,
-                        cancellation_token.clone(),
-                        kv_block_size,
-                        next_event_id,
-                        image_token_id,
-                    ));
+                let zmq_handle =
+                    component
+                        .drt()
+                        .runtime()
+                        .secondary()
+                        .spawn(start_zmq_listener_with_input(
+                            endpoint,
+                            topic,
+                            worker_id,
+                            tx,
+                            cancellation_token.clone(),
+                            kv_block_size,
+                            next_event_id,
+                            image_token_id,
+                            capture_store_input,
+                        ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })
             }
@@ -135,8 +145,10 @@ impl KvEventSource {
 
 /// A publisher of KV events.
 pub struct KvEventPublisher {
-    /// The size of the KV block.
+    /// Physical block size emitted by the engine.
     kv_block_size: u32,
+    /// Router-visible block size after optional coalescing.
+    routing_kv_block_size: u32,
     /// The source of KV events.
     /// Can be `None` if all events provided through [`KvEventPublisher::publish`].
     source: Option<KvEventSource>,
@@ -145,7 +157,7 @@ pub struct KvEventPublisher {
     /// The ID of the local worker emitting placement events.
     worker_id: WorkerId,
     /// The channel to send events to.
-    tx: mpsc::UnboundedSender<PlacementEvent>,
+    tx: mpsc::UnboundedSender<PlacementEventInput>,
     /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
     next_event_id: Arc<AtomicU64>,
 }
@@ -194,6 +206,31 @@ impl KvEventPublisher {
         dp_rank: DpRank,
         batching_timeout_ms: Option<u64>,
     ) -> Result<Self> {
+        Self::new_with_local_indexer_worker_id_and_coalescing(
+            component,
+            worker_id,
+            kv_block_size,
+            None,
+            source_config,
+            enable_local_indexer,
+            dp_rank,
+            batching_timeout_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_local_indexer_worker_id_and_coalescing(
+        component: Component,
+        worker_id: Option<WorkerId>,
+        kv_block_size: u32,
+        coalescing_block_size: Option<u32>,
+        source_config: Option<KvEventSourceConfig>,
+        enable_local_indexer: bool,
+        dp_rank: DpRank,
+        batching_timeout_ms: Option<u64>,
+    ) -> Result<Self> {
+        let routing_kv_block_size = coalescing_block_size.unwrap_or(kv_block_size);
+        let _ = coalescer::EventCoalescer::new(kv_block_size, routing_kv_block_size)?;
         let cancellation_token = CancellationToken::new();
         let batching_timeout_ms = batching_timeout_ms
             .filter(|&ms| {
@@ -208,7 +245,7 @@ impl KvEventPublisher {
             })
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
-        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEventInput>();
         let worker_id = worker_id.unwrap_or_else(|| component.drt().connection_id());
 
         let _ = KvPublisherMetrics::from_component(&component);
@@ -236,6 +273,7 @@ impl KvEventPublisher {
                 cancellation_token.clone(),
                 tx.clone(),
                 next_event_id.clone(),
+                routing_kv_block_size != kv_block_size,
             )?);
         }
 
@@ -243,7 +281,7 @@ impl KvEventPublisher {
             let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
             Some(Arc::new(LocalKvIndexer::new(
                 cancellation_token.clone(),
-                kv_block_size,
+                routing_kv_block_size,
                 metrics,
                 WORKER_KV_INDEXER_BUFFER_SIZE,
             )))
@@ -288,13 +326,15 @@ impl KvEventPublisher {
                         }
                     };
 
-                start_event_processor(
+                start_event_processor_with_coalescing(
                     EventPlanePublisher(event_publisher),
                     worker_id,
                     cancellation_token_clone,
                     rx,
                     local_indexer_clone,
                     batching_timeout_ms,
+                    kv_block_size,
+                    routing_kv_block_size,
                 )
                 .await
             });
@@ -313,13 +353,15 @@ impl KvEventPublisher {
                     tracing::error!("Failed to connect NatsQueue: {e}");
                     return;
                 }
-                start_event_processor_jetstream(
+                start_event_processor_jetstream_with_coalescing(
                     nats_queue,
                     worker_id,
                     cancellation_token_clone,
                     rx,
                     local_indexer_clone,
                     batching_timeout_ms,
+                    kv_block_size,
+                    routing_kv_block_size,
                 )
                 .await
             });
@@ -327,6 +369,7 @@ impl KvEventPublisher {
 
         Ok(Self {
             kv_block_size,
+            routing_kv_block_size,
             source,
             cancellation_token,
             worker_id,
@@ -337,9 +380,12 @@ impl KvEventPublisher {
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
         let placement_event = PlacementEvent::local_gpu(self.worker_id, event);
-        match self.tx.send(placement_event) {
+        match self
+            .tx
+            .send(PlacementEventInput::without_store_input(placement_event))
+        {
             Ok(()) => Ok(()),
-            Err(err) => Err(mpsc::error::SendError(err.0.event)),
+            Err(err) => Err(mpsc::error::SendError(err.0.event.event)),
         }
     }
 
@@ -352,9 +398,31 @@ impl KvEventPublisher {
             Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
             event,
         );
-        match self.tx.send(placement_event) {
+        match self
+            .tx
+            .send(PlacementEventInput::without_store_input(placement_event))
+        {
             Ok(()) => Ok(()),
-            Err(err) => Err(mpsc::error::SendError(err.0.event)),
+            Err(err) => Err(mpsc::error::SendError(err.0.event.event)),
+        }
+    }
+
+    pub fn publish_with_storage_tier_and_input(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+        store_input: Option<KvCacheStoreInput>,
+    ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+        let placement_event = PlacementEvent::new(
+            Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
+            event,
+        );
+        match self
+            .tx
+            .send(PlacementEventInput::new(placement_event, store_input))
+        {
+            Ok(()) => Ok(()),
+            Err(err) => Err(mpsc::error::SendError(err.0.event.event)),
         }
     }
 
@@ -364,6 +432,10 @@ impl KvEventPublisher {
 
     pub fn kv_block_size(&self) -> u32 {
         self.kv_block_size
+    }
+
+    pub fn routing_kv_block_size(&self) -> u32 {
+        self.routing_kv_block_size
     }
 
     pub fn shutdown(&mut self) {

@@ -48,6 +48,7 @@ fn setup_kv_publishers(
     component: &Component,
     sources: Vec<KvEventSource>,
     kv_cache_block_size: u32,
+    coalescing_block_size: Option<u32>,
     enable_local_indexer: bool,
 ) -> Result<Vec<Arc<KvEventPublisher>>, DynamoError> {
     let mut publishers = Vec::with_capacity(sources.len());
@@ -66,9 +67,11 @@ fn setup_kv_publishers(
             ),
             KvEventSource::Push { on_ready, .. } => (None, Some(on_ready)),
         };
-        let publisher = KvEventPublisher::new_with_local_indexer(
+        let publisher = KvEventPublisher::new_with_local_indexer_worker_id_and_coalescing(
             component.clone(),
+            None,
             kv_cache_block_size,
+            coalescing_block_size,
             source_config,
             enable_local_indexer,
             dp_rank,
@@ -131,13 +134,20 @@ pub(crate) async fn setup_publishers(
     dp_ranks: Vec<u32>,
     on_publisher_ready: Option<crate::engine::OnSnapshotPublisherReady>,
     kv_cache_block_size: Option<u32>,
+    coalescing_block_size: Option<u32>,
     enable_local_indexer: bool,
 ) -> Result<PublisherHandles, DynamoError> {
     // KV event publishers require the engine's block size; without it, the
     // router can't translate token IDs into cache blocks. Snapshot publisher
     // is independent — load reporting works regardless of cache structure.
     let kv_publishers = if let Some(block_size) = kv_cache_block_size {
-        setup_kv_publishers(component, kv_sources, block_size, enable_local_indexer)?
+        setup_kv_publishers(
+            component,
+            kv_sources,
+            block_size,
+            coalescing_block_size,
+            enable_local_indexer,
+        )?
     } else {
         if !kv_sources.is_empty() {
             tracing::warn!(
@@ -153,7 +163,15 @@ pub(crate) async fn setup_publishers(
     } else {
         let router_publishers = build_router_publishers(component, &dp_ranks).await?;
         let gauges = Arc::new(ComponentGauges::new(engine_metrics, &dp_ranks)?);
-        let publisher = Arc::new(SnapshotPublisher::new(gauges, router_publishers));
+        let block_ratio = match (kv_cache_block_size, coalescing_block_size) {
+            (Some(source), Some(target)) => u64::from(target / source),
+            _ => 1,
+        };
+        let publisher = Arc::new(SnapshotPublisher::new_with_block_ratio(
+            gauges,
+            router_publishers,
+            block_ratio,
+        ));
         if let Some(on_ready) = on_publisher_ready {
             on_ready(publisher.clone())
                 .map_err(|e| publisher_err(format!("snapshot publisher on_ready: {e}")))?;

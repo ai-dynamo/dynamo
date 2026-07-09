@@ -1070,6 +1070,7 @@ class KvEventPublisher:
         zmq_topic: Optional[str] = None,
         batching_timeout_ms: Optional[int] = None,
         image_token_id: Optional[int] = None,
+        kv_event_coalescing_block_size: Optional[int] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -3284,6 +3285,7 @@ class backend:
             route_to_encoder: bool = ...,
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
+            kv_event_coalescing_block_size: Optional[int] = None,
         ) -> None: ...
 
     class Worker:
