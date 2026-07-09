@@ -573,7 +573,7 @@ const (
 //   - Unsupported: the backend does not surface a placement score at all.
 //   - Unknown:     the backend supports scores but the current value is
 //     indeterminate (e.g. read failure, not yet populated by the
-//     scheduler). When set, PlacementScore must be cleared.
+//     scheduler). When set, PlacementStatus.Score must be cleared.
 //
 // +kubebuilder:validation:Enum=Reported;Partial;Unsupported;Unknown
 type PlacementScoreState string
@@ -584,6 +584,27 @@ const (
 	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
 	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
 )
+
+// PlacementStatus groups DGD-level scheduler placement fields under a single
+// status object so future placement signals (e.g. scheduler contract version,
+// last-report timestamp, per-unit reports) can be added without a schema break.
+type PlacementStatus struct {
+	// score is the DGD-level scheduler placement score aggregated from
+	// relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
+	// is better and 1.0 represents the best possible placement. Aggregation
+	// uses the minimum across placement units so the value is a worst-placement
+	// signal for the graph. Scores are only comparable across DGDs that share
+	// the same scheduler scoring contract and version.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Score *float64 `json:"score,omitempty"`
+
+	// state indicates placement score reporting state. See PlacementScoreState
+	// for the semantics of each value.
+	// +optional
+	State PlacementScoreState `json:"state,omitempty"`
+}
 
 // RestartPhase enumerates phases of a graph-level restart.
 type RestartPhase string

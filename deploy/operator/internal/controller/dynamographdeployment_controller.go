@@ -25,7 +25,6 @@ import (
 
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	"github.com/go-logr/logr"
 	"github.com/imdario/mergo"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -290,7 +289,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// Compute DGD-level placement score from the Grove PodCliqueSet when on
 	// the Grove pathway. Score is sourced from scheduler PodGang statuses and
 	// is purely informational — it does not affect readiness.
-	r.updatePlacementScoreStatus(ctx, logger, dynamoDeployment)
+	r.updatePlacementStatus(ctx, dynamoDeployment)
 
 	if err != nil {
 		logger.Error(err, "failed to reconcile the resources")
@@ -696,33 +695,37 @@ func (r *DynamoGraphDeploymentReconciler) getExistingGrovePodCliqueSet(ctx conte
 	return pcs, nil
 }
 
-// updatePlacementScoreStatus writes the placement score fields on every
-// reconcile so status is never left stale. Per the placement-score DEP,
-// every backend must set placementScoreState after the first reconciliation:
+// updatePlacementStatus writes the placement status on every reconcile so
+// status is never left stale. Per the placement-score DEP, every backend must
+// set Placement.State after the first reconciliation:
 //   - non-Grove pathways report Unsupported (no placement score source),
 //   - Grove read failures report Unknown (indeterminate; may recover),
 //   - otherwise the aggregator's classification is written through.
 //
-// In every non-Reported/Partial branch PlacementScore is cleared so a value
+// In every non-Reported/Partial branch Placement.Score is cleared so a value
 // from a previous reconcile cannot linger.
-func (r *DynamoGraphDeploymentReconciler) updatePlacementScoreStatus(ctx context.Context, logger logr.Logger, dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+func (r *DynamoGraphDeploymentReconciler) updatePlacementStatus(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 	if !r.isGrovePathway(dgd) {
-		dgd.Status.PlacementScore = nil
-		dgd.Status.PlacementScoreState = nvidiacomv1beta1.PlacementScoreStateUnsupported
+		dgd.Status.Placement = &nvidiacomv1beta1.PlacementStatus{
+			State: nvidiacomv1beta1.PlacementScoreStateUnsupported,
+		}
 		return
 	}
 
 	pcs, pcsErr := r.getExistingGrovePodCliqueSet(ctx, dgd)
 	if pcsErr != nil {
-		logger.V(1).Info("Failed to get PodCliqueSet for placement score", "error", pcsErr)
-		dgd.Status.PlacementScore = nil
-		dgd.Status.PlacementScoreState = nvidiacomv1beta1.PlacementScoreStateUnknown
+		log.FromContext(ctx).V(1).Info("Failed to get PodCliqueSet for placement score", "error", pcsErr)
+		dgd.Status.Placement = &nvidiacomv1beta1.PlacementStatus{
+			State: nvidiacomv1beta1.PlacementScoreStateUnknown,
+		}
 		return
 	}
 
 	score, state := dynamo.AggregatePlacementScore(pcs)
-	dgd.Status.PlacementScore = score
-	dgd.Status.PlacementScoreState = state
+	dgd.Status.Placement = &nvidiacomv1beta1.PlacementStatus{
+		Score: score,
+		State: state,
+	}
 }
 
 func restartAnnotationsFromPodCliqueSet(pcs *grovev1alpha1.PodCliqueSet) map[string]string {

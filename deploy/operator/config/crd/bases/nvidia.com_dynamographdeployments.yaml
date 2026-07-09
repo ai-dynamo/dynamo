@@ -11947,27 +11947,27 @@ spec:
                   description: ObservedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
-                placementScore:
+                placement:
                   description: |-
-                    PlacementScore is the DGD-level scheduler placement score aggregated from
-                    relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
-                    is better and 1.0 represents the best possible placement. Aggregation uses
-                    the minimum across placement units so the value is a worst-placement
-                    signal for the graph. Scores are only comparable across DGDs that share
-                    the same scheduler scoring contract and version.
-                  maximum: 1
-                  minimum: 0
-                  type: number
-                placementScoreState:
-                  description: |-
-                    PlacementScoreState indicates placement score reporting state. See
-                    PlacementScoreState for the semantics of each value.
-                  enum:
-                    - Reported
-                    - Partial
-                    - Unsupported
-                    - Unknown
-                  type: string
+                    Placement groups DGD-level scheduler placement signals (score, reporting
+                    state, and any future placement fields).
+                  properties:
+                    score:
+                      description: |-
+                        Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0]
+                        where higher is better and 1.0 is the best possible placement.
+                      maximum: 1
+                      minimum: 0
+                      type: number
+                    state:
+                      description: State indicates placement score reporting state.
+                      enum:
+                        - Reported
+                        - Partial
+                        - Unsupported
+                        - Unknown
+                      type: string
+                  type: object
                 restart:
                   description: Restart contains the status of the restart of the graph deployment.
                   properties:
@@ -21334,27 +21334,33 @@ spec:
                   description: observedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
-                placementScore:
+                placement:
                   description: |-
-                    placementScore is the DGD-level scheduler placement score aggregated from
-                    relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
-                    is better and 1.0 represents the best possible placement. Aggregation uses
-                    the minimum across placement units so the value is a worst-placement
-                    signal for the graph. Scores are only comparable across DGDs that share
-                    the same scheduler scoring contract and version.
-                  maximum: 1
-                  minimum: 0
-                  type: number
-                placementScoreState:
-                  description: |-
-                    placementScoreState indicates placement score reporting state. See
-                    PlacementScoreState for the semantics of each value.
-                  enum:
-                    - Reported
-                    - Partial
-                    - Unsupported
-                    - Unknown
-                  type: string
+                    placement groups DGD-level scheduler placement signals (score, reporting
+                    state, and any future placement fields).
+                  properties:
+                    score:
+                      description: |-
+                        score is the DGD-level scheduler placement score aggregated from
+                        relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
+                        is better and 1.0 represents the best possible placement. Aggregation
+                        uses the minimum across placement units so the value is a worst-placement
+                        signal for the graph. Scores are only comparable across DGDs that share
+                        the same scheduler scoring contract and version.
+                      maximum: 1
+                      minimum: 0
+                      type: number
+                    state:
+                      description: |-
+                        state indicates placement score reporting state. See PlacementScoreState
+                        for the semantics of each value.
+                      enum:
+                        - Reported
+                        - Partial
+                        - Unsupported
+                        - Unknown
+                      type: string
+                  type: object
                 restart:
                   description: restart contains the status of a graph-level restart.
                   properties:
