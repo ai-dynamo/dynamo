@@ -160,8 +160,8 @@ vllm_configs = {
     ),
     # Speculative decoding: Llama-3.1-8B main model with an EAGLE3 draft model
     # (see launch/agg_spec_decoding.sh). The base model is gated on HF, so this
-    # needs HF_TOKEN set and only runs where the token + VRAM are available;
-    # hence pytest.mark.nightly rather than a per-PR/pre-merge tier.
+    # needs HF_TOKEN set and only runs where the token + VRAM are available.
+    # Temporarily pre_merge to validate the fix in PR CI; flip to nightly once green.
     "aggregated_spec_decoding": VLLMConfig(
         name="aggregated_spec_decoding",
         directory=vllm_dir,
@@ -173,10 +173,12 @@ vllm_configs = {
             # sequential GPU stage; profile the real peak in a CI env that has
             # meta-llama access.
             pytest.mark.timeout(900),
-            # 8B + gated Llama base model -> nightly only (needs HF_TOKEN + VRAM).
+            # Temporarily pre_merge to validate in PR CI; will flip to nightly once green.
             pytest.mark.pre_merge,
         ],
         model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        # 8B weights leave little KV room on the 24 GiB gpu_1 lane; cap context (payloads are tiny).
+        script_args=["--max-model-len", "4096"],
         request_payloads=[
             chat_payload_default(),
             chat_payload(

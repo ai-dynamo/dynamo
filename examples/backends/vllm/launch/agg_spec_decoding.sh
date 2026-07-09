@@ -22,7 +22,7 @@ python -m dynamo.frontend --http-port="$HTTP_PORT" &
 # ---------------------------
 # This runs the main model with EAGLE as the draft model for speculative decoding
 # TODO: use build_vllm_gpu_mem_args to measure VRAM instead of hardcoded fractions
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
     --model "$MODEL" \
     --enforce-eager \
@@ -32,7 +32,7 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
         "num_speculative_tokens": 2,
         "method": "eagle3"
     }' \
-    --gpu-memory-utilization 0.8 &
+    --gpu-memory-utilization 0.8 "$@" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
