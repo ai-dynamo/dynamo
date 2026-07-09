@@ -22,8 +22,7 @@ DLLM_ALGORITHM_CONFIG="${DLLM_ALGORITHM_CONFIG:-}"  # Optional: path to YAML con
 NAMESPACE="${NAMESPACE:-dynamo}"
 COMPONENT="${COMPONENT:-backend}"
 ENDPOINT="${ENDPOINT:-generate}"
-# Use the harness-assigned dynamic ports when present (DYN_HTTP_PORT / DYN_SYSTEM_PORT),
-# falling back to fixed defaults for manual runs. Avoids collisions with leftover/concurrent processes.
+# Prefer the harness-assigned dynamic port (DYN_HTTP_PORT); fixed default for manual runs.
 HTTP_PORT="${DYN_HTTP_PORT:-8001}"
 TP_SIZE="${TP_SIZE:-1}"
 

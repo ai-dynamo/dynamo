@@ -784,50 +784,35 @@ sglang_configs = {
         ],
     ),
     "diffusion_llada": SGLangConfig(
-        # Diffusion language model (LLaDA2.0): text generation via iterative
-        # refinement rather than autoregressive decoding. Unlike the t2i/t2v
-        # diffusion configs above (image/video generation), this serves plain
-        # text through /v1/chat/completions, so it uses a chat payload.
+        # LLaDA2.0 diffusion LM: text via iterative refinement (not autoregressive),
+        # served over /v1/chat/completions, so it uses a chat payload.
         name="diffusion_llada",
         directory=sglang_dir,
         script_name="diffusion_llada.sh",
-        # diffusion_llada.sh forwards "$@", so VRAM is bounded from the test
-        # (not the example default). --mem-fraction-static 0.4 is TOO LOW: the
-        # sglang scheduler OOMs at pool sizing ("Not enough memory. Please try
-        # to increase --mem-fraction-static") because LLaDA2.0-mini-preview
-        # weights + diffusion activation need a large absolute reservation.
-        # 0.7 boots cleanly; on the 80 GiB H100 lane that is ~56 GiB. This model
-        # far exceeds the 24 GiB gpu_1 lane, so it runs on the H100 lane
-        # (pytest.mark.h100, aws-dev-02 runner).
+        # diffusion_llada.sh forwards "$@", so the test bounds VRAM. 0.4 is too low
+        # (sglang scheduler OOMs at pool sizing); 0.7 boots (~56 GiB on the H100).
         script_args=["--mem-fraction-static", "0.7"],
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.h100,
-            # --mem-fraction-static 0.7 makes sglang reserve ~0.7*80 = 56 GiB on
-            # the H100. This is the reservation the VRAM-aware packer must budget
-            # (not the ~32 GiB transient peak), so co-packing another large test
-            # is correctly prevented.
+            # 0.7 reserves ~0.7*80 = 56 GiB on the H100; budget that, not the
+            # ~32 GiB transient peak, so the packer won't co-schedule.
             pytest.mark.profiled_vram_gib(56.0),
-            # Diffusion decoding is iterative; the 32-token H100 smoke runs ~135s
-            # (aws-dev-02, warm HF cache). ~4.4x headroom covers diffusion
-            # variance and a cold model pull without a 15-min hang window.
+            # 32-token H100 smoke runs ~135s; ~4.4x headroom for cold pulls.
             pytest.mark.timeout(600),
-            # Runs on the nightly H100 lane (sglang-h100-test in nightly-ci.yml),
-            # not PR/post-merge: the model needs >24 GiB so it can't use the
-            # standard gpu_1 lanes.
+            # >24 GiB model: nightly H100 lane only, not the gpu_1 lanes.
             pytest.mark.nightly,
         ],
         model="inclusionAI/LLaDA2.0-mini-preview",
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            # Diffusion text output is non-deterministic; accept any non-empty
-            # response (empty expected_response) and just exercise the path.
+            # Non-deterministic diffusion output: accept any non-empty response.
             chat_payload(
                 "What is the capital of France? Answer in one word.",
                 repeat_count=1,
                 expected_response=[],
-                # Keep the smoke tiny: diffusion decode cost scales with tokens.
+                # Small: diffusion decode cost scales with tokens.
                 max_tokens=32,
                 temperature=0.0,
             ),

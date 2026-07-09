@@ -423,8 +423,7 @@ jobs:
       dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: H100 Test
-      # 80 GiB H100 cluster (aws-dev-02); hosts sglang tests that exceed the
-      # 24 GiB gpu_1 lane (e.g. diffusion_llada / LLaDA2.0).
+      # 80 GiB H100 (aws-dev-02): sglang tests that exceed the 24 GiB gpu_1 lane.
       amd_runner: aws-dev-02-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
