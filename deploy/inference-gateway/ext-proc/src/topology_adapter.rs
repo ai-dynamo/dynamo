@@ -13,11 +13,13 @@
 //! to the [`Selector`], which owns the actual-vs-desired diff against its
 //! in-process catalog.
 //!
-//! The adapter owns `worker_id` generation (via the reflector's stable hash) and
-//! applies the same id everywhere, so each replica's catalog agrees.
+//! The adapter reuses the `worker_id` the reflector derives (a stable hash of the
+//! pod name) and applies the same id everywhere, so each replica's catalog agrees.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use tokio_util::sync::CancellationToken;
 
 use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::pod_discovery::{PodDiscovery, RawWorker};
@@ -39,7 +41,8 @@ impl RegistrationDefaults {
         Self {
             model_name: cfg.model_name.clone(),
             block_size: cfg.block_size,
-            data_parallel_size: cfg.data_parallel_size,
+            // Milestone 1 supports one aggregated worker rank per pod.
+            data_parallel_size: 1,
             total_kv_blocks: cfg.total_kv_blocks,
             max_num_batched_tokens: cfg.max_num_batched_tokens,
         }
@@ -47,31 +50,48 @@ impl RegistrationDefaults {
 }
 
 /// Background task that keeps the selector catalog in sync with the reflector.
+/// Dropping the adapter cancels the task so it stops promptly and releases its
+/// `Selector`/`PodDiscovery` handles.
 pub struct TopologyAdapter {
-    _task: tokio::task::JoinHandle<()>,
+    cancel: CancellationToken,
 }
 
 impl TopologyAdapter {
     /// Spawn the reconciliation loop. Performs an initial reconcile immediately,
     /// then re-reconciles whenever the reflector reports a pod change.
     pub fn spawn(
-        reflector: Arc<PodDiscovery>,
+        reflector: PodDiscovery,
         selector: Arc<Selector>,
         defaults: RegistrationDefaults,
     ) -> Self {
-        let task = tokio::spawn(async move {
+        let cancel = CancellationToken::new();
+        let cancel_child = cancel.clone();
+        tokio::spawn(async move {
             let mut pod_changes = reflector.subscribe_changes();
             loop {
                 reconcile_once(&reflector, selector.as_ref(), &defaults).await;
-                // Re-reconcile on a pod change. Exit if the pod-change sender
-                // drops (reflector gone).
-                if pod_changes.changed().await.is_err() {
-                    tracing::warn!("Reflector change channel closed; topology adapter stopping");
-                    break;
+                tokio::select! {
+                    _ = cancel_child.cancelled() => break,
+                    // Re-reconcile on a pod change. Exit if the sender drops
+                    // (reflector gone).
+                    changed = pod_changes.changed() => {
+                        if changed.is_err() {
+                            tracing::warn!(
+                                "Reflector change channel closed; topology adapter stopping"
+                            );
+                            break;
+                        }
+                    }
                 }
             }
         });
-        Self { _task: task }
+        Self { cancel }
+    }
+}
+
+impl Drop for TopologyAdapter {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
@@ -84,7 +104,7 @@ async fn reconcile_once(
 ) {
     let desired: HashMap<u64, WorkerRegistration> = reflector
         .ready_workers()
-        .iter()
+        .into_iter()
         .map(|w| (w.worker_id, build_registration(w, defaults)))
         .collect();
 
@@ -93,23 +113,25 @@ async fn reconcile_once(
     }
 }
 
-/// Normalize a discovered worker into a selector registration payload.
-fn build_registration(w: &RawWorker, defaults: &RegistrationDefaults) -> WorkerRegistration {
+/// Normalize a discovered worker into a selector registration payload. Consumes
+/// the worker so its endpoint strings move into the registration instead of
+/// being cloned.
+fn build_registration(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRegistration {
     // Aggregated V1: a single dp_rank 0 maps to the pod's KV-event PUB socket.
     let mut kv_events_endpoints = HashMap::new();
-    kv_events_endpoints.insert(0u32, w.kv_events_endpoint.clone());
+    kv_events_endpoints.insert(0u32, w.kv_events_endpoint);
 
     WorkerRegistration {
         worker_id: w.worker_id,
         model_name: defaults.model_name.clone(),
-        endpoint: w.http_endpoint.clone(),
+        endpoint: w.http_endpoint,
         block_size: defaults.block_size,
         data_parallel_size: defaults.data_parallel_size,
         kv_events_endpoints,
-        replay_endpoint: w.replay_endpoint.clone(),
+        replay_endpoint: w.replay_endpoint,
         total_kv_blocks: defaults.total_kv_blocks,
         max_num_batched_tokens: defaults.max_num_batched_tokens,
-        stable_routing_id: Some(w.stable_routing_id.clone()),
+        stable_routing_id: Some(w.stable_routing_id),
     }
 }
 
@@ -141,7 +163,7 @@ mod tests {
 
     #[test]
     fn registration_maps_env_and_endpoints() {
-        let reg = build_registration(&worker(7, "10.0.0.1"), &defaults());
+        let reg = build_registration(worker(7, "10.0.0.1"), &defaults());
         assert_eq!(reg.worker_id, 7);
         assert_eq!(reg.model_name, "Qwen/Qwen3-0.6B");
         assert_eq!(reg.endpoint, "http://10.0.0.1:8000");
