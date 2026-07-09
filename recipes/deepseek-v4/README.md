@@ -23,7 +23,7 @@ workers in the disaggregated variants, so those are listed as `prefill / decode`
 | `deepseek-v4-pro/vllm/disagg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Pro` | 32× H200 (1P·3D) | TP8+EP / TP8+EP | MARLIN | none | 86,016 ¹ | NIXL GDR ² |
 | `deepseek-v4-flash/vllm/agg-b200-agentic` | `nvidia/DeepSeek-V4-Flash-NVFP4` | 4× B200 | TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | — |
 | `deepseek-v4-flash/vllm/agg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Flash` | 4× H200 | DP4 + TP1 + EP | MARLIN (FLASHINFER_MLA attn) | MTP-1 | 1,048,576 | — |
-| `deepseek-v4-flash/vllm/disagg-b200-agentic` | `nvidia/DeepSeek-V4-Flash-NVFP4` | 8× B200 | TP4 / TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | NIXL GDR |
+| `deepseek-v4-flash/vllm/disagg-b200-agentic` | `nvidia/DeepSeek-V4-Flash-NVFP4` | 24× B200 (4P·2D) | TP4 / TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | NIXL GDR |
 | `deepseek-v4-flash/vllm/disagg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Flash` | 28× H200 (4P·3D) | DP4+TP1+EP / DP4+TP1+EP | MARLIN (FLASHINFER_MLA attn) | none / MTP-1 | 1,048,576 | NIXL GDR ² |
 
 Common to all: FP8 KV cache, block size 256, KV-aware routing, prefix caching. B200 variants
@@ -58,9 +58,9 @@ Variant keys match the [Configurations](#configurations) table (`${MODEL}/vllm/$
 | `deepseek-v4-pro/vllm/agg-h200-agentic` | Agentic | 8 | 53.2 | 45.9 |
 | `deepseek-v4-pro/vllm/disagg-h200-agentic` | Agentic | 32 | 50.5 | 43.9 |
 | `deepseek-v4-flash/vllm/agg-b200-agentic` | Agentic | 38 | 50.6 | 362.1 |
-| `deepseek-v4-flash/vllm/disagg-b200-agentic` | Agentic | 72 | 70.1 | 340.8 |
+| `deepseek-v4-flash/vllm/disagg-b200-agentic` | Agentic | 320 | 50.0 | 388.3 |
 | `deepseek-v4-flash/vllm/agg-h200-agentic` | Agentic | 16 | 50.7 | 145.4 |
-| `deepseek-v4-flash/vllm/disagg-h200-agentic` | Agentic | 128 | 55.3 | 213.3 |
+| `deepseek-v4-flash/vllm/disagg-h200-agentic` | Agentic | 128 | 51.8 | 201.9 |
 
 **AGG figures are single-replica floor-picks** (best tok/s/GPU at user_p50 ≥ 50). AGG scales by deploying
 independent replicas; KV-routed *multi*-replica AGG does **not** improve per-GPU throughput — see
@@ -69,8 +69,10 @@ independent replicas; KV-routed *multi*-replica AGG does **not** improve per-GPU
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
-2. **GPU cluster** matching the variant (8× B200 / 8× H200 for aggregated; 16× / 8× for 1P1D
-   disaggregated), nodes labeled `nvidia.com/gpu.product=NVIDIA-B200` or `NVIDIA-H200`.
+2. **GPU cluster** matching the variant (8× B200 / 8× H200 for aggregated; 16–32× for
+   disaggregated — see the [Configurations](#configurations) table for each shape's exact GPU count,
+   e.g. Flash B200 4P·2D = 24×, Flash H200 4P·3D = 28×), nodes labeled
+   `nvidia.com/gpu.product=NVIDIA-B200` or `NVIDIA-H200`.
 3. **HuggingFace token** with access to the checkpoints you deploy:
    ```bash
    export NAMESPACE=your-namespace
