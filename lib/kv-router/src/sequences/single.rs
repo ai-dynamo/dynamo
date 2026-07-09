@@ -20,7 +20,6 @@
 
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -28,7 +27,7 @@ use uuid::Uuid;
 #[cfg(test)]
 use rustc_hash::FxHashSet;
 
-use super::block_tracker::BlockTracker;
+use super::block_tracker::{BlockTracker, RequestBlockChain};
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::protocols::PrefillLoadHint;
@@ -45,16 +44,9 @@ pub type RequestId = String;
 
 #[derive(Debug)]
 pub(super) struct RequestState {
-    prompt_blocks: Vec<(SequenceHash, Arc<()>)>,
-    output_blocks: Vec<(SequenceHash, Arc<()>)>,
+    blocks: RequestBlockChain,
     started_at: Instant,
     expected_output_tokens: Option<u32>,
-}
-
-impl RequestState {
-    fn all_blocks(&self) -> impl Iterator<Item = &(SequenceHash, Arc<()>)> {
-        self.prompt_blocks.iter().chain(self.output_blocks.iter())
-    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -143,11 +135,14 @@ impl ActiveSequences {
             "prefill tracker cannot reference missing request state",
         );
         assert!(
-            self.blocks
-                .fractional_blocks
-                .keys()
-                .all(|hash| self.blocks.unique_blocks.contains_key(hash)),
+            self.blocks.fractional_hashes_are_active(),
             "fractional_blocks cannot reference non-active blocks",
+        );
+        assert!(
+            self.requests
+                .values()
+                .all(|state| self.blocks.contains_chain(&state.blocks)),
+            "request block chain cannot reference an unindexed block",
         );
     }
 
@@ -185,41 +180,22 @@ impl ActiveSequences {
         let mut outcome = self.force_expiry();
         let started_at = Instant::now();
 
-        let prompt_blocks = match token_sequence {
-            Some(sequence) => {
-                let mut first_new_prompt_idx = None;
-                let prompt_blocks: Vec<_> = sequence
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, block)| {
-                        let acquire = self.blocks.touch_block(&block);
-                        if acquire.became_present_on_worker && first_new_prompt_idx.is_none() {
-                            first_new_prompt_idx = Some(idx);
-                        }
-                        (block, acquire.rc)
-                    })
-                    .collect();
+        let prompt_hashes = token_sequence.unwrap_or_default();
+        let (blocks, first_new_prompt_idx) = self.blocks.acquire_prompt(&prompt_hashes);
 
-                if let Some(first_new_prompt_idx) = first_new_prompt_idx {
-                    debug_assert!(
-                        prompt_blocks[first_new_prompt_idx..]
-                            .iter()
-                            .all(|(hash, _)| self.blocks.unique_blocks.contains_key(hash))
-                    );
-                    let parent = first_new_prompt_idx
-                        .checked_sub(1)
-                        .map(|idx| prompt_blocks[idx].0);
-                    let hashes = prompt_blocks[first_new_prompt_idx..]
-                        .iter()
-                        .map(|(hash, _)| *hash)
-                        .collect();
-                    outcome.membership_delta.push_store(parent, hashes);
-                }
-
-                prompt_blocks
-            }
-            None => Vec::new(),
-        };
+        if let Some(first_new_prompt_idx) = first_new_prompt_idx {
+            debug_assert!(
+                prompt_hashes[first_new_prompt_idx..]
+                    .iter()
+                    .all(|hash| self.blocks.contains_block(hash))
+            );
+            let parent = first_new_prompt_idx
+                .checked_sub(1)
+                .map(|idx| prompt_hashes[idx]);
+            outcome
+                .membership_delta
+                .push_store(parent, prompt_hashes[first_new_prompt_idx..].to_vec());
+        }
 
         let prefill = if track_prefill_tokens {
             prefill_load_hint.and_then(|hint| {
@@ -235,8 +211,7 @@ impl ActiveSequences {
         self.requests.insert(
             request_id.clone(),
             RequestState {
-                prompt_blocks,
-                output_blocks: Vec::new(),
+                blocks,
                 started_at,
                 expected_output_tokens,
             },
@@ -272,22 +247,14 @@ impl ActiveSequences {
             return PromptMembershipDelta::default();
         };
 
-        let _ = request_state.expected_output_tokens;
+        let RequestState {
+            blocks,
+            expected_output_tokens,
+            ..
+        } = request_state;
+        let _ = expected_output_tokens;
         let mut membership_delta = PromptMembershipDelta::default();
-        let mut prompt_remove = Vec::new();
-
-        for (block_hash, rc) in request_state.prompt_blocks {
-            drop(rc);
-            if self.blocks.try_remove_block(&block_hash) || !prompt_remove.is_empty() {
-                prompt_remove.push(block_hash);
-            }
-        }
-        membership_delta.push_remove(prompt_remove);
-
-        for (block_hash, rc) in request_state.output_blocks {
-            drop(rc);
-            self.blocks.try_remove_block(&block_hash);
-        }
+        membership_delta.push_remove(self.blocks.release(blocks));
 
         self.validate_state();
         membership_delta
@@ -301,27 +268,24 @@ impl ActiveSequences {
         request_id: &RequestId,
         decay_fraction: Option<f64>,
     ) -> Option<SequenceHash> {
-        if !self.requests.contains_key(request_id) {
+        let Some(request_state) = self.requests.get_mut(request_id) else {
             tracing::warn!("Request {request_id} not found for add_output_block");
             return None;
-        }
+        };
 
         // TODO: Output blocks still use random hashes, so indexing them mainly simplifies
         // generic block bookkeeping and usually adds little real reuse signal.
         let random_hash: SequenceHash = Uuid::new_v4().as_u64_pair().0;
-        let acquire = self.blocks.touch_block(&random_hash);
-        self.requests
-            .get_mut(request_id)
-            .expect("request existence was checked above")
-            .output_blocks
-            .push((random_hash, acquire.rc));
+        self.blocks
+            .append_output(&mut request_state.blocks, random_hash);
 
         if let Some(frac) = decay_fraction {
-            self.set_single_ref_blocks_as_fractional(request_id, frac);
+            self.blocks
+                .set_unique_suffix_fractional(&request_state.blocks, frac);
         }
 
         self.validate_state();
-        acquire.became_present_on_worker.then_some(random_hash)
+        Some(random_hash)
     }
 
     /// Force expiry of stale requests if the timer has elapsed.
@@ -359,23 +323,6 @@ impl ActiveSequences {
         outcome
     }
 
-    /// Find all blocks in a request that have only a single strong reference (only used by this request)
-    /// and insert them into fractional_blocks with the given fraction value.
-    fn set_single_ref_blocks_as_fractional(&mut self, request_id: &RequestId, fraction: f64) {
-        let Some(request_state) = self.requests.get(request_id) else {
-            tracing::warn!(
-                "Request {request_id} not found for set_single_ref_blocks_as_fractional"
-            );
-            return;
-        };
-
-        for (hash, rc) in request_state.all_blocks() {
-            if Arc::strong_count(rc) == 1 {
-                self.blocks.fractional_blocks.insert(*hash, fraction);
-            }
-        }
-    }
-
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
@@ -386,14 +333,14 @@ impl ActiveSequences {
 
     #[cfg(test)]
     pub(super) fn active_block_hashes(&self) -> FxHashSet<SequenceHash> {
-        self.blocks.unique_blocks.keys().copied().collect()
+        self.blocks.active_hashes().collect()
     }
 
     #[cfg(test)]
     pub(super) fn active_prompt_hashes(&self) -> FxHashSet<SequenceHash> {
         self.requests
             .values()
-            .flat_map(|state| state.prompt_blocks.iter().map(|(hash, _)| *hash))
+            .flat_map(|state| state.blocks.prompt_hashes())
             .collect()
     }
 }
@@ -415,6 +362,12 @@ mod tests {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: None,
         })
+    }
+
+    #[test]
+    fn active_sequences_remains_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ActiveSequences>();
     }
 
     #[test]
@@ -543,7 +496,7 @@ mod tests {
 
         seq_manager.add_request_with_prefill_tracking(
             "request_2".to_string(),
-            Some(vec![4]),
+            Some(vec![5]),
             None,
             true,
             tracking_hint(4),
@@ -560,7 +513,7 @@ mod tests {
             tracking_hint(0),
             decay_now,
         );
-        assert_eq!(seq_manager.active_blocks(), 4);
+        assert_eq!(seq_manager.active_blocks(), 5);
         assert_eq!(seq_manager.active_tokens(decay_now), 16);
 
         seq_manager.free(&"request_2".to_string(), decay_now);
