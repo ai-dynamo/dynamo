@@ -1,0 +1,237 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Valkey router module
+
+on:
+  pull_request:
+    paths:
+      - "lib/kv-router/valkey-module/**"
+      - "lib/kv-router/src/scheduling/config.rs"
+      - "lib/kv-router/src/scheduling/valkey_config.rs"
+      - "lib/llm/build.rs"
+      - "lib/llm/src/kv_router.rs"
+      - "lib/llm/src/kv_router/**"
+      - "lib/llm/src/entrypoint.rs"
+      - "lib/llm/src/model_card.rs"
+      - "lib/llm/src/preprocessor.rs"
+      - "lib/llm/src/tokenizer_cache/**"
+      - "lib/llm/src/tokenizer_cache.rs"
+      - "lib/llm/tests/preprocessor.rs"
+      - "lib/llm/src/router_valkey_config.rs"
+      - "lib/llm/src/valkey_transport.rs"
+      - "lib/backend-common/src/publisher.rs"
+      - "lib/backend-common/src/worker.rs"
+      - "lib/bindings/python/rust/lib.rs"
+      - "lib/bindings/python/rust/llm/entrypoint.rs"
+      - "lib/bindings/python/rust/llm/entrypoint/tokenizer_cache.rs"
+      - "lib/bindings/python/rust/llm/kv.rs"
+      - "lib/bindings/python/src/dynamo/_core.pyi"
+      - "components/src/dynamo/frontend/main.py"
+      - "components/src/dynamo/frontend/frontend_args.py"
+      - "components/src/dynamo/vllm/main.py"
+      - "components/src/dynamo/vllm/handlers.py"
+      - "components/src/dynamo/vllm/valkey_startup.py"
+      - "components/src/dynamo/vllm/worker_factory.py"
+      - "components/src/dynamo/vllm/tests/test_valkey_startup.py"
+      - "components/src/dynamo/vllm/tests/test_vllm_unit.py"
+      - "components/src/dynamo/vllm/tests/test_vllm_worker_factory.py"
+      - "components/src/dynamo/common/configuration/router_valkey_config.py"
+      - "components/src/dynamo/common/configuration/groups/kv_router_args.py"
+      - "components/src/dynamo/common/configuration/groups/runtime_args.py"
+      - "components/src/dynamo/common/tests/configuration/test_router_valkey_config.py"
+      - "lib/runtime/src/config/environment_names.rs"
+      - "lib/runtime/src/discovery/mod.rs"
+      - "tests/router/router_process.py"
+      - "tests/router/test_router_process_ha.py"
+      - "tests/router/test_router_valkey_e2e.py"
+      - "tests/router/valkey_e2e_helpers.py"
+      - "tests/router/valkey_e2e_scenarios.py"
+      - "benchmarks/router/valkey_saturation/**"
+      - "benchmarks/router/valkey_module_saturation.py"
+      - "benchmarks/router/valkey_aiperf/**"
+      - "docs/design-docs/valkey-ha-router.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "lib/llm/Cargo.toml"
+      - "lib/kv-router/Cargo.toml"
+      - "lib/backend-common/Cargo.toml"
+      - "lib/bindings/python/Cargo.toml"
+      - ".github/workflows/valkey-module.yml"
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+    paths:
+      - "lib/kv-router/valkey-module/**"
+      - "lib/kv-router/src/scheduling/config.rs"
+      - "lib/kv-router/src/scheduling/valkey_config.rs"
+      - "lib/llm/build.rs"
+      - "lib/llm/src/kv_router.rs"
+      - "lib/llm/src/kv_router/**"
+      - "lib/llm/src/entrypoint.rs"
+      - "lib/llm/src/model_card.rs"
+      - "lib/llm/src/preprocessor.rs"
+      - "lib/llm/src/tokenizer_cache/**"
+      - "lib/llm/src/tokenizer_cache.rs"
+      - "lib/llm/tests/preprocessor.rs"
+      - "lib/llm/src/router_valkey_config.rs"
+      - "lib/llm/src/valkey_transport.rs"
+      - "lib/backend-common/src/publisher.rs"
+      - "lib/backend-common/src/worker.rs"
+      - "lib/bindings/python/rust/lib.rs"
+      - "lib/bindings/python/rust/llm/entrypoint.rs"
+      - "lib/bindings/python/rust/llm/entrypoint/tokenizer_cache.rs"
+      - "lib/bindings/python/rust/llm/kv.rs"
+      - "lib/bindings/python/src/dynamo/_core.pyi"
+      - "components/src/dynamo/frontend/main.py"
+      - "components/src/dynamo/frontend/frontend_args.py"
+      - "components/src/dynamo/vllm/main.py"
+      - "components/src/dynamo/vllm/handlers.py"
+      - "components/src/dynamo/vllm/valkey_startup.py"
+      - "components/src/dynamo/vllm/worker_factory.py"
+      - "components/src/dynamo/vllm/tests/test_valkey_startup.py"
+      - "components/src/dynamo/vllm/tests/test_vllm_unit.py"
+      - "components/src/dynamo/vllm/tests/test_vllm_worker_factory.py"
+      - "components/src/dynamo/common/configuration/router_valkey_config.py"
+      - "components/src/dynamo/common/configuration/groups/kv_router_args.py"
+      - "components/src/dynamo/common/configuration/groups/runtime_args.py"
+      - "components/src/dynamo/common/tests/configuration/test_router_valkey_config.py"
+      - "lib/runtime/src/config/environment_names.rs"
+      - "lib/runtime/src/discovery/mod.rs"
+      - "tests/router/router_process.py"
+      - "tests/router/test_router_process_ha.py"
+      - "tests/router/test_router_valkey_e2e.py"
+      - "tests/router/valkey_e2e_helpers.py"
+      - "tests/router/valkey_e2e_scenarios.py"
+      - "benchmarks/router/valkey_saturation/**"
+      - "benchmarks/router/valkey_module_saturation.py"
+      - "benchmarks/router/valkey_aiperf/**"
+      - "docs/design-docs/valkey-ha-router.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "lib/llm/Cargo.toml"
+      - "lib/kv-router/Cargo.toml"
+      - "lib/backend-common/Cargo.toml"
+      - "lib/bindings/python/Cargo.toml"
+      - ".github/workflows/valkey-module.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout Dynamo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Checkout pinned Valkey
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: valkey-io/valkey
+          ref: fea0b4064cf612d1c365b032326832bff0946bd9 # Valkey 8.0.8
+          path: .ci/valkey
+
+      - name: Build Valkey server
+        run: make -C .ci/valkey -j2 BUILD_TLS=no
+
+      - name: Build and test Dynamo module
+        run: |
+          make -C lib/kv-router/valkey-module clean all test \
+            VALKEY_SRC="$GITHUB_WORKSPACE/.ci/valkey/src"
+
+      - name: Exercise 1K-worker shared-prefix matching
+        run: |
+          python3 benchmarks/router/valkey_module_saturation.py \
+            --server "$GITHUB_WORKSPACE/.ci/valkey/src/valkey-server" \
+            --module "$GITHUB_WORKSPACE/lib/kv-router/valkey-module/dynkv.so" \
+            --preset worker-scale \
+            --mode match \
+            --events 256 \
+            --connections 4 \
+            --pipeline 8 \
+            --query-blocks 16 \
+            --output "$RUNNER_TEMP/worker-scale.json"
+
+      - name: Run module suite under UBSan
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          make -C lib/kv-router/valkey-module clean all test \
+            SANITIZE=undefined \
+            VALKEY_SRC="$GITHUB_WORKSPACE/.ci/valkey/src"
+
+      - name: Run live tokenizer cache and Valkey client tests
+        env:
+          DYN_TOKENIZER_CACHE_TEST_URL: valkey://127.0.0.1:16389
+        run: |
+          data_dir="$(mktemp -d)"
+          trap '.ci/valkey/src/valkey-cli -p 16389 shutdown nosave >/dev/null 2>&1 || true; rm -rf "$data_dir"' EXIT
+          .ci/valkey/src/valkey-server \
+            --port 16389 \
+            --bind 127.0.0.1 \
+            --protected-mode no \
+            --save '' \
+            --appendonly no \
+            --dir "$data_dir" \
+            --daemonize yes
+          cargo test -p dynamo-llm \
+            tokenizer_cache::tests::live_valkey_shares_a_large_growing_prefix_between_frontends \
+            --lib -- --ignored --exact
+          cargo test -p dynamo-llm tokenizer_cache::tests --lib
+          cargo test -p dynamo-llm valkey_transport::tests --lib
+          cargo test -p dynamo-llm --test preprocessor \
+            tokenizer_l2_is_used_by_separate_preprocessor_instances_for_a_growing_chat \
+            -- --ignored --exact
+          cargo test -p dynamo-llm kv_router::indexer::valkey --lib
+          cargo test -p dynamo-llm kv_router::publisher --lib
+
+      - name: Require three-Sentinel quorum process coverage
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Run three-Sentinel process test
+        env:
+          VALKEY_SERVER: ${{ github.workspace }}/.ci/valkey/src/valkey-server
+          VALKEY_CLI: ${{ github.workspace }}/.ci/valkey/src/valkey-cli
+        run: |
+          python -m pip install "pytest==9.0.2" "psutil==7.2.2" "requests==2.32.5"
+          python -m pytest tests/router/test_router_process_ha.py \
+            --confcutdir=tests/router -o addopts='' -q
+
+      - name: Build editable Dynamo for required router E2E
+        run: |
+          python -m pip install "uv==0.11.7"
+          uv venv .ci/venv --python 3.12
+          uv pip install --python .ci/venv/bin/python \
+            "maturin==1.14.1" \
+            "patchelf==0.17.2.4"
+          VIRTUAL_ENV="$GITHUB_WORKSPACE/.ci/venv" \
+            .ci/venv/bin/maturin develop \
+              --manifest-path lib/bindings/python/Cargo.toml \
+              --uv
+          uv pip install --python .ci/venv/bin/python \
+            --editable '.[mocker]' \
+            "pytest==9.0.2" \
+            "pytest-timeout==2.4.0"
+
+      - name: Run Python Valkey configuration and startup tests
+        run: |
+          .ci/venv/bin/python -m pytest \
+            components/src/dynamo/common/tests/configuration/test_router_valkey_config.py \
+            components/src/dynamo/vllm/tests/test_valkey_startup.py \
+            -o addopts='' -q
+
+      - name: Require router and tokenizer failover plus three-frontend routing
+        env:
+          VALKEY_SERVER: ${{ github.workspace }}/.ci/valkey/src/valkey-server
+          DYNKV_MODULE: ${{ github.workspace }}/lib/kv-router/valkey-module/dynkv.so
+          ROUTER_MODEL_NAME: ${{ github.workspace }}/lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct
+        run: |
+          .ci/venv/bin/python -m pytest \
+            tests/router/test_router_valkey_e2e.py::test_mocker_valkey_planned_primary_failover \
+            tests/router/test_router_valkey_e2e.py::test_mocker_valkey_three_frontends \
+            -o addopts='' -q
