@@ -2298,6 +2298,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           2,
 						UpdatedReplicas:    2,
 						ReadyReplicas:      2,
+						ScheduledReplicas:  2,
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -2308,11 +2309,12 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: "All resources are ready",
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-frontend"},
-						Replicas:        2,
-						UpdatedReplicas: 2,
-						ReadyReplicas:   ptr.To(int32(2)),
+						ComponentKind:     v1beta1.ComponentKindPodClique,
+						ComponentNames:    []string{"test-dgd-0-frontend"},
+						Replicas:          2,
+						UpdatedReplicas:   2,
+						ReadyReplicas:     ptr.To(int32(2)),
+						ScheduledReplicas: ptr.To(int32(2)),
 					},
 				},
 			},
@@ -2345,6 +2347,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           1,
 						UpdatedReplicas:    1,
 						ReadyReplicas:      1,
+						ScheduledReplicas:  1,
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -2360,6 +2363,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           2,
 						UpdatedReplicas:    1,
 						ReadyReplicas:      1, // Only 1 ready, but 2 desired
+						ScheduledReplicas:  2, // both scheduled; rollout in progress
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -2370,18 +2374,20 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: Message("Resources not ready: test-dgd: decode: desired=2, updated=1"),
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-frontend"},
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   ptr.To(int32(1)),
+						ComponentKind:     v1beta1.ComponentKindPodClique,
+						ComponentNames:    []string{"test-dgd-0-frontend"},
+						Replicas:          1,
+						UpdatedReplicas:   1,
+						ReadyReplicas:     ptr.To(int32(1)),
+						ScheduledReplicas: ptr.To(int32(1)),
 					},
 					"decode": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-decode"},
-						Replicas:        2,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   ptr.To(int32(1)),
+						ComponentKind:     v1beta1.ComponentKindPodClique,
+						ComponentNames:    []string{"test-dgd-0-decode"},
+						Replicas:          2,
+						UpdatedReplicas:   1,
+						ReadyReplicas:     ptr.To(int32(1)),
+						ScheduledReplicas: ptr.To(int32(2)),
 					},
 				},
 			},
@@ -2420,6 +2426,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           1,
 						UpdatedReplicas:    1,
 						AvailableReplicas:  1,
+						ScheduledReplicas:  1,
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -2435,6 +2442,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           1,
 						UpdatedReplicas:    1,
 						AvailableReplicas:  1,
+						ScheduledReplicas:  1,
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -2450,6 +2458,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
+						ScheduledReplicas: ptr.To(int32(1)),
 					},
 					"prefill": {
 						ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
@@ -2457,6 +2466,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:          1,
 						UpdatedReplicas:   1,
 						AvailableReplicas: ptr.To(int32(1)),
+						ScheduledReplicas: ptr.To(int32(1)),
 					},
 				},
 			},
@@ -2492,6 +2502,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           1,
 						UpdatedReplicas:    1,
 						ReadyReplicas:      1,
+						ScheduledReplicas:  1,
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -2507,6 +2518,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:           2,
 						UpdatedReplicas:    2,
 						AvailableReplicas:  1, // Only 1 available, but 2 desired
+						ScheduledReplicas:  2, // both scheduled; availability (not scheduling) is the shortfall
 						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
@@ -2517,11 +2529,12 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Message: Message("Resources not ready: test-dgd: aggregated: scheduled but available=1/2"),
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
-						ComponentKind:   v1beta1.ComponentKindPodClique,
-						ComponentNames:  []string{"test-dgd-0-frontend"},
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   ptr.To(int32(1)),
+						ComponentKind:     v1beta1.ComponentKindPodClique,
+						ComponentNames:    []string{"test-dgd-0-frontend"},
+						Replicas:          1,
+						UpdatedReplicas:   1,
+						ReadyReplicas:     ptr.To(int32(1)),
+						ScheduledReplicas: ptr.To(int32(1)),
 					},
 					"aggregated": {
 						ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
@@ -2529,6 +2542,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						AvailableReplicas: ptr.To(int32(1)),
+						ScheduledReplicas: ptr.To(int32(2)),
 					},
 				},
 			},
@@ -2557,7 +2571,6 @@ func Test_reconcileGroveResources(t *testing.T) {
 				WithScheme(s).
 				WithObjects(objects...).
 				WithStatusSubresource(objects...).
-				WithInterceptorFuncs(tt.interceptorFuncs).
 				Build()
 
 			recorder := record.NewFakeRecorder(100)

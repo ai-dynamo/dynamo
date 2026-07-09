@@ -213,9 +213,7 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), serviceStatus, v1beta1.DGDReadyReasonSomeResourcesNotReady
 	}
 
-	if !(scheduledReplicas == 0 && replicas > 0) {
-		serviceStatus.ScheduledReplicas = &scheduledReplicas
-	}
+	serviceStatus.ScheduledReplicas = &scheduledReplicas
 
 	if desiredReplicas == 0 {
 		return true, "", serviceStatus, ""
@@ -232,14 +230,6 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 	//   1. scheduleGatedReplicas > 0            (explicit gated count)
 	//   2. PodCliqueScheduled condition = False  (explicit scheduling signal)
 	//   3. 0 < scheduledReplicas < desired       (genuine partial scheduling)
-	// Grove defaults scheduledReplicas to 0 (non-pointer field), so a 0 is
-	// ambiguous between "genuinely nothing scheduled" and "field not populated",
-	// and is additionally 0 transiently during early rollout. Comparing a 0
-	// would misclassify ordinary rollout/readiness churn as InsufficientCapacity.
-	// The trade-off: a *total* scheduling failure (scheduled == 0 of N) cannot be
-	// distinguished from the default and is not caught here — it will instead be
-	// reported via case 1 or case 2, if Grove sets them, or fall through
-	// to Updating/PodsNotReady otherwise.
 	if scheduleGatedReplicas > 0 {
 		logger.V(1).Info("PodClique has schedule-gated replicas", "resourceName", resourceName, "scheduleGated", scheduleGatedReplicas)
 		return false, fmt.Sprintf("schedule-gated replicas: %d", scheduleGatedReplicas), serviceStatus, v1beta1.DGDReadyReasonInsufficientCapacity
@@ -323,9 +313,7 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), serviceStatus, v1beta1.DGDReadyReasonSomeResourcesNotReady
 	}
 
-	if !(scheduledReplicas == 0 && replicas > 0) {
-		serviceStatus.ScheduledReplicas = &scheduledReplicas
-	}
+	serviceStatus.ScheduledReplicas = &scheduledReplicas
 
 	if desiredReplicas == 0 {
 		// No replicas desired, so it's ready
