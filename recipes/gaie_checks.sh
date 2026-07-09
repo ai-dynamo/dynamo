@@ -50,7 +50,6 @@ GAIE_CRDS=(
   inferenceobjectives.inference.networking.x-k8s.io
   inferencepoolimports.inference.networking.x-k8s.io
   inferencepools.inference.networking.k8s.io
-  inferencepools.inference.networking.x-k8s.io
 )
 
 info "Checking GAIE (Inference Extension) CRDs…"
