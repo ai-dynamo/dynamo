@@ -34,7 +34,7 @@ trap 'kill "$MOCKER_PID" 2>/dev/null || true; rm -rf "$DYN_FILE_KV"' EXIT
 echo "Starting frontend on CPU core 0 with tokenizer cache ${1}"
 DYN_TOKENIZER=fastokens \
 DYN_TOKENIZER_CACHE="$TOKENIZER_CACHE" \
-DYN_TOKENIZER_CACHE_BYTES=1073741824 \
+DYN_TOKENIZER_CACHE_BYTES=8589934592 \
 taskset -c 0 python -m dynamo.frontend \
     --discovery-backend file \
     --request-plane tcp \

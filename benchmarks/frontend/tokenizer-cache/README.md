@@ -42,7 +42,7 @@ Compare the two AIPerf summaries written under
 
 - Frontend: CPU 0, fastokens, round-robin routing.
 - Tokenizer cache: explicitly disabled with `DYN_TOKENIZER_CACHE=0`, or enabled
-  with `DYN_TOKENIZER_CACHE=1` and a 1 GiB budget.
+  with `DYN_TOKENIZER_CACHE=1` and an 8 GiB budget.
 - Mockers: four workers on every CPU except CPU 0, with a 1,000,000x speedup
   ratio and a 1,024-token KV-cache block size.
 - Discovery and transport: file discovery, TCP requests, and ZMQ events.
@@ -52,11 +52,6 @@ Compare the two AIPerf summaries written under
   32 warmup requests, 120 measured seconds, and a 90-second grace period.
 - AIPerf: `cquil11/aiperf` pinned to commit
   `8473e1545476c1d91932aa2402b642b416a23df6`.
-
-On the original host, enabling the cache increased request throughput from
-105.97 to 163.14 requests/second (+53.9%) and input-token throughput from
-8.32M to 14.08M tokens/second (+69.2%). Treat these as reference results;
-compare cache off and on on the same otherwise-idle host.
 
 AIPerf reconstructs and memory-maps the AgentX dataset. Ensure the host has
 enough available memory before starting the benchmark.
