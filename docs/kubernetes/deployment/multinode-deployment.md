@@ -230,14 +230,14 @@ For vLLM multinode deployments, the operator automatically selects and configure
 
 For multi-node tensor/pipeline parallelism, **the `mp` (multiprocessing) backend is the recommended approach**.
 
-**When used**: When `world_size > GPUs_per_node` where `world_size = tensor_parallel_size × pipeline_parallel_size`
+**When used**: Multi-node TP/PP deployments (`world_size > GPUs_per_node`). DGDs created by operator ≥ 1.0.0 use `mp` by default; pre-upgrade DGDs without an origin annotation remain on `ray`. Override with the `nvidia.com/vllm-distributed-executor-backend` annotation.
 
 **All Nodes (Leader and Workers):**
 - **Injected Flags**:
   - `--nnodes <total-nodes>` - Total number of nodes in the deployment
   - `--node-rank <rank>` - Rank of this node (automatically determined)
   - `--master-addr <leader-hostname>` - Address of the leader node
-  - `--master-port 6379` - Port for synchronization
+  - `--master-port 29500` - Port for synchronization
   - `--distributed-executor-backend mp` - Use PyTorch multiprocessing backend
 - **Behavior**: Each node runs its own vLLM process with PyTorch's native distributed initialization
 - **Probes**: Worker probes are automatically adjusted; leader probes remain active
@@ -258,13 +258,13 @@ For multi-node tensor/pipeline parallelism, **the `mp` (multiprocessing) backend
 
 #### Ray Backend
 
-The Ray backend is available for use cases such as Elastic EP.
+**For Tensor/Pipeline Parallelism (TP/PP) with Ray:**
+- To request Ray for a DGD, set the annotation: `nvidia.com/vllm-distributed-executor-backend: ray`
 
-**To use Ray for multi-node deployments:**
+**For Elastic EP (Data Parallel with Ray):**
 1. Ensure Ray is installed in your container: `pip install "ray>=2.55.0"`
-2. Configure your vLLM launch with: `--distributed-executor-backend ray --data-parallel-backend ray`
-
-For an Elastic EP example that uses Ray, see [vLLM examples: Data Parallel / Expert Parallelism](../../backends/vllm/vllm-examples.md#data-parallel--expert-parallelism).
+2. Add `--data-parallel-backend ray` to your vLLM launch command.
+3. See [`examples/backends/vllm/launch/elastic_ep.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/elastic_ep.sh) for a complete example.
 
 
 The `mp` backend is the official recommendation and should be used for all new deployments.
