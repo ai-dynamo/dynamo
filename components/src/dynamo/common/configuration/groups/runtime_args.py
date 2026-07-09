@@ -20,6 +20,12 @@ _FPM_TRACE_VALUES = {"1", "0", "true", "false", "on", "off", "yes", "no"}
 _fpm_trace_invalid_warning_emitted = False
 
 
+def validate_event_plane(value: str) -> str:
+    if value not in {"nats", "zmq"}:
+        raise argparse.ArgumentTypeError("event-plane must be 'nats' or 'zmq'")
+    return value
+
+
 class DynamoRuntimeConfig(ConfigBase):
     """Configuration for Dynamo runtime (common across all backends)."""
 
@@ -152,9 +158,13 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
             default=None,
-            help="Determines how events are published. If unset, defaults to 'zmq' for "
-            "all discovery backends. Set to 'nats' to use a NATS-based event plane.",
+            help=(
+                "Determines how runtime events are published. If unset, defaults to "
+                "'zmq'. Direct KV publication to Valkey is configured independently "
+                "through --router-valkey-config."
+            ),
             choices=["nats", "zmq"],
+            arg_type=validate_event_plane,
         )
         add_negatable_bool_argument(
             g,

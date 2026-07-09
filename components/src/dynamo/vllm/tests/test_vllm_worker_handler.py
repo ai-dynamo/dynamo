@@ -147,6 +147,59 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
 
 
 @pytest.mark.asyncio
+async def test_valkey_shutdown_drains_publishers_before_unregister():
+    lifecycle: list[str] = []
+
+    async def drain_publisher(name: str) -> bool:
+        await asyncio.sleep(0)
+        lifecycle.append(name)
+        return True
+
+    def make_publisher(name: str) -> SimpleNamespace:
+        async def shutdown_and_wait() -> bool:
+            return await drain_publisher(name)
+
+        return SimpleNamespace(
+            shutdown_and_wait=AsyncMock(side_effect=shutdown_and_wait)
+        )
+
+    publishers = [make_publisher("publisher-0"), make_publisher("publisher-1")]
+
+    async def unregister() -> None:
+        lifecycle.append("registration")
+
+    registration = SimpleNamespace(shutdown=AsyncMock(side_effect=unregister))
+    handler = SimpleNamespace(
+        kv_publishers=publishers,
+        valkey_worker_registration=registration,
+    )
+
+    await mod.BaseWorkerHandler.shutdown_valkey_worker_registration(handler)
+
+    assert set(lifecycle[:2]) == {"publisher-0", "publisher-1"}
+    assert lifecycle[2:] == ["registration"]
+    assert handler.kv_publishers is None
+    assert handler.valkey_worker_registration is None
+
+
+@pytest.mark.asyncio
+async def test_valkey_shutdown_uses_lease_expiry_after_forced_publisher_stop():
+    publisher = SimpleNamespace(shutdown_and_wait=AsyncMock(return_value=False))
+    registration = SimpleNamespace(shutdown=AsyncMock())
+    handler = SimpleNamespace(
+        kv_publishers=[publisher],
+        valkey_worker_registration=registration,
+    )
+
+    await mod.BaseWorkerHandler.shutdown_valkey_worker_registration(handler)
+
+    publisher.shutdown_and_wait.assert_awaited_once_with()
+    registration.shutdown.assert_not_awaited()
+    assert handler.kv_publishers is None
+    assert handler.valkey_worker_registration is None
+
+
+@pytest.mark.asyncio
 async def test_clear_kv_blocks_resets_vllm_external_cache():
     handler = _make_handler()
     handler.engine_client = SimpleNamespace(

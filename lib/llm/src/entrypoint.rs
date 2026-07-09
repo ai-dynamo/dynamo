@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
     local_model::LocalModel, model_card::ModelDeploymentCard,
+    tokenizer_cache::TokenizerCacheConfig,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
@@ -45,6 +46,8 @@ pub type ChatEngineFactoryCallback = Arc<
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
+    #[serde(default)]
+    pub tokenizer_cache_config: TokenizerCacheConfig,
     /// Load threshold configuration for overload detection
     pub load_threshold_config: LoadThresholdConfig,
     /// Deprecated compatibility field. Routing and readiness ignore this value.
@@ -59,6 +62,7 @@ impl RouterConfig {
         Self {
             router_mode,
             kv_router_config,
+            tokenizer_cache_config: TokenizerCacheConfig::default(),
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
             session_affinity_ttl_secs: None,

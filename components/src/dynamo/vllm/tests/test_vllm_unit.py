@@ -15,7 +15,7 @@ import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -286,6 +286,83 @@ def test_uses_dynamo_connector_direct_and_nested():
     )
     assert _uses_dynamo_connector(_make_engine_cfg("NixlConnector")) is False
     assert _uses_dynamo_connector(_make_engine_cfg()) is False
+
+
+@pytest.mark.asyncio
+async def test_valkey_worker_registration_uses_complete_dp_range(monkeypatch):
+    from dynamo.vllm import main as main_module
+
+    registration = object()
+    create_from_env = AsyncMock(return_value=registration)
+    monkeypatch.setattr(
+        main_module,
+        "ValkeyWorkerRegistration",
+        SimpleNamespace(create_from_env=create_from_env),
+    )
+    monkeypatch.setattr(main_module, "get_dp_range_for_worker", lambda _config: (3, 2))
+    monkeypatch.setattr(
+        main_module,
+        "get_configured_kv_event_block_size",
+        lambda _config: 64,
+    )
+
+    endpoint = object()
+    config = SimpleNamespace(disaggregation_mode=DisaggregationMode.DECODE)
+    result = await main_module.setup_valkey_worker_registration(
+        config,
+        endpoint,
+        SimpleNamespace(),
+    )
+
+    assert result is registration
+    create_from_env.assert_awaited_once_with(
+        endpoint=endpoint,
+        kv_block_size=64,
+        dp_ranks=[3, 4],
+    )
+
+
+@pytest.mark.asyncio
+async def test_kv_publisher_setup_drains_first_rank_when_second_rank_fails(
+    monkeypatch,
+):
+    main_module = _load_vllm_main()
+    first_publisher = SimpleNamespace(shutdown_and_wait=AsyncMock(return_value=True))
+
+    def publisher_factory(**kwargs):
+        if kwargs["dp_rank"] == 1:
+            raise RuntimeError("injected second-rank publisher failure")
+        return first_publisher
+
+    monkeypatch.setattr(main_module, "KvEventPublisher", publisher_factory)
+    monkeypatch.setattr(main_module, "get_dp_range_for_worker", lambda _config: (0, 2))
+    monkeypatch.setattr(
+        main_module,
+        "get_configured_kv_event_block_size",
+        lambda _config: 64,
+    )
+    monkeypatch.setattr(main_module, "_resolve_image_token_id", lambda *_args: None)
+    config = SimpleNamespace(
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        enable_local_indexer=False,
+        engine_args=SimpleNamespace(
+            enable_prefix_caching=True,
+            kv_events_config=SimpleNamespace(
+                enable_kv_cache_events=True,
+                endpoint="tcp://127.0.0.1:5557",
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="injected second-rank"):
+        await main_module.setup_kv_event_publisher(
+            config,
+            object(),
+            SimpleNamespace(),
+            valkey_registration=object(),
+        )
+
+    first_publisher.shutdown_and_wait.assert_awaited_once_with()
 
 
 def test_headless_namespace_has_required_fields(mock_vllm_cli):

@@ -22,7 +22,14 @@ from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
-from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
+from dynamo.llm import (
+    KvEventPublisher,
+    ModelInput,
+    ModelType,
+    ValkeyWorkerRegistration,
+    WorkerType,
+    register_model,
+)
 from dynamo.runtime import DistributedRuntime
 
 from .args import Config
@@ -44,6 +51,7 @@ from .health_check import (
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
+from .valkey_startup import complete_valkey_startup
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +145,10 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
 
 
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
-SetupKvEventPublisherFn = Callable[..., Optional[Any]]
+SetupKvEventPublisherFn = Callable[..., Awaitable[Optional[list[KvEventPublisher]]]]
+SetupValkeyWorkerRegistrationFn = Callable[
+    ..., Awaitable[Optional[ValkeyWorkerRegistration]]
+]
 RegisterVllmModelFn = Callable[..., Awaitable[None]]
 SetupFpmRelayFn = Callable[..., Optional[list]]
 SetupMetricsCollectionFn = Callable[..., None]
@@ -150,15 +161,46 @@ class WorkerFactory:
         self,
         setup_vllm_engine_fn: SetupVllmEngineFn,
         setup_kv_event_publisher_fn: SetupKvEventPublisherFn,
+        setup_valkey_worker_registration_fn: SetupValkeyWorkerRegistrationFn,
         register_vllm_model_fn: RegisterVllmModelFn,
         setup_fpm_relay_fn: SetupFpmRelayFn,
         setup_metrics_collection_fn: SetupMetricsCollectionFn,
     ):
         self.setup_vllm_engine = setup_vllm_engine_fn
         self.setup_kv_event_publisher = setup_kv_event_publisher_fn
+        self.setup_valkey_worker_registration = setup_valkey_worker_registration_fn
         self.register_vllm_model = register_vllm_model_fn
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
+
+    async def _complete_valkey_startup(
+        self,
+        handler: BaseWorkerHandler,
+        config: Config,
+        generate_endpoint: Any,
+        vllm_config: VllmConfig,
+        *,
+        consolidator_enabled: bool,
+        consolidator_port: Optional[int],
+        register_model: Callable[[], Awaitable[None]],
+    ) -> None:
+        await complete_valkey_startup(
+            handler,
+            acquire_registration=lambda: self.setup_valkey_worker_registration(
+                config,
+                generate_endpoint,
+                vllm_config,
+            ),
+            start_publishers=lambda registration: self.setup_kv_event_publisher(
+                config,
+                generate_endpoint,
+                vllm_config,
+                consolidator_enabled=consolidator_enabled,
+                consolidator_port=consolidator_port,
+                valkey_registration=registration,
+            ),
+            register_model=register_model,
+        )
 
     async def create(
         self,
@@ -519,18 +561,6 @@ class WorkerFactory:
             consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
             consolidator_enabled = True
 
-        # Set up KV event publisher for prefix caching if enabled
-        # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
-        kv_publishers = self.setup_kv_event_publisher(
-            config,
-            generate_endpoint,
-            vllm_config,
-            consolidator_enabled=consolidator_enabled,
-            consolidator_port=consolidator_port,
-        )
-        if kv_publishers:
-            handler.kv_publishers = kv_publishers
-
         # Set up forward pass metrics relay (child ZMQ -> event plane).
         # In checkpoint mode the engine was created before the runtime, so
         # ForwardPassMetrics.worker_id will be empty (relay still works).
@@ -592,17 +622,6 @@ class WorkerFactory:
             needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 
-        await self.register_vllm_model(
-            model_input,
-            model_type,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            worker_type=worker_type,
-            needs=needs,
-        )
-
         health_check_payload = VllmHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
         ).to_dict()
@@ -612,19 +631,38 @@ class WorkerFactory:
         )
         shutdown_endpoints.append(perf_endpoint)
 
+        model_metrics_labels = [
+            (
+                prometheus_names.labels.MODEL,
+                config.served_model_name or config.model,
+            ),
+            (
+                prometheus_names.labels.MODEL_NAME,
+                config.served_model_name or config.model,
+            ),
+        ]
+
+        await self._complete_valkey_startup(
+            handler,
+            config,
+            generate_endpoint,
+            vllm_config,
+            consolidator_enabled=consolidator_enabled,
+            consolidator_port=consolidator_port,
+            register_model=lambda: self.register_vllm_model(
+                model_input,
+                model_type,
+                generate_endpoint,
+                config,
+                engine_client,
+                vllm_config,
+                worker_type=worker_type,
+                needs=needs,
+            ),
+        )
+
         try:
             logger.debug("Starting serve_endpoint for decode worker")
-
-            model_metrics_labels = [
-                (
-                    prometheus_names.labels.MODEL,
-                    config.served_model_name or config.model,
-                ),
-                (
-                    prometheus_names.labels.MODEL_NAME,
-                    config.served_model_name or config.model,
-                ),
-            ]
 
             serve_tasks = [
                 # for decode, we want to transfer the in-flight requests to other decode engines,
@@ -679,6 +717,7 @@ class WorkerFactory:
         finally:
             logger.debug("Cleaning up decode worker")
             # Cleanup background tasks
+            await handler.shutdown_valkey_worker_registration()
             handler.cleanup()
 
     async def _create_prefill_worker(
@@ -761,18 +800,6 @@ class WorkerFactory:
             consolidator_port = int(consolidator_output_endpoint.split(":")[-1])
             consolidator_enabled = True
 
-        # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
-        # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
-        kv_publishers = self.setup_kv_event_publisher(
-            config,
-            generate_endpoint,
-            vllm_config,
-            consolidator_enabled=consolidator_enabled,
-            consolidator_port=consolidator_port,
-        )
-        if kv_publishers:
-            handler.kv_publishers = kv_publishers
-
         # Set up forward pass metrics relay (child ZMQ -> event plane).
         # In checkpoint mode the engine was created before the runtime, so
         # ForwardPassMetrics.worker_id will be empty (relay still works).
@@ -827,17 +854,6 @@ class WorkerFactory:
         prefill_needs_set: list[WorkerType] = [WorkerType.Decode]
         if config.route_to_encoder:
             prefill_needs_set.append(WorkerType.Encode)
-        await self.register_vllm_model(
-            ModelInput.Tokens,
-            ModelType.Prefill,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            worker_type=WorkerType.Prefill,
-            needs=[prefill_needs_set],
-        )
-
         health_check_payload = VllmPrefillHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
         ).to_dict()
@@ -852,6 +868,25 @@ class WorkerFactory:
                 config.served_model_name or config.model,
             ),
         ]
+
+        await self._complete_valkey_startup(
+            handler,
+            config,
+            generate_endpoint,
+            vllm_config,
+            consolidator_enabled=consolidator_enabled,
+            consolidator_port=consolidator_port,
+            register_model=lambda: self.register_vllm_model(
+                ModelInput.Tokens,
+                ModelType.Prefill,
+                generate_endpoint,
+                config,
+                engine_client,
+                vllm_config,
+                worker_type=WorkerType.Prefill,
+                needs=[prefill_needs_set],
+            ),
+        )
 
         try:
             logger.debug("Starting serve_endpoint for prefill worker")
@@ -885,6 +920,7 @@ class WorkerFactory:
             raise
         finally:
             logger.debug("Cleaning up prefill worker")
+            await handler.shutdown_valkey_worker_registration()
             handler.cleanup()
 
     async def _maybe_get_encode_worker_client(

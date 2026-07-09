@@ -58,6 +58,11 @@ def test_runtime_config_accepts_optional_fields():
     )
 
 
+def test_runtime_config_rejects_valkey_as_a_generic_event_plane():
+    with pytest.raises(ValueError, match="Valid values: 'nats', 'zmq'"):
+        backend.RuntimeConfig(event_plane="valkey")
+
+
 def test_engine_config_required_model_only():
     """EngineConfig only requires ``model``; the rest are optional."""
     cfg = backend.EngineConfig(model="m1")

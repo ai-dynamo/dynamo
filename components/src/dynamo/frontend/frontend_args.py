@@ -20,6 +20,7 @@ from dynamo.common.configuration.groups.router_args import (
     RouterArgGroup,
     RouterConfigBase,
 )
+from dynamo.common.configuration.groups.runtime_args import validate_event_plane
 from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
@@ -90,6 +91,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
     def validate(self) -> None:
+        self.parsed_router_valkey_config()
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_load_aware_preset()
@@ -372,10 +374,13 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
             default=None,
-            help="Determines how events are published [nats|zmq]. If unset, "
-            "defaults to 'zmq' for all discovery backends. Set to 'nats' to use a "
-            "NATS-based event plane.",
+            help=(
+                "Determines how runtime events are published [nats|zmq]. "
+                "If unset, defaults to 'zmq'. Direct Valkey KV publication is "
+                "configured independently through --router-valkey-config."
+            ),
             choices=["nats", "zmq"],
+            arg_type=validate_event_plane,
         )
         add_negatable_bool_argument(
             g,

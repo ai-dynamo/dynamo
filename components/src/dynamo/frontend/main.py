@@ -35,6 +35,7 @@ from dynamo.llm import (
     KvRouterConfig,
     RouterConfig,
     RouterMode,
+    TokenizerCacheConfig,
     make_engine,
     run_input,
 )
@@ -236,8 +237,18 @@ async def async_main():
         kv_router_config = None
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
+    router_valkey_config = config.parsed_router_valkey_config()
+    tokenizer_cache_config = (
+        None
+        if router_valkey_config is not None
+        else TokenizerCacheConfig(config.tokenizer_cache_config_json())
+    )
     router_config = RouterConfig(
-        router_mode, kv_router_config, **config.router_kwargs()
+        router_mode,
+        kv_router_config,
+        tokenizer_cache_config=tokenizer_cache_config,
+        router_valkey_config=router_valkey_config,
+        **config.router_kwargs(),
     )
 
     metrics_prefix = (
@@ -277,9 +288,9 @@ async def async_main():
         kwargs["http_metrics_port"] = config.grpc_metrics_port
 
     if config.chat_processor == "vllm":
-        assert (
-            vllm_flags is not None
-        ), "vllm_flags is required when chat processor is vllm"
+        assert vllm_flags is not None, (
+            "vllm_flags is required when chat processor is vllm"
+        )
         chat_engine_factory = setup_engine_factory(
             config, vllm_flags
         ).chat_engine_factory

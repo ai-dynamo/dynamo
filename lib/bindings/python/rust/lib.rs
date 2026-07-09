@@ -183,6 +183,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        llm::entrypoint::normalize_router_valkey_config,
+        m
+    )?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<Endpoint>()?;
@@ -196,6 +200,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::AicPerfConfig>()?;
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
+    m.add_class::<llm::entrypoint::TokenizerCacheConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
     m.add_class::<llm::replay::SglangArgs>()?;
     m.add_class::<llm::replay::TrtllmArgs>()?;
@@ -214,6 +219,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
+    m.add_class::<llm::kv::ValkeyWorkerRegistration>()?;
     m.add_class::<llm::kv::MultimodalEmbeddingCachePublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
@@ -928,10 +934,7 @@ impl DistributedRuntime {
         }
 
         let nats_enabled = request_plane.is_nats()
-            || matches!(
-                event_transport_kind,
-                dynamo_runtime::discovery::EventTransportKind::Nats
-            )
+            || matches!(event_transport_kind, EventTransportKind::Nats)
             || (explicit_event_plane.is_none()
                 && std::env::var(config::environment_names::nats::NATS_SERVER).is_ok());
 

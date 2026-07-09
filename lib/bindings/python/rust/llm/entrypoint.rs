@@ -12,7 +12,7 @@ use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
-    apply_deprecated_overlap_score_weight_override,
+    ValkeyRouterConfig as RsValkeyRouterConfig, apply_deprecated_overlap_score_weight_override,
 };
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
@@ -25,6 +25,7 @@ use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
+use dynamo_llm::router_valkey_config::RouterValkeyConfig as RsRouterValkeyContract;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
 
@@ -38,6 +39,9 @@ use super::local_model::ModelRuntimeConfig;
 use super::model_card::ModelDeploymentCard;
 use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
+
+mod tokenizer_cache;
+pub use tokenizer_cache::{TokenizerCacheConfig, normalize_router_valkey_config};
 
 fn validate_kv_router_config(config: &RsKvRouterConfig) -> PyResult<()> {
     config.validate_config().map_err(PyValueError::new_err)
@@ -234,7 +238,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_policy_config=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_policy_config=None, valkey_urls=None, valkey_index_scope=None, valkey_connection_pool_size=4, valkey_required_replica_acks=None, valkey_sentinel_urls=None, valkey_sentinel_master_name=None, valkey_sentinel_quorum=None, valkey_allow_insecure_plaintext=false, valkey_allow_degraded_writes=false, valkey_worker_events=false, valkey_authoritative_admission=false, valkey_admission_lease_ms=30000))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -264,6 +268,18 @@ impl KvRouterConfig {
         overlap_score_credit_decay: f64,
         mut prefill_load_scale: f64,
         router_policy_config: Option<String>,
+        valkey_urls: Option<String>,
+        valkey_index_scope: Option<String>,
+        valkey_connection_pool_size: u32,
+        valkey_required_replica_acks: Option<u32>,
+        valkey_sentinel_urls: Option<String>,
+        valkey_sentinel_master_name: Option<String>,
+        valkey_sentinel_quorum: Option<u32>,
+        valkey_allow_insecure_plaintext: bool,
+        valkey_allow_degraded_writes: bool,
+        valkey_worker_events: bool,
+        valkey_authoritative_admission: bool,
+        valkey_admission_lease_ms: u64,
     ) -> PyResult<Self> {
         if let Some(value) = overlap_score_weight {
             apply_deprecated_overlap_score_weight(
@@ -302,6 +318,20 @@ impl KvRouterConfig {
             router_queue_policy: router_queue_policy.parse().map_err(PyValueError::new_err)?,
             use_remote_indexer,
             serve_indexer,
+            valkey: RsValkeyRouterConfig {
+                urls: valkey_urls,
+                index_scope: valkey_index_scope,
+                connection_pool_size: valkey_connection_pool_size,
+                required_replica_acks: valkey_required_replica_acks,
+                sentinel_urls: valkey_sentinel_urls,
+                sentinel_master_name: valkey_sentinel_master_name,
+                sentinel_quorum: valkey_sentinel_quorum,
+                allow_insecure_plaintext: valkey_allow_insecure_plaintext,
+                allow_degraded_writes: valkey_allow_degraded_writes,
+                worker_events: valkey_worker_events,
+                authoritative_admission: valkey_authoritative_admission,
+                admission_lease_ms: valkey_admission_lease_ms,
+            },
             shared_cache_multiplier,
             shared_cache_type: shared_cache_type.parse().map_err(PyValueError::new_err)?,
             router_predicted_ttl_secs,
@@ -422,6 +452,9 @@ pub struct RouterConfig {
     #[pyo3(get, set)]
     pub kv_router_config: KvRouterConfig,
 
+    #[pyo3(get, set)]
+    pub tokenizer_cache_config: TokenizerCacheConfig,
+
     /// Threshold for active decode blocks utilization (0.0-1.0)
     active_decode_blocks_threshold: Option<f64>,
     /// Threshold for active prefill tokens utilization (literal token count)
@@ -434,7 +467,8 @@ pub struct RouterConfig {
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, tokenizer_cache_config=None, router_valkey_config=None))]
+    #[allow(clippy::too_many_arguments)] // Stable Python keyword constructor.
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -443,6 +477,8 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
+        tokenizer_cache_config: Option<TokenizerCacheConfig>,
+        router_valkey_config: Option<&str>,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -457,9 +493,29 @@ impl RouterConfig {
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
+        let mut kv_router_config = config.unwrap_or_default();
+        let tokenizer_cache_config = if let Some(raw_config) = router_valkey_config {
+            if tokenizer_cache_config.is_some() {
+                return Err(PyValueError::new_err(
+                    "router_valkey_config and tokenizer_cache_config are mutually exclusive",
+                ));
+            }
+            let contract = RsRouterValkeyContract::parse(raw_config)
+                .map_err(|error| PyValueError::new_err(format!("{error:#}")))?;
+            contract.apply_to_kv_router(&mut kv_router_config.inner);
+            validate_kv_router_config(&kv_router_config.inner)?;
+            TokenizerCacheConfig {
+                inner: contract
+                    .tokenizer_cache_config()
+                    .map_err(|error| PyValueError::new_err(format!("{error:#}")))?,
+            }
+        } else {
+            tokenizer_cache_config.unwrap_or_default()
+        };
         Ok(Self {
             router_mode: mode,
-            kv_router_config: config.unwrap_or_default(),
+            kv_router_config,
+            tokenizer_cache_config,
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
@@ -473,6 +529,7 @@ impl From<RouterConfig> for RsRouterConfig {
         RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
+            tokenizer_cache_config: rc.tokenizer_cache_config.inner,
             load_threshold_config: RsLoadThresholdConfig {
                 active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
                 active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,

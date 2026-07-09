@@ -113,7 +113,8 @@ class TestCreate:
     def factory(self) -> WorkerFactory:
         factory = WorkerFactory(
             setup_vllm_engine_fn=Mock(),
-            setup_kv_event_publisher_fn=Mock(),
+            setup_kv_event_publisher_fn=AsyncMock(),
+            setup_valkey_worker_registration_fn=AsyncMock(return_value=None),
             register_vllm_model_fn=AsyncMock(),
             setup_fpm_relay_fn=Mock(),
             setup_metrics_collection_fn=Mock(),
@@ -271,7 +272,8 @@ class TestPrefillRegistrationContract:
 
         factory = WorkerFactory(
             setup_vllm_engine_fn=Mock(return_value=engine_tuple),
-            setup_kv_event_publisher_fn=Mock(return_value=None),
+            setup_kv_event_publisher_fn=AsyncMock(return_value=None),
+            setup_valkey_worker_registration_fn=AsyncMock(return_value=None),
             register_vllm_model_fn=fake_register_vllm_model,
             setup_fpm_relay_fn=Mock(return_value=None),
             setup_metrics_collection_fn=Mock(),
@@ -281,7 +283,11 @@ class TestPrefillRegistrationContract:
         factory.register_engine_routes = Mock()  # type: ignore[assignment]
 
         # embedding_cache_manager=None skips register_embedding_cache_metrics.
-        mock_handler = Mock(embedding_cache_manager=None)
+        mock_handler = Mock(
+            embedding_cache_manager=None,
+            shutdown_valkey_worker_registration=AsyncMock(),
+            cleanup=Mock(),
+        )
         monkeypatch.setattr(
             "dynamo.vllm.worker_factory.PrefillWorkerHandler",
             Mock(return_value=mock_handler),
@@ -317,6 +323,12 @@ class TestPrefillRegistrationContract:
                 asyncio.Event(),
                 [],
             )
+
+        factory.setup_valkey_worker_registration.assert_awaited_once_with(
+            config,
+            runtime.endpoint.return_value,
+            vllm_config,
+        )
 
         assert captured["model_input"] == ModelInput.Tokens
         assert captured["worker_type"] == WorkerType.Prefill

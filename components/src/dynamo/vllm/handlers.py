@@ -70,6 +70,7 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    ValkeyWorkerRegistration,
     WorkerType,
     lora_name_to_id,
     register_model,
@@ -974,6 +975,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
         self.kv_publishers: list[KvEventPublisher] | None = None
+        self.valkey_worker_registration: ValkeyWorkerRegistration | None = None
         self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
@@ -2295,6 +2297,40 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         except Exception as e:
             logger.error(f"Failed to list LoRA adapters: {e}")
             yield {"status": "error", "message": str(e)}
+
+    async def shutdown_valkey_worker_registration(self) -> None:
+        publishers = self.kv_publishers or []
+        self.kv_publishers = None
+        publishers_drained = True
+        if publishers:
+            results = await asyncio.gather(
+                *(publisher.shutdown_and_wait() for publisher in publishers),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    publishers_drained = False
+                    logger.error(
+                        "Failed to drain KV event publisher; Valkey lease expiry remains the backstop",
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+                elif result is not True:
+                    publishers_drained = False
+            if not publishers_drained:
+                logger.warning(
+                    "KV event publishers required forced shutdown; skipping Valkey worker unregister so the owner lease can expire"
+                )
+
+        if self.valkey_worker_registration is not None:
+            registration = self.valkey_worker_registration
+            self.valkey_worker_registration = None
+            if publishers_drained:
+                try:
+                    await registration.shutdown()
+                except Exception:
+                    logger.exception(
+                        "Failed to unregister Valkey worker lease; server-side expiry remains the backstop"
+                    )
 
     def cleanup(self):
         """Clean up resources including temporary directories."""

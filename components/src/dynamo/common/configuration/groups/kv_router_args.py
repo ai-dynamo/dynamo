@@ -17,6 +17,10 @@ from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.router_valkey_config import (
+    legacy_tokenizer_cache_config_json,
+    validate_router_valkey_config,
+)
 from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
@@ -49,9 +53,36 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_queue_policy",
     "use_remote_indexer",
     "serve_indexer",
+    "valkey_urls",
+    "valkey_index_scope",
+    "valkey_connection_pool_size",
+    "valkey_required_replica_acks",
+    "valkey_sentinel_urls",
+    "valkey_sentinel_master_name",
+    "valkey_sentinel_quorum",
+    "valkey_allow_insecure_plaintext",
+    "valkey_allow_degraded_writes",
+    "valkey_worker_events",
+    "valkey_authoritative_admission",
+    "valkey_admission_lease_ms",
     "shared_cache_multiplier",
     "shared_cache_type",
     "router_predicted_ttl_secs",
+)
+
+_LEGACY_VALKEY_FIELDS: tuple[str, ...] = (
+    "valkey_urls",
+    "valkey_index_scope",
+    "valkey_connection_pool_size",
+    "valkey_required_replica_acks",
+    "valkey_sentinel_urls",
+    "valkey_sentinel_master_name",
+    "valkey_sentinel_quorum",
+    "valkey_allow_insecure_plaintext",
+    "valkey_allow_degraded_writes",
+    "valkey_worker_events",
+    "valkey_authoritative_admission",
+    "valkey_admission_lease_ms",
 )
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
@@ -67,6 +98,18 @@ _LOAD_AWARE_KWARG_OVERRIDES = {
     "router_track_prefill_tokens": True,
     "use_remote_indexer": False,
     "serve_indexer": False,
+    "valkey_urls": None,
+    "valkey_index_scope": None,
+    "valkey_connection_pool_size": 4,
+    "valkey_required_replica_acks": None,
+    "valkey_sentinel_urls": None,
+    "valkey_sentinel_master_name": None,
+    "valkey_sentinel_quorum": None,
+    "valkey_allow_insecure_plaintext": False,
+    "valkey_allow_degraded_writes": False,
+    "valkey_worker_events": False,
+    "valkey_authoritative_admission": False,
+    "valkey_admission_lease_ms": 30000,
     "shared_cache_multiplier": 0.0,
     "shared_cache_type": "none",
     "router_predicted_ttl_secs": None,
@@ -132,10 +175,34 @@ class KvRouterConfigBase(ConfigBase):
     router_queue_policy: str
     use_remote_indexer: bool = False
     serve_indexer: bool = False
+    router_valkey_config: Optional[str] = None
+    valkey_urls: Optional[str] = None
+    valkey_index_scope: Optional[str] = None
+    valkey_connection_pool_size: int = 4
+    valkey_required_replica_acks: Optional[int] = None
+    valkey_sentinel_urls: Optional[str] = None
+    valkey_sentinel_master_name: Optional[str] = None
+    valkey_sentinel_quorum: Optional[int] = None
+    valkey_allow_insecure_plaintext: bool = False
+    valkey_allow_degraded_writes: bool = False
+    valkey_worker_events: bool = False
+    valkey_authoritative_admission: bool = False
+    valkey_admission_lease_ms: int = 30000
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
+
+    def parsed_router_valkey_config(self) -> str | None:
+        if self.router_valkey_config is None:
+            return None
+        return validate_router_valkey_config(self.router_valkey_config)
+
+    def tokenizer_cache_config_json(self) -> str:
+        config = self.parsed_router_valkey_config()
+        if config is not None:
+            return config
+        return legacy_tokenizer_cache_config_json()
 
     def apply_load_aware_preset(self) -> None:
         if not self.load_aware:
@@ -147,7 +214,14 @@ class KvRouterConfigBase(ConfigBase):
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         self.apply_load_aware_preset()
-        return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
+        values = {field: getattr(self, field) for field in _KV_ROUTER_FIELDS}
+        if self.router_valkey_config is not None:
+            # Validate through the canonical Rust JSON contract here for early
+            # CLI errors. RouterConfig parses it once into both Rust configs.
+            self.parsed_router_valkey_config()
+            for field in _LEGACY_VALKEY_FIELDS:
+                values.pop(field)
+        return values
 
 
 class KvRouterArgGroup(ArgGroup):
@@ -155,6 +229,23 @@ class KvRouterArgGroup(ArgGroup):
 
     def add_arguments(self, parser) -> None:
         g = parser.add_argument_group("KV Router Options")
+
+        add_argument(
+            g,
+            flag_name="--router-valkey-config",
+            env_var="DYN_ROUTER_VALKEY_CONFIG",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: Inline JSON configuration for the shared "
+                "Valkey router index, Sentinel discovery, and optional tokenizer L2 "
+                "cache. This object replaces the legacy --router-valkey-* arguments "
+                "and tokenizer-cache environment. The tokenizer cache can inherit "
+                "the top-level Sentinel "
+                "witnesses while selecting a distinct sentinel_master_name."
+            ),
+            arg_type=str,
+            dest="router_valkey_config",
+        )
 
         add_negatable_bool_argument(
             g,
@@ -451,6 +542,157 @@ class KvRouterArgGroup(ArgGroup):
                 "component via the request plane instead of maintaining a local radix tree."
             ),
             dest="use_remote_indexer",
+        )
+        add_argument(
+            g,
+            flag_name="--router-valkey-urls",
+            env_var="DYN_ROUTER_VALKEY_URLS",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: Comma-separated Valkey endpoints for a persistent "
+                "shared device-tier prefix index (for example, valkey://valkey-0:6379,valkey://valkey-1:6379). "
+                "Only the first endpoint receives traffic; a Sentinel/operator-managed stable-primary "
+                "endpoint can be used with --router-valkey-required-replica-acks. "
+                "Use --router-valkey-authoritative-admission to make the replicated module "
+                "also own immediate cross-frontend admission."
+            ),
+            arg_type=str,
+            dest="valkey_urls",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-valkey-worker-events",
+            env_var="DYN_ROUTER_VALKEY_WORKER_EVENTS",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] KV Router: Workers publish GPU KV metadata directly "
+                "to the primary Valkey index. Set the same DYN_ROUTER_VALKEY_URLS "
+                "and DYN_ROUTER_VALKEY_WORKER_EVENTS environment variables in every worker process. "
+                "Frontends route from the shared Valkey index; legacy event-plane delivery is a post-commit compatibility relay."
+            ),
+            dest="valkey_worker_events",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-valkey-authoritative-admission",
+            env_var="DYN_ROUTER_VALKEY_AUTHORITATIVE_ADMISSION",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] KV Router: Atomically select and reserve workers in the "
+                "replicated Valkey module, rather than making frontend-local admission decisions. "
+                "Requires direct Valkey worker events and immediate-routing mode: disable "
+                "router queues, replica sync, frontend-local prefill/output accounting, "
+                "shared-cache credits, overlap decay, and temperature."
+            ),
+            dest="valkey_authoritative_admission",
+        )
+        add_argument(
+            g,
+            flag_name="--router-valkey-admission-lease-ms",
+            env_var="DYN_ROUTER_VALKEY_ADMISSION_LEASE_MS",
+            default=30000,
+            help=(
+                "KV Router: Valkey authoritative-admission lease duration in milliseconds "
+                "(10000-600000). Normal request cleanup releases the lease sooner; expiry "
+                "recovers a reservation after a frontend failure."
+            ),
+            arg_type=int,
+            dest="valkey_admission_lease_ms",
+        )
+        add_argument(
+            g,
+            flag_name="--router-valkey-index-scope",
+            env_var="DYN_ROUTER_VALKEY_INDEX_SCOPE",
+            default=None,
+            help=(
+                "KV Router: Shared Valkey index scope used by every frontend and worker. "
+                "Required with --router-valkey-worker-events when worker and frontend "
+                "component names differ (for example DGD prefill/decode workers)."
+            ),
+            arg_type=str,
+            dest="valkey_index_scope",
+        )
+        add_argument(
+            g,
+            flag_name="--router-valkey-connection-pool-size",
+            env_var="DYN_ROUTER_VALKEY_CONNECTION_POOL_SIZE",
+            default=4,
+            help=(
+                "KV Router: Number of persistent match connections maintained to the Valkey primary."
+            ),
+            arg_type=int,
+            dest="valkey_connection_pool_size",
+        )
+        add_argument(
+            g,
+            flag_name="--router-valkey-required-replica-acks",
+            env_var="DYN_ROUTER_VALKEY_REQUIRED_REPLICA_ACKS",
+            default=None,
+            help=(
+                "KV Router: Number of replicas that must acknowledge every Valkey "
+                "mutation. Set this to 1 with a single stable-primary URL for strict "
+                "two-node durability. When omitted, one acknowledgement is inferred "
+                "from a URL list containing two or more endpoints; otherwise zero."
+            ),
+            arg_type=int,
+            dest="valkey_required_replica_acks",
+        )
+        add_argument(
+            g,
+            flag_name="--router-valkey-sentinel-urls",
+            env_var="DYN_ROUTER_VALKEY_SENTINEL_URLS",
+            default=None,
+            help=(
+                "KV Router: Comma-separated Valkey Sentinel witness endpoints. "
+                "Clients require a strict witness majority before switching primaries."
+            ),
+            arg_type=str,
+            dest="valkey_sentinel_urls",
+        )
+        add_argument(
+            g,
+            flag_name="--router-valkey-sentinel-master-name",
+            env_var="DYN_ROUTER_VALKEY_SENTINEL_MASTER_NAME",
+            default=None,
+            help="KV Router: Sentinel master-set name used for primary discovery.",
+            arg_type=str,
+            dest="valkey_sentinel_master_name",
+        )
+        add_argument(
+            g,
+            flag_name="--router-valkey-sentinel-quorum",
+            env_var="DYN_ROUTER_VALKEY_SENTINEL_QUORUM",
+            default=None,
+            help=(
+                "KV Router: Sentinel witnesses that must agree on one primary. "
+                "Defaults to a strict majority."
+            ),
+            arg_type=int,
+            dest="valkey_sentinel_quorum",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-valkey-allow-insecure-plaintext",
+            env_var="DYN_ROUTER_VALKEY_ALLOW_INSECURE_PLAINTEXT",
+            default=False,
+            help=(
+                "KV Router: Explicitly allow unauthenticated plaintext Valkey only "
+                "on a separate tenant-isolated trusted network. TLS and ACL "
+                "credentials are not yet supported."
+            ),
+            dest="valkey_allow_insecure_plaintext",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-valkey-allow-degraded-writes",
+            env_var="DYN_ROUTER_VALKEY_ALLOW_DEGRADED_WRITES",
+            default=False,
+            help=(
+                "KV Router: Preserve two-node availability after failover by accepting "
+                "writes on a Sentinel-quorum-confirmed singleton when WAIT returns zero. "
+                "Those writes have no redundant copy until the replica rejoins."
+            ),
+            dest="valkey_allow_degraded_writes",
         )
         add_argument(
             g,

@@ -123,6 +123,20 @@ def test_event_plane_zmq_ignores_ambient_nats(monkeypatch):
 
 
 @pytest.mark.forked
+def test_event_plane_valkey_is_rejected():
+    async def _run():
+        with pytest.raises(ValueError, match="Invalid event_plane value"):
+            DistributedRuntime(
+                asyncio.get_running_loop(),
+                "file",
+                "tcp",
+                event_plane="valkey",
+            )
+
+    asyncio.run(_run())
+
+
+@pytest.mark.forked
 def test_invalid_event_plane_errors():
     async def _run():
         with pytest.raises(ValueError, match="Invalid event_plane value"):

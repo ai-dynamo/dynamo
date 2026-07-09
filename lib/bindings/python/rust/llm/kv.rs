@@ -39,7 +39,10 @@ use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
 use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
-use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
+use llm_rs::kv_router::publisher::{
+    KvEventSourceConfig, ValkeyWorkerRegistration as RsValkeyWorkerRegistration,
+    create_stored_blocks,
+};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
@@ -769,6 +772,55 @@ pub(crate) struct WorkerMetricsPublisher {
     inner: Arc<llm_rs::kv_router::publisher::WorkerMetricsPublisher>,
 }
 
+/// Awaited, registration-only Valkey admission lifecycle for worker ranks
+/// which intentionally have no KV event source (notably disaggregated decode
+/// workers).
+#[pyclass]
+pub(crate) struct ValkeyWorkerRegistration {
+    inner: Option<RsValkeyWorkerRegistration>,
+}
+
+#[pymethods]
+impl ValkeyWorkerRegistration {
+    #[staticmethod]
+    #[pyo3(signature = (endpoint, kv_block_size, dp_ranks, worker_id=None))]
+    fn create_from_env<'p>(
+        py: Python<'p>,
+        endpoint: Endpoint,
+        kv_block_size: u32,
+        dp_ranks: Vec<DpRank>,
+        worker_id: Option<WorkerId>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let component = endpoint.inner.component().clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let registration = RsValkeyWorkerRegistration::register_from_env(
+                &component,
+                worker_id,
+                kv_block_size,
+                &dp_ranks,
+            )
+            .await
+            .map_err(to_pyerr)?;
+
+            Python::with_gil(|py| {
+                registration
+                    .map(|inner| Py::new(py, Self { inner: Some(inner) }))
+                    .transpose()
+            })
+        })
+    }
+
+    fn shutdown<'p>(&mut self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let registration = self.inner.take();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if let Some(mut registration) = registration {
+                registration.shutdown().await.map_err(to_pyerr)?;
+            }
+            Ok(())
+        })
+    }
+}
+
 #[pymethods]
 impl WorkerMetricsPublisher {
     #[new]
@@ -907,7 +959,7 @@ impl KvEventPublisher {
     ///         ``0`` is treated as ``None`` (also disables batching).
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, valkey_registration=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -919,6 +971,7 @@ impl KvEventPublisher {
         zmq_topic: Option<String>,
         batching_timeout_ms: Option<u64>,
         image_token_id: Option<u32>,
+        valkey_registration: Option<PyRef<'_, ValkeyWorkerRegistration>>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
@@ -933,8 +986,21 @@ impl KvEventPublisher {
         // Extract component from endpoint
         let component = endpoint.inner.component().clone();
 
-        let inner =
-            llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id(
+        let valkey_event_lease = valkey_registration
+            .as_ref()
+            .map(|registration| {
+                registration
+                    .inner
+                    .as_ref()
+                    .map(RsValkeyWorkerRegistration::event_lease)
+                    .ok_or_else(|| {
+                        to_pyerr(anyhow::anyhow!(
+                            "ValkeyWorkerRegistration has already been shut down"
+                        ))
+                    })
+            })
+            .transpose()?;
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id_and_valkey_lease(
                 component,
                 worker_id,
                 kv_block_size as u32,
@@ -942,6 +1008,7 @@ impl KvEventPublisher {
                 enable_local_indexer,
                 dp_rank,
                 batching_timeout_ms,
+                valkey_event_lease,
             )
             .map_err(to_pyerr)?;
 
@@ -1028,12 +1095,16 @@ impl KvEventPublisher {
         })
     }
 
-    fn shutdown(&mut self) {
-        // If no other Arc clones exist, shut down eagerly.
-        // Otherwise the Drop impl handles cleanup when the last reference is freed.
-        if let Some(inner) = Arc::get_mut(&mut self.inner) {
-            inner.shutdown();
-        }
+    fn shutdown(&self) {
+        self.inner.shutdown_handle().request_shutdown();
+    }
+
+    fn shutdown_and_wait<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let shutdown = self.inner.shutdown_handle();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let outcome = shutdown.shutdown_and_wait().await;
+            Ok(outcome == llm_rs::kv_router::publisher::KvEventPublisherShutdownOutcome::Drained)
+        })
     }
 }
 

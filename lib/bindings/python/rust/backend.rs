@@ -35,6 +35,7 @@ use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
 use futures::stream::{BoxStream, StreamExt};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3_async_runtimes::TaskLocals;
@@ -271,14 +272,21 @@ impl RuntimeConfig {
         discovery_backend: Option<String>,
         request_plane: Option<String>,
         event_plane: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        let event_plane = event_plane
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|error| PyValueError::new_err(format!("{error:#}")))
+            })
+            .transpose()?;
+        Ok(Self {
             inner: RsRuntimeConfig {
                 discovery_backend,
                 request_plane,
                 event_plane,
             },
-        }
+        })
     }
 }
 

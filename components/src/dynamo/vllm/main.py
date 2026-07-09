@@ -41,11 +41,13 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    ValkeyWorkerRegistration,
     WorkerType,
     register_model,
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.valkey_startup import UnsafeKvEventPublisherSetupError
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -173,6 +175,7 @@ async def worker(argv: list[str] | None = None) -> None:
     factory = WorkerFactory(
         setup_vllm_engine_fn=setup_vllm_engine,
         setup_kv_event_publisher_fn=setup_kv_event_publisher,
+        setup_valkey_worker_registration_fn=setup_valkey_worker_registration,
         register_vllm_model_fn=register_vllm_model,
         setup_fpm_relay_fn=setup_fpm_relay,
         setup_metrics_collection_fn=setup_metrics_collection,
@@ -340,12 +343,43 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
     return resolve_routing_image_token_id(config.model, model_dir)
 
 
-def setup_kv_event_publisher(
+async def setup_valkey_worker_registration(
+    config: Config,
+    generate_endpoint: Endpoint,
+    vllm_config: VllmConfig,
+) -> Optional[ValkeyWorkerRegistration]:
+    """Register all worker DP ranks before model discovery is advertised.
+
+    This is independent of KV event publication because disaggregated decode
+    workers are valid admission targets but intentionally emit no ownership
+    events. The Rust helper returns ``None`` when direct Valkey worker events
+    are disabled.
+    """
+    dp_start, dp_size = get_dp_range_for_worker(vllm_config)
+    dp_ranks = list(range(dp_start, dp_start + dp_size))
+    kv_block_size = get_configured_kv_event_block_size(vllm_config)
+    registration = await ValkeyWorkerRegistration.create_from_env(
+        endpoint=generate_endpoint,
+        kv_block_size=kv_block_size,
+        dp_ranks=dp_ranks,
+    )
+    if registration is not None:
+        logger.info(
+            "Registered %s worker DP rank(s) in Valkey before discovery: role=%s ranks=%s",
+            len(dp_ranks),
+            config.disaggregation_mode,
+            dp_ranks,
+        )
+    return registration
+
+
+async def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
     vllm_config: VllmConfig,
     consolidator_enabled: bool = False,
     consolidator_port: Optional[int] = 5558,
+    valkey_registration: Optional[ValkeyWorkerRegistration] = None,
 ) -> Optional[list[KvEventPublisher]]:
     """
     list[KvEventPublisher] | None
@@ -357,6 +391,7 @@ def setup_kv_event_publisher(
         vllm_config: vLLM configuration
         consolidator_enabled: If True, subscribe to kv eventconsolidator's ZMQ endpoint
         consolidator_port: Port where kv event consolidator publishes (default: 5558)
+        valkey_registration: Awaited owner lease for direct Valkey publishing
 
     Returns:
         List of KvEventPublisher instances (one per dp_rank) if prefix caching is enabled, None otherwise.
@@ -391,37 +426,51 @@ def setup_kv_event_publisher(
     # unchanged — consistent with the frontend also skipping MM routing.
     image_token_id = _resolve_image_token_id(config, vllm_config)
 
-    for dp_rank in range(dp_start, dp_start + dp_size):
-        if consolidator_enabled:
-            # TODO: Use different port for each dp_rank once KVBM supports DP
-            zmq_endpoint = f"tcp://127.0.0.1:{consolidator_port}"
-            logger.info(
-                f"KV event publisher for dp_rank={dp_rank} subscribing to consolidator at {zmq_endpoint}"
-            )
-        else:
-            # Each dp_rank publishes to a different port
-            zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-                config.engine_args.kv_events_config.endpoint,
-                data_parallel_rank=dp_rank,
-            ).replace("*", "127.0.0.1")
-            logger.info(
-                f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
-            )
+    try:
+        for dp_rank in range(dp_start, dp_start + dp_size):
+            if consolidator_enabled:
+                # TODO: Use different port for each dp_rank once KVBM supports DP
+                zmq_endpoint = f"tcp://127.0.0.1:{consolidator_port}"
+                logger.info(
+                    f"KV event publisher for dp_rank={dp_rank} subscribing to consolidator at {zmq_endpoint}"
+                )
+            else:
+                # Each dp_rank publishes to a different port
+                zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+                    config.engine_args.kv_events_config.endpoint,
+                    data_parallel_rank=dp_rank,
+                ).replace("*", "127.0.0.1")
+                logger.info(
+                    f"KV event publisher for dp_rank={dp_rank} subscribing to vLLM at {zmq_endpoint}"
+                )
 
-        kv_publisher = KvEventPublisher(
-            endpoint=generate_endpoint,
-            kv_block_size=kv_event_block_size,
-            zmq_endpoint=zmq_endpoint,
-            zmq_topic="",
-            enable_local_indexer=config.enable_local_indexer,
-            dp_rank=dp_rank,
-            image_token_id=image_token_id,
-        )
-        kv_publishers.append(kv_publisher)
+            kv_publisher = KvEventPublisher(
+                endpoint=generate_endpoint,
+                kv_block_size=kv_event_block_size,
+                zmq_endpoint=zmq_endpoint,
+                zmq_topic="",
+                enable_local_indexer=config.enable_local_indexer,
+                dp_rank=dp_rank,
+                image_token_id=image_token_id,
+                valkey_registration=valkey_registration,
+            )
+            kv_publishers.append(kv_publisher)
 
-        logger.info(
-            f"Worker reading KV events for dp_rank={dp_rank} from {zmq_endpoint}"
+            logger.info(
+                f"Worker reading KV events for dp_rank={dp_rank} from {zmq_endpoint}"
+            )
+    except BaseException as error:
+        results = await asyncio.gather(
+            *(publisher.shutdown_and_wait() for publisher in kv_publishers),
+            return_exceptions=True,
         )
+        publishers_drained = all(result is True for result in results)
+        if not publishers_drained:
+            raise UnsafeKvEventPublisherSetupError(
+                "KV event publisher setup failed and partial publishers did not drain; "
+                "Valkey worker ownership must expire by lease"
+            ) from error
+        raise
 
     return kv_publishers if kv_publishers else None
 

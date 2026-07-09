@@ -73,7 +73,8 @@ class DistributedRuntime:
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
-            event_plane: Event plane transport ("nats" or "zmq")
+            event_plane: Runtime event-plane mode ("nats" or "zmq").
+                In Valkey mode, unrelated runtime event channels continue to use ZMQ.
         """
         ...
 
@@ -628,6 +629,26 @@ class WorkerMetricsPublisher:
         """
         ...
 
+class ValkeyWorkerRegistration:
+    """Awaited Valkey admission registration for worker ranks without KV events."""
+
+    @staticmethod
+    async def create_from_env(
+        endpoint: Endpoint,
+        kv_block_size: int,
+        dp_ranks: List[int],
+        worker_id: Optional[int] = None,
+    ) -> Optional["ValkeyWorkerRegistration"]:
+        """Register all ranks before discovery exposes the worker.
+
+        Returns ``None`` when direct Valkey worker events are disabled.
+        """
+        ...
+
+    async def shutdown(self) -> None:
+        """Stop heartbeats and conditionally unregister this worker lease."""
+        ...
+
 class MultimodalEmbeddingCachePublisher:
     """
     A publisher for multimodal encode-worker cache state.
@@ -1070,6 +1091,7 @@ class KvEventPublisher:
         zmq_topic: Optional[str] = None,
         batching_timeout_ms: Optional[int] = None,
         image_token_id: Optional[int] = None,
+        valkey_registration: Optional[ValkeyWorkerRegistration] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1087,6 +1109,7 @@ class KvEventPublisher:
             enable_local_indexer: Enable worker-local KV indexer
             zmq_endpoint: Optional ZMQ endpoint for relay mode (e.g. "tcp://127.0.0.1:5557")
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
+            valkey_registration: Awaited owner lease for direct Valkey publishing
         """
 
     def publish_stored(
@@ -1132,7 +1155,16 @@ class KvEventPublisher:
 
     def shutdown(self) -> None:
         """
-        Shuts down the event publisher, stopping any background tasks.
+        Signal event-publisher shutdown without waiting for background tasks.
+        """
+        ...
+
+    async def shutdown_and_wait(self) -> bool:
+        """Drain accepted events and wait for background tasks.
+
+        Returns ``True`` when graceful drain completed. ``False`` means the
+        bounded fallback cancelled indexer operations, so worker registration
+        must be left to server-side lease expiry.
         """
         ...
 
@@ -1551,10 +1583,19 @@ class RouterMode:
     DeviceAwareWeighted: "RouterMode"
     ...
 
+class TokenizerCacheConfig:
+    """Typed frontend tokenizer L1 and optional shared Valkey L2 policy."""
+
+    def __init__(
+        self,
+        router_valkey_config: Optional[str] = None,
+    ) -> None: ...
+
 class RouterConfig:
     """How to route the request"""
     router_mode: RouterMode
     kv_router_config: KvRouterConfig
+    tokenizer_cache_config: TokenizerCacheConfig
 
     def __init__(
         self,
@@ -1564,6 +1605,9 @@ class RouterConfig:
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
+        session_affinity_ttl_secs: Optional[int] = None,
+        tokenizer_cache_config: Optional[TokenizerCacheConfig] = None,
+        router_valkey_config: Optional[str] = None,
     ) -> None:
         """
         Create a RouterConfig.
@@ -1790,6 +1834,18 @@ class KvRouterConfig:
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
         router_policy_config: Optional[str] = None,
+        valkey_urls: Optional[str] = None,
+        valkey_index_scope: Optional[str] = None,
+        valkey_connection_pool_size: int = 4,
+        valkey_required_replica_acks: Optional[int] = None,
+        valkey_sentinel_urls: Optional[str] = None,
+        valkey_sentinel_master_name: Optional[str] = None,
+        valkey_sentinel_quorum: Optional[int] = None,
+        valkey_allow_insecure_plaintext: bool = False,
+        valkey_allow_degraded_writes: bool = False,
+        valkey_worker_events: bool = False,
+        valkey_authoritative_admission: bool = False,
+        valkey_admission_lease_ms: int = 30000,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1827,6 +1883,22 @@ class KvRouterConfig:
             router_policy_config: Startup-only policy-family and cache-bucket queue
                 YAML path. When omitted, router_queue_threshold and
                 router_queue_policy define one default queue.
+            valkey_urls: Comma-separated Valkey primary/topology endpoints for the persistent index.
+            valkey_index_scope: Deployment-wide index scope shared by frontends and workers.
+            valkey_connection_pool_size: Persistent match connections to the primary.
+            valkey_required_replica_acks: Explicit replica acknowledgements required per mutation.
+                Set to 1 with one stable-primary URL for strict two-node durability. When omitted,
+                compatibility behavior infers one from a multi-endpoint URL list and zero otherwise.
+            valkey_sentinel_urls: Comma-separated Sentinel witness endpoints for automatic failover.
+            valkey_sentinel_master_name: Sentinel master-set name.
+            valkey_sentinel_quorum: Strict witness majority required to accept a primary route.
+            valkey_allow_insecure_plaintext: Explicitly permit plaintext unauthenticated Valkey
+                only on a separate tenant-isolated trusted network.
+            valkey_allow_degraded_writes: Preserve two-node availability on a confirmed singleton,
+                accepting that writes lack a redundant copy until a replica rejoins.
+            valkey_worker_events: Publish worker GPU KV metadata directly to Valkey.
+            valkey_authoritative_admission: Let Valkey atomically select and reserve workers.
+            valkey_admission_lease_ms: Authoritative-admission lease duration in milliseconds.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
@@ -3295,3 +3367,4 @@ class backend:
             raw: bool = False,
         ) -> None: ...
         def run(self) -> Awaitable[None]: ...
+def normalize_router_valkey_config(raw: str) -> str: ...
