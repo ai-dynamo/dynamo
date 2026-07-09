@@ -4,7 +4,6 @@
 import argparse
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -614,7 +613,10 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
 def test_build_mocker_engine_args_falls_back_when_aic_estimator_missing(
     monkeypatch, caplog
 ):
-    monkeypatch.setitem(sys.modules, "aiconfigurator.sdk", None)
+    def missing_memory(module_name):
+        raise ModuleNotFoundError(name=module_name)
+
+    monkeypatch.setattr("dynamo._internal.aic.importlib.import_module", missing_memory)
 
     engine_args = CONFIG.build_mocker_engine_args(
         make_args(aic_perf_model=True, model_path="/models/mock")

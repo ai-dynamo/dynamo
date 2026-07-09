@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 import math
 import os
@@ -465,12 +466,20 @@ def estimate_num_gpu_blocks(
     #   omitted due to a downstream AIC bug where `_get_memory_usage` predicts
     #   negative KV capacity with Eagle.
     try:
-        from aiconfigurator.sdk import memory
-    except ImportError as exc:
-        raise AicMemoryEstimatorUnavailableError(
-            "aiconfigurator.sdk.memory is required for AIC KV-cache estimation; "
-            "install a compatible aiconfigurator version"
-        ) from exc
+        memory = importlib.import_module("aiconfigurator.sdk.memory")
+    except ModuleNotFoundError as exc:
+        if exc.name == "aiconfigurator.sdk.memory":
+            raise AicMemoryEstimatorUnavailableError(
+                "aiconfigurator.sdk.memory is required for AIC KV-cache estimation; "
+                "install a compatible aiconfigurator version"
+            ) from exc
+        if exc.name in {"aiconfigurator", "aiconfigurator.sdk"}:
+            raise RuntimeError(
+                "aiconfigurator is required for AIC KV-cache estimation but is not "
+                "installed; install the 'mocker' extra or set num_gpu_blocks "
+                "explicitly (e.g. --num-gpu-blocks-override)"
+            ) from exc
+        raise
 
     # AIC's non-KV memory is independent of batch size (activations track
     # max_num_tokens), so the fixed max_batch_size here does not affect the result.

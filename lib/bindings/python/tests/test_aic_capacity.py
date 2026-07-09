@@ -173,9 +173,11 @@ def test_estimate_num_gpu_blocks_rejects_unsupported_backend():
 def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
     # The low-level helper reports a typed, actionable error so mocker can apply
     # its fallback without masking unrelated estimator failures.
-    import sys
+    def missing_memory(module_name):
+        raise ModuleNotFoundError(name=module_name)
 
-    monkeypatch.setitem(sys.modules, "aiconfigurator.sdk", None)
+    monkeypatch.setattr("dynamo._internal.aic.importlib.import_module", missing_memory)
+
     with pytest.raises(
         AicMemoryEstimatorUnavailableError,
         match=r"aiconfigurator\.sdk\.memory is required",
@@ -188,6 +190,29 @@ def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
             block_size=10,
             max_num_batched_tokens=128,
         )
+
+
+def test_estimate_num_gpu_blocks_propagates_transitive_import_error(monkeypatch):
+    missing_dependency = ModuleNotFoundError(name="aiconfigurator_core")
+
+    def broken_memory_module(_module_name):
+        raise missing_dependency
+
+    monkeypatch.setattr(
+        "dynamo._internal.aic.importlib.import_module", broken_memory_module
+    )
+
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        estimate_num_gpu_blocks(
+            backend_name="vllm",
+            system="h200_sxm",
+            model_path="some/model",
+            tp_size=1,
+            block_size=10,
+            max_num_batched_tokens=128,
+        )
+
+    assert exc_info.value is missing_dependency
 
 
 def test_trtllm_version_resolution():
