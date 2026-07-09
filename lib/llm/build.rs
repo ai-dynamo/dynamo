@@ -2,17 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Environment variable names (build.rs can't import from runtime crate)
 const DYN_FATBIN_PATH: &str = "DYN_FATBIN_PATH";
 const OUT_DIR: &str = "OUT_DIR";
+const DYNKV_LIMITS_HEADER: &str = "../kv-router/valkey-module/dynkv_limits.h";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Declare our custom cfg flag to avoid unexpected_cfgs warnings
     println!("cargo:rustc-check-cfg=cfg(have_vec_copy_fatbin)");
 
     build_protos()?;
+    build_dynkv_limits()?;
 
     // Get FATBIN path and copy it to OUT_DIR for embedding
     if let Some(fatbin_path) = find_fatbin_file() {
@@ -44,6 +46,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=DYN_FATBIN_PATH");
 
     Ok(())
+}
+
+fn build_dynkv_limits() -> Result<(), Box<dyn std::error::Error>> {
+    let header = std::fs::read_to_string(DYNKV_LIMITS_HEADER)?;
+    let definitions = [
+        ("DYNKV_MAX_MATCH_HASHES", "usize"),
+        ("DYNKV_MAX_ADMISSION_DOMAIN_LENGTH", "usize"),
+        ("DYNKV_MAX_ADMISSION_CANDIDATES", "usize"),
+        ("DYNKV_MAX_ADMISSION_LEASE_MS", "u64"),
+        ("DYNKV_MAX_REGISTRATION_RANKS", "usize"),
+    ];
+    let mut generated =
+        String::from("// Generated from lib/kv-router/valkey-module/dynkv_limits.h.\n");
+    for (name, rust_type) in definitions {
+        let value = parse_c_define(&header, name)?;
+        generated.push_str(&format!(
+            "pub(super) const {name}: {rust_type} = {value};\n"
+        ));
+    }
+    let output = Path::new(&env::var(OUT_DIR)?).join("dynkv_limits.rs");
+    std::fs::write(output, generated)?;
+    println!("cargo:rerun-if-changed={DYNKV_LIMITS_HEADER}");
+    Ok(())
+}
+
+fn parse_c_define(header: &str, name: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let prefix = format!("#define {name} ");
+    let value = header
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&prefix))
+        .ok_or_else(|| format!("missing {name} in {DYNKV_LIMITS_HEADER}"))?;
+    Ok(value.parse()?)
 }
 
 fn build_protos() -> Result<(), Box<dyn std::error::Error>> {

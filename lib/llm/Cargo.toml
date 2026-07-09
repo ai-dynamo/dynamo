@@ -69,6 +69,7 @@ dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
+aho-corasick = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }
@@ -87,6 +88,7 @@ ipnet = { workspace = true }
 lru = { workspace = true }
 moka = { workspace = true }
 rand = { workspace = true }
+rustc-hash = "2.1.1"
 oneshot = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
