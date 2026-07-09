@@ -15,7 +15,15 @@ To launch the Dynamo frontend with the KV Router:
 python -m dynamo.frontend --router-mode kv --http-port 8000
 ```
 
-For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. For event-driven KV state, configure backend workers to publish KV cache events using the backend-specific flags described in [Router Operations](router-operations.md#additional-notes). Use `--no-router-kv-events` only when you want approximate cache-state prediction.
+> [!IMPORTANT]
+> `--router-mode kv` (or `DYN_ROUTER_MODE=kv`) enables KV routing on the
+> frontend, but it does not enable KV event publishing on backend workers. With
+> the default `--router-kv-events` setting, missing publishers leave the router
+> in event-driven mode without real cache state; the router does not
+> automatically switch to approximate prediction. Configure the backend-specific
+> publishing flags in [Router Operations](router-operations.md#additional-notes).
+> If workers will not publish events, use `--no-router-kv-events` for approximate
+> cache prediction or `--load-aware` for load-only routing.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
@@ -23,7 +31,7 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. For event-driv
 | `--load-aware` | disabled | Use KV active-load routing without cache-reuse signals; implies `--router-mode kv` on the frontend |
 | `--router-kv-overlap-score-credit` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
 | `--router-prefill-load-scale` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
-| `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Consume worker KV events, or fall back to approximate routing without events |
+| `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Consume worker KV events, or explicitly disable them to use approximate routing |
 | `--router-queue-threshold` | `16.0` | Backpressure queue threshold; priority hints only reorder requests while this queue is non-empty |
 | `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 | `--no-router-track-prefill-tokens` | disabled | Ignore prompt-side prefill tokens in router load accounting; useful for decode-only routing paths |
