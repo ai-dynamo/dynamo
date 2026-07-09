@@ -599,9 +599,10 @@ impl ModelWatcher {
                     namespace = %worker_namespace,
                     "Removed WorkerSet (no remaining instances in namespace)"
                 );
-                // Also remove from alias models
+                // Remove alias mirrors, but only ones this deployment owns — a
+                // declared alias that lost its reservation belongs to another model.
                 for alias in &card.aliases {
-                    if alias != &model_name {
+                    if alias != &model_name && self.manager.alias_belongs_to(alias, &model_name) {
                         self.manager.remove_worker_set(alias, &ws_key);
                         self.manager.remove_model_if_empty(alias);
                         self.manager.unregister_alias_if_empty(alias, &model_name);
@@ -677,9 +678,9 @@ impl ModelWatcher {
 
         // No instances remain anywhere — remove the entire Model
         let _ = self.manager.remove_model(&model_name);
-        // Also remove alias models
+        // Same ownership rule: only remove alias models this deployment owns.
         for alias in &card.aliases {
-            if alias != &model_name {
+            if alias != &model_name && self.manager.alias_belongs_to(alias, &model_name) {
                 let _ = self.manager.remove_model(alias);
                 self.manager.unregister_alias_if_empty(alias, &model_name);
             }

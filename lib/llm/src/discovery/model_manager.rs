@@ -336,6 +336,14 @@ impl ModelManager {
             .unwrap_or_else(|| model.to_string())
     }
 
+    /// Whether `alias` is currently reserved as an alias of `primary`. Teardown
+    /// uses this to clean up only the alias names a deployment actually owns.
+    pub fn alias_belongs_to(&self, alias: &str, primary: &str) -> bool {
+        self.alias_to_primary
+            .get(alias)
+            .is_some_and(|owner| owner.value() == primary)
+    }
+
     /// Remove a WorkerSet from a Model. Removes the Model if it becomes empty.
     pub fn remove_worker_set(&self, model_name: &str, namespace: &str) -> Option<Arc<WorkerSet>> {
         let model = self.models.get(model_name)?;
@@ -1794,6 +1802,23 @@ mod tests {
         let model = mm.get_model("shared").expect("alias model present");
         assert!(model.get_worker_set("ns1").is_some());
         assert!(model.get_worker_set("ns2").is_none());
+    }
+
+    #[test]
+    fn test_alias_belongs_to_identifies_owner() {
+        let mm = ModelManager::new();
+        assert!(mm.register_alias("chat", "llama"));
+
+        assert!(mm.alias_belongs_to("chat", "llama"));
+        // Not owned by a different primary, and a non-alias name is owned by nobody.
+        assert!(!mm.alias_belongs_to("chat", "other"));
+        assert!(!mm.alias_belongs_to("not-an-alias", "llama"));
+
+        // A live primary named "chat" (a different deployment) is not an alias of
+        // "llama" — so a "llama" teardown must not treat "chat" as its own.
+        let mm2 = ModelManager::new();
+        mm2.add_worker_set("chat", "ns1", make_worker_set("ns1", "abc"));
+        assert!(!mm2.alias_belongs_to("chat", "llama"));
     }
 
     #[test]

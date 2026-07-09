@@ -537,8 +537,14 @@ fn register_model<'p>(
             card.worker_type = worker_type_value;
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
+            // Aliases are only honored on the LLM surfaces (their handlers
+            // canonicalize alias→primary); ignore them for these types.
             if !model_aliases.is_empty() {
-                card.set_aliases(model_aliases);
+                tracing::warn!(
+                    model_name = %model_name,
+                    "Ignoring served-model-name aliases: not supported for \
+                     tensor/images/videos/realtime models"
+                );
             }
 
             card.runtime_config = runtime_config.inner;

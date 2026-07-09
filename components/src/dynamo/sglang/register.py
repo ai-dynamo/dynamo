@@ -169,13 +169,7 @@ async def _register_model_with_runtime_config(
             max_gpu_lora_count=max_gpu_lora_count,
             model_aliases=aliases or None,
         )
-        if aliases:
-            logging.info(
-                "Successfully registered LLM with runtime config (aliases: %s)",
-                aliases,
-            )
-        else:
-            logging.info("Successfully registered LLM with runtime config")
+        logging.info("Successfully registered LLM with runtime config")
         return True
     except Exception as e:
         logging.error(f"Failed to register with runtime config: {e}")

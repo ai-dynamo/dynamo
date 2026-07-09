@@ -186,14 +186,8 @@ class DynamoSGLangConfig(ConfigBase):
     frontend_decoding: bool = False
     sglang_trace_level: int
 
-    # Additional names this model responds to (aliases). Populated by
-    # parse_args when --served-model-name is given as a whitespace- or
-    # comma-separated string of multiple names; the first becomes the
-    # primary and the rest land here. Plumbed to register_model() so the
-    # Rust ModelManager registers the same WorkerSet under each alias.
-    # Default is None (not []): ConfigBase.from_cli_args copies class
-    # defaults onto each instance by reference, so a mutable [] would be
-    # shared across configs.
+    # Extra served names beyond the primary, parsed from --served-model-name.
+    # None (not []) since ConfigBase copies class defaults by reference.
     served_model_aliases: Optional[List[str]] = None
 
     def validate(self) -> None:
