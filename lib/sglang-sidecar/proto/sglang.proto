@@ -7,7 +7,8 @@
 syntax = "proto3";
 package sglang.runtime.v1;
 
-service SglangService {
+service SglangService
+{
   // SGLang-native RPCs (typed proto)
   rpc TextGenerate(TextGenerateRequest) returns (stream TextGenerateResponse);
   rpc Generate(GenerateRequest) returns (stream GenerateResponse);
@@ -48,14 +49,16 @@ service SglangService {
 // the room id; the decode leg fetches it from the same room. Both legs
 // receive the same `bootstrap_room` from the router so they rendezvous
 // on the KV transfer.
-message DisaggregatedParams {
+message DisaggregatedParams
+{
   string bootstrap_host = 1;
   int32 bootstrap_port = 2;
   int64 bootstrap_room = 3;
 }
 
 // Sampling parameters shared across text and tokenized RPCs.
-message SamplingParams {
+message SamplingParams
+{
   optional float temperature = 1;
   optional float top_p = 2;
   optional int32 top_k = 3;
@@ -75,7 +78,8 @@ message SamplingParams {
 
 // ---- Text-based generate (text in, text out) ----
 
-message TextGenerateRequest {
+message TextGenerateRequest
+{
   string text = 1;
   optional SamplingParams sampling_params = 2;
   optional bool stream = 3;
@@ -92,7 +96,8 @@ message TextGenerateRequest {
   optional DisaggregatedParams disaggregated_params = 14;
 }
 
-message TextGenerateResponse {
+message TextGenerateResponse
+{
   string text = 1;
   map<string, string> meta_info = 2;
   bool finished = 3;
@@ -100,7 +105,8 @@ message TextGenerateResponse {
 
 // ---- Tokenized generate (input_ids in, token_ids out) ----
 
-message GenerateRequest {
+message GenerateRequest
+{
   repeated int32 input_ids = 1;
   optional SamplingParams sampling_params = 2;
   optional bool stream = 3;
@@ -116,7 +122,8 @@ message GenerateRequest {
   optional DisaggregatedParams disaggregated_params = 13;
 }
 
-message GenerateResponse {
+message GenerateResponse
+{
   repeated int32 output_ids = 1;
   map<string, string> meta_info = 2;
   bool finished = 3;
@@ -124,28 +131,32 @@ message GenerateResponse {
 
 // ---- Text-based embed (text in, embedding out) ----
 
-message TextEmbedRequest {
+message TextEmbedRequest
+{
   string text = 1;
   optional string rid = 2;
   optional string routing_key = 3;
   map<string, string> trace_headers = 4;
 }
 
-message TextEmbedResponse {
+message TextEmbedResponse
+{
   repeated float embedding = 1;
   map<string, string> meta_info = 2;
 }
 
 // ---- Tokenized embed (input_ids in, embedding out) ----
 
-message EmbedRequest {
+message EmbedRequest
+{
   repeated int32 input_ids = 1;
   optional string rid = 2;
   optional string routing_key = 3;
   map<string, string> trace_headers = 4;
 }
 
-message EmbedResponse {
+message EmbedResponse
+{
   repeated float embedding = 1;
   map<string, string> meta_info = 2;
 }
@@ -154,7 +165,8 @@ message EmbedResponse {
 
 message HealthCheckRequest {}
 
-message HealthCheckResponse {
+message HealthCheckResponse
+{
   bool healthy = 1;
 }
 
@@ -162,7 +174,8 @@ message HealthCheckResponse {
 
 message GetModelInfoRequest {}
 
-message GetModelInfoResponse {
+message GetModelInfoResponse
+{
   string model_path = 1;
   string json_info = 2;
 }
@@ -171,24 +184,28 @@ message GetModelInfoResponse {
 
 message GetServerInfoRequest {}
 
-message GetServerInfoResponse {
+message GetServerInfoResponse
+{
   string json_info = 1;
 }
 
 // ---- Abort ----
 
-message AbortRequest {
+message AbortRequest
+{
   string rid = 1;
   bool abort_all = 2;
 }
 
-message AbortResponse {
+message AbortResponse
+{
   bool success = 1;
 }
 
 // ---- Classify (same internal path as embed, uses EmbeddingReqInput) ----
 
-message ClassifyRequest {
+message ClassifyRequest
+{
   string text = 1;
   repeated int32 input_ids = 2;
   optional string rid = 3;
@@ -196,30 +213,35 @@ message ClassifyRequest {
   map<string, string> trace_headers = 5;
 }
 
-message ClassifyResponse {
+message ClassifyResponse
+{
   repeated float embedding = 1;
   map<string, string> meta_info = 2;
 }
 
 // ---- Tokenize / Detokenize (local ops, no inference) ----
 
-message TokenizeRequest {
+message TokenizeRequest
+{
   string text = 1;
   optional bool add_special_tokens = 2;
 }
 
-message TokenizeResponse {
+message TokenizeResponse
+{
   repeated int32 tokens = 1;
   int32 count = 2;
   int32 max_model_len = 3;
   string input_text = 4;
 }
 
-message DetokenizeRequest {
+message DetokenizeRequest
+{
   repeated int32 tokens = 1;
 }
 
-message DetokenizeResponse {
+message DetokenizeResponse
+{
   string text = 1;
 }
 
@@ -227,11 +249,13 @@ message DetokenizeResponse {
 
 message ListModelsRequest {}
 
-message ListModelsResponse {
+message ListModelsResponse
+{
   repeated ModelCard models = 1;
 }
 
-message ModelCard {
+message ModelCard
+{
   string id = 1;
   string root = 2;
   optional string parent = 3;
@@ -240,11 +264,13 @@ message ModelCard {
 
 // ---- Get load ----
 
-message GetLoadRequest {
+message GetLoadRequest
+{
   optional int32 dp_rank = 1;
 }
 
-message GetLoadResponse {
+message GetLoadResponse
+{
   string json_info = 1;
 }
 
@@ -252,68 +278,80 @@ message GetLoadResponse {
 
 message FlushCacheRequest {}
 
-message FlushCacheResponse {
+message FlushCacheResponse
+{
   bool success = 1;
   string message = 2;
 }
 
 // ---- Pause / Continue generation ----
 
-message PauseGenerationRequest {
+message PauseGenerationRequest
+{
   string mode = 1;
 }
 
-message PauseGenerationResponse {
+message PauseGenerationResponse
+{
   string message = 1;
 }
 
 message ContinueGenerationRequest {}
 
-message ContinueGenerationResponse {
+message ContinueGenerationResponse
+{
   string message = 1;
 }
 
 // ---- OpenAI-compatible pass-through messages ----
 
-message OpenAIRequest {
+message OpenAIRequest
+{
   bytes json_body = 1;
   map<string, string> trace_headers = 2;
 }
 
-message OpenAIStreamChunk {
+message OpenAIStreamChunk
+{
   bytes json_chunk = 1;
   bool finished = 2;
 }
 
-message OpenAIResponse {
+message OpenAIResponse
+{
   bytes json_body = 1;
   int32 status_code = 2;
 }
 
 // ---- Admin: Profile ----
 
-message StartProfileRequest {
+message StartProfileRequest
+{
   optional string output_dir = 1;
 }
 
-message StartProfileResponse {
+message StartProfileResponse
+{
   string message = 1;
 }
 
 message StopProfileRequest {}
 
-message StopProfileResponse {
+message StopProfileResponse
+{
   string message = 1;
 }
 
 // ---- Admin: Weight update ----
 
-message UpdateWeightsRequest {
+message UpdateWeightsRequest
+{
   string model_path = 1;
   optional string load_format = 2;
 }
 
-message UpdateWeightsResponse {
+message UpdateWeightsResponse
+{
   bool success = 1;
   string message = 2;
 }
