@@ -1,0 +1,11 @@
+# Benchmark drivers, aggregate reports, summaries, plots, and provenance belong
+# in git. High-volume inputs and per-request/runtime output belong in artifact
+# storage and can be regenerated with the adjacent driver.
+**/__pycache__/
+**/campaign/**/runs/
+**/campaign/**/aiperf/
+**/campaign/**/datasets/*.jsonl
+**/campaign/**/*-derived.jsonl
+**/campaign/**/profile_export*
+**/campaign/**/*.log.txt
+**/campaign/**/results.json
