@@ -32,6 +32,7 @@ class DynamoRuntimeConfig(ConfigBase):
     connector: list[str]
     enable_local_indexer: bool
     durable_kv_events: bool
+    kv_event_coalescing_block_size: Optional[int] = None
 
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
@@ -89,6 +90,14 @@ class DynamoRuntimeConfig(ConfigBase):
         if self.engine_request_limit is not None and self.engine_request_limit <= 0:
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
+            )
+        if (
+            self.kv_event_coalescing_block_size is not None
+            and self.kv_event_coalescing_block_size <= 0
+        ):
+            raise ValueError(
+                "--kv-event-coalescing-block-size must be a positive integer, "
+                f"got {self.kv_event_coalescing_block_size}"
             )
 
     def _validate_output_modalities(self) -> None:
@@ -178,6 +187,15 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_DURABLE_KV_EVENTS",
             default=False,
             help="[Deprecated] Enable durable KV events using NATS JetStream instead of the local indexer. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--kv-event-coalescing-block-size",
+            env_var="DYN_KV_EVENT_COALESCING_BLOCK_SIZE",
+            default=None,
+            type=int,
+            help="Coalesce worker KV events into router-visible blocks of this many tokens. Must be a multiple of the engine KV block size.",
         )
 
         # Optional: tool/reasoning parsers (choices from dynamo._core when available)

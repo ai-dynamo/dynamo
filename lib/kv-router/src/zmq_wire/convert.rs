@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-    KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData, Placement, PlacementEvent,
-    StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
+    KvCacheRemoveData, KvCacheStoreBlockInput, KvCacheStoreData, KvCacheStoreInput,
+    KvCacheStoredBlockData, Placement, PlacementEvent, PlacementEventInput, StorageTier,
+    WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
 use super::types::{BlockHashValue, RawKvEvent};
@@ -22,6 +23,49 @@ pub fn convert_event(
     warning_count: &Arc<AtomicU32>,
     image_token_id: Option<u32>,
 ) -> Option<PlacementEvent> {
+    convert_event_impl(
+        raw,
+        event_id,
+        kv_block_size,
+        worker,
+        warning_count,
+        image_token_id,
+        false,
+    )
+    .map(|input| input.event)
+}
+
+/// Convert a raw event while retaining worker-local token context for optional
+/// publisher-side block coalescing.
+pub fn convert_event_with_input(
+    raw: RawKvEvent,
+    event_id: u64,
+    kv_block_size: u32,
+    worker: WorkerWithDpRank,
+    warning_count: &Arc<AtomicU32>,
+    image_token_id: Option<u32>,
+) -> Option<PlacementEventInput> {
+    convert_event_impl(
+        raw,
+        event_id,
+        kv_block_size,
+        worker,
+        warning_count,
+        image_token_id,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn convert_event_impl(
+    raw: RawKvEvent,
+    event_id: u64,
+    kv_block_size: u32,
+    worker: WorkerWithDpRank,
+    warning_count: &Arc<AtomicU32>,
+    image_token_id: Option<u32>,
+    capture_store_input: bool,
+) -> Option<PlacementEventInput> {
     let storage_tier = match &raw {
         RawKvEvent::BlockStored { medium, .. } | RawKvEvent::BlockRemoved { medium, .. } => {
             StorageTier::from_kv_medium_or_default(medium.as_deref())
@@ -60,15 +104,17 @@ pub fn convert_event(
                     // Return an empty Removed instead of Cleared to avoid nuking
                     // the worker's entire index state. An empty Removed is a no-op
                     // in the radix tree (zero iterations, returns Ok(())).
-                    return Some(PlacementEvent::new(
-                        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
-                        KvCacheEvent {
-                            event_id,
-                            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                block_hashes: vec![],
-                            }),
-                            dp_rank,
-                        },
+                    return Some(PlacementEventInput::without_store_input(
+                        PlacementEvent::new(
+                            Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+                            KvCacheEvent {
+                                event_id,
+                                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                    block_hashes: vec![],
+                                }),
+                                dp_rank,
+                            },
+                        ),
                     ));
                 }
             }
@@ -78,14 +124,23 @@ pub fn convert_event(
                 .into_iter()
                 .map(BlockHashValue::into_u64)
                 .collect();
-            KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: parent_block_hash
-                        .map(BlockHashValue::into_u64)
-                        .map(ExternalSequenceBlockHash::from),
-                    start_position: None,
-                    blocks: create_stored_blocks(
+            let (blocks, store_input) = if capture_store_input {
+                let (blocks, input) = create_stored_blocks_with_input(
+                    kv_block_size,
+                    &token_ids,
+                    &num_block_tokens,
+                    &block_hashes_u64,
+                    lora_name.as_deref(),
+                    cache_namespace.as_deref(),
+                    warning_count,
+                    block_mm_infos.as_deref(),
+                    is_eagle,
+                    image_token_id,
+                );
+                (blocks, Some(input))
+            } else {
+                (
+                    create_stored_blocks(
                         kv_block_size,
                         &token_ids,
                         &num_block_tokens,
@@ -97,9 +152,27 @@ pub fn convert_event(
                         is_eagle,
                         image_token_id,
                     ),
+                    None,
+                )
+            };
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent_block_hash
+                        .map(BlockHashValue::into_u64)
+                        .map(ExternalSequenceBlockHash::from),
+                    start_position: None,
+                    blocks,
                 }),
                 dp_rank,
-            }
+            };
+            return Some(PlacementEventInput::new(
+                PlacementEvent::new(
+                    Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+                    event,
+                ),
+                store_input,
+            ));
         }
         RawKvEvent::BlockRemoved { block_hashes, .. } => {
             let hashes = block_hashes
@@ -123,9 +196,11 @@ pub fn convert_event(
         RawKvEvent::Ignored => unreachable!("ignored events return before conversion"),
     };
 
-    Some(PlacementEvent::new(
-        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
-        event,
+    Some(PlacementEventInput::without_store_input(
+        PlacementEvent::new(
+            Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+            event,
+        ),
     ))
 }
 
@@ -199,13 +274,6 @@ pub fn create_stored_block_from_parts(
         is_eagle,
         image_token_id,
     } = options;
-
-    // When the model has a routing image token and this block carries mm
-    // objects (vLLM events), normalize to the canonical pad_value scheme:
-    // substitute pad_value over the image_token_id runs and hash WITHOUT
-    // block_mm_infos, matching the frontend. sglang events carry no
-    // image_token_id tokens nor mm_extra_info, so they take the else branch
-    // unchanged.
     let tokens_hash = match (image_token_id, mm_extra_info.as_ref()) {
         (Some(img_tok), Some(info)) if !info.mm_objects.is_empty() => {
             let mm_hashes: Vec<u64> = info.mm_objects.iter().map(|o| o.mm_hash).collect();
@@ -235,7 +303,6 @@ pub fn create_stored_block_from_parts(
             )[0]
         }
     };
-
     tracing::trace!(
         "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}, mm_extra_info={:?}",
         block_hash,
@@ -251,6 +318,72 @@ pub fn create_stored_block_from_parts(
     }
 }
 
+pub fn create_stored_block_from_parts_with_input(
+    kv_block_size: u32,
+    block_hash: u64,
+    token_ids: &[u32],
+    options: StoredBlockOptions<'_>,
+) -> (KvCacheStoredBlockData, KvCacheStoreBlockInput) {
+    let StoredBlockOptions {
+        lora_name,
+        cache_namespace,
+        mm_extra_info,
+        is_eagle,
+        image_token_id,
+    } = options;
+
+    // When the model has a routing image token and this block carries mm
+    // objects (vLLM events), normalize to the canonical pad_value scheme:
+    // substitute pad_value over the image_token_id runs and hash WITHOUT
+    // block_mm_infos, matching the frontend. sglang events carry no
+    // image_token_id tokens nor mm_extra_info, so they take the else branch
+    // unchanged.
+    let (canonical_tokens, hash_mm_extra_info) = match (image_token_id, mm_extra_info.as_ref()) {
+        (Some(img_tok), Some(info)) if !info.mm_objects.is_empty() => {
+            let mm_hashes: Vec<u64> = info.mm_objects.iter().map(|o| o.mm_hash).collect();
+            let substituted = substitute_pad_values(token_ids, img_tok, &mm_hashes);
+            (substituted, None)
+        }
+        _ => (token_ids.to_vec(), mm_extra_info.clone()),
+    };
+    let block_mm_infos = hash_mm_extra_info
+        .as_ref()
+        .map(|info| vec![Some(info.clone())]);
+    let tokens_hash = compute_block_hash_for_seq(
+        &canonical_tokens,
+        kv_block_size,
+        BlockHashOptions {
+            block_mm_infos: block_mm_infos.as_deref(),
+            lora_name,
+            cache_namespace,
+            is_eagle,
+        },
+    )[0];
+
+    tracing::trace!(
+        "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}, mm_extra_info={:?}",
+        block_hash,
+        tokens_hash.0,
+        token_ids,
+        kv_block_size,
+        mm_extra_info
+    );
+    (
+        KvCacheStoredBlockData {
+            block_hash: ExternalSequenceBlockHash::from(block_hash),
+            tokens_hash,
+            mm_extra_info,
+        },
+        KvCacheStoreBlockInput {
+            token_ids: canonical_tokens,
+            lora_name: lora_name.map(ToOwned::to_owned),
+            cache_namespace: cache_namespace.map(ToOwned::to_owned),
+            is_eagle: is_eagle.unwrap_or(false),
+            hash_mm_extra_info,
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn create_stored_blocks(
     kv_block_size: u32,
@@ -264,7 +397,69 @@ pub fn create_stored_blocks(
     is_eagle: Option<bool>,
     image_token_id: Option<u32>,
 ) -> Vec<KvCacheStoredBlockData> {
+    let mut blocks = Vec::new();
+    let mut token_offset = 0usize;
+    let append = usize::from(is_eagle.unwrap_or(false));
+
+    for (block_idx, (num_tokens, block_hash)) in
+        num_block_tokens.iter().zip(block_hashes).enumerate()
+    {
+        if *num_tokens != u64::from(kv_block_size) {
+            if warning_count.fetch_add(1, Ordering::Relaxed) < 3 {
+                tracing::warn!(
+                    "Block not published. Block size must be {} tokens to be published. Block size is: {}",
+                    kv_block_size,
+                    *num_tokens
+                );
+            }
+            break;
+        }
+        let end = token_offset + append + *num_tokens as usize;
+        if end > token_ids.len() {
+            if warning_count.fetch_add(1, Ordering::Relaxed) < 3 {
+                tracing::warn!(
+                    "Block not published. token_ids too short: need {}, got {}",
+                    end,
+                    token_ids.len()
+                );
+            }
+            break;
+        }
+        let mm_extra_info = block_mm_infos
+            .and_then(|infos| infos.get(block_idx))
+            .and_then(Clone::clone);
+        blocks.push(create_stored_block_from_parts(
+            kv_block_size,
+            *block_hash,
+            &token_ids[token_offset..end],
+            StoredBlockOptions {
+                lora_name,
+                cache_namespace,
+                mm_extra_info,
+                is_eagle,
+                image_token_id,
+            },
+        ));
+        token_offset += *num_tokens as usize;
+    }
+    blocks
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_stored_blocks_with_input(
+    kv_block_size: u32,
+    token_ids: &[u32],
+    num_block_tokens: &[u64],
+    block_hashes: &[u64],
+    lora_name: Option<&str>,
+    cache_namespace: Option<&str>,
+    warning_count: &Arc<AtomicU32>,
+    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+    is_eagle: Option<bool>,
+    image_token_id: Option<u32>,
+) -> (Vec<KvCacheStoredBlockData>, KvCacheStoreInput) {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
+    let mut inputs: Vec<KvCacheStoreBlockInput> = Vec::new();
 
     let mut token_offset: usize = 0;
     let append = is_eagle.unwrap_or(false) as usize;
@@ -300,7 +495,7 @@ pub fn create_stored_blocks(
             .and_then(|infos| infos.get(block_idx))
             .and_then(|opt| opt.clone());
 
-        blocks.push(create_stored_block_from_parts(
+        let (block, input) = create_stored_block_from_parts_with_input(
             kv_block_size,
             *block_hash_it,
             tokens,
@@ -311,11 +506,13 @@ pub fn create_stored_blocks(
                 is_eagle,
                 image_token_id,
             },
-        ));
+        );
+        blocks.push(block);
+        inputs.push(input);
         token_offset += *num_tokens_it as usize;
     }
 
-    blocks
+    (blocks, KvCacheStoreInput { blocks: inputs })
 }
 
 #[cfg(test)]
@@ -385,5 +582,37 @@ mod normalize_tests {
         let without =
             create_stored_block_from_parts(block_size, 0x1, &tokens, StoredBlockOptions::default());
         assert_eq!(with_img.tokens_hash, without.tokens_hash);
+    }
+
+    #[test]
+    fn sidecar_path_preserves_published_blocks() {
+        let warning_count = Arc::new(AtomicU32::new(0));
+        let standard = create_stored_blocks(
+            2,
+            &[10, 20, 30, 40],
+            &[2, 2],
+            &[100, 200],
+            Some("adapter"),
+            Some("namespace"),
+            &warning_count,
+            None,
+            None,
+            None,
+        );
+        let (with_sidecar, input) = create_stored_blocks_with_input(
+            2,
+            &[10, 20, 30, 40],
+            &[2, 2],
+            &[100, 200],
+            Some("adapter"),
+            Some("namespace"),
+            &warning_count,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(with_sidecar, standard);
+        assert_eq!(input.blocks[0].token_ids, vec![10, 20]);
+        assert_eq!(input.blocks[1].token_ids, vec![30, 40]);
     }
 }

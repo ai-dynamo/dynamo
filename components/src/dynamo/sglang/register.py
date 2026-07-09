@@ -30,8 +30,10 @@ from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
+    kv_event_block_sizes,
     model_card_dp_rank_bounds,
     runtime_capacity,
+    scale_kv_block_capacity,
 )
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
@@ -118,6 +120,7 @@ async def _register_model_with_runtime_config(
         True if registration succeeded, False otherwise.
     """
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
+    _, routing_block_size = kv_event_block_sizes(server_args, dynamo_args)
 
     if dynamo_args.use_sglang_tokenizer:
         logging.warning(
@@ -159,7 +162,7 @@ async def _register_model_with_runtime_config(
             endpoint,
             _register_model_source_path(engine, server_args),
             server_args.served_model_name,
-            kv_cache_block_size=server_args.page_size,
+            kv_cache_block_size=routing_block_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
             media_decoder=media_decoder,
@@ -457,11 +460,18 @@ async def _get_runtime_config(
     try:
         scheduler_info = engine._scheduler_init_result.scheduler_infos[0]
         capacity = runtime_capacity(server_args, scheduler_info)
+        source_block_size, routing_block_size = kv_event_block_sizes(
+            server_args, dynamo_args
+        )
         max_total_tokens = scheduler_info.get("max_total_num_tokens")
 
         if max_total_tokens:
             if capacity.total_kv_blocks is not None:
-                runtime_config.total_kv_blocks = capacity.total_kv_blocks
+                runtime_config.total_kv_blocks = scale_kv_block_capacity(
+                    capacity.total_kv_blocks,
+                    source_block_size,
+                    routing_block_size,
+                )
                 logging.info(
                     f"Got total KV blocks from scheduler: {runtime_config.total_kv_blocks} "
                     f"(max_total_tokens={max_total_tokens}, page_size={server_args.page_size})"

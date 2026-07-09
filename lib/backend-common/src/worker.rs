@@ -150,6 +150,9 @@ pub struct WorkerConfig {
     /// Kill switch for KV-aware-routing publishers. When `false`, skip
     /// `engine.kv_event_sources()` and `SnapshotPublisher` setup.
     pub enable_kv_routing: bool,
+    /// Optional router-visible KV block size. The engine continues to emit
+    /// physical blocks at `EngineConfig.llm.kv_cache_block_size`.
+    pub kv_event_coalescing_block_size: Option<u32>,
     /// Per-endpoint Prometheus metric labels appended to every metric.
     /// Common labels: `("model", "<served-name>")`.
     pub metrics_labels: Vec<(String, String)>,
@@ -217,6 +220,7 @@ impl Default for WorkerConfig {
             exclude_tools_when_tool_choice_none: true,
             enable_local_indexer: true,
             enable_kv_routing: true,
+            kv_event_coalescing_block_size: None,
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             health_check_payload: None,
@@ -657,11 +661,16 @@ impl Worker {
             .llm
             .as_ref()
             .and_then(|l| l.kv_cache_block_size);
+        let routing_kv_block_size = resolve_routing_kv_block_size(
+            kv_cache_block_size,
+            self.config.kv_event_coalescing_block_size,
+        )?;
         tracing::debug!(
             kv_sources = kv_sources.len(),
             snapshot_dp_ranks = bindings.dp_ranks.len(),
             enable_local_indexer,
             kv_cache_block_size = ?kv_cache_block_size,
+            routing_kv_block_size = ?routing_kv_block_size,
             "Starting KV-aware-routing publishers"
         );
         let handles = setup_publishers(
@@ -671,6 +680,7 @@ impl Worker {
             bindings.dp_ranks,
             bindings.on_publisher_ready,
             kv_cache_block_size,
+            self.config.kv_event_coalescing_block_size,
             enable_local_indexer,
         )
         .await?;
@@ -1595,6 +1605,31 @@ fn validate_model_input(model_input: ModelInput, engine: &EngineKind) -> Result<
     }
 }
 
+fn resolve_routing_kv_block_size(
+    source: Option<u32>,
+    configured: Option<u32>,
+) -> Result<Option<u32>, DynamoError> {
+    let Some(target) = configured else {
+        return Ok(source);
+    };
+    let Some(source) = source else {
+        return Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "kv_event_coalescing_block_size requires the engine to report kv_cache_block_size"
+                .to_string(),
+        ));
+    };
+    if source == 0 || target < source || target % source != 0 {
+        return Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            format!(
+                "kv_event_coalescing_block_size ({target}) must be a multiple of the engine KV block size ({source}) and cannot be smaller"
+            ),
+        ));
+    }
+    Ok(Some(target))
+}
+
 async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
@@ -1633,9 +1668,18 @@ async fn build_local_model(
         _ => None,
     };
 
+    let routing_kv_block_size = resolve_routing_kv_block_size(
+        llm.kv_cache_block_size,
+        config.kv_event_coalescing_block_size,
+    )?;
+    let block_ratio = match (llm.kv_cache_block_size, routing_kv_block_size) {
+        (Some(source), Some(target)) => u64::from(target / source),
+        _ => 1,
+    };
+
     let rt_cfg = ModelRuntimeConfig {
         context_length: llm.context_length,
-        total_kv_blocks: llm.total_kv_blocks,
+        total_kv_blocks: llm.total_kv_blocks.map(|blocks| blocks / block_ratio),
         max_num_seqs: llm.max_num_seqs,
         max_num_batched_tokens: llm.max_num_batched_tokens,
         data_parallel_size: llm.data_parallel_size.unwrap_or(1),
@@ -1655,7 +1699,7 @@ async fn build_local_model(
     let mut builder = LocalModelBuilder::default();
     builder
         .model_name(served_name)
-        .kv_cache_block_size(llm.kv_cache_block_size)
+        .kv_cache_block_size(routing_kv_block_size)
         .custom_template_path(config.custom_jinja_template.clone())
         .media_decoder(config.media_decoder.clone())
         .media_fetcher(config.media_fetcher.clone())
@@ -1697,6 +1741,20 @@ async fn build_local_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_kv_block_size_validates_source_multiple() {
+        assert_eq!(
+            resolve_routing_kv_block_size(Some(1), None).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            resolve_routing_kv_block_size(Some(4), Some(16)).unwrap(),
+            Some(16)
+        );
+        assert!(resolve_routing_kv_block_size(Some(4), Some(10)).is_err());
+        assert!(resolve_routing_kv_block_size(None, Some(16)).is_err());
+    }
 
     fn error_type_of(result: Result<ModelType, DynamoError>) -> ErrorType {
         result.unwrap_err().error_type()
@@ -1952,6 +2010,29 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("group-a")
         );
+    }
+
+    #[tokio::test]
+    async fn build_local_model_advertises_coalesced_block_units() {
+        let config = WorkerConfig {
+            kv_event_coalescing_block_size: Some(16),
+            ..WorkerConfig::default()
+        };
+        let engine_config = EngineConfig {
+            model: "test/model".to_string(),
+            llm: Some(crate::engine::LlmRegistration {
+                kv_cache_block_size: Some(1),
+                total_kv_blocks: Some(33),
+                ..Default::default()
+            }),
+            ..EngineConfig::default()
+        };
+
+        let local_model = build_local_model(&config, &engine_config, true)
+            .await
+            .unwrap();
+        assert_eq!(local_model.card().kv_cache_block_size, 16);
+        assert_eq!(local_model.runtime_config().total_kv_blocks, Some(2));
     }
 
     #[tokio::test]

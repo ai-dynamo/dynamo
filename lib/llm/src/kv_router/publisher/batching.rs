@@ -7,9 +7,11 @@ use std::time::{Duration, Instant};
 use dynamo_kv_router::RouterEventSink;
 use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::{
-    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, StorageTier,
+    KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoreInput,
+    StorageTier,
 };
 
+use super::coalescer::EventCoalescer;
 use super::dedup::EventDedupFilter;
 use super::sinks::emit;
 
@@ -19,6 +21,7 @@ use super::sinks::emit;
 pub(super) struct BatchingState {
     pub(super) pending_removed: Option<KvCacheRemoveData>,
     pub(super) pending_stored: Option<KvCacheStoreData>,
+    pub(super) pending_stored_input: Option<KvCacheStoreInput>,
     pub(super) next_publish_id: u64,
     pub(super) last_dp_rank: u32,
     pub(super) last_storage_tier: StorageTier,
@@ -30,6 +33,7 @@ impl BatchingState {
         Self {
             pending_removed: None,
             pending_stored: None,
+            pending_stored_input: None,
             next_publish_id: 1,
             last_dp_rank: 0,
             last_storage_tier: StorageTier::Device,
@@ -77,48 +81,61 @@ impl BatchingState {
         local_indexer: &Option<Arc<LocalKvIndexer>>,
         worker_id: u64,
         dedup: &mut EventDedupFilter,
+        coalescer: &mut EventCoalescer,
     ) {
         if !self.has_pending() {
             return;
         }
         let dp_rank = self.last_dp_rank;
-        let mut emitted = false;
         if let Some(data) = self.pending_removed.take()
             && let Some(filtered) = dedup.filter_remove(dp_rank, self.last_storage_tier, data)
         {
-            emit(
-                publisher,
-                local_indexer,
-                worker_id,
+            for data in coalescer.process(
+                dp_rank,
                 self.last_storage_tier,
-                KvCacheEvent {
-                    event_id: self.next_publish_id,
-                    data: KvCacheEventData::Removed(filtered),
-                    dp_rank,
-                },
-            )
-            .await;
-            emitted = true;
+                KvCacheEventData::Removed(filtered),
+                None,
+            ) {
+                emit(
+                    publisher,
+                    local_indexer,
+                    worker_id,
+                    self.last_storage_tier,
+                    KvCacheEvent {
+                        event_id: self.next_publish_id,
+                        data,
+                        dp_rank,
+                    },
+                )
+                .await;
+                self.next_publish_id += 1;
+            }
         }
         if let Some(data) = self.pending_stored.take() {
             dedup.track_store(dp_rank, self.last_storage_tier, &data);
-            emit(
-                publisher,
-                local_indexer,
-                worker_id,
+            let input = self.pending_stored_input.take();
+            for data in coalescer.process(
+                dp_rank,
                 self.last_storage_tier,
-                KvCacheEvent {
-                    event_id: self.next_publish_id,
-                    data: KvCacheEventData::Stored(data),
-                    dp_rank,
-                },
-            )
-            .await;
-            emitted = true;
+                KvCacheEventData::Stored(data),
+                input,
+            ) {
+                emit(
+                    publisher,
+                    local_indexer,
+                    worker_id,
+                    self.last_storage_tier,
+                    KvCacheEvent {
+                        event_id: self.next_publish_id,
+                        data,
+                        dp_rank,
+                    },
+                )
+                .await;
+                self.next_publish_id += 1;
+            }
         }
-        if emitted {
-            self.next_publish_id += 1;
-        }
+        debug_assert!(self.pending_stored_input.is_none());
         self.record_flush_time();
     }
 }

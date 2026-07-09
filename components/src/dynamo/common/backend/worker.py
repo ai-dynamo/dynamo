@@ -144,6 +144,7 @@ class WorkerConfig:
     route_to_encoder: bool = False
     media_decoder: Optional[MediaDecoder] = None
     media_fetcher: Optional[MediaFetcher] = None
+    kv_event_coalescing_block_size: Optional[int] = None
 
     @classmethod
     def from_runtime_config(
@@ -182,6 +183,9 @@ class WorkerConfig:
             ),
             "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
             "enable_kv_routing": getattr(runtime_cfg, "enable_kv_routing", True),
+            "kv_event_coalescing_block_size": getattr(
+                runtime_cfg, "kv_event_coalescing_block_size", None
+            ),
             "structural_tag_mode": (
                 "on"
                 if getattr(runtime_cfg, "dyn_enable_structural_tag", False)
@@ -267,6 +271,9 @@ class Worker:
             ),
             enable_local_indexer=self.config.enable_local_indexer,
             enable_kv_routing=self.config.enable_kv_routing,
+            kv_event_coalescing_block_size=(
+                self.config.kv_event_coalescing_block_size
+            ),
             metrics_labels=list(self.config.metrics_labels),
             disaggregation_mode=_to_rust_disaggregation_mode(
                 self.config.disaggregation_mode

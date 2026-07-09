@@ -24,7 +24,9 @@ mod tests;
 mod types;
 
 pub use convert::{
-    StoredBlockOptions, convert_event, create_stored_block_from_parts, create_stored_blocks,
+    StoredBlockOptions, convert_event, convert_event_with_input, create_stored_block_from_parts,
+    create_stored_block_from_parts_with_input, create_stored_blocks,
+    create_stored_blocks_with_input,
 };
 pub use extra_keys::{
     extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, parse_mm_hash_from_extra_key,
@@ -145,6 +147,22 @@ impl ZmqEventNormalizer {
         worker: WorkerWithDpRank,
     ) -> Option<PlacementEvent> {
         convert_event(
+            raw,
+            event_id,
+            self.kv_block_size,
+            worker,
+            &self.warning_count,
+            self.image_token_id,
+        )
+    }
+
+    pub fn normalize_preprocessed_with_input(
+        &self,
+        raw: RawKvEvent,
+        event_id: u64,
+        worker: WorkerWithDpRank,
+    ) -> Option<crate::protocols::PlacementEventInput> {
+        convert_event_with_input(
             raw,
             event_id,
             self.kv_block_size,

@@ -14,7 +14,7 @@ use dynamo_kv_router::zmq_wire::*;
 use crate::kv_router::metrics::kv_publisher_metrics;
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
-#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) async fn start_zmq_listener(
     zmq_endpoint: String,
     zmq_topic: String,
@@ -24,6 +24,58 @@ pub(super) async fn start_zmq_listener(
     kv_block_size: u32,
     next_event_id: Arc<AtomicU64>,
     image_token_id: Option<u32>,
+) {
+    start_zmq_listener_impl(
+        zmq_endpoint,
+        zmq_topic,
+        worker_id,
+        tx,
+        cancellation_token,
+        kv_block_size,
+        next_event_id,
+        image_token_id,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn start_zmq_listener_with_input(
+    zmq_endpoint: String,
+    zmq_topic: String,
+    worker_id: WorkerId,
+    tx: mpsc::UnboundedSender<PlacementEventInput>,
+    cancellation_token: CancellationToken,
+    kv_block_size: u32,
+    next_event_id: Arc<AtomicU64>,
+    image_token_id: Option<u32>,
+    capture_store_input: bool,
+) {
+    start_zmq_listener_impl(
+        zmq_endpoint,
+        zmq_topic,
+        worker_id,
+        tx,
+        cancellation_token,
+        kv_block_size,
+        next_event_id,
+        image_token_id,
+        capture_store_input,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_zmq_listener_impl<E: From<PlacementEventInput>>(
+    zmq_endpoint: String,
+    zmq_topic: String,
+    worker_id: WorkerId,
+    tx: mpsc::UnboundedSender<E>,
+    cancellation_token: CancellationToken,
+    kv_block_size: u32,
+    next_event_id: Arc<AtomicU64>,
+    image_token_id: Option<u32>,
+    capture_store_input: bool,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -124,20 +176,25 @@ pub(super) async fn start_zmq_listener(
                         metrics.increment_zmq_event("accepted", event_type);
                     }
                     let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
-                    let Some(event) =
-                        normalizer.normalize_preprocessed(raw_event, event_id, worker)
-                    else {
+                    let event = if capture_store_input {
+                        normalizer.normalize_preprocessed_with_input(raw_event, event_id, worker)
+                    } else {
+                        normalizer
+                            .normalize_preprocessed(raw_event, event_id, worker)
+                            .map(PlacementEventInput::without_store_input)
+                    };
+                    let Some(event) = event else {
                         if let Some(metrics) = &metrics {
                             metrics.increment_zmq_conversion_issue(event_type, "conversion_none");
                         }
                         continue;
                     };
-                    if matches!(event.event.data, KvCacheEventData::Stored(ref data) if data.blocks.is_empty())
+                    if matches!(event.event.event.data, KvCacheEventData::Stored(ref data) if data.blocks.is_empty())
                         && let Some(metrics) = &metrics
                     {
                         metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
                     }
-                    if tx.send(event).is_err() {
+                    if tx.send(event.into()).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         break 'main String::from("channel receiver dropped");
                     }

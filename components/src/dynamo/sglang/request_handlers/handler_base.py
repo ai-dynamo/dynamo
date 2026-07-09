@@ -45,6 +45,7 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang._compat import start_profile_compat
 from dynamo.sglang.args import Config
+from dynamo.sglang.capacity import kv_event_block_sizes
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -411,12 +412,16 @@ class LoraMixin:
                                 else:
                                     lora_worker_type = WorkerType.Aggregated
                                     lora_needs = []
+                            _, routing_block_size = kv_event_block_sizes(
+                                self.config.server_args,
+                                self.config.dynamo_args,
+                            )
                             await register_llm(
                                 model_input=ModelInput.Tokens,
                                 model_type=lora_model_type,
                                 endpoint=self.generate_endpoint,
                                 model_path=self.config.server_args.model_path,
-                                kv_cache_block_size=self.config.server_args.page_size,
+                                kv_cache_block_size=routing_block_size,
                                 user_data=user_data,
                                 lora_name=lora_name,
                                 base_model_path=self.config.server_args.model_path,

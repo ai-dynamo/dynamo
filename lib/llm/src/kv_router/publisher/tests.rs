@@ -1870,6 +1870,105 @@ mod event_processor_tests {
         )
     }
 
+    fn coalescing_store_input(
+        event_id: u64,
+        parent_hash: Option<u64>,
+        hashes: &[u64],
+        tokens: &[u32],
+    ) -> PlacementEventInput {
+        let warning_count = Arc::new(AtomicU32::new(0));
+        let block_sizes = vec![1; hashes.len()];
+        let (blocks, store_input) = create_stored_blocks_with_input(
+            1,
+            tokens,
+            &block_sizes,
+            hashes,
+            None,
+            None,
+            &warning_count,
+            None,
+            None,
+            None,
+        );
+        PlacementEventInput::new(
+            local_gpu_event(KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                    start_position: None,
+                    blocks,
+                }),
+                dp_rank: 0,
+            }),
+            Some(store_input),
+        )
+    }
+
+    #[tokio::test]
+    async fn coalescing_runs_after_dedup_and_assigns_contiguous_output_ids() {
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEventInput>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop_with_block_sizes(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                Some(10_000),
+                DEFAULT_MAX_BATCH_BLOCKS,
+                1,
+                4,
+            )
+            .await
+        });
+
+        tx.send(coalescing_store_input(
+            10,
+            None,
+            &[1, 2, 3, 4],
+            &[11, 22, 33, 44],
+        ))
+        .unwrap();
+        tx.send(coalescing_store_input(
+            11,
+            None,
+            &[1, 2, 3, 4],
+            &[11, 22, 33, 44],
+        ))
+        .unwrap();
+        for event_id in [12, 13] {
+            tx.send(PlacementEventInput::from(local_gpu_event(KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(2)],
+                }),
+                dp_rank: 0,
+            })))
+            .unwrap();
+        }
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event.event_id, 1);
+        assert_eq!(events[1].event.event_id, 2);
+        let KvCacheEventData::Stored(stored) = &events[0].event.data else {
+            panic!("expected coalesced store")
+        };
+        assert_eq!(stored.blocks.len(), 1);
+        assert_eq!(stored.blocks[0].block_hash, ExternalSequenceBlockHash(4));
+        assert_eq!(
+            events[1].event.data,
+            KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(4)]
+            })
+        );
+    }
+
     /// Test that pushing N removed events results in batched output
     /// Uses a 10ms timeout to ensure events are batched (events sent rapidly)
     #[tokio::test]

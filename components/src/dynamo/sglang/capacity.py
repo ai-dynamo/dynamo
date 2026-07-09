@@ -56,6 +56,38 @@ def tokens_to_kv_blocks(tokens: int, page_size: int | None) -> int:
     return (tokens + page_size - 1) // page_size
 
 
+def kv_event_block_sizes(server_args: Any, dynamo_args: Any) -> tuple[int, int]:
+    """Return and validate physical and router-visible KV event block sizes."""
+    source = int(getattr(server_args, "page_size", 0) or 0)
+    target = int(
+        getattr(dynamo_args, "kv_event_coalescing_block_size", None) or source
+    )
+    if source <= 0:
+        raise ValueError(f"SGLang page_size must be positive, got {source}")
+    if target < source or target % source:
+        raise ValueError(
+            "kv_event_coalescing_block_size "
+            f"({target}) must be a multiple of SGLang page_size ({source}) "
+            "and cannot be smaller"
+        )
+    return source, target
+
+
+def scale_kv_block_capacity(
+    blocks: int | None, source: int, target: int
+) -> int | None:
+    """Convert a total capacity using floor division."""
+    if blocks is None:
+        return None
+    return blocks // (target // source)
+
+
+def scale_kv_block_usage(blocks: int, source: int, target: int) -> int:
+    """Convert an occupied-block measurement using ceiling division."""
+    ratio = target // source
+    return (blocks + ratio - 1) // ratio
+
+
 def runtime_capacity(
     server_args: Any, scheduler_info: dict[str, Any]
 ) -> RuntimeCapacity:

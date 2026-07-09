@@ -319,6 +319,7 @@ impl WorkerConfig {
         route_to_encoder = false,
         media_decoder = None,
         media_fetcher = None,
+        kv_event_coalescing_block_size = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -346,6 +347,7 @@ impl WorkerConfig {
         route_to_encoder: bool,
         media_decoder: Option<MediaDecoder>,
         media_fetcher: Option<MediaFetcher>,
+        kv_event_coalescing_block_size: Option<u32>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -415,6 +417,7 @@ impl WorkerConfig {
                 exclude_tools_when_tool_choice_none,
                 enable_local_indexer,
                 enable_kv_routing,
+                kv_event_coalescing_block_size,
                 metrics_labels,
                 disaggregation_mode: disaggregation_mode.into(),
                 health_check_payload,
