@@ -167,6 +167,33 @@ def test_get_worker_runtime_namespace_falls_back_to_worker_name_when_type_missin
     assert namespace == "base-ns-abc123"
 
 
+def test_get_worker_runtime_namespace_explicit_type_overrides_worker_name_fallback(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = {
+        "metadata": {"annotations": {"nvidia.com/current-worker-hash": "abc123"}},
+        "spec": {
+            "components": [
+                _component("worker", "frontend"),
+                _component("serving", "worker"),
+            ]
+        },
+        "status": {
+            "components": {
+                "worker": {
+                    "componentKind": "Deployment",
+                    "runtimeNamespace": "base-ns",
+                },
+                "serving": {"componentKind": "Deployment"},
+            }
+        },
+    }
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-abc123"
+
+
 def test_get_worker_runtime_namespace_falls_back_to_v2_hash(
     kubernetes_connector, mock_kube_api
 ):

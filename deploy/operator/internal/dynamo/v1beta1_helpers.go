@@ -281,10 +281,17 @@ func GetDCDEffectiveWorkerHash(dcd *v1beta1.DynamoComponentDeployment) string {
 		return ""
 	}
 	if workerHash := dcd.GetLabels()[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
+		if workerHash == commonconsts.LegacyWorkerHash {
+			return ""
+		}
 		return workerHash
 	}
 	labels := GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-	return labels[commonconsts.KubeLabelDynamoWorkerHash]
+	workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]
+	if workerHash == commonconsts.LegacyWorkerHash {
+		return ""
+	}
+	return workerHash
 }
 
 // GetDCDRuntimeNamespace returns the effective Dynamo runtime namespace used by

@@ -135,10 +135,10 @@ class KubernetesConnector(PlannerConnector):
         return worker_hash
 
     def _is_worker_component(self, component_name: str, component: dict) -> bool:
-        return (
-            get_component_type(component) in WORKER_COMPONENT_TYPES
-            or component_name in WORKER_COMPONENT_TYPES
-        )
+        component_type = get_component_type(component)
+        if component_type:
+            return component_type in WORKER_COMPONENT_TYPES
+        return component_name in WORKER_COMPONENT_TYPES
 
     def _has_worker_component(self, deployment: dict) -> bool:
         return any(

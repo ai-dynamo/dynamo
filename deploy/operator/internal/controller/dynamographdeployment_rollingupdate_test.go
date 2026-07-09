@@ -1481,6 +1481,93 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 		assert.Equal(t, "base-oldhash1", statuses["prefill"].RuntimeNamespace)
 	})
 
+	t.Run("multiple old generations selects newest nonzero target runtime namespace", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {
+				ComponentType: consts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(3)),
+			},
+		})
+
+		now := metav1.Now()
+		earlier := metav1.NewTime(now.Add(-1 * 60 * 1e9))
+
+		oldestDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "test-dgd-worker-hashaaaa",
+				Namespace:         "default",
+				CreationTimestamp: earlier,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoWorkerHash:          "hashaaaa",
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeWorker,
+					ServiceName:   "worker",
+					Replicas:      ptr.To(int32(0)),
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+					ComponentKind:    "Deployment",
+					ComponentNames:   []string{"test-dgd-worker-hashaaaa"},
+					RuntimeNamespace: "base-hashaaaa",
+					Replicas:         0,
+					ReadyReplicas:    ptr.To(int32(0)),
+				},
+			},
+		})
+
+		newerOldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "test-dgd-worker-hashbbbb",
+				Namespace:         "default",
+				CreationTimestamp: now,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoWorkerHash:          "hashbbbb",
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeWorker,
+					ServiceName:   "worker",
+					Replicas:      ptr.To(int32(2)),
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+					ComponentKind:    "Deployment",
+					ComponentNames:   []string{"test-dgd-worker-hashbbbb"},
+					RuntimeNamespace: "base-hashbbbb",
+					Replicas:         2,
+					ReadyReplicas:    ptr.To(int32(2)),
+				},
+			},
+		})
+
+		r := createTestReconcilerWithStatus(dgd, withObjects(oldestDCD, newerOldDCD))
+		ctx := context.Background()
+
+		rollingUpdateCtx := dynamo.RollingUpdateContext{
+			NewWorkerHash:                      "hashcccc",
+			OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 2},
+			OldWorkerReplicaTargetsByDCD: map[string]int32{
+				"test-dgd-worker-hashaaaa": 0,
+				"test-dgd-worker-hashbbbb": 2,
+			},
+		}
+
+		statuses, err := r.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
+		require.NoError(t, err)
+
+		assert.Equal(t, int32(2), statuses["worker"].Replicas)
+		assert.Equal(t, ptr.To(int32(2)), statuses["worker"].ReadyReplicas)
+		assert.Equal(t, "base-hashbbbb", statuses["worker"].RuntimeNamespace)
+	})
+
 	t.Run("old DCD not found - skips gracefully", func(t *testing.T) {
 		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"prefill": {

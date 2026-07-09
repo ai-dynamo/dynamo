@@ -267,6 +267,40 @@ func TestGetDCDRuntimeNamespaceIgnoresLegacyMetadataOnlyHash(t *testing.T) {
 		},
 	}
 
+	if got := GetDCDEffectiveWorkerHash(dcd); got != "" {
+		t.Fatalf("GetDCDEffectiveWorkerHash() = %q, want empty", got)
+	}
+	if got := GetDCDRuntimeNamespace(dcd); got != "base" {
+		t.Fatalf("GetDCDRuntimeNamespace() = %q, want base", got)
+	}
+}
+
+func TestGetDCDRuntimeNamespaceIgnoresLegacyPodTemplateHash(t *testing.T) {
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcd",
+			Namespace: "k8s",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoNamespace: "base",
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if got := GetDCDEffectiveWorkerHash(dcd); got != "" {
+		t.Fatalf("GetDCDEffectiveWorkerHash() = %q, want empty", got)
+	}
 	if got := GetDCDRuntimeNamespace(dcd); got != "base" {
 		t.Fatalf("GetDCDRuntimeNamespace() = %q, want base", got)
 	}
