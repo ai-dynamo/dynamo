@@ -350,6 +350,7 @@ impl KvPushRouter {
             let stopped = context_for_monitoring.stopped();
             tokio::pin!(stopped);
 
+            let mut failed = false;
             let completed = loop {
                 tokio::select! {
                     biased;
@@ -363,17 +364,14 @@ impl KvPushRouter {
                         let Some(item) = item else {
                             break true;
                         };
-                        let failed = item.error.is_some() || item.event.as_deref() == Some("error");
+                        failed |= item.error.is_some() || item.event.as_deref() == Some("error");
                         guard.on_item(&item).await;
                         yield item;
-                        if failed {
-                            break false;
-                        }
                     }
                 }
             };
 
-            if completed {
+            if completed && !failed {
                 guard.finish().await;
             } else {
                 guard.abort().await;

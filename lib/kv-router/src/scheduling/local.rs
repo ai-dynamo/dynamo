@@ -507,13 +507,13 @@ where
     ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
-        let result = self.slots.free(&request_id, Instant::now());
+        self.slots.free(&request_id, Instant::now())?;
         self.queue.finish(&request_id, outcome).await;
         match worker {
             Some(worker) => self.queue.update_worker(worker).await,
             None => self.queue.update().await,
         }
-        result
+        Ok(())
     }
 
     pub fn pending_count(&self) -> usize {
