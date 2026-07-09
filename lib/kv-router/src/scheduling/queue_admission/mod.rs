@@ -101,7 +101,7 @@ impl WorkerEligibilitySnapshot {
 pub struct AdmissionRequest<'a> {
     id: AdmissionId,
     session_id: Option<&'a str>,
-    input_tokens: usize,
+    context_tokens: usize,
     worker_eligibility: WorkerEligibility,
 }
 
@@ -109,13 +109,13 @@ impl<'a> AdmissionRequest<'a> {
     pub fn new(
         id: AdmissionId,
         session_id: Option<&'a str>,
-        input_tokens: usize,
+        context_tokens: usize,
         worker_eligibility: WorkerEligibility,
     ) -> Self {
         Self {
             id,
             session_id,
-            input_tokens,
+            context_tokens,
             worker_eligibility,
         }
     }
@@ -128,8 +128,9 @@ impl<'a> AdmissionRequest<'a> {
         self.session_id
     }
 
-    pub fn input_tokens(&self) -> usize {
-        self.input_tokens
+    /// Full tokenized request context, not uncached prefill work.
+    pub fn context_tokens(&self) -> usize {
+        self.context_tokens
     }
 
     pub fn worker_eligibility(&self) -> &WorkerEligibility {
@@ -165,14 +166,13 @@ pub enum AdmissionEvent {
         id: AdmissionId,
         worker: WorkerWithDpRank,
     },
-    /// Best-effort cumulative generated tokens. Values are monotonic but may
-    /// be coalesced or dropped; `Finished::total_tokens` is authoritative.
-    OutputTokens { id: AdmissionId, cumulative: usize },
-    /// The request left the admission host, including cancellation at any stage.
-    Finished {
+    /// The response stream ended normally.
+    Completed {
         id: AdmissionId,
-        total_tokens: usize,
+        context_tokens: usize,
     },
+    /// The request ended without committing a new logical context.
+    Aborted { id: AdmissionId },
     /// The host is giving the strategy an opportunity to reconsider deferred work.
     Reconcile,
 }
@@ -191,13 +191,13 @@ pub enum AdmissionAction {
 /// The host calls [`Self::admit`] exactly once for each tracked request, using
 /// a unique ID. A bypassed request receives no lifecycle events. A ready
 /// request may receive one `Dispatched` event and every tracked request
-/// receives exactly one terminal `Finished` event while the host remains
-/// alive. A deferred request receives no `Dispatched` event until the first
-/// valid `MakeReady` action is accepted. Duplicate or unknown actions are
-/// ignored. While any request is deferred, `Reconcile` is delivered at least
-/// once per configured queue recheck interval and may also be delivered after
-/// lifecycle or capacity changes. Host shutdown drops the strategy and its
-/// requests together, so no terminal events are delivered after shutdown
+/// receives exactly one terminal `Completed` or `Aborted` event while the host
+/// remains alive. A deferred request receives no `Dispatched` event until the
+/// first valid `MakeReady` action is accepted. Duplicate or unknown actions
+/// are ignored. While any request is deferred, `Reconcile` is delivered at
+/// least once per configured queue recheck interval and may also be delivered
+/// after lifecycle or capacity changes. Host shutdown drops the strategy and
+/// its requests together, so no terminal events are delivered after shutdown
 /// begins.
 pub trait PolicyClassAdmissionStrategy: Send {
     fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision;
@@ -230,7 +230,7 @@ mod tests {
         fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
             assert_eq!(request.id(), AdmissionId::new(7));
             assert_eq!(request.session_id(), Some("session"));
-            assert_eq!(request.input_tokens(), 42);
+            assert_eq!(request.context_tokens(), 42);
             let worker = WorkerWithDpRank::new(3, 0);
             let eligibility = request.worker_eligibility().snapshot();
             assert!(eligibility.allows(worker));
