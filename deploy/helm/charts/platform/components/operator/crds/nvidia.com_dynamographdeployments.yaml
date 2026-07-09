@@ -6,7 +6,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.4
+    controller-gen.kubebuilder.io/version: v0.17.3
     helm.sh/resource-policy: keep
   name: dynamographdeployments.nvidia.com
 spec:
@@ -11858,6 +11858,10 @@ spec:
                     - topologyProfile
                   type: object
               type: object
+              x-kubernetes-validations:
+                - message: spec.restart must be unset on create; set spec.restart.id after creation to request a restart
+                  optionalOldSelf: true
+                  rule: oldSelf.hasValue() || !has(self.restart)
             status:
               description: Status reflects the current observed state of this graph deployment.
               properties:
@@ -12719,7 +12723,11 @@ spec:
                               annotations:
                                 additionalProperties:
                                   type: string
+                                  maxLength: 262144
                                 type: object
+                                x-kubernetes-validations:
+                                  - rule: '!("nvidia.com/vllm-distributed-executor-backend" in self) || self["nvidia.com/vllm-distributed-executor-backend"].lowerAscii() in ["mp", "ray"]'
+                                    message: podTemplate backend annotation must be mp or ray, case-insensitively
                               finalizers:
                                 items:
                                   type: string
@@ -15087,6 +15095,9 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: self.name == "main" || (has(self.image) && self.image != "")
+                                      message: sidecar containers must specify a non-empty image
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -18159,6 +18170,9 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: has(self.image) && self.image != ""
+                                      message: init containers must specify a non-empty image
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -21189,6 +21203,10 @@ spec:
                     - clusterTopologyName
                   type: object
               type: object
+              x-kubernetes-validations:
+                - message: spec.restart must be unset on create; set spec.restart.id after creation to request a restart
+                  optionalOldSelf: true
+                  rule: oldSelf.hasValue() || !has(self.restart)
             status:
               description: status reflects the current observed state of this graph deployment.
               properties:

@@ -3,8 +3,10 @@ package cuda
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -19,7 +21,63 @@ type allocatedDRADevice struct {
 	device string
 }
 
-func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace string, log logr.Logger) ([]allocatedDRADevice, string, bool, error) {
+// containerResourceClaimRefs returns the pod-level resource-claim references
+// exposed to the named container via container.resources.claims, mapped to
+// the set of claim request names the container is restricted to. A nil inner
+// set exposes every request in the claim. An empty containerName returns a
+// nil map, meaning the pod-wide claim view applies.
+func containerResourceClaimRefs(pod *corev1.Pod, containerName string) (map[string]map[string]struct{}, error) {
+	if containerName == "" {
+		return nil, nil
+	}
+	for _, containers := range [][]corev1.Container{pod.Spec.Containers, pod.Spec.InitContainers} {
+		for i := range containers {
+			if containers[i].Name != containerName {
+				continue
+			}
+			refs := make(map[string]map[string]struct{}, len(containers[i].Resources.Claims))
+			for _, claimRef := range containers[i].Resources.Claims {
+				requests, seen := refs[claimRef.Name]
+				if seen && requests == nil {
+					// Already exposed without a request restriction.
+					continue
+				}
+				if claimRef.Request == "" {
+					refs[claimRef.Name] = nil
+					continue
+				}
+				if requests == nil {
+					requests = make(map[string]struct{})
+					refs[claimRef.Name] = requests
+				}
+				requests[claimRef.Request] = struct{}{}
+			}
+			return refs, nil
+		}
+	}
+	return nil, fmt.Errorf("container %q not found in pod %s/%s spec", containerName, pod.Namespace, pod.Name)
+}
+
+// resultMatchesRequests reports whether an allocation result belongs to one of
+// the claim request names a container is restricted to. Allocation results
+// for subrequests use the "<main request>/<subrequest>" form, so a container
+// reference to the main request matches its subrequest results too.
+func resultMatchesRequests(resultRequest string, requests map[string]struct{}) bool {
+	if requests == nil {
+		return true
+	}
+	if _, ok := requests[resultRequest]; ok {
+		return true
+	}
+	mainRequest, _, found := strings.Cut(resultRequest, "/")
+	if !found {
+		return false
+	}
+	_, ok := requests[mainRequest]
+	return ok
+}
+
+func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName string, log logr.Logger) ([]allocatedDRADevice, string, bool, error) {
 	if clientset == nil {
 		return nil, "", false, nil
 	}
@@ -39,6 +97,21 @@ func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Inte
 		return nil, "", false, nil
 	}
 
+	containerClaimRefs, err := containerResourceClaimRefs(pod, containerName)
+	if err != nil {
+		// The pod defines resource claims but the target container cannot be
+		// resolved; fail rather than fall back to unverified discovery.
+		return nil, pod.Spec.NodeName, true, err
+	}
+	if containerClaimRefs != nil && len(containerClaimRefs) == 0 {
+		// The target container references no resource claims.
+		return nil, pod.Spec.NodeName, false, nil
+	}
+	// Probe state: the target container (or the whole pod, when containerName
+	// is empty) references resource claims. Every error past this point
+	// returns true so the caller fails closed instead of falling back to
+	// unverified discovery.
+
 	claimNamesByPodRef := make(map[string]string, len(pod.Spec.ResourceClaims))
 	for _, ref := range pod.Spec.ResourceClaims {
 		if ref.ResourceClaimName != nil && *ref.ResourceClaimName != "" {
@@ -57,6 +130,14 @@ func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Inte
 	var allocated []allocatedDRADevice
 	hasNVIDIADRAAllocation := false
 	for _, ref := range pod.Spec.ResourceClaims {
+		var containerRequests map[string]struct{}
+		if containerClaimRefs != nil {
+			requests, exposed := containerClaimRefs[ref.Name]
+			if !exposed {
+				continue
+			}
+			containerRequests = requests
+		}
 		claimName := claimNamesByPodRef[ref.Name]
 		if claimName == "" {
 			log.V(1).Info("pod resource claim has no resolved claim name", "pod_claim", ref.Name)
@@ -64,13 +145,16 @@ func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Inte
 		}
 		claim, err := clientset.ResourceV1().ResourceClaims(podNamespace).Get(ctx, claimName, metav1.GetOptions{})
 		if err != nil {
-			return nil, pod.Spec.NodeName, hasNVIDIADRAAllocation, fmt.Errorf("get resource claim %s/%s: %w", podNamespace, claimName, err)
+			return nil, pod.Spec.NodeName, true, fmt.Errorf("get resource claim %s/%s: %w", podNamespace, claimName, err)
 		}
 		if claim.Status.Allocation == nil || len(claim.Status.Allocation.Devices.Results) == 0 {
 			continue
 		}
 		for _, result := range claim.Status.Allocation.Devices.Results {
 			if result.Driver != nvidiaGPUDRADriver {
+				continue
+			}
+			if !resultMatchesRequests(result.Request, containerRequests) {
 				continue
 			}
 			hasNVIDIADRAAllocation = true
@@ -86,9 +170,14 @@ func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Inte
 
 // GetGPUUUIDsViaDRAAPI resolves GPU UUIDs for a pod by querying the Kubernetes API:
 // Pod (resource claim refs) -> ResourceClaim (allocation results) -> ResourceSlice (device attributes).
-// It also reports whether the pod is using NVIDIA DRA GPU allocations at all.
-func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace string, log logr.Logger) ([]string, bool, error) {
-	allocated, nodeName, hasNVIDIADRAAllocation, err := getAllocatedNVIDIADRADevices(ctx, clientset, podName, podNamespace, log)
+// A non-empty containerName restricts resolution to the claims (and claim
+// requests) that container references via resources.claims.
+// On success, the returned bool reports whether NVIDIA DRA GPU allocations
+// were found for that container. With a non-nil error, it reports whether the
+// container was established to reference resource claims, in which case the
+// caller must fail instead of falling back to other discovery paths.
+func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName string, log logr.Logger) ([]string, bool, error) {
+	allocated, nodeName, hasNVIDIADRAAllocation, err := getAllocatedNVIDIADRADevices(ctx, clientset, podName, podNamespace, containerName, log)
 	if err != nil {
 		return nil, hasNVIDIADRAAllocation, err
 	}

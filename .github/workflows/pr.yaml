@@ -131,7 +131,13 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
+    if: |
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.vllm == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.deploy == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true'
     name: Operator
     runs-on: prod-default-v2
     outputs:
@@ -253,18 +259,8 @@ jobs:
         uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
         with:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
-      - name: Lint and render (production + dev)
-        run: |
-          CHART=deploy/helm/charts/power-agent
-          helm lint "$CHART" --set image.tag=ci-test
-          # Production DaemonSet render (default daemonset.enabled=true).
-          helm template power-agent "$CHART" --set image.tag=ci-test >/dev/null
-          # Dev-pod render: uses dev.image.* and must NOT require the production
-          # image.tag (regression guard for the daemonset-gated validation).
-          helm template power-agent "$CHART" \
-            --set daemonset.enabled=false \
-            --set dev.enabled=true \
-            --set dev.nodeName=ci-node >/dev/null
+      - name: Lint and test Helm chart
+        run: make -C deploy/helm/charts/power-agent lint test
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -523,7 +519,6 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       gpu_test_markers: pre_merge and sglang and gpu_1
-      gpu_test_timeout_minutes: 45
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -741,9 +736,7 @@ jobs:
     needs: [changed-files, frontend-build]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.frontend-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
@@ -758,9 +751,7 @@ jobs:
     needs: [changed-files, vllm-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -808,9 +799,7 @@ jobs:
     needs: [changed-files, sglang-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
@@ -860,7 +849,7 @@ jobs:
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
-      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
+      needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
     permissions:
@@ -878,7 +867,7 @@ jobs:
         uses: ./.github/actions/setup-dynamo-operator
         with:
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
+          operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
@@ -935,10 +924,8 @@ jobs:
     name: vLLM DynamoCheckpoint Operator Setup
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
+      (needs.changed-files.outputs.snapshot == 'true') &&
+      needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
     permissions:
@@ -956,7 +943,7 @@ jobs:
           vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
+          operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
@@ -967,10 +954,8 @@ jobs:
     name: SGLang DynamoCheckpoint Operator Setup
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
+      (needs.changed-files.outputs.snapshot == 'true') &&
+      needs.operator.result == 'success'
     needs: [changed-files, operator]
     runs-on: prod-deploy-tester-v1
     permissions:
@@ -988,7 +973,7 @@ jobs:
           vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
+          operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
@@ -1000,9 +985,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-vllm, snapshot-agent]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-operator-checkpoint-vllm.result == 'success' &&
       needs.snapshot-agent.result == 'success'
     runs-on: prod-deploy-tester-v1
@@ -1049,9 +1032,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-sglang, snapshot-agent]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-operator-checkpoint-sglang.result == 'success' &&
       needs.snapshot-agent.result == 'success'
     runs-on: prod-deploy-tester-v1
@@ -1098,9 +1079,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-snapshot-agent-checkpoint-vllm.result == 'success' &&
       needs.snapshot-placeholder-vllm.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
@@ -1165,9 +1144,7 @@ jobs:
     needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.snapshot == 'true') &&
       needs.deploy-snapshot-agent-checkpoint-sglang.result == 'success' &&
       needs.snapshot-placeholder-sglang.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
@@ -1246,9 +1223,7 @@ jobs:
     name: vLLM DynamoCheckpoint Cleanup
     if: |
       always() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, deploy-test-checkpoint-vllm]
     runs-on: prod-deploy-tester-v1
     steps:
@@ -1263,9 +1238,7 @@ jobs:
     name: SGLang DynamoCheckpoint Cleanup
     if: |
       always() &&
-      (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.snapshot == 'true' ||
-       needs.changed-files.outputs.deploy == 'true')
+      (needs.changed-files.outputs.snapshot == 'true')
     needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, deploy-test-checkpoint-sglang]
     runs-on: prod-deploy-tester-v1
     steps:

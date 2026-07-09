@@ -13,9 +13,16 @@ from types import SimpleNamespace
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
-from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
 from dynamo.frontend.prepost import _prepare_request
+
+# NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
+# need it (and via the vllm_processor_module fixture). Importing it at module
+# top level would run its `from vllm.tasks import ...` /
+# `from vllm.v1.engine.parallel_sampling import ...` imports during pytest
+# collection, which breaks the pytest-marker-report pre-commit hook (its vllm
+# stub list does not cover those submodules).
 
 # Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -29,6 +36,7 @@ pytestmark = [
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
+_DEFAULT_MM_DATA = object()
 
 TOOL_REQUEST = {
     "model": MODEL,
@@ -124,6 +132,171 @@ class TestPrepareRequestToolStripping:  # FRONTEND.1 + FRONTEND.3 — tool strip
         assert (
             chat_params.chat_template_kwargs["tools"] is None
         ), "No tools in request should produce None tools in template"
+
+
+class TestMultimodalFeatureMetadata:
+    def _feature(
+        self, modality, mm_hash, offset, length, data=_DEFAULT_MM_DATA, is_embed=None
+    ):
+        return SimpleNamespace(
+            modality=modality,
+            mm_hash=mm_hash,
+            data=data,
+            mm_position=SimpleNamespace(
+                offset=offset,
+                length=length,
+                is_embed=is_embed,
+            ),
+        )
+
+    def test_groups_hashes_and_placeholders_by_modality(self):
+        from dynamo.frontend.vllm_processor import _group_mm_feature_metadata
+
+        features = [
+            self._feature("image", "image_hash", 4, 8),
+            self._feature("audio", "audio_hash", 20, 6),
+        ]
+
+        (
+            flat_hashes,
+            flat_placeholders,
+            hashes_by_modality,
+            placeholders_by_modality,
+        ) = _group_mm_feature_metadata(features)
+
+        assert flat_hashes == []
+        assert flat_placeholders == []
+        assert hashes_by_modality == {
+            "image": ["image_hash"],
+            "audio": ["audio_hash"],
+        }
+        assert placeholders_by_modality == {
+            "image": [(4, 8)],
+            "audio": [(20, 6)],
+        }
+
+    def test_image_only_metadata_keeps_legacy_flat_fields(self):
+        from dynamo.frontend.vllm_processor import _group_mm_feature_metadata
+
+        features = [
+            self._feature("image", "image_hash_0", 4, 8),
+            self._feature("image", "image_hash_1", 20, 6),
+        ]
+
+        (
+            flat_hashes,
+            flat_placeholders,
+            hashes_by_modality,
+            placeholders_by_modality,
+        ) = _group_mm_feature_metadata(features)
+
+        assert flat_hashes == ["image_hash_0", "image_hash_1"]
+        assert flat_placeholders == [(4, 8), (20, 6)]
+        assert hashes_by_modality == {"image": ["image_hash_0", "image_hash_1"]}
+        assert placeholders_by_modality == {"image": [(4, 8), (20, 6)]}
+
+    def test_placeholder_metadata_preserves_is_embed_mask(self):
+        from dynamo.frontend.vllm_processor import _group_mm_feature_metadata
+
+        mask = [False, True, True, False]
+        features = [
+            self._feature("image", "image_hash", 4, 4, is_embed=mask),
+        ]
+
+        _, flat_placeholders, _, placeholders_by_modality = _group_mm_feature_metadata(
+            features
+        )
+
+        expected = {"offset": 4, "length": 4, "is_embed": mask}
+        assert flat_placeholders == [expected]
+        assert placeholders_by_modality == {"image": [expected]}
+
+    def test_missing_hash_skips_only_that_feature(self):
+        from dynamo.frontend.vllm_processor import _group_mm_feature_metadata
+
+        features = [
+            self._feature("image", "image_hash", 4, 8),
+            self._feature("image", None, 20, 8),
+        ]
+
+        assert _group_mm_feature_metadata(features) == (
+            ["image_hash"],
+            [(4, 8)],
+            {"image": ["image_hash"]},
+            {"image": [(4, 8)]},
+        )
+
+    def test_single_transfer_modality_rejects_mixed_features(self):
+        from dynamo.frontend.vllm_processor import _single_transfer_modality
+
+        assert (
+            _single_transfer_modality(
+                [
+                    self._feature("image", "image_hash", 4, 8),
+                    self._feature("audio", "audio_hash", 20, 6),
+                ]
+            )
+            is None
+        )
+        assert (
+            _single_transfer_modality(
+                [
+                    self._feature("image", "image_hash_0", 4, 8),
+                    self._feature("image", "image_hash_1", 20, 8),
+                ]
+            )
+            == "image"
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepare_mm_routing_skips_single_modality_transfer_for_mixed_features(
+    vllm_processor_module,
+    monkeypatch,
+):
+    def fail_sender():
+        raise AssertionError("mixed-modality requests must not construct a sender")
+
+    monkeypatch.setattr(vllm_processor_module, "MmKwargsShmSender", fail_sender)
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = True
+    processor.use_shm_transfer = True
+    processor._sender = None
+
+    def feature(modality, mm_hash, offset, length):
+        return SimpleNamespace(
+            modality=modality,
+            mm_hash=mm_hash,
+            data=object(),
+            mm_position=SimpleNamespace(offset=offset, length=length),
+        )
+
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(32)),
+        mm_features=[
+            feature("image", "a" * 64, 0, 16),
+            feature("audio", "b" * 64, 16, 8),
+        ],
+    )
+    dynamo_preproc = {}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+    )
+
+    assert mm_routing_info is not None
+    assert cleanup_items == []
+    assert transferred is False
+    assert dynamo_preproc["extra_args"]["mm_hashes"] == []
+    assert dynamo_preproc["extra_args"]["mm_hashes_by_modality"] == {
+        "image": ["a" * 64],
+        "audio": ["b" * 64],
+    }
 
 
 class TestReasoningParserMetadata:
@@ -347,11 +520,60 @@ class TestRoutedEnginePath:
 
         assert envelope["event"] == "llm_metrics"
         assert len(envelope["comment"]) == 1
+        # Zero counts are omitted (text-only request), mirroring the Rust skip-zero behavior.
         assert json.loads(envelope["comment"][0]) == {
             "input_tokens": 3,
             "output_tokens": 1,
             "chunk_tokens": 1,
         }
+
+    @pytest.mark.asyncio
+    async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):
+        # The Rust postprocessor is bypassed on this path, so the processor must
+        # emit per-request multimodal content-part counts itself.
+        routed_engine = _FakeRoutedEngine(
+            [{"token_ids": [101], "index": 0, "finish_reason": None}]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        request = {
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "compare"},
+                        {"type": "image_url", "image_url": {"url": "http://x/a.png"}},
+                        {"type": "image_url", "image_url": {"url": "http://x/b.png"}},
+                        {"type": "video_url", "video_url": {"url": "http://x/c.mp4"}},
+                    ],
+                }
+            ],
+        }
+        preproc = _base_preproc()
+        chunks = [
+            item
+            async for item in processor._generate_and_stream(
+                "request-id",
+                request,
+                preproc,
+                preproc["token_ids"],
+                SimpleNamespace(
+                    sampling_params=SimpleNamespace(n=1),
+                    request_id="vllm-request",
+                    external_req_id=None,
+                ),
+                {0: _FakePostProcessor()},
+                mm_routing_info=None,
+                context=None,
+            )
+        ]
+
+        metrics = json.loads(chunks[0]["comment"][0])
+        assert metrics["image_count"] == 2
+        assert metrics["video_count"] == 1
+        # audio has zero parts, so the key is omitted from the emitted metrics.
+        assert metrics.get("audio_count") is None
 
 
 OBJECT_TYPED_TOOL_REQUEST = {
@@ -409,7 +631,7 @@ class TestSchemaAwareToolParser:
         request_for_sampling, parser, _, _, _ = _prepare_request(
             OBJECT_TYPED_TOOL_REQUEST,
             tokenizer=tokenizer,
-            tool_parser_class=Qwen3CoderToolParser,
+            tool_parser_class=Qwen3EngineToolParser,
         )
         assert parser is not None, "Expected _prepare_request to construct the parser"
 

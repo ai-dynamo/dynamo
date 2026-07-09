@@ -21,6 +21,8 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
+MAX_BENCHMARK_AXIS_GRANULARITY = 1024
+MAX_BENCHMARK_GRID_POINTS = 4096
 
 
 def _warn_deprecated(message: str) -> None:
@@ -147,6 +149,21 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--custom-encoder-class",
+            env_var="DYN_CUSTOM_ENCODER_CLASS",
+            default=None,
+            help=(
+                "Dotted module.ClassName path to a VisionEncoderBackend subclass. "
+                "When set, the aggregated worker wraps it in the in-process "
+                "AsyncVisionEncoder and runs encoder.encode(image_urls) for each "
+                "multimodal request, bypassing vLLM's built-in multimodal "
+                "processing. --model is passed verbatim to the backend's build(). "
+                "Example: 'my_package.encoders.MyEncoder'."
+            ),
+        )
+
+        add_argument(
+            g,
             flag_name="--embedding-transfer-mode",
             env_var="DYN_VLLM_EMBEDDING_TRANSFER_MODE",
             default=EmbeddingTransferMode.NIXL_WRITE.value,
@@ -209,8 +226,9 @@ class DynamoVllmArgGroup(ArgGroup):
             choices=["prefill", "decode", "agg"],
             help=(
                 "Run self-benchmark on startup before accepting requests. "
-                "Sweeps prefill ISLs and/or decode (context_length x batch_size) "
-                "points, collecting ForwardPassMetrics at each operating point."
+                "Sweeps prefill (ISL x KV-read tokens x batch_size) and/or decode "
+                "(context_length x batch_size) points, collecting "
+                "ForwardPassMetrics at each operating point."
             ),
         )
         add_argument(
@@ -223,13 +241,46 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--benchmark-prefill-kv-read-granularity",
+            env_var="DYN_BENCHMARK_PREFILL_KV_READ_GRANULARITY",
+            default=1,
+            arg_type=int,
+            help=(
+                "Maximum number of initial KV-read samples per prefill ISL "
+                f"(1 to {MAX_BENCHMARK_AXIS_GRANULARITY}). For values greater "
+                "than 1, candidate samples are "
+                "evenly spaced from 0 to the largest usable KV-read prefix below "
+                "the ISL, rounded down to KV-block boundaries, and deduplicated; "
+                "therefore fewer samples may result. A value of 1 samples only 0 "
+                "(cache miss; default: 1). Values greater than 1 require prefix "
+                "caching. The total benchmark grid is limited to "
+                f"{MAX_BENCHMARK_GRID_POINTS} points."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--benchmark-prefill-batch-granularity",
+            env_var="DYN_BENCHMARK_PREFILL_BATCH_GRANULARITY",
+            default=1,
+            arg_type=int,
+            help=(
+                "Maximum number of batch-size samples per prefill ISL and "
+                f"KV-read point (1 to {MAX_BENCHMARK_AXIS_GRANULARITY}). "
+                "Samples are evenly spaced from 1 to the largest homogeneous "
+                "batch that fits the request-count, uncached-token, and KV-cache "
+                "limits, then deduplicated; therefore fewer samples may result. "
+                "A value of 1 samples only batch size 1 (default: 1). The total "
+                f"benchmark grid is limited to {MAX_BENCHMARK_GRID_POINTS} points."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--benchmark-decode-length-granularity",
             env_var="DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY",
             default=6,
             type=int,
             help=(
-                "Number of context length sample points for decode sweep "
-                "(default: 6)."
+                "Number of context length sample points for decode sweep (default: 6)."
             ),
         )
         add_argument(
@@ -239,7 +290,7 @@ class DynamoVllmArgGroup(ArgGroup):
             default=6,
             type=int,
             help=(
-                "Number of batch size sample points per context length " "(default: 6)."
+                "Number of batch size sample points per context length (default: 6)."
             ),
         )
         add_argument(
@@ -299,6 +350,9 @@ class DynamoVllmConfig(ConfigBase):
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
 
+    # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
+    custom_encoder_class: Optional[str] = None
+
     # Headless mode for multi-node TP/PP
     headless: bool = False
 
@@ -311,6 +365,8 @@ class DynamoVllmConfig(ConfigBase):
     # Benchmark / self-profiling
     benchmark_mode: Optional[str] = None
     benchmark_prefill_granularity: int = 16
+    benchmark_prefill_kv_read_granularity: int = 1
+    benchmark_prefill_batch_granularity: int = 1
     benchmark_decode_length_granularity: int = 6
     benchmark_decode_batch_granularity: int = 6
     benchmark_warmup_iterations: int = 5
@@ -324,6 +380,55 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
+        self._validate_custom_encoder()
+        self._validate_benchmark_config()
+
+    def _validate_benchmark_config(self) -> None:
+        if self.benchmark_mode is None:
+            return
+
+        axes = {
+            "benchmark_prefill_granularity": int(self.benchmark_prefill_granularity),
+            "benchmark_prefill_kv_read_granularity": int(
+                self.benchmark_prefill_kv_read_granularity
+            ),
+            "benchmark_prefill_batch_granularity": int(
+                self.benchmark_prefill_batch_granularity
+            ),
+            "benchmark_decode_length_granularity": int(
+                self.benchmark_decode_length_granularity
+            ),
+            "benchmark_decode_batch_granularity": int(
+                self.benchmark_decode_batch_granularity
+            ),
+        }
+        for name, value in axes.items():
+            flag = f"--{name.replace('_', '-')}"
+            if not 1 <= value <= MAX_BENCHMARK_AXIS_GRANULARITY:
+                raise ValueError(
+                    f"{flag} must be between 1 and "
+                    f"{MAX_BENCHMARK_AXIS_GRANULARITY} when --benchmark-mode "
+                    "is set."
+                )
+
+        point_counts = {
+            "prefill": axes["benchmark_prefill_granularity"]
+            * axes["benchmark_prefill_kv_read_granularity"]
+            * axes["benchmark_prefill_batch_granularity"],
+            "decode": axes["benchmark_decode_length_granularity"]
+            * axes["benchmark_decode_batch_granularity"],
+        }
+        requested_points = (
+            sum(point_counts.values())
+            if self.benchmark_mode == "agg"
+            else point_counts[self.benchmark_mode]
+        )
+        if requested_points > MAX_BENCHMARK_GRID_POINTS:
+            raise ValueError(
+                f"--benchmark-mode {self.benchmark_mode} requests "
+                f"{requested_points} grid points; the maximum is "
+                f"{MAX_BENCHMARK_GRID_POINTS}."
+            )
 
     def _resolve_embedding_transfer_mode(self) -> None:
         """Resolve embedding_transfer_mode from string to enum."""
@@ -486,6 +591,61 @@ class DynamoVllmConfig(ConfigBase):
         if self._count_multimodal_roles() == 1 and not self.enable_multimodal:
             raise ValueError(
                 "Use --enable-multimodal when enabling any multimodal component"
+            )
+
+    def _validate_custom_encoder(self) -> None:
+        """Validate the aggregated CustomEncoder configuration.
+
+        The encoder runs in-process in a single aggregated worker on the
+        token-in/token-out path and produces image embeds for the mixed
+        EmbedsPrompt, so it is a multimodal, aggregated-only, token-mode
+        component. Enforce those here (fail fast) instead of silently bypassing
+        the multimodal gate at request time, no-op'ing in a decode worker that
+        never reaches the custom-encoder branch, or loading the encoder in
+        --use-vllm-tokenizer text mode where it is never invoked.
+        """
+        if not self.custom_encoder_class:
+            return
+        if (
+            self.multimodal_worker
+            or self.multimodal_encode_worker
+            or self.multimodal_decode_worker
+        ):
+            raise ValueError(
+                "--custom-encoder-class is incompatible with the legacy multimodal "
+                "role flags (--multimodal-worker / --multimodal-encode-worker / "
+                "--multimodal-decode-worker): the custom encoder is its own "
+                "aggregated multimodal path and bypasses vLLM's built-in "
+                "multimodal processing."
+            )
+        if not self.enable_multimodal:
+            raise ValueError(
+                "--custom-encoder-class requires --enable-multimodal "
+                "(the custom encoder is a multimodal component)."
+            )
+        if self.use_vllm_tokenizer:
+            raise ValueError(
+                "--custom-encoder-class is incompatible with --use-vllm-tokenizer: "
+                "the custom encoder is wired into the token-in/token-out path, "
+                "which --use-vllm-tokenizer bypasses (text mode), so the encoder "
+                "would load but never run."
+            )
+        if self.frontend_decoding:
+            raise ValueError(
+                "--custom-encoder-class is incompatible with --frontend-decoding: "
+                "the custom encoder consumes image URLs, but frontend decoding "
+                "pre-decodes images to tensors the encoder cannot accept."
+            )
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            mode = (
+                self.disaggregation_mode.value
+                if isinstance(self.disaggregation_mode, DisaggregationMode)
+                else self.disaggregation_mode
+            )
+            raise ValueError(
+                f"--custom-encoder-class is only supported with "
+                f"--disaggregation-mode=agg (got {mode}). The custom encoder "
+                "runs in-process in a single aggregated worker."
             )
 
     def _validate_embedding_worker_exclusivity(self) -> None:

@@ -78,7 +78,7 @@ webhooks:
     service:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
-      path: /validate-nvidia-com-v1alpha1-dynamographdeployment
+      path: /validate/nvidia.com/v1beta1/dynamographdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: vdynamographdeployment.kb.io
   {{- if .Values.webhook.namespaceSelector }}
@@ -93,7 +93,7 @@ webhooks:
   - apiGroups:
     - nvidia.com
     apiVersions:
-    - v1alpha1
+    - v1beta1
     operations:
     - CREATE
     - UPDATE
@@ -234,7 +234,7 @@ webhooks:
     service:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
-      path: /mutate-nvidia-com-v1alpha1-dynamographdeployment
+      path: /mutate/nvidia.com/v1beta1/dynamographdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: mdynamographdeployment.kb.io
   {{- if .Values.webhook.namespaceSelector }}
@@ -249,7 +249,7 @@ webhooks:
   - apiGroups:
     - nvidia.com
     apiVersions:
-    - v1alpha1
+    - v1beta1
     operations:
     - CREATE
     - UPDATE

@@ -19,7 +19,9 @@ use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
+use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
+use dynamo_llm::local_model::runtime_config::TokenizerBackend;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
@@ -426,7 +428,6 @@ pub struct RouterConfig {
     active_prefill_tokens_threshold: Option<u64>,
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
-    enforce_disagg: bool,
     session_affinity_ttl_secs: Option<u64>,
 }
 
@@ -443,6 +444,14 @@ impl RouterConfig {
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
     ) -> PyResult<Self> {
+        if enforce_disagg {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "enforce_disagg is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+                );
+            });
+        }
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
@@ -454,7 +463,6 @@ impl RouterConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-            enforce_disagg,
             session_affinity_ttl_secs,
         })
     }
@@ -470,7 +478,7 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
-            enforce_disagg: rc.enforce_disagg,
+            enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
         }
     }
@@ -504,11 +512,13 @@ pub(crate) struct EntrypointArgs {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    metrics_config: Option<MetricsConfig>,
+    frontend_api_config: Option<FrontendApiConfig>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
     mocker_engine_args: Option<PyMockEngineArgs>,
-    runtime_config: Option<ModelRuntimeConfig>,
+    runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     is_prefill: bool,
@@ -523,7 +533,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, tokenizer_backend=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -549,11 +559,14 @@ impl EntrypointArgs {
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
         aic_perf_config: Option<AicPerfConfig>,
+        metrics_prefix: Option<String>,
+        enable_anthropic_api: Option<bool>,
+        strip_anthropic_preamble: Option<bool>,
+        enable_streaming_tool_dispatch: Option<bool>,
+        enable_streaming_reasoning_dispatch: Option<bool>,
+        tokenizer_backend: Option<String>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
-        if let Some(runtime_config) = &runtime_config {
-            runtime_config.validate_config()?;
-        }
         if (tls_cert_path.is_some() && tls_key_path.is_none())
             || (tls_cert_path.is_none() && tls_key_path.is_some())
         {
@@ -578,6 +591,22 @@ impl EntrypointArgs {
             })
             .transpose()?;
 
+        let tokenizer_backend = tokenizer_backend
+            .map(|backend| {
+                backend
+                    .parse::<TokenizerBackend>()
+                    .map_err(PyValueError::new_err)
+            })
+            .transpose()?;
+
+        let mut runtime_config = runtime_config.unwrap_or_default();
+        if let Some(tokenizer_backend) = tokenizer_backend {
+            runtime_config
+                .inner
+                .set_tokenizer_backend(Some(tokenizer_backend));
+        }
+        runtime_config.validate_config()?;
+
         Ok(EntrypointArgs {
             engine_type,
             model_path,
@@ -589,6 +618,13 @@ impl EntrypointArgs {
             http_host,
             http_port: http_port.unwrap_or(DEFAULT_HTTP_PORT),
             http_metrics_port,
+            metrics_config: metrics_prefix.map(|prefix| MetricsConfig::new(Some(prefix))),
+            frontend_api_config: FrontendApiConfig::from_optional_flags(
+                enable_anthropic_api,
+                strip_anthropic_preamble,
+                enable_streaming_tool_dispatch,
+                enable_streaming_reasoning_dispatch,
+            ),
             tls_cert_path,
             tls_key_path,
             extra_engine_args,
@@ -636,12 +672,19 @@ pub fn make_engine<'p>(
         .migration_max_seq_len(args.migration_max_seq_len)
         .http_host(args.http_host.clone())
         .http_port(args.http_port)
-        .http_metrics_port(args.http_metrics_port)
+        .http_metrics_port(args.http_metrics_port);
+    if let Some(metrics_config) = args.metrics_config.clone() {
+        builder.metrics_config(metrics_config);
+    }
+    if let Some(frontend_api_config) = args.frontend_api_config.clone() {
+        builder.frontend_api_config(frontend_api_config);
+    }
+    builder
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
-        .runtime_config(args.runtime_config.clone().unwrap_or_default().inner)
+        .runtime_config(args.runtime_config.clone().inner)
         .namespace(args.namespace.clone())
         .namespace_prefix(args.namespace_prefix.clone());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {

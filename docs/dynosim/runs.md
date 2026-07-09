@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: DynoSim Runs
 subtitle: Run one trace or synthetic workload through a simulated Dynamo configuration
@@ -120,6 +120,11 @@ report JSON to disk.
 
 ## Input Format
 
+> [!NOTE]
+> The `mooncake-delta`, `agentic_mooncake`, and `dynamo` trace formats were added after the v1.2.1
+> release. The `ai-dynamo` 1.2.x wheels on PyPI accept only `--trace-format mooncake` and
+> `--trace-format applied_compute_agentic`.
+
 The trace file must be Mooncake-style JSONL. Each line should contain:
 
 - `timestamp` or `created_time`
@@ -138,7 +143,7 @@ Example:
 ```
 
 Rows without `session_id` are independent timestamped requests. Use this shape for wall-clock
-request traces, including agent-converted traces where parallel LLM calls should remain parallel.
+Mooncake-format inputs where parallel LLM calls should remain parallel.
 
 `priority` and `strict_priority` affect only KV-router pending-queue ordering when
 `--router-mode kv_router` is active and requests are actually queued. Negative `priority` values
@@ -165,9 +170,9 @@ row also waits for the first turn to complete plus the inferred 50 ms timestamp 
 ### Dynamo Request Traces
 
 `--trace-format dynamo` reads one or more original
-`dynamo.request.trace.v1` JSONL or JSONL.GZ shards. Replay derives the block
-size from the records and selects standard or agentic lowering based on
-`agent_context`.
+`dynamo.request.trace.v1` JSONL or JSONL.GZ shards directly. Replay derives the
+block size from the records and builds the standard or agentic in-memory model
+based on `agent_context`. It does not create an intermediate Mooncake file.
 
 ```bash
 python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
@@ -182,7 +187,8 @@ python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
 
 `--trace-format agentic_mooncake` simulates request-level workflow dependencies in addition to the
 Mooncake request fields. Each row should contain the normal Mooncake fields plus a stable
-`request_id`. Dependency fields are optional.
+`request_id`. Dependency fields are optional. This is a separate input format for externally
+authored Mooncake-compatible traces, not an intermediate format for Dynamo request traces.
 
 ```json
 {
@@ -207,7 +213,7 @@ child requests spawned by this row, and `prefix_reset` marks the first row in a 
 Run it with:
 
 ```bash
-python -m dynamo.replay /tmp/dynamo-request-trace.agentic-mooncake.jsonl \
+python -m dynamo.replay /path/to/agentic-mooncake.jsonl \
     --trace-format agentic_mooncake \
     --trace-block-size 128 \
     --replay-mode offline \
@@ -250,6 +256,7 @@ The dedicated DynoSim CLI exposes:
 - `--arrival-interval-ms`
 - `--arrival-speedup-ratio`
 - `--trace-format mooncake|mooncake-delta|agentic_mooncake|applied_compute_agentic|dynamo`
+  (release availability differs; see the note in [Input Format](#input-format))
 - `--trace-block-size`
 - `--turns-per-session`
 - `--shared-prefix-ratio`
@@ -576,6 +583,12 @@ If you violate those constraints, DynoSim fails immediately with a validation er
 - trace-file workloads can use different values for `--trace-block-size` and engine `block_size`
 - Mooncake/toolagent traces typically use `--trace-block-size 512`, while engine `block_size`
   often stays `64`
+- on Apple Silicon, run the `aarch64` wheel natively (`docker run --platform linux/arm64 ...`);
+  amd64 emulation under Rosetta hits an Apple translation defect that segfaults multi-worker
+  multi-turn runs ([issue #11228](https://github.com/ai-dynamo/dynamo/issues/11228)). To run
+  `linux/amd64` anyway, disable Docker Desktop's Rosetta option to fall back to QEMU. Bare
+  `docker run` defaults to the native arm64 image but silently reuses a previously pulled amd64
+  image under the same tag; pass `--platform linux/arm64` explicitly after running amd64 variants
 
 ## When To Use This vs AIPerf
 

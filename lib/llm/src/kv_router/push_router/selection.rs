@@ -49,6 +49,7 @@ impl<'a> RoutingRequestParts<'a> {
 pub(super) struct SelectionOptions {
     pub(super) affinity_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
+    pub(super) session_id: Option<String>,
 }
 
 struct BestMatchArgs<'a> {
@@ -58,9 +59,11 @@ struct BestMatchArgs<'a> {
     update_states: bool,
     return_routing_hashes: bool,
     lora_name: Option<String>,
+    cache_namespace: Option<String>,
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
+    session_id: Option<String>,
     expected_output_tokens: Option<u32>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -80,9 +83,11 @@ impl KvPushRouter {
                 args.update_states,
                 args.return_routing_hashes,
                 args.lora_name,
+                args.cache_namespace,
                 args.priority_jump,
                 args.strict_priority,
                 args.policy_class,
+                args.session_id,
                 args.expected_output_tokens,
                 args.pinned_worker,
                 args.allowed_worker_ids,
@@ -123,6 +128,7 @@ impl KvPushRouter {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
+        let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
         let priority_jump = routing
             .and_then(|routing| routing.priority_jump)
             .unwrap_or(0.0);
@@ -137,9 +143,12 @@ impl KvPushRouter {
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
         let explicit_pin = pinned_worker_hint(phase, routing);
-        let affinity_pin = options
-            .affinity_worker
-            .map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let SelectionOptions {
+            affinity_worker,
+            policy_class,
+            session_id,
+        } = options;
+        let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
         let Some((pinned_worker_id, requested_dp_rank)) =
             merge_affinity_pin(explicit_pin, affinity_pin)
         else {
@@ -152,9 +161,11 @@ impl KvPushRouter {
                     update_states: !is_query_only,
                     return_routing_hashes,
                     lora_name,
+                    cache_namespace,
                     priority_jump,
                     strict_priority,
-                    policy_class: options.policy_class.clone(),
+                    policy_class,
+                    session_id,
                     expected_output_tokens,
                     pinned_worker: None,
                     allowed_worker_ids,
@@ -185,6 +196,7 @@ impl KvPushRouter {
 
             return Ok(selection);
         };
+        let cache_namespace = routing.and_then(|routing| routing.cache_namespace.clone());
 
         let pinned_worker = resolve_pinned_worker_rank(
             pinned_worker_id,
@@ -222,9 +234,11 @@ impl KvPushRouter {
             update_states: !is_query_only,
             return_routing_hashes,
             lora_name,
+            cache_namespace,
             priority_jump,
             strict_priority,
-            policy_class: options.policy_class,
+            policy_class,
+            session_id,
             expected_output_tokens,
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,

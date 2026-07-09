@@ -24,7 +24,7 @@ use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
     sync::{
@@ -77,6 +77,15 @@ impl OccupancyPermit {
             instance_id,
             armed: true,
         }
+    }
+
+    fn retarget(&mut self, instance_id: u64) {
+        if self.instance_id == instance_id {
+            return;
+        }
+        self.state.increment(instance_id);
+        self.state.decrement(self.instance_id);
+        self.instance_id = instance_id;
     }
 
     fn into_tracked_stream<U: Data>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
@@ -185,9 +194,10 @@ pub enum RouterMode {
 }
 
 #[derive(Clone, Copy)]
-enum TransportFallback {
+enum TransportFallback<'a> {
     Allow,
     Deny,
+    Within(&'a HashSet<u64>),
 }
 
 struct DeviceAwareCandidates {
@@ -667,6 +677,19 @@ where
 
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.round_robin_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn round_robin_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let (instance_id, candidate_count) = {
@@ -684,12 +707,25 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, None, prepare)
             .await
     }
 
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.random_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn random_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let (instance_id, candidate_count) = {
             let routing_instances = self.client.routing_instances();
             let count = routing_instances.free_ids().len();
@@ -706,13 +742,26 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, None, prepare)
             .await
     }
 
     /// Issue a request using power-of-two-choices: pick 2 random healthy workers,
     /// route to the one with fewer in-flight requests.
     pub async fn power_of_two_choices(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.power_of_two_choices_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn power_of_two_choices_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let state = self.occupancy_state()?;
         let instance_id = {
             let routing_instances = self.client.routing_instances();
@@ -723,14 +772,8 @@ where
         };
         state.increment(instance_id);
         let permit = OccupancyPermit::new(state, instance_id);
-
-        match self
-            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, Some(permit), prepare)
             .await
-        {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
-            Err(err) => Err(err),
-        }
     }
 
     /// Issue a request to a specific endpoint
@@ -739,6 +782,36 @@ where
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
+        self.direct_within(request, instance_id, None).await
+    }
+
+    /// Like [`direct`], but if the selected instance disappears between selection and dispatch,
+    /// the internal reselection is constrained to `allowed_fallback` (when `Some`). Callers that
+    /// pre-narrowed the candidate set (e.g. LoRA replica-set filtering) pass that set so the
+    /// vanished-instance fallback cannot escape it and route to an arbitrary worker.
+    pub async fn direct_within(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        allowed_fallback: Option<&HashSet<u64>>,
+    ) -> anyhow::Result<ManyOut<U>> {
+        self.direct_within_prepared(request, instance_id, allowed_fallback, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    /// Like [`Self::direct_within`], but prepares the request after transport resolution and
+    /// returns the preparation metadata alongside the response stream.
+    pub async fn direct_within_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        allowed_fallback: Option<&HashSet<u64>>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         // When fault detection is disabled, check the raw discovery list
         // (not filtered by report_instance_down) so transient failures
         // don't poison the instance for subsequent retries.
@@ -768,7 +841,10 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        let fallback = allowed_fallback
+            .map(TransportFallback::Within)
+            .unwrap_or(TransportFallback::Allow);
+        self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
             .await
     }
 
@@ -808,6 +884,63 @@ where
         Ok((metadata, stream))
     }
 
+    /// Select a worker using the configured routing mode, prepare the request with the worker
+    /// that survives transport resolution, then dispatch with normal fallback behavior.
+    pub async fn select_and_dispatch<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        match self.router_mode {
+            RouterMode::Random => self.random_prepared(request, prepare).await,
+            RouterMode::RoundRobin => self.round_robin_prepared(request, prepare).await,
+            RouterMode::PowerOfTwoChoices => {
+                self.power_of_two_choices_prepared(request, prepare).await
+            }
+            RouterMode::LeastLoaded => self.least_loaded_prepared(request, prepare).await,
+            RouterMode::DeviceAwareWeighted => {
+                self.device_aware_weighted_prepared(request, prepare).await
+            }
+            RouterMode::KV => anyhow::bail!("KV routing should not call select_and_dispatch"),
+            RouterMode::Direct => anyhow::bail!(
+                "Direct routing should use direct_within_prepared instead of select_and_dispatch"
+            ),
+        }
+    }
+
+    async fn dispatch_selected<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        mut permit: Option<OccupancyPermit>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        let (metadata, stream) = self
+            .generate_with_fault_detection_prepared(
+                instance_id,
+                request,
+                TransportFallback::Allow,
+                |request, resolved_instance_id| {
+                    if let Some(permit) = permit.as_mut() {
+                        permit.retarget(resolved_instance_id);
+                    }
+                    prepare(request, resolved_instance_id)
+                },
+            )
+            .await?;
+        let stream = match permit {
+            Some(permit) => permit.into_tracked_stream(stream),
+            None => stream,
+        };
+        Ok((metadata, stream))
+    }
+
     /// Issue a request using device-aware weighted routing.
     ///
     /// Instances are partitioned by device type (CPU vs non-CPU), then the router
@@ -817,6 +950,19 @@ where
     /// If only one device class exists (all CPU or all non-CPU), this naturally
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.device_aware_weighted_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn device_aware_weighted_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let state = self.occupancy_state()?;
         let routing_instances = self.client.routing_instances();
         let instance_ids = routing_instances.free_ids().to_vec();
@@ -862,16 +1008,8 @@ where
             "Selected worker"
         );
 
-        match self
-            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, permit, prepare)
             .await
-        {
-            Ok(stream) => Ok(match permit {
-                Some(permit) => permit.into_tracked_stream(stream),
-                None => stream,
-            }),
-            Err(err) => Err(err),
-        }
     }
 
     fn device_aware_candidates(
@@ -939,6 +1077,19 @@ where
 
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
+        self.least_loaded_prepared(request, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn least_loaded_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let state = self.occupancy_state()?;
         let routing_instances = self.client.routing_instances();
         let instance_ids = routing_instances.free_ids().to_vec();
@@ -955,13 +1106,8 @@ where
             "Selected worker"
         );
 
-        match self
-            .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        self.dispatch_selected(instance_id, request, Some(permit), prepare)
             .await
-        {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
-            Err(err) => Err(err),
-        }
     }
 
     /// Select the next worker according to the routing mode.
@@ -1166,8 +1312,23 @@ where
         &self,
         instance_id: u64,
         request: SingleIn<T>,
-        fallback: TransportFallback,
+        fallback: TransportFallback<'_>,
     ) -> anyhow::Result<ManyOut<U>> {
+        self.generate_with_fault_detection_prepared(instance_id, request, fallback, |_, _| Ok(()))
+            .await
+            .map(|(_, stream)| stream)
+    }
+
+    async fn generate_with_fault_detection_prepared<M, F>(
+        &self,
+        instance_id: u64,
+        mut request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
         let route_span = if matches!(self.router_mode, RouterMode::KV) {
@@ -1185,6 +1346,7 @@ where
 
         let (instance_id, address, transport_kind, instance) =
             self.resolve_transport(instance_id, fallback)?;
+        let metadata = prepare(&mut request, instance_id)?;
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
@@ -1197,7 +1359,8 @@ where
             .generate(request)
             .instrument(route_span)
             .await;
-        self.wrap_with_fault_detection(stream, instance_id)
+        let stream = self.wrap_with_fault_detection(stream, instance_id)?;
+        Ok((metadata, stream))
     }
 
     /// Reject early if the selected worker is overloaded and fault detection
@@ -1251,7 +1414,7 @@ where
     fn resolve_transport(
         &self,
         instance_id: u64,
-        fallback: TransportFallback,
+        fallback: TransportFallback<'_>,
     ) -> anyhow::Result<(u64, String, &'static str, Instance)> {
         use crate::component::TransportType;
 
@@ -1274,20 +1437,22 @@ where
         if let Some((addr, kind, inst)) = lookup(instance_id) {
             return Ok((instance_id, addr, kind, inst));
         }
-        if matches!(fallback, TransportFallback::Deny) {
-            return Err(anyhow::anyhow!(
-                "Instance {} not found for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            ));
-        }
+        let allowed_fallback = match fallback {
+            TransportFallback::Allow => None,
+            TransportFallback::Deny => {
+                return Err(anyhow::anyhow!(
+                    "Instance {} not found for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ));
+            }
+            TransportFallback::Within(allowed) => Some(allowed),
+        };
 
         let routing_instances = self.client.routing_instances();
-        let fallback_id = routing_instances
-            .free_ids()
-            .iter()
-            .copied()
-            .find(|&id| id != instance_id);
+        let fallback_id = routing_instances.free_ids().iter().copied().find(|&id| {
+            id != instance_id && allowed_fallback.is_none_or(|allowed| allowed.contains(&id))
+        });
         match fallback_id {
             Some(id) => {
                 tracing::warn!(
@@ -2045,6 +2210,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_within_rejects_overloaded_constrained_target() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_direct_within_overload_rejection".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        client.set_overloaded_instances(&[worker_id]);
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        let allowed = HashSet::from([worker_id]);
+        let error = router
+            .direct_within(SingleIn::new(42), worker_id, Some(&allowed))
+            .await
+            .unwrap_err();
+
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[]
+        ));
+        assert!(
+            error.to_string().contains("Selected worker is overloaded"),
+            "expected overload rejection, got: {error}"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn no_workers_is_reported_as_unavailable() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
@@ -2341,6 +2549,49 @@ mod tests {
         rt.shutdown();
     }
 
+    #[tokio::test]
+    async fn prepared_dispatch_observes_worker_after_transport_fallback() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_prepared_transport_fallback".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let real_id = client.wait_for_instances().await.unwrap()[0].id();
+        let stale_id = real_id.wrapping_add(1);
+        client.override_instance_avail(vec![stale_id, real_id]);
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::LeastLoaded)
+            .await
+            .unwrap();
+        let state = router.occupancy_state.clone().unwrap();
+        state.increment(real_id);
+        let state_for_prepare = state.clone();
+        let observed = Arc::new(AtomicU64::new(0));
+        let observed_for_prepare = observed.clone();
+
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            router.select_and_dispatch(SingleIn::new(42), move |_, worker_id| {
+                assert_eq!(state_for_prepare.load(stale_id), 0);
+                assert_eq!(state_for_prepare.load(worker_id), 2);
+                observed_for_prepare.store(worker_id, Ordering::Relaxed);
+                Ok(())
+            }),
+        )
+        .await;
+
+        assert_eq!(observed.load(Ordering::Relaxed), real_id);
+        assert_eq!(state.load(real_id), 1);
+        state.decrement(real_id);
+        rt.shutdown();
+    }
+
     /// When no instances are available at all (both primary and fallback),
     /// the router should return a clear error.
     #[tokio::test]
@@ -2384,7 +2635,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_transport_resolution_never_falls_back() {
+    async fn transport_resolution_honors_fallback_policy() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -2411,6 +2662,20 @@ mod tests {
                 .resolve_transport(stale_id, TransportFallback::Allow)
                 .is_ok(),
             "normal dispatch should preserve transport fallback"
+        );
+        let allowed = HashSet::from([real_id]);
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Within(&allowed))
+                .is_ok(),
+            "constrained dispatch should fall back within the allowed worker set"
+        );
+        let disallowed = HashSet::new();
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
+                .is_err(),
+            "constrained dispatch must not fall back outside the allowed worker set"
         );
         let error = router
             .resolve_transport(stale_id, TransportFallback::Deny)

@@ -346,6 +346,7 @@ def compute_block_hash_for_seq(
     block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     lora_name: Optional[str] = None,
     is_eagle: Optional[bool] = None,
+    cache_namespace: Optional[str] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -456,6 +457,13 @@ class Context:
         """
         ...
 
+    def detached(self, id: str) -> "Context":
+        """
+        Create a context with a fresh cancellation controller and request ID
+        while preserving trace parentage and a metadata snapshot.
+        """
+        ...
+
     def async_killed_or_stopped(self) -> asyncio.Future[bool]:
         """
         Asynchronously wait until the context is killed or stopped.
@@ -517,8 +525,8 @@ class Context:
         Build W3C trace headers for propagating to downstream inference engines.
 
         Returns:
-            ``{"traceparent": "00-<trace_id>-<span_id>-01"}`` when this request
-            carries trace context, ``None`` otherwise. Also emits ``tracestate``,
+            ``{"traceparent": "00-<trace_id>-<span_id>-<flags>"}`` when this
+            request carries trace context, ``None`` otherwise. Also emits ``tracestate``,
             ``x-request-id``, ``request-id`` when upstream propagated them.
             Forward unchanged to the inference engine's ``trace_headers`` kwarg.
         """
@@ -678,9 +686,9 @@ class SelectionService:
         ...
 
     def list_workers(
-        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+        self, *, model_name: Optional[str] = None, routing_group: Optional[str] = None
     ) -> JsonLike:
-        """List catalog records, optionally filtered by model and tenant."""
+        """List catalog records, optionally filtered by model and routing group."""
         ...
 
     def ready(self) -> JsonLike:
@@ -718,7 +726,7 @@ class SelectionService:
         ...
 
     def loads(
-        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+        self, *, model_name: Optional[str] = None, routing_group: Optional[str] = None
     ) -> JsonLike:
         """Current per-model active load (pending counts + per-worker potential loads)."""
         ...
@@ -773,6 +781,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    tokenizer_backend: str | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -1089,6 +1098,7 @@ class KvEventPublisher:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         is_eagle: Optional[bool] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -1564,7 +1574,7 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            enforce_disagg: Strictly enforce disaggregated mode, failing requests if no prefill workers are available
+            enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
         """
         ...
 
@@ -1940,6 +1950,7 @@ class MockEngineArgs:
         kv_transfer_bandwidth: Optional[float] = None,
         kv_transfer_timing_mode: str = "full_prompt",
         reasoning: Optional[ReasoningConfig] = None,
+        response_replay_trace_path: Optional[str | os.PathLike[str]] = None,
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,
         preemption_mode: str = "lifo",
@@ -1956,6 +1967,7 @@ class MockEngineArgs:
         enable_g4_storage: bool = False,
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
+        max_model_len: Optional[int] = None,
     ) -> None:
         ...
 
@@ -1973,6 +1985,9 @@ class MockEngineArgs:
 
     @num_gpu_blocks.setter
     def num_gpu_blocks(self, value: int) -> None: ...
+
+    @property
+    def max_model_len(self) -> Optional[int]: ...
 
     @property
     def max_num_seqs(self) -> Optional[int]: ...
@@ -2003,6 +2018,9 @@ class MockEngineArgs:
 
     @property
     def engine_type(self) -> str: ...
+
+    @property
+    def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
 
     @property
     def num_g2_blocks(self) -> Optional[int]: ...
@@ -2228,6 +2246,7 @@ async def register_model(
     needs: Optional[List[List[WorkerType]]] = None,
     self_host_metadata: Optional[bool] = None,
     ignore_weights: bool = False,
+    max_gpu_lora_count: Optional[int] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2828,6 +2847,7 @@ class KvRouter:
         routing_constraints: Optional[RoutingConstraints] = None,
         strict_priority: int = 0,
         policy_class: Optional[str] = None,
+        cache_namespace: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -2845,6 +2865,7 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
+            cache_namespace: Optional cache namespace used in block hash computation.
             policy_class: Requested policy family, or an exact explicit class.
                           Missing, unknown, and ordinary physical-class names use the
                           configured default family before cache-bucket resolution.
@@ -2862,6 +2883,7 @@ class KvRouter:
         token_ids: List[int],
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        cache_namespace: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
         Get potential prefill and decode loads for all workers.
@@ -2894,6 +2916,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         include_shared: bool = True,
+        cache_namespace: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Get per-worker KV overlap by storage tier.
@@ -2992,8 +3015,16 @@ class EntrypointArgs:
         is_prefill: bool = False,
         is_decode: bool = False,
         migration_limit: int = 0,
+        migration_max_seq_len: Optional[int] = None,
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        *,
+        metrics_prefix: Optional[str] = None,
+        enable_anthropic_api: Optional[bool] = None,
+        strip_anthropic_preamble: Optional[bool] = None,
+        enable_streaming_tool_dispatch: Optional[bool] = None,
+        enable_streaming_reasoning_dispatch: Optional[bool] = None,
+        tokenizer_backend: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3019,8 +3050,15 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
+            migration_max_seq_len: Optional max sequence length for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
+            metrics_prefix: Optional Prometheus metrics prefix override
+            enable_anthropic_api: Optional Anthropic Messages API override
+            strip_anthropic_preamble: Optional Anthropic preamble stripping override
+            enable_streaming_tool_dispatch: Optional streaming tool dispatch override
+            enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
+            tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
         """
         ...
 
@@ -3161,6 +3199,7 @@ class backend:
         Aggregated: "backend.DisaggregationMode"
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
+        Encode: "backend.DisaggregationMode"
 
     class LlmRegistration:
         def __init__(
@@ -3242,6 +3281,9 @@ class backend:
             structural_tag_mode: str = ...,
             structural_tag_scope: str = ...,
             structural_tag_schema: str = ...,
+            route_to_encoder: bool = ...,
+            media_decoder: Optional[MediaDecoder] = None,
+            media_fetcher: Optional[MediaFetcher] = None,
         ) -> None: ...
 
     class Worker:

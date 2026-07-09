@@ -3,8 +3,8 @@ module github.com/ai-dynamo/dynamo/deploy/snapshot
 go 1.26.3
 
 require (
-	github.com/checkpoint-restore/go-criu/v8 v8.2.0
-	github.com/containerd/containerd v1.7.32
+	github.com/checkpoint-restore/go-criu/v8 v8.4.0
+	github.com/containerd/containerd v1.7.33
 	github.com/cyphar/filepath-securejoin v0.5.1
 	github.com/go-logr/logr v1.4.3
 	github.com/go-logr/zapr v1.3.0
@@ -13,7 +13,7 @@ require (
 	github.com/opencontainers/runtime-spec v1.2.0
 	github.com/prometheus/procfs v0.16.1
 	go.uber.org/zap v1.27.1
-	golang.org/x/sys v0.42.0
+	golang.org/x/sys v0.46.0
 	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
@@ -33,6 +33,7 @@ require (
 	github.com/AdamKorcz/go-118-fuzz-build v0.0.0-20230306123547-8075edf89bb0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Microsoft/hcsshim v0.11.7 // indirect
+	github.com/aperturerobotics/protobuf-go-lite v0.15.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect

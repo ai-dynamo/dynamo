@@ -53,11 +53,11 @@ impl ReplayIndexer {
     ) -> Result<OverlapScores> {
         match self {
             Self::Single(indexer) => indexer
-                .find_matches_for_request(tokens, lora_name, None)
+                .find_matches_for_request(tokens, lora_name, None, None)
                 .await
                 .map_err(Into::into),
             Self::Concurrent(indexer) => indexer
-                .find_matches_for_request(tokens, lora_name, None)
+                .find_matches_for_request(tokens, lora_name, None, None)
                 .await
                 .map_err(Into::into),
         }
@@ -411,6 +411,7 @@ mod tests {
         DirectRequest {
             tokens: vec![uuid as u32; 64],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),

@@ -326,6 +326,11 @@ pub enum DiscoverySpec {
         component: String,
         /// Topic name for this channel (e.g., "kv-events", "kv-metrics")
         topic: String,
+        /// Unique identity of this publisher incarnation.
+        ///
+        /// A process can host multiple publishers for the same topic, so event
+        /// channels cannot use the process-level discovery instance ID.
+        publisher_id: u64,
         /// Event transport type (NATS subject prefix or ZMQ endpoint)
         transport: EventTransport,
     },
@@ -368,8 +373,12 @@ impl DiscoverySpec {
         })
     }
 
-    /// Attaches an instance ID to create a DiscoveryInstance
-    pub fn with_instance_id(self, instance_id: u64) -> DiscoveryInstance {
+    /// Converts this registration spec into a discovery instance.
+    ///
+    /// Endpoint and model specs use `default_instance_id`, normally the
+    /// discovery client's process-level ID. Event channel specs already carry
+    /// a publisher-level ID, so they use that instead.
+    pub fn into_instance(self, default_instance_id: u64) -> DiscoveryInstance {
         match self {
             Self::Endpoint {
                 namespace,
@@ -381,7 +390,7 @@ impl DiscoverySpec {
                 namespace,
                 component,
                 endpoint,
-                instance_id,
+                instance_id: default_instance_id,
                 transport,
                 device_type,
             }),
@@ -395,7 +404,7 @@ impl DiscoverySpec {
                 namespace,
                 component,
                 endpoint,
-                instance_id,
+                instance_id: default_instance_id,
                 card_json,
                 model_suffix,
             },
@@ -403,15 +412,21 @@ impl DiscoverySpec {
                 namespace,
                 component,
                 topic,
+                publisher_id,
                 transport,
             } => DiscoveryInstance::EventChannel {
                 namespace,
                 component,
                 topic,
-                instance_id,
+                instance_id: publisher_id,
                 transport,
             },
         }
+    }
+
+    /// Compatibility alias for [`DiscoverySpec::into_instance`].
+    pub fn with_instance_id(self, default_instance_id: u64) -> DiscoveryInstance {
+        self.into_instance(default_instance_id)
     }
 }
 
@@ -765,7 +780,9 @@ fn find_conflicting_model_name(
 #[async_trait]
 pub trait Discovery: Send + Sync {
     /// Returns a unique identifier for this worker (e.g lease id if using etcd or generated id for memory store)
-    /// Discovery objects created by this worker will be associated with this id.
+    /// Endpoint and model objects created by this worker use this ID. Event
+    /// channels use a publisher-level ID because a worker can own more than one
+    /// publisher for the same topic.
     fn instance_id(&self) -> u64;
 
     /// Registers an object in the discovery plane with the instance id

@@ -2297,7 +2297,7 @@ _Appears in:_
 | `dgdName` _string_ | DGDName is the name of the generated or created DynamoGraphDeployment. |  | Optional: \{\} <br /> |
 | `profilingJobName` _string_ | ProfilingJobName is the name of the Kubernetes Job running the profiler. |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the deployment request.<br />Standard condition types include: Succeeded, Validation, Profiling, SpecGenerated, DeploymentReady. |  | Optional: \{\} <br /> |
-| `profilingResults` _[ProfilingResultsStatus](#profilingresultsstatus)_ | ProfilingResults contains the output of the profiling process including<br />Pareto-optimal configurations and the selected deployment configuration. |  | Optional: \{\} <br /> |
+| `profilingResults` _[ProfilingResultsStatus](#profilingresultsstatus)_ | ProfilingResults contains the selected deployment configuration produced by profiling.<br />Deprecated compatibility fields may remain on objects created by older releases. |  | Optional: \{\} <br /> |
 | `deploymentInfo` _[DeploymentInfoStatus](#deploymentinfostatus)_ | DeploymentInfo tracks the state of the deployed DynamoGraphDeployment.<br />Populated when a DGD has been created (either via autoApply or manually). |  | Optional: \{\} <br /> |
 | `observedGeneration` _integer_ | ObservedGeneration is the most recent generation observed by the controller. |  | Optional: \{\} <br /> |
 
@@ -2760,15 +2760,16 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `profilingJob` _[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)_ | ProfilingJob allows overriding the profiling Job specification.<br />Fields set here are merged into the controller-generated Job spec. |  | Optional: \{\} <br /> |
-| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment<br />to use as the base for the generated deployment. Fields from profiling results<br />are merged on top. Use this to override backend worker images.<br />The field is stored as a raw embedded resource rather than a typed<br />*v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already<br />imports v1beta1 as the conversion hub and Go does not allow import cycles.<br />The EmbeddedResource marker tells the API server to validate that the value is a<br />well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it<br />is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,<br />kind, and field schema) is performed by the controller during reconciliation. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
+| `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD provides a partial, versioned DynamoGraphDeployment override for the<br />profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or<br />nvidia.com/v1beta1 and kind to DynamoGraphDeployment.<br />The profiler merges the override using the schema for its declared version.<br />If the generated DGD uses another supported version, the complete DGD is<br />converted before the merge and converted back afterward. The final DGD<br />selected or created by a DGDR is nvidia.com/v1beta1.<br />The override can update DGD fields, but topology entries are limited to<br />services or components already present in the generated DGD. Metadata labels<br />and annotations are merged, metadata.name selects the final DGD name, and<br />other identity or runtime metadata is ignored.<br />V1alpha1 worker argument lists retain legacy append behavior. V1beta1 follows<br />structural schema merge behavior, including map-list merging and atomic-list<br />replacement.<br />The raw embedded resource preserves either supported schema. The API server<br />validates that it has apiVersion and kind; override processing validates the<br />DGD kind, supported version, and field schema. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
 
 
 #### ParetoConfig
 
 
 
-ParetoConfig represents a single Pareto-optimal deployment configuration
-discovered during profiling.
+ParetoConfig is retained for compatibility with status objects produced by
+older profiler releases.
+Deprecated: The profiler no longer generates Pareto configurations.
 
 
 
@@ -2866,7 +2867,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pareto` _[ParetoConfig](#paretoconfig) array_ | Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.<br />Each entry represents a different cost/performance trade-off. |  | Optional: \{\} <br /> |
+| `pareto` _[ParetoConfig](#paretoconfig) array_ | Pareto is retained for compatibility with existing status objects.<br />Deprecated: The controller no longer populates this field. |  | Optional: \{\} <br /> |
 | `selectedConfig` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | SelectedConfig is the recommended configuration chosen by the profiler<br />based on the SLA targets. This is the configuration used for deployment<br />when autoApply is true. |  | Type: object <br />Optional: \{\} <br /> |
 
 
@@ -3610,6 +3611,7 @@ _Appears in:_
 | `grove` _[GroveConfiguration](#groveconfiguration)_ | Grove orchestrator configuration |  |  |
 | `lws` _[LWSConfiguration](#lwsconfiguration)_ | LWS orchestrator configuration |  |  |
 | `kaiScheduler` _[KaiSchedulerConfiguration](#kaischedulerconfiguration)_ | KaiScheduler configuration |  |  |
+| `volcanoScheduler` _[VolcanoSchedulerConfiguration](#volcanoschedulerconfiguration)_ | VolcanoScheduler configuration |  |  |
 
 
 #### RBACConfiguration
@@ -3699,10 +3701,27 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled overrides service mesh auto-detection. nil = auto-detect. |  |  |
 | `provider` _string_ | Provider selects the service mesh implementation. Supported: "istio", "".<br />Empty string disables service mesh resource generation. |  |  |
 | `istio` _[IstioMeshConfiguration](#istiomeshconfiguration)_ | Istio holds Istio-specific settings. Only used when Provider is "istio". |  |  |
 
 
+
+
+#### VolcanoSchedulerConfiguration
+
+
+
+VolcanoSchedulerConfiguration holds Volcano scheduler settings.
+
+
+
+_Appears in:_
+- [OrchestratorConfiguration](#orchestratorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets. |  |  |
 
 
 #### WebhookServer
