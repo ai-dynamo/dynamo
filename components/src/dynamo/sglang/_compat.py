@@ -173,6 +173,25 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
     return kwargs
 
 
+@lru_cache(maxsize=1)
+def _warn_kv_hints_unsupported() -> None:
+    logger.warning(
+        "Dropping kv_hints because SGLang Engine.async_generate does not support it; "
+        "upgrade SGLang to enable programmatic KV retention"
+    )
+
+
+def kv_hint_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Forward provider-neutral KV hints when the installed SGLang supports them."""
+    kv_hints = request.get("kv_hints")
+    if not kv_hints:
+        return {}
+    kwargs = filter_supported_async_generate_kwargs(engine, {"kv_hints": kv_hints})
+    if "kv_hints" not in kwargs:
+        _warn_kv_hints_unsupported()
+    return kwargs
+
+
 @lru_cache(maxsize=32)
 def _start_profile_accepts_request_object(start_profile: Any) -> bool:
     """Return whether TokenizerManager.start_profile expects a ProfileReq."""
@@ -231,6 +250,7 @@ __all__ = [
     "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
+    "kv_hint_kwargs",
     "require_reasoning_kwargs",
     "start_profile_compat",
 ]

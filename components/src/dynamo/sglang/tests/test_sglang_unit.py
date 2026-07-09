@@ -24,6 +24,7 @@ from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
+    kv_hint_kwargs,
     require_reasoning_kwargs,
     start_profile_compat,
 )
@@ -305,6 +306,22 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     kwargs = {"return_routed_experts": True}
 
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
+
+
+def test_kv_hint_kwargs_are_forwarded_only_when_supported():
+    class OldEngine:
+        async def async_generate(self, input_ids=None):
+            return None
+
+    class NewEngine:
+        async def async_generate(self, input_ids=None, kv_hints=None):
+            return None
+
+    request = {"kv_hints": {"retention": [{"prefix_tokens": 4, "ttl_seconds": 300}]}}
+
+    assert kv_hint_kwargs(OldEngine(), request) == {}
+    assert kv_hint_kwargs(NewEngine(), request) == {"kv_hints": request["kv_hints"]}
+    assert kv_hint_kwargs(NewEngine(), {}) == {}
 
 
 @pytest.mark.parametrize(
