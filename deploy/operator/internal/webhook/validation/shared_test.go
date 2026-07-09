@@ -161,7 +161,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 	}
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 
-	errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, field.NewPath("spec", "components").Index(0), false)
+	errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, field.NewPath("spec", "components").Index(0), false, true)
 	assertFieldPaths(t, errs, []string{
 		"spec.components[0].minAvailable",
 		"spec.components[0].sharedMemorySize",
@@ -180,7 +180,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 	t.Run("requires pod template", func(t *testing.T) {
 		name := "frontend"
 		spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{FrontendSidecar: &name}
-		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true)
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
 		assertFieldPaths(t, errs, []string{
 			"spec.components[0].podTemplate.spec.containers",
 		})
@@ -192,7 +192,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 			PodTemplate:     &corev1.PodTemplateSpec{},
 			FrontendSidecar: &name,
 		}
-		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true)
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
 		assertFieldPaths(t, errs, []string{
 			"spec.components[0].frontendSidecar",
 		})
@@ -206,7 +206,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T
 			},
 			FrontendSidecar: &name,
 		}
-		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true)
+		errs := validation.validateDynamoComponentDeploymentSharedSpec(spec, componentPath, true, true)
 		assertFieldPaths(t, errs, nil)
 	})
 }

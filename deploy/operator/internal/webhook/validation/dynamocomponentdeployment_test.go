@@ -18,14 +18,15 @@
 package validation
 
 import (
+	"fmt"
 	"slices"
-	"strings"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,6 +47,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		validReplicas    = int32(3)
 		negativeReplicas = int32(-1)
 		validMinAvail    = int32(2)
+		negativeSHMSize  = resource.MustParse("-1Gi")
 		workerGPU        = &nvidiacomv1alpha1.Resources{
 			Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
 		}
@@ -81,7 +83,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Replicas = &validReplicas
 				dcd.Spec.MinAvailable = &validMinAvail
 			}),
-			wantWebhookErrs: []string{"spec.minAvailable is currently supported only for Grove-backed DynamoGraphDeployment components"},
+			wantWebhookErrs: []string{"spec.minAvailable: Forbidden: is currently supported only for Grove-backed DynamoGraphDeployment components"},
 		},
 		{
 			name: "v1beta1 minAvailable reaches the standalone DCD webhook",
@@ -89,21 +91,38 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Replicas = &validReplicas
 				dcd.Spec.MinAvailable = &validMinAvail
 			}),
-			wantWebhookErrs: []string{"spec.minAvailable is currently supported only for Grove-backed DynamoGraphDeployment components"},
+			wantWebhookErrs: []string{"spec.minAvailable: Forbidden: is currently supported only for Grove-backed DynamoGraphDeployment components"},
+		},
+		{
+			name: "v1beta1 structural validation aggregates independent shared-spec errors",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.SharedMemorySize = &negativeSHMSize
+				dcd.Spec.FrontendSidecar = k8sptr.To("frontend")
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.sharedMemorySize: Invalid value: "-1Gi": must be non-negative`,
+				"spec.podTemplate.spec.containers: Required value: is required when frontendSidecar is set",
+				"spec.experimental.gpuMemoryService: Forbidden: GPU memory service is only supported for worker, prefill, or decode components",
+				"spec.experimental.gpuMemoryService: Forbidden: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
+			},
 		},
 		{
 			name: "invalid ingress",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true}
 			}),
-			wantWebhookErrs: []string{"spec.ingress.host is required when ingress is enabled"},
+			wantWebhookErrs: []string{"spec.ingress.host: Required value: is required when ingress is enabled"},
 		},
 		{
 			name: "invalid volume mount",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.VolumeMounts = []nvidiacomv1alpha1.VolumeMount{{Name: "data"}}
 			}),
-			wantWebhookErrs: []string{"spec.volumeMounts[0].mountPoint is required when useAsCompilationCache is false"},
+			wantWebhookErrs: []string{"spec.volumeMounts[0].mountPoint: Required value: is required when useAsCompilationCache is false"},
 		},
 		{
 			name: "invalid shared memory",
@@ -276,7 +295,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
 			}),
-			wantWebhookErrs: []string{`spec.annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "invalid": must be "mp" or "ray"`},
+			wantWebhookErrs: []string{`spec.annotations[nvidia.com/vllm-distributed-executor-backend]: Invalid value: "invalid": must be "mp" or "ray"`},
 		},
 		{
 			name: "checkpoint without GMS is accepted",
@@ -381,7 +400,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			}),
-			wantWebhookErrs: []string{"spec.checkpoint.job.gmsClientContainers requires gpuMemoryService to be enabled"},
+			wantWebhookErrs: []string{"spec.experimental.checkpoint.job.gmsClientContainers: Forbidden: requires gpuMemoryService to be set"},
 		},
 		{
 			name: "checkpoint GMS client names are validated by the source schema",
@@ -417,7 +436,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Containers: []corev1.Container{{Name: consts.FrontendSidecarContainerName, Image: "conflict:latest"}},
 				}},
 			}),
-			wantWebhookErrs: []string{`spec: cannot inject frontend sidecar: a container named "sidecar-frontend" already exists in extraPodSpec.containers`},
+			wantWebhookErrs: []string{`spec.frontendSidecar: Forbidden: cannot inject frontend sidecar: a container named "sidecar-frontend" already exists in extraPodSpec.containers`},
 		},
 		{
 			name: "frontend sidecar with non-conflicting containers is accepted",
@@ -439,7 +458,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Enabled: true,
 				},
 			}),
-			wantWebhookErrs: []string{"spec.gpuMemoryService: GPU memory service is only supported for worker components (componentType must be worker, prefill, or decode)"},
+			wantWebhookErrs: []string{"spec.experimental.gpuMemoryService: Forbidden: GPU memory service is only supported for worker, prefill, or decode components"},
 		},
 		{
 			name: "GMS requires a GPU",
@@ -447,7 +466,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				ComponentType:    consts.ComponentTypeWorker,
 				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
 			}),
-			wantWebhookErrs: []string{"spec.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1"},
+			wantWebhookErrs: []string{"spec.experimental.gpuMemoryService: Forbidden: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1"},
 		},
 		{
 			name: "GMS accepts GPU requests when limits are unset",
@@ -468,7 +487,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				},
 				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
 			}),
-			wantWebhookErrs: []string{"spec.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1"},
+			wantWebhookErrs: []string{"spec.experimental.gpuMemoryService: Forbidden: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1"},
 		},
 		{
 			name: "checkpoint GMS clients reject inter-pod GMS",
@@ -490,7 +509,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			}),
-			wantWebhookErrs: []string{"spec.checkpoint.job.gmsClientContainers is only supported with gpuMemoryService.mode=IntraPod"},
+			wantWebhookErrs: []string{
+				"spec.experimental.checkpoint.job.gmsClientContainers: Forbidden: is only supported with gpuMemoryService.mode=IntraPod",
+				"spec.experimental.checkpoint: Forbidden: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
+			},
 		},
 		{
 			name: "checkpoint GMS clients accept intra-pod GMS",
@@ -553,7 +575,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					NumShadows: 1,
 				},
 			}),
-			wantWebhookErrs: []string{`spec.failover: interPod failover requires gpuMemoryService.enabled=true and gpuMemoryService.mode="interPod"`},
+			wantWebhookErrs: []string{`spec.experimental.failover: Forbidden: gpuMemoryService is required when failover mode is "InterPod"`},
 		},
 		{
 			name: "inter-pod failover requires matching GMS mode",
@@ -570,7 +592,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					NumShadows: 1,
 				},
 			}),
-			wantWebhookErrs: []string{`spec.failover: interPod failover requires gpuMemoryService.mode="interPod" (got "intraPod")`},
+			wantWebhookErrs: []string{`spec.experimental.failover.mode: Invalid value: "InterPod": must match gpuMemoryService.mode "IntraPod"`},
 		},
 		{
 			name: "matching inter-pod GMS failover is accepted",
@@ -615,7 +637,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					NumShadows: 2,
 				},
 			}),
-			wantWebhookErrs: []string{`spec.failover.numShadows=2 is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`},
+			wantWebhookErrs: []string{`spec.failover.numShadows: Invalid value: 2: is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`},
 		},
 		{
 			name: "single-shadow intra-pod failover is accepted",
@@ -655,7 +677,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.OwnerReferences = []metav1.OwnerReference{{Kind: "DynamoGraphDeployment", Name: "trtllm-disagg"}}
 				dcd.Spec.DynamoNamespace = k8sptr.To("my-custom-namespace")
 			}),
-			wantWarnings: []string{"spec.dynamoNamespace is deprecated and ignored. Value 'my-custom-namespace' will be replaced with 'hannahz-trtllm-disagg'. Remove this field from your configuration"},
+			wantWarnings: []string{`spec.dynamoNamespace is deprecated and ignored. Value "my-custom-namespace" will be replaced with "hannahz-trtllm-disagg". Remove this field from your configuration`},
 		},
 
 		// EPP rules and their source-version ownership.
@@ -665,7 +687,10 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				ComponentType: consts.ComponentTypeEPP,
 				Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
 			}),
-			wantWebhookErrs: []string{"spec: EPP component cannot be multinode (multinode field must be nil or nodeCount must be 1)"},
+			wantWebhookErrs: []string{
+				"spec.multinode: Forbidden: EPP component cannot be multinode",
+				"spec.eppConfig: Required value: is required for EPP components",
+			},
 		},
 		{
 			name: "v1alpha1 EPP requires one replica",
@@ -673,21 +698,24 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &validMinAvail,
 			}),
-			wantWebhookErrs: []string{"spec: EPP component must have exactly 1 replica (found 2 replicas)"},
+			wantWebhookErrs: []string{
+				"spec.replicas: Invalid value: 2: EPP component must have exactly 1 replica",
+				"spec.eppConfig: Required value: is required for EPP components",
+			},
 		},
 		{
 			name: "v1alpha1 EPP requires configuration",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 			}),
-			wantWebhookErrs: []string{"spec.eppConfig is required for EPP components"},
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for EPP components"},
 		},
 		{
-			name: "v1beta1 EPP without configuration reaches and is rejected by the converted webhook",
+			name: "v1beta1 EPP without configuration reaches and is rejected by the v1beta1 webhook",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 			}),
-			wantWebhookErrs: []string{"spec.eppConfig is required for EPP components"},
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for EPP components"},
 		},
 		{
 			name: "v1alpha1 empty EPP config reaches and is rejected by the webhook",
@@ -695,7 +723,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				ComponentType: consts.ComponentTypeEPP,
 				EPPConfig:     &nvidiacomv1alpha1.EPPConfig{},
 			}),
-			wantWebhookErrs: []string{"spec.eppConfig: either configMapRef or config must be specified (no default configuration provided)"},
+			wantWebhookErrs: []string{"spec.eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
 		},
 		{
 			name: "v1beta1 empty EPP config is rejected by source CEL",
@@ -717,7 +745,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			}),
-			wantWebhookErrs: []string{"spec.eppConfig: configMapRef and config are mutually exclusive, only one can be specified"},
+			wantWebhookErrs: []string{"spec.eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
 		},
 		{
 			name: "v1beta1 conflicting EPP config is rejected by source CEL",
@@ -741,7 +769,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					ConfigMapRef: &corev1.ConfigMapKeySelector{},
 				},
 			}),
-			wantWebhookErrs: []string{"spec.eppConfig.configMapRef.name is required"},
+			wantWebhookErrs: []string{"spec.eppConfig.configMapRef.name: Required value: is required"},
 		},
 		{
 			name: "valid v1alpha1 EPP config reaches the webhook",
@@ -754,7 +782,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "valid v1beta1 EPP config reaches the converted webhook",
+			name: "valid v1beta1 EPP config reaches the v1beta1 webhook",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
@@ -832,7 +860,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:       "valid v1beta1 deployment reaches the converted webhook",
+			name:       "valid v1beta1 deployment reaches the v1beta1 webhook",
 			deployment: betaDCDForAdmission(nil),
 		},
 		{
@@ -845,7 +873,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:          "v1beta1 update without changes reaches the converted webhook",
+			name:          "v1beta1 update without changes reaches the v1beta1 webhook",
 			oldDeployment: betaDCDForAdmission(nil),
 			deployment:    betaDCDForAdmission(nil),
 		},
@@ -857,18 +885,18 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.BackendFramework = dcdAdmissionVLLMBackend
 			}),
-			wantWebhookErrs: []string{"spec.backendFramework is immutable and cannot be changed after creation"},
+			wantWebhookErrs: []string{`spec.backendFramework: Invalid value: "vllm": is immutable and cannot be changed after creation`},
 			wantWarnings:    []string{"Changing spec.backendFramework may cause unexpected behavior"},
 		},
 		{
-			name: "v1beta1 backend framework update reaches and is rejected by the converted webhook",
+			name: "v1beta1 backend framework update reaches and is rejected by the v1beta1 webhook",
 			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
 			}),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.BackendFramework = dcdAdmissionVLLMBackend
 			}),
-			wantWebhookErrs: []string{"spec.backendFramework is immutable and cannot be changed after creation"},
+			wantWebhookErrs: []string{`spec.backendFramework: Invalid value: "vllm": is immutable and cannot be changed after creation`},
 			wantWarnings:    []string{"Changing spec.backendFramework may cause unexpected behavior"},
 		},
 		{
@@ -883,13 +911,21 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 replicas update reaches the converted webhook",
+			name: "v1beta1 replicas update reaches the v1beta1 webhook",
 			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Replicas = &oneReplica
 			}),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Replicas = &validReplicas
 			}),
+		},
+		{
+			name:          "v1beta1 multinode layout change is rejected by the shared update validator",
+			oldDeployment: betaDCDForAdmission(nil),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{`spec.multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
 		},
 	}
 
@@ -935,16 +971,16 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}
 
 			handler := NewDynamoComponentDeploymentHandler()
-			ctx := dgdAdmissionContext(dgdAdmissionOperation(tt.oldDeployment), nvidiacomv1alpha1.DynamoComponentDeploymentGVK)
+			ctx := dgdAdmissionContext(dgdAdmissionOperation(tt.oldDeployment), nvidiacomv1beta1.DynamoComponentDeploymentGVK)
 			var warnings []string
 			var err error
 			if tt.oldDeployment == nil {
-				warnings, err = handler.ValidateCreate(ctx, dcdAdmissionAlpha(t, tt.deployment))
+				warnings, err = handler.ValidateCreate(ctx, dcdAdmissionBeta(t, tt.deployment))
 			} else {
 				warnings, err = handler.ValidateUpdate(
 					ctx,
-					dcdAdmissionAlpha(t, tt.oldDeployment),
-					dcdAdmissionAlpha(t, tt.deployment),
+					dcdAdmissionBeta(t, tt.oldDeployment),
+					dcdAdmissionBeta(t, tt.deployment),
 				)
 			}
 			assertDCDWebhookErrors(t, err, tt.wantWebhookErrs)
@@ -966,7 +1002,22 @@ func assertDCDWebhookErrors(t *testing.T, err error, want []string) {
 	if err == nil {
 		t.Fatalf("webhook errors = nil, want %v", want)
 	}
-	got := strings.Split(err.Error(), "\n")
+	statusErr, ok := err.(*k8serrors.StatusError)
+	if !ok || !k8serrors.IsInvalid(err) {
+		t.Fatalf("error = %T %v, want typed Kubernetes invalid error", err, err)
+	}
+	if statusErr.ErrStatus.Details == nil {
+		t.Fatalf("error = %v, want typed field causes", err)
+	}
+
+	causes := statusErr.ErrStatus.Details.Causes
+	got := make([]string, len(causes))
+	for i, cause := range causes {
+		if cause.Field == "" {
+			t.Fatalf("error cause = %#v, want an exact field path", cause)
+		}
+		got[i] = fmt.Sprintf("%s: %s", cause.Field, cause.Message)
+	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("webhook errors = %v, want %v", got, want)
 	}
@@ -1026,17 +1077,17 @@ func betaDCDForAdmission(
 	return dcd
 }
 
-func dcdAdmissionAlpha(t *testing.T, deployment runtime.Object) *nvidiacomv1alpha1.DynamoComponentDeployment {
+func dcdAdmissionBeta(t *testing.T, deployment runtime.Object) *nvidiacomv1beta1.DynamoComponentDeployment {
 	t.Helper()
 	switch deployment := deployment.(type) {
 	case *nvidiacomv1alpha1.DynamoComponentDeployment:
-		return deployment.DeepCopy()
-	case *nvidiacomv1beta1.DynamoComponentDeployment:
-		alpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
-		if err := alpha.ConvertFrom(deployment); err != nil {
-			t.Fatalf("convert v1beta1 DCD to v1alpha1: %v", err)
+		beta := &nvidiacomv1beta1.DynamoComponentDeployment{}
+		if err := deployment.ConvertTo(beta); err != nil {
+			t.Fatalf("convert v1alpha1 DCD to v1beta1: %v", err)
 		}
-		return alpha
+		return beta
+	case *nvidiacomv1beta1.DynamoComponentDeployment:
+		return deployment.DeepCopy()
 	default:
 		t.Fatalf("unsupported DCD type %T", deployment)
 		return nil
