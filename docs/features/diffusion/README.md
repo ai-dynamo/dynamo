@@ -15,10 +15,13 @@ Dynamo supports serving diffusion models across multiple backends, enabling gene
 |----------|-----------|--------|---------|
 | Text-to-Text | ❌ | ✅ | ❌ |
 | Text-to-Image | ✅ | ✅ | ✅ |
-| Text-to-Video | ✅ | ✅ | ✅ |
+| Text-to-Video | ✅ | ✅ | ✅ (NVENC required) |
 | Image-to-Video | ✅ | ❌ | ❌ |
 
 **Status:** ✅ Supported | ❌ Not supported
+
+TRT-LLM video output currently supports MP4 only and requires an NVENC-capable GPU. GPUs
+without NVENC are not supported for TRT-LLM video output.
 
 ## Backend Documentation
 
