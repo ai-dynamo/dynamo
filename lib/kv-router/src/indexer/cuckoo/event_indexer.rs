@@ -194,28 +194,20 @@ impl SyncIndexer for EventTransposedCkfIndexer {
                 }
                 WorkerTask::Flush(sender) => {
                     #[cfg(feature = "bench")]
-                    let result = self
-                        .pipeline
+                    self.pipeline
                         .flush_pending_with_telemetry(&mut batch, &mut bench_telemetry);
                     #[cfg(not(feature = "bench"))]
-                    let result = self.pipeline.flush_pending(&mut batch);
-                    if let Err(error) = result {
-                        tracing::warn!(?error, "Failed to flush pending CKF publication");
-                    }
+                    self.pipeline.flush_pending(&mut batch);
                     #[cfg(feature = "bench")]
                     self.pipeline.merge_bench_telemetry(&mut bench_telemetry);
                     let _ = sender.send(());
                 }
                 WorkerTask::Terminate => {
                     #[cfg(feature = "bench")]
-                    let result = self
-                        .pipeline
+                    self.pipeline
                         .flush_pending_with_telemetry(&mut batch, &mut bench_telemetry);
                     #[cfg(not(feature = "bench"))]
-                    let result = self.pipeline.flush_pending(&mut batch);
-                    if let Err(error) = result {
-                        tracing::warn!(?error, "Failed to flush CKF publication at termination");
-                    }
+                    self.pipeline.flush_pending(&mut batch);
                     #[cfg(feature = "bench")]
                     self.pipeline.merge_bench_telemetry(&mut bench_telemetry);
                     break;
@@ -224,17 +216,10 @@ impl SyncIndexer for EventTransposedCkfIndexer {
         }
 
         #[cfg(feature = "bench")]
-        let result = self
-            .pipeline
+        self.pipeline
             .flush_pending_with_telemetry(&mut batch, &mut bench_telemetry);
         #[cfg(not(feature = "bench"))]
-        let result = self.pipeline.flush_pending(&mut batch);
-        if let Err(error) = result {
-            tracing::warn!(
-                ?error,
-                "Failed to flush CKF publication at receiver closure"
-            );
-        }
+        self.pipeline.flush_pending(&mut batch);
         #[cfg(feature = "bench")]
         self.pipeline.merge_bench_telemetry(&mut bench_telemetry);
 

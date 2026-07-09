@@ -1134,9 +1134,10 @@ pub async fn run_open_loop<T: SyncIndexer>(
         .map(|result| result.drain_ns)
         .max()
         .unwrap_or(start_ns);
-    let end_ns = query_drain_ns.max(sealed.latest_seal_ns());
+    let observed_work_end_ns = query_drain_ns.max(sealed.latest_seal_ns());
     let snapshot = sealed.harvest().await?;
     KvIndexerInterface::flush(indexer.as_ref()).await;
+    let end_ns = observed_work_end_ns.max(clock.now_ns());
     let backend_timing_report = KvIndexerInterface::timing_report(indexer.as_ref());
 
     Ok(analyze_result(

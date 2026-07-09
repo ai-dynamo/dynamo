@@ -204,6 +204,8 @@ pub struct CkfDeltaBatch {
     format: CkfFormatIdentity,
     reset_lanes: u16,
     images: Vec<CkfBucketImage>,
+    #[cfg(test)]
+    fail_reserve: bool,
 }
 
 impl CkfDeltaBatch {
@@ -224,6 +226,8 @@ impl CkfDeltaBatch {
             format,
             reset_lanes: 0,
             images: Vec::new(),
+            #[cfg(test)]
+            fail_reserve: false,
         }
     }
 
@@ -234,9 +238,23 @@ impl CkfDeltaBatch {
     }
 
     fn try_reserve(&mut self, additional: usize) -> Result<(), KvCacheEventError> {
+        #[cfg(test)]
+        if self.fail_reserve {
+            return Err(KvCacheEventError::CapacityExhausted);
+        }
         self.images
             .try_reserve(additional)
             .map_err(|_| KvCacheEventError::CapacityExhausted)
+    }
+
+    #[cfg(test)]
+    pub(super) fn image_capacity(&self) -> usize {
+        self.images.capacity()
+    }
+
+    #[cfg(test)]
+    pub(super) fn force_reserve_failure(&mut self) {
+        self.fail_reserve = true;
     }
 }
 
@@ -604,7 +622,7 @@ impl RelayLaneState {
         &mut self,
         lane: usize,
         replica: &TransposedCkfReplica,
-        batch: &mut CkfDeltaBatch,
+        mut emit: impl FnMut(CkfBucketImage),
     ) -> FinalizeImageStats {
         let mut stats = FinalizeImageStats {
             distinct_touched: self.dirty_scratch.len() as u64,
@@ -616,7 +634,7 @@ impl RelayLaneState {
             if replica.table.load_image(bucket, lane) == value {
                 stats.net_reverted += 1;
             } else {
-                batch.images.push(CkfBucketImage {
+                emit(CkfBucketImage {
                     lane: lane as u8,
                     bucket,
                     value: value.0,
@@ -722,13 +740,6 @@ impl CkfRelayAggregator {
             *slot = self.lanes[lane].as_ref().map(Mutex::lock);
         }
         guards
-    }
-
-    fn lifecycle_batch_capacity(&self, mask: u16) -> Result<usize, KvCacheEventError> {
-        let lane_count = mask.count_ones() as usize;
-        self.bucket_count
-            .checked_mul(lane_count)
-            .ok_or(KvCacheEventError::CapacityExhausted)
     }
 
     fn stats_for_worker_ids(&self, worker_ids: &FxHashSet<WorkerId>) -> WorkerLookupStats {
@@ -1052,29 +1063,15 @@ impl RouterLocalCkfPipeline {
             let due_mask =
                 due_lane_mask(&guards, mask, self.aggregator.config.publish_every_n_events);
             if due_mask != 0 {
-                #[cfg(feature = "bench")]
-                let finalization_started = Instant::now();
-                let publication = publish_locked_lanes(&mut guards, due_mask, &self.replica, batch);
-                #[cfg(feature = "bench")]
-                let finalization_ns = elapsed_ns(finalization_started);
-                let has_replica_update = batch.reset_lanes != 0 || !batch.images.is_empty();
-                #[cfg(feature = "bench")]
-                let apply_started = Instant::now();
-                if has_replica_update {
-                    self.replica.apply(batch);
-                }
+                let publication = self.publish_locked(&mut guards, due_mask, batch, true);
                 #[cfg(feature = "bench")]
                 outcome.bench.record_publication(
-                    &publication,
-                    has_replica_update
-                        .then(|| elapsed_ns(apply_started))
-                        .unwrap_or(0),
-                    !has_replica_update,
-                    finalization_ns,
+                    &publication.stats,
+                    publication.replica_apply_ns,
+                    !publication.applied,
+                    publication.finalization_ns,
                 );
-                #[cfg(not(feature = "bench"))]
-                let _ = publication;
-                outcome.batch_applied = has_replica_update;
+                outcome.batch_applied = publication.applied;
             }
             #[cfg(feature = "bench")]
             outcome.bench.record_event(
@@ -1124,23 +1121,59 @@ impl RouterLocalCkfPipeline {
         self.remove_members(1u16 << lane, batch, |member| member == worker)
     }
 
+    fn removal_image_capacity(
+        &self,
+        guards: &[Option<MutexGuard<'_, RelayLaneState>>; DC_COUNT],
+        mask: u16,
+        selected: impl Fn(WorkerWithDpRank) -> bool + Copy,
+    ) -> Option<usize> {
+        let mut total = 0usize;
+        for (lane, state) in guards.iter().enumerate() {
+            if mask & (1u16 << lane) == 0 {
+                continue;
+            }
+            let state = state.as_ref()?;
+            let member_blocks = self.aggregator.manifest.lanes[lane]
+                .members
+                .iter()
+                .copied()
+                .filter(|&member| selected(member))
+                .try_fold(0usize, |count, member| {
+                    count.checked_add(state.member_blocks.get(&member).map_or(0, FxHashSet::len))
+                })?;
+            let lane_capacity = state
+                .dirty_scratch
+                .len()
+                .checked_add(member_blocks)?
+                .min(self.aggregator.bucket_count);
+            total = total.checked_add(lane_capacity)?;
+        }
+        Some(total)
+    }
+
     fn remove_members(
         &self,
         mask: u16,
         batch: &mut CkfDeltaBatch,
-        mut selected: impl FnMut(WorkerWithDpRank) -> bool,
+        selected: impl Fn(WorkerWithDpRank) -> bool + Copy,
     ) -> CkfEventOutcome {
         batch.reset(self.aggregator.format);
-        let Ok(capacity) = self.aggregator.lifecycle_batch_capacity(mask) else {
-            return CkfEventOutcome::failure(KvCacheEventError::CapacityExhausted);
+        let requested_capacity = {
+            let guards = self.aggregator.lock_lanes(mask);
+            self.removal_image_capacity(&guards, mask, selected)
         };
-        if let Err(error) = batch.try_reserve(capacity) {
-            return CkfEventOutcome::failure(error);
-        }
+        let mut buffered = match requested_capacity {
+            Some(capacity) => batch.try_reserve(capacity).is_ok(),
+            None => false,
+        };
 
         let mut outcome = CkfEventOutcome::success(false);
         {
             let mut guards = self.aggregator.lock_lanes(mask);
+            buffered = buffered
+                && self
+                    .removal_image_capacity(&guards, mask, selected)
+                    .is_some_and(|required| batch.images.capacity() >= required);
             for state in guards.iter_mut().flatten() {
                 state.advance_event();
             }
@@ -1162,39 +1195,22 @@ impl RouterLocalCkfPipeline {
                     );
                 }
             }
-            #[cfg(feature = "bench")]
-            let finalization_started = Instant::now();
-            let publication = publish_locked_lanes(&mut guards, mask, &self.replica, batch);
-            #[cfg(feature = "bench")]
-            let finalization_ns = elapsed_ns(finalization_started);
-            let has_replica_update = batch.reset_lanes != 0 || !batch.images.is_empty();
-            #[cfg(feature = "bench")]
-            let apply_started = Instant::now();
-            if has_replica_update {
-                self.replica.apply(batch);
-            }
+            let publication = self.publish_locked(&mut guards, mask, batch, buffered);
             #[cfg(feature = "bench")]
             outcome.bench.record_publication(
-                &publication,
-                has_replica_update
-                    .then(|| elapsed_ns(apply_started))
-                    .unwrap_or(0),
-                !has_replica_update,
-                finalization_ns,
+                &publication.stats,
+                publication.replica_apply_ns,
+                !publication.applied,
+                publication.finalization_ns,
             );
-            #[cfg(not(feature = "bench"))]
-            let _ = publication;
-            outcome.batch_applied = has_replica_update;
+            outcome.batch_applied = publication.applied;
         }
         outcome
     }
 
     #[cfg(any(test, not(feature = "bench")))]
-    pub(super) fn flush_pending(
-        &self,
-        batch: &mut CkfDeltaBatch,
-    ) -> Result<bool, KvCacheEventError> {
-        Ok(self.flush_pending_core(batch)?.applied)
+    pub(super) fn flush_pending(&self, batch: &mut CkfDeltaBatch) -> bool {
+        self.flush_pending_core(batch).applied
     }
 
     #[cfg(feature = "bench")]
@@ -1202,8 +1218,8 @@ impl RouterLocalCkfPipeline {
         &self,
         batch: &mut CkfDeltaBatch,
         telemetry: &mut CkfBenchLocalTelemetry,
-    ) -> Result<bool, KvCacheEventError> {
-        let result = self.flush_pending_core(batch)?;
+    ) -> bool {
+        let result = self.flush_pending_core(batch);
         if let Some(publication) = result.publication.as_ref() {
             telemetry.record_publication(
                 publication,
@@ -1212,47 +1228,88 @@ impl RouterLocalCkfPipeline {
                 result.finalization_ns,
             );
         }
-        Ok(result.applied)
+        result.applied
     }
 
-    fn flush_pending_core(
-        &self,
-        batch: &mut CkfDeltaBatch,
-    ) -> Result<FlushPendingResult, KvCacheEventError> {
+    fn flush_pending_core(&self, batch: &mut CkfDeltaBatch) -> FlushPendingResult {
         batch.reset(self.aggregator.format);
         let mask = self.aggregator.manifest.active_lanes;
-        let capacity = self.aggregator.lifecycle_batch_capacity(mask)?;
-        batch.try_reserve(capacity)?;
+        let (initial_pending_mask, requested_capacity) = {
+            let guards = self.aggregator.lock_lanes(mask);
+            let pending_mask = pending_lane_mask(&guards, mask);
+            (pending_mask, pending_image_capacity(&guards, pending_mask))
+        };
+        if initial_pending_mask == 0 {
+            return FlushPendingResult::default();
+        }
+        let buffered =
+            requested_capacity.is_some_and(|capacity| batch.try_reserve(capacity).is_ok());
 
         let mut result = FlushPendingResult::default();
         {
             let mut guards = self.aggregator.lock_lanes(mask);
             let pending_mask = pending_lane_mask(&guards, mask);
             if pending_mask != 0 {
-                #[cfg(feature = "bench")]
-                let finalization_started = Instant::now();
-                let publication =
-                    publish_locked_lanes(&mut guards, pending_mask, &self.replica, batch);
-                #[cfg(feature = "bench")]
-                let finalization_ns = elapsed_ns(finalization_started);
-                let has_replica_update = batch.reset_lanes != 0 || !batch.images.is_empty();
-                #[cfg(feature = "bench")]
-                let apply_started = Instant::now();
-                if has_replica_update {
-                    self.replica.apply(batch);
-                }
+                let buffered = buffered
+                    && pending_image_capacity(&guards, pending_mask)
+                        .is_some_and(|required| batch.images.capacity() >= required);
+                let publication = self.publish_locked(&mut guards, pending_mask, batch, buffered);
+                result.applied = publication.applied;
                 #[cfg(feature = "bench")]
                 {
-                    result.replica_apply_ns = has_replica_update
-                        .then(|| elapsed_ns(apply_started))
-                        .unwrap_or(0);
-                    result.finalization_ns = finalization_ns;
+                    result.replica_apply_ns = publication.replica_apply_ns;
+                    result.finalization_ns = publication.finalization_ns;
                 }
-                result.applied = has_replica_update;
-                result.publication = Some(publication);
+                result.publication = Some(publication.stats);
             }
         }
-        Ok(result)
+        result
+    }
+
+    fn publish_locked(
+        &self,
+        guards: &mut [Option<MutexGuard<'_, RelayLaneState>>; DC_COUNT],
+        mask: u16,
+        batch: &mut CkfDeltaBatch,
+        buffered: bool,
+    ) -> AppliedPublication {
+        if buffered {
+            #[cfg(feature = "bench")]
+            let finalization_started = Instant::now();
+            let stats = publish_locked_lanes(guards, mask, &self.replica, batch);
+            #[cfg(feature = "bench")]
+            let finalization_ns = elapsed_ns(finalization_started);
+            let applied = stats.has_replica_update();
+            #[cfg(feature = "bench")]
+            let apply_started = Instant::now();
+            if applied {
+                self.replica.apply(batch);
+            }
+            return AppliedPublication {
+                stats,
+                applied,
+                #[cfg(feature = "bench")]
+                replica_apply_ns: if applied {
+                    elapsed_ns(apply_started)
+                } else {
+                    0
+                },
+                #[cfg(feature = "bench")]
+                finalization_ns,
+            };
+        }
+
+        #[cfg(feature = "bench")]
+        let started = Instant::now();
+        let stats = publish_locked_lanes_direct(guards, mask, &self.replica);
+        AppliedPublication {
+            applied: stats.has_replica_update(),
+            stats,
+            #[cfg(feature = "bench")]
+            replica_apply_ns: 0,
+            #[cfg(feature = "bench")]
+            finalization_ns: elapsed_ns(started),
+        }
     }
 
     pub(super) fn worker_stats(&self, worker_ids: &FxHashSet<WorkerId>) -> WorkerLookupStats {
@@ -1358,6 +1415,19 @@ fn pending_lane_mask(
         })
 }
 
+fn pending_image_capacity(
+    guards: &[Option<MutexGuard<'_, RelayLaneState>>; DC_COUNT],
+    mask: u16,
+) -> Option<usize> {
+    guards
+        .iter()
+        .enumerate()
+        .filter(|(lane, _)| mask & (1u16 << lane) != 0)
+        .try_fold(0usize, |capacity, (_, state)| {
+            capacity.checked_add(state.as_ref()?.dirty_scratch.len())
+        })
+}
+
 #[derive(Debug, Default)]
 struct PublicationStats {
     lane_windows: u64,
@@ -1373,6 +1443,21 @@ struct PublicationStats {
     maximum_staleness_ns: u64,
 }
 
+impl PublicationStats {
+    fn has_replica_update(&self) -> bool {
+        self.final_images != 0 || self.reset_lanes != 0
+    }
+}
+
+struct AppliedPublication {
+    stats: PublicationStats,
+    applied: bool,
+    #[cfg(feature = "bench")]
+    replica_apply_ns: u64,
+    #[cfg(feature = "bench")]
+    finalization_ns: u64,
+}
+
 #[derive(Debug, Default)]
 struct FlushPendingResult {
     applied: bool,
@@ -1383,11 +1468,55 @@ struct FlushPendingResult {
     finalization_ns: u64,
 }
 
+enum PublicationTarget<'a> {
+    Batch(&'a mut CkfDeltaBatch),
+    Replica(&'a TransposedCkfReplica),
+}
+
+impl PublicationTarget<'_> {
+    fn reset_lane(&mut self, lane: usize) {
+        match self {
+            Self::Batch(batch) => batch.reset_lanes |= 1u16 << lane,
+            Self::Replica(replica) => replica.table.clear_lane(lane),
+        }
+    }
+
+    fn emit(&mut self, image: CkfBucketImage) {
+        match self {
+            Self::Batch(batch) => batch.images.push(image),
+            Self::Replica(replica) => replica.table.store_image(
+                image.bucket,
+                usize::from(image.lane),
+                PackedBucket(image.value),
+            ),
+        }
+    }
+}
+
 fn publish_locked_lanes(
     guards: &mut [Option<MutexGuard<'_, RelayLaneState>>; DC_COUNT],
     mask: u16,
     replica: &TransposedCkfReplica,
     batch: &mut CkfDeltaBatch,
+) -> PublicationStats {
+    let stats = publish_locked_lanes_to(guards, mask, replica, PublicationTarget::Batch(batch));
+    debug_assert_eq!(batch.reset_lanes & !mask, 0);
+    stats
+}
+
+fn publish_locked_lanes_direct(
+    guards: &mut [Option<MutexGuard<'_, RelayLaneState>>; DC_COUNT],
+    mask: u16,
+    replica: &TransposedCkfReplica,
+) -> PublicationStats {
+    publish_locked_lanes_to(guards, mask, replica, PublicationTarget::Replica(replica))
+}
+
+fn publish_locked_lanes_to(
+    guards: &mut [Option<MutexGuard<'_, RelayLaneState>>; DC_COUNT],
+    mask: u16,
+    replica: &TransposedCkfReplica,
+    mut target: PublicationTarget<'_>,
 ) -> PublicationStats {
     let mut stats = PublicationStats::default();
     for (lane, state) in guards.iter_mut().enumerate() {
@@ -1397,23 +1526,19 @@ fn publish_locked_lanes(
         if mask & (1u16 << lane) == 0 {
             continue;
         }
-        let images_before = batch.images.len();
         let distinct_touched = state.dirty_scratch.len() as u64;
         if state.dc_refcounts.is_empty() && state.published_nonempty {
             state.reset_filter();
-            batch.reset_lanes |= 1u16 << lane;
+            target.reset_lane(lane);
             stats.reset_lanes += 1;
         } else if state.dc_refcounts.is_empty() {
             stats.net_reverted = stats.net_reverted.saturating_add(distinct_touched);
             state.dirty_scratch.clear();
         } else {
-            let finalized = state.finalize_images(lane, replica, batch);
+            let finalized = state.finalize_images(lane, replica, |image| target.emit(image));
             debug_assert_eq!(finalized.distinct_touched, distinct_touched);
             stats.net_reverted = stats.net_reverted.saturating_add(finalized.net_reverted);
-            debug_assert_eq!(
-                finalized.emitted_images,
-                (batch.images.len() - images_before) as u64
-            );
+            stats.final_images = stats.final_images.saturating_add(finalized.emitted_images);
         }
         stats.lane_windows += 1;
         stats.lane_events = stats
@@ -1423,9 +1548,6 @@ fn publish_locked_lanes(
             .physical_touches
             .saturating_add(state.physical_touches_pending);
         stats.distinct_touched = stats.distinct_touched.saturating_add(distinct_touched);
-        stats.final_images = stats
-            .final_images
-            .saturating_add((batch.images.len() - images_before) as u64);
         #[cfg(feature = "bench")]
         if let Some(started_at) = state.window_started_at.take() {
             let staleness = started_at.elapsed().as_nanos().min(u64::MAX as u128) as u64;
@@ -1435,7 +1557,6 @@ fn publish_locked_lanes(
         state.physical_touches_pending = 0;
         state.finish_publication();
     }
-    debug_assert_eq!(batch.reset_lanes & !mask, 0);
     stats
 }
 

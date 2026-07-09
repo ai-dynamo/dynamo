@@ -875,6 +875,7 @@ impl<'de> Deserialize<'de> for ExternalSequenceBlockHash {
 /// Errors that can occur during KV Cache Event processing.
 ///
 /// Indexer backends may introduce additional failure modes.
+/// Downstream matches must include a wildcard arm because this enum is non-exhaustive.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum KvCacheEventError {
