@@ -16,6 +16,11 @@ on:
         required: false
         type: string
         default: ''
+      image_tag_suffix:
+        description: 'Optional suffix appended to built image tags.'
+        required: false
+        type: string
+        default: ''
       registry_host:
         description: 'Local registry host to push images to.'
         required: false
@@ -33,6 +38,11 @@ on:
         required: false
         type: string
         default: ''
+      image_tag_suffix:
+        description: 'Optional suffix appended to built image tags.'
+        required: false
+        type: string
+        default: ''
       registry_host:
         description: 'Local registry host to push images to.'
         required: false
@@ -46,6 +56,7 @@ concurrency:
 env:
   FRAMEWORK: ${{ inputs.framework || 'vllm' }}
   SOURCE_REF: ${{ inputs.source_ref || github.sha }}
+  IMAGE_TAG_SUFFIX: ${{ inputs.image_tag_suffix || '' }}
   LOCAL_REGISTRY: ${{ inputs.registry_host || 'localhost:5000' }}
   TARGET: runtime
   DEVICE: xpu
@@ -91,7 +102,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          IMAGE_URI="${LOCAL_REGISTRY}/ai-dynamo/dynamo:${SOURCE_REF}-${FRAMEWORK}-${TARGET}-xpu"
+          IMAGE_URI="${LOCAL_REGISTRY}/ai-dynamo/dynamo:${SOURCE_REF}-${FRAMEWORK}-${TARGET}-xpu${IMAGE_TAG_SUFFIX}"
 
           # Check if image already exists to avoid redundant builds
           if docker image inspect "${IMAGE_URI}" >/dev/null 2>&1; then
@@ -111,7 +122,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          OPERATOR_IMAGE_URI="${LOCAL_REGISTRY}/ai-dynamo/dynamo:${SOURCE_REF}-operator"
+          OPERATOR_IMAGE_URI="${LOCAL_REGISTRY}/ai-dynamo/dynamo:${SOURCE_REF}-operator${IMAGE_TAG_SUFFIX}"
 
           if docker image inspect "${OPERATOR_IMAGE_URI}" >/dev/null 2>&1; then
             echo "::notice::Image ${OPERATOR_IMAGE_URI} already exists, skipping build"
@@ -133,7 +144,7 @@ jobs:
         with:
           matrix_slug: ${{ matrix.slug }}
           operator_repository: ${{ env.LOCAL_REGISTRY }}/ai-dynamo/dynamo
-          operator_tag: ${{ env.SOURCE_REF }}-operator
+          operator_tag: ${{ env.SOURCE_REF }}-operator${{ env.IMAGE_TAG_SUFFIX }}
 
       - name: Setup XPU Deploy Test Environment
         shell: bash
