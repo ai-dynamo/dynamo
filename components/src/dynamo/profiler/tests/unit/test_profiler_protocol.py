@@ -827,23 +827,28 @@ def test_model_has_auto_map_local_dir_missing_config_returns_false(tmp_path) -> 
     assert model_has_auto_map(tmp_path) is False
 
 
-def test_auto_inject_trust_remote_code_appends_for_vllm_with_auto_map() -> None:
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
+def test_materialize_dgd_injects_trust_remote_code_for_vllm() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
     )
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
         return_value=True,
     ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
         return_value=True,
     ):
-        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
 
-    assert modified == ["VllmDecodeWorker"]
-    decode_args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+    decode_args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
         "mainContainer"
     ]["args"]
     assert decode_args[-1] == "--trust-remote-code"
@@ -851,147 +856,180 @@ def test_auto_inject_trust_remote_code_appends_for_vllm_with_auto_map() -> None:
     assert decode_args[:-1] == ["--model", "some/model", "--tp", "1"]
     # Frontend untouched.
     assert "--trust-remote-code" not in (
-        cfg["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
+        result["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
     )
 
 
-def test_auto_inject_trust_remote_code_appends_for_sglang_with_auto_map() -> None:
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
+def test_materialize_dgd_injects_trust_remote_code_for_sglang() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
     )
 
     cfg = _make_dgd_with_workers("SglangDecodeWorker", "SglangPrefillWorker")
     with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
         return_value=True,
     ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
         return_value=True,
     ):
-        modified = auto_inject_trust_remote_code(cfg, "some/model", "sglang")
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="sglang",
+            model_name_or_path="some/model",
+        )
 
-    assert set(modified) == {"SglangDecodeWorker", "SglangPrefillWorker"}
     for svc in ("SglangDecodeWorker", "SglangPrefillWorker"):
-        args = cfg["spec"]["services"][svc]["extraPodSpec"]["mainContainer"]["args"]
+        args = result["spec"]["services"][svc]["extraPodSpec"]["mainContainer"]["args"]
         assert args.count("--trust-remote-code") == 1
 
 
-def test_auto_inject_trust_remote_code_skips_when_no_auto_map() -> None:
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
+def test_materialize_dgd_skips_trust_when_no_auto_map() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
     )
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
         return_value=False,
-    ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
-        return_value=True,
     ):
-        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
 
-    assert modified == []
-    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
-        "args"
-    ]
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
     assert "--trust-remote-code" not in args
 
 
-def test_auto_inject_trust_remote_code_fails_closed_for_mutable_remote_ref() -> None:
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
+def test_materialize_dgd_fails_closed_for_mutable_remote_ref() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
     )
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
         return_value=True,
     ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
         return_value=False,
     ):
         with pytest.raises(
             RuntimeError, match="Refusing to auto-inject --trust-remote-code"
         ):
-            auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+            materialize_dgd(
+                cfg,
+                purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+                runtime_backend="vllm",
+                model_name_or_path="some/model",
+            )
 
 
-def test_auto_inject_trust_remote_code_skips_trtllm_backend() -> None:
-    """TRT-LLM uses a YAML `trust_remote_code: true` field, not the CLI flag."""
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
+def test_materialize_dgd_skips_trust_for_trtllm() -> None:
+    """TRT-LLM uses a YAML field, not the CLI flag."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
     )
 
     cfg = _make_dgd_with_workers("TRTLLMDecodeWorker")
-    # Even with auto_map=True the trtllm backend must not get the CLI flag.
     with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
-        return_value=True,
-    ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
         return_value=True,
     ):
-        modified = auto_inject_trust_remote_code(cfg, "some/model", "trtllm")
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="trtllm",
+            model_name_or_path="some/model",
+        )
 
-    assert modified == []
+    args = result["spec"]["services"]["TRTLLMDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert "--trust-remote-code" not in args
 
 
-def test_auto_inject_trust_remote_code_is_idempotent() -> None:
-    """Running the injector twice must not duplicate the flag."""
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
+def test_materialize_dgd_trust_injection_is_idempotent() -> None:
+    """Running materialize_dgd twice must not duplicate the flag."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
     )
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
     with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
         return_value=True,
     ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
         return_value=True,
     ):
-        auto_inject_trust_remote_code(cfg, "some/model", "vllm")
-        modified_second = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+        result2 = materialize_dgd(
+            result,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
 
-    assert modified_second == []
-    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
-        "args"
-    ]
+    args = result2["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
     assert args.count("--trust-remote-code") == 1
 
 
-def test_auto_inject_trust_remote_code_respects_user_override() -> None:
-    """An explicit user override (already merged) must not be duplicated."""
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
+def test_materialize_dgd_respects_existing_trust_flag() -> None:
+    """An explicit --trust-remote-code already in args must not be duplicated."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
     )
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
-    # Simulate apply_dgd_overrides having already appended the flag.
     cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
         "args"
     ].append("--trust-remote-code")
 
     with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
         return_value=True,
     ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
         return_value=True,
     ):
-        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
 
-    assert modified == []
-    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
-        "args"
-    ]
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
     assert args.count("--trust-remote-code") == 1
 
 
-def test_auto_inject_trust_remote_code_excludes_frontend_and_planner() -> None:
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
+def test_materialize_dgd_excludes_frontend_and_planner() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
     )
 
     cfg = _make_dgd_with_workers("VllmDecodeWorker")
@@ -999,109 +1037,25 @@ def test_auto_inject_trust_remote_code_excludes_frontend_and_planner() -> None:
         "extraPodSpec": {"mainContainer": {"args": ["--interval", "30"]}},
     }
     with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
         return_value=True,
     ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
         return_value=True,
     ):
-        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
 
-    assert modified == ["VllmDecodeWorker"]
     assert "--trust-remote-code" not in (
-        cfg["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
+        result["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
     )
     assert "--trust-remote-code" not in (
-        cfg["spec"]["services"]["Planner"]["extraPodSpec"]["mainContainer"]["args"]
+        result["spec"]["services"]["Planner"]["extraPodSpec"]["mainContainer"]["args"]
     )
-
-
-def test_auto_inject_trust_remote_code_shell_form_worker() -> None:
-    """Shell-form workers (command=['sh','-c'], args=['<single string>']) must
-    have the flag appended inside the string, not as a second list element."""
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
-    )
-
-    cfg = {
-        "spec": {
-            "services": {
-                "VllmDecodeWorker": {
-                    "extraPodSpec": {
-                        "mainContainer": {
-                            "command": ["sh", "-c"],
-                            "args": [
-                                "python3 -m vllm.entrypoints.openai.api_server "
-                                "--model some/model --tp 1"
-                            ],
-                        },
-                    },
-                },
-            }
-        }
-    }
-    with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
-        return_value=True,
-    ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
-        return_value=True,
-    ):
-        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
-
-    assert modified == ["VllmDecodeWorker"]
-    result_args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
-    # Must still be a single-element list (shell form preserved).
-    assert isinstance(result_args, list) and len(result_args) == 1
-    assert result_args[0].endswith("--trust-remote-code")
-    # Idempotency: calling again must not duplicate the flag.
-    with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
-        return_value=True,
-    ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
-        return_value=True,
-    ):
-        modified2 = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
-    assert modified2 == []
-    assert result_args[0].count("--trust-remote-code") == 1
-
-
-def test_auto_inject_trust_remote_code_uses_per_service_model_arg() -> None:
-    """When a worker's args contain ``--model override/model``, that path is
-    used for auto_map detection rather than the fallback argument."""
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
-    )
-
-    cfg = _make_dgd_with_workers("VllmDecodeWorker")
-    # Override the --model arg in the worker to a different model.
-    cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
-        "args"
-    ] = ["--model", "override/model", "--tp", "1"]
-
-    def _auto_map_only_for_override(model, *args, **kwargs):
-        return model == "override/model"
-
-    with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
-        side_effect=_auto_map_only_for_override,
-    ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
-        return_value=True,
-    ):
-        # Fallback model does NOT have auto_map; the worker's --model does.
-        modified = auto_inject_trust_remote_code(cfg, "original/model", "vllm")
-
-    assert modified == [
-        "VllmDecodeWorker"
-    ], "Should inject because the worker's --model arg points to a model with auto_map"
-    args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
-        "args"
-    ]
-    assert "--trust-remote-code" in args
 
 
 def test_model_has_auto_map_returns_true_on_unexpected_error() -> None:
@@ -1142,100 +1096,3 @@ def test_model_has_auto_map_returns_false_for_malformed_json(tmp_path) -> None:
     (tmp_path / "config.json").write_text("{this is not valid json}")
     result = model_has_auto_map(tmp_path)
     assert result is False
-
-
-def test_auto_inject_trust_remote_code_detects_model_path_flag() -> None:
-    """SGLang uses ``--model-path`` instead of ``--model``; the injector
-    must extract the model from that flag for per-service auto_map detection."""
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
-    )
-
-    cfg = _make_dgd_with_workers("SglangDecodeWorker")
-    cfg["spec"]["services"]["SglangDecodeWorker"]["extraPodSpec"]["mainContainer"][
-        "args"
-    ] = ["--model-path", "sglang/custom-model", "--tp", "1"]
-
-    def _auto_map_for_sglang_model(model, *args, **kwargs):
-        return model == "sglang/custom-model"
-
-    with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
-        side_effect=_auto_map_for_sglang_model,
-    ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
-        return_value=True,
-    ):
-        modified = auto_inject_trust_remote_code(cfg, "fallback/model", "sglang")
-
-    assert modified == ["SglangDecodeWorker"]
-
-
-def test_auto_inject_trust_remote_code_detects_equals_form() -> None:
-    """The injector must handle ``--model=value`` and ``--model-path=value``
-    forms used in some DGD templates."""
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
-    )
-
-    cfg = _make_dgd_with_workers("VllmDecodeWorker")
-    cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
-        "args"
-    ] = ["--model=equals/model", "--tp", "1"]
-
-    def _auto_map_for_equals_model(model, *args, **kwargs):
-        return model == "equals/model"
-
-    with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
-        side_effect=_auto_map_for_equals_model,
-    ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
-        return_value=True,
-    ):
-        modified = auto_inject_trust_remote_code(cfg, "fallback/model", "vllm")
-
-    assert modified == ["VllmDecodeWorker"]
-
-
-def test_auto_inject_trust_remote_code_shell_form_preserves_syntax() -> None:
-    """Shell-form args with shell operators (&&, |, etc.) must not be
-    corrupted by shlex round-tripping."""
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        auto_inject_trust_remote_code,
-    )
-
-    original_cmd = (
-        "export FOO=bar && python3 -m vllm.entrypoints.openai.api_server "
-        "--model some/model --tp 1"
-    )
-    cfg = {
-        "spec": {
-            "services": {
-                "VllmDecodeWorker": {
-                    "extraPodSpec": {
-                        "mainContainer": {
-                            "command": ["sh", "-c"],
-                            "args": [original_cmd],
-                        },
-                    },
-                },
-            }
-        }
-    }
-    with patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_has_auto_map",
-        return_value=True,
-    ), patch(
-        "dynamo.profiler.utils.config_modifiers.protocol.model_ref_allows_implicit_trust_remote_code",
-        return_value=True,
-    ):
-        modified = auto_inject_trust_remote_code(cfg, "some/model", "vllm")
-
-    assert modified == ["VllmDecodeWorker"]
-    result_args = cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
-    assert len(result_args) == 1
-    # The original shell syntax (&&, export) must be preserved verbatim.
-    assert result_args[0] == original_cmd + " --trust-remote-code"
