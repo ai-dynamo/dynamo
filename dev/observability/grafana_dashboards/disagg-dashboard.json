@@ -562,7 +562,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "((sum by(pod, namespace) (dynamo_frontend_stage_requests{stage=~\"preprocess|route|dispatch\"}))) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
+          "expr": "((sum by(pod, namespace) (dynamo_frontend_stage_requests{stage=~\"preprocess|route|dispatch\", namespace=\"$namespace\"}))) * on(pod, namespace) group_left() kube_pod_status_phase{phase=\"Running\"}",
           "legendFormat": "{{pod}}",
           "range": true,
           "refId": "A"

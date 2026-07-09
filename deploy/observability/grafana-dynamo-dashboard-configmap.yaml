@@ -1104,7 +1104,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(dynamo_frontend_active_requests{model=\"$model\"})",
+              "expr": "sum(dynamo_frontend_active_requests)",
               "legendFormat": "active",
               "range": true,
               "refId": "A"
