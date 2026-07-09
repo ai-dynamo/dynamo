@@ -458,8 +458,9 @@ async def init_llm_worker(
         default_sampling_params.detokenize = False
 
     connector = None
-    needs_nixl = config.disaggregation_mode != DisaggregationMode.AGGREGATED or (
+    needs_nixl = (
         config.modality == Modality.MULTIMODAL
+        and config.disaggregation_mode != DisaggregationMode.AGGREGATED
         and (
             config.frontend_decoding
             or config.disaggregation_mode == DisaggregationMode.ENCODE
