@@ -440,7 +440,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("failover", "numShadows"),
 			newFailover.NumShadows,
-			"is immutable for inter-pod GMS failover; delete and recreate the DynamoGraphDeployment to change it",
+			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", ownerKind.Kind),
 		))
 	}
 	return allErrs

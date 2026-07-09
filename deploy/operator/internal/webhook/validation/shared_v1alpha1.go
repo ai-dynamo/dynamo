@@ -112,9 +112,8 @@ func (v *sharedValidation) validateEPPConfigV1alpha1(
 	if (config.ConfigMapRef == nil) != (config.Config == nil) {
 		return nil
 	}
-	return field.ErrorList{field.Invalid(
+	return field.ErrorList{field.Forbidden(
 		fldPath,
-		nil,
 		"exactly one of configMapRef or config is required",
 	)}
 }

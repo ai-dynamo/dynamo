@@ -117,18 +117,7 @@ func (h *DynamoComponentDeploymentHandler) validateUpdate(
 	}
 
 	validator := NewDynamoComponentDeploymentValidator()
-	warnings, err := validator.Validate(ctx, newDeployment)
-	if err != nil {
-		return warnings, err
-	}
-
-	updateWarnings, err := validator.ValidateUpdate(ctx, oldDeployment, newDeployment)
-	if err != nil {
-		return updateWarnings, err
-	}
-
-	warnings = append(warnings, updateWarnings...)
-	return warnings, nil
+	return validator.ValidateUpdate(ctx, oldDeployment, newDeployment)
 }
 
 // ValidateDelete validates a DynamoComponentDeployment delete request.

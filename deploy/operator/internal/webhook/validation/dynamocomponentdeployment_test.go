@@ -723,7 +723,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				ComponentType: consts.ComponentTypeEPP,
 				EPPConfig:     &nvidiacomv1alpha1.EPPConfig{},
 			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: exactly one of configMapRef or config is required"},
 		},
 		{
 			name: "v1beta1 empty EPP config is rejected by source CEL",
@@ -745,7 +745,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: exactly one of configMapRef or config is required"},
 		},
 		{
 			name: "v1beta1 conflicting EPP config is rejected by source CEL",
@@ -926,6 +926,43 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
 			wantWebhookErrs: []string{`spec.multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
+		},
+		{
+			name: "v1alpha1 update aggregates create and DCD-specific update errors",
+			oldDeployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Replicas:      &oneReplica,
+				MinAvailable:  &oneReplica,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeInterPod,
+					NumShadows: 1,
+				},
+			}),
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Replicas:      &oneReplica,
+				MinAvailable:  &oneReplica,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeInterPod,
+					NumShadows: 2,
+				},
+			}),
+			wantWebhookErrs: []string{
+				"spec.minAvailable: Forbidden: is currently supported only for Grove-backed DynamoGraphDeployment components",
+				"spec.experimental.failover.numShadows: Invalid value: 2: is immutable for inter-pod GMS failover; delete and recreate the DynamoComponentDeployment to change it",
+			},
 		},
 	}
 

@@ -60,7 +60,8 @@ func (v *DynamoComponentDeploymentValidator) Validate(
 	return validation.warnings, invalidDynamoComponentDeploymentError(dcd, allErrs)
 }
 
-// ValidateUpdate performs stateful validation comparing old and new v1beta1 DCD objects.
+// ValidateUpdate performs complete validation of an updated v1beta1 DCD and
+// compares its state with the previous object.
 // ctx, oldDCD, and newDCD must not be nil.
 func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	ctx context.Context,
@@ -71,7 +72,13 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 		sharedValidation: sharedValidation{ctx: ctx},
 	}
 
-	allErrs := validation.validateDynamoComponentDeploymentUpdate(newDCD, oldDCD)
+	allErrs := validation.validateDynamoComponentDeployment(newDCD)
+	alpha, err := alphaDynamoComponentDeploymentForValidation(newDCD)
+	if err != nil {
+		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
+	}
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(alpha)...)
+	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentUpdate(newDCD, oldDCD)...)
 	return validation.warnings, invalidDynamoComponentDeploymentError(newDCD, allErrs)
 }
 
