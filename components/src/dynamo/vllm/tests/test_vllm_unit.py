@@ -1069,6 +1069,60 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     assert sp.thinking_token_budget == 1024
 
 
+@pytest.mark.parametrize(
+    ("constraint_name", "constraint_value"),
+    [
+        pytest.param(
+            "json",
+            {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+            },
+            id="json-object",
+        ),
+        pytest.param(
+            "json",
+            json.dumps(
+                {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                }
+            ),
+            id="json-string",
+        ),
+        pytest.param("regex", r"(red|blue|green)", id="regex"),
+        pytest.param(
+            "grammar",
+            'root ::= "red" | "blue" | "green"',
+            id="grammar",
+        ),
+        pytest.param("choice", ["red", "blue", "green"], id="choice"),
+    ],
+)
+def test_build_sampling_params_maps_guided_decoding(constraint_name, constraint_value):
+    from vllm.sampling_params import StructuredOutputsParams
+
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {
+            "guided_decoding": {constraint_name: constraint_value},
+        },
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+    sp = build_sampling_params(request, default_sampling_params={})
+
+    assert isinstance(sp.structured_outputs, StructuredOutputsParams)
+    for field in ("json", "regex", "grammar", "choice"):
+        expected = constraint_value if field == constraint_name else None
+        assert getattr(sp.structured_outputs, field) == expected
+
+
 def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
     from dynamo.vllm.handlers import build_sampling_params
 
