@@ -1260,6 +1260,9 @@ jobs:
   notify-slack:
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [ deploy-status-check ]
+    permissions:
+      contents: read
+      actions: read   # grant the reusable notifier read access to list this run's jobs
     uses: ./.github/workflows/notify-slack.yml
     with:
       pipeline_name: Post-Merge

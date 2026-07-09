@@ -842,6 +842,9 @@ jobs:
   notify-slack:
     if: always()
     needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
+    permissions:
+      contents: read
+      actions: read   # grant the reusable notifier read access to list this run's jobs
     uses: ./.github/workflows/notify-slack.yml
     with:
       pipeline_name: Nightly
