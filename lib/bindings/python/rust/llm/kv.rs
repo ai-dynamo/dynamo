@@ -883,6 +883,11 @@ enum KvEventInput {
     },
 }
 
+fn depythonize_kv_event_inputs(events: &Bound<'_, PyAny>) -> PyResult<Vec<KvEventInput>> {
+    depythonize(events)
+        .map_err(|error| PyValueError::new_err(format!("invalid KV event batch: {error}")))
+}
+
 #[cfg(test)]
 mod kv_event_input_tests {
     use super::KvEventInput;
@@ -1073,79 +1078,78 @@ impl KvEventPublisher {
     ) -> PyResult<()> {
         let inner = self.inner.clone();
 
-        let event_id = inner.next_event_id();
-
         let mm_infos = block_mm_infos
             .as_ref()
             .map(depythonize_block_mm_infos)
             .transpose()?;
 
-        let event = self.stored_event(
-            event_id,
-            &token_ids,
-            &num_block_tokens,
-            &block_hashes,
-            parent_hash,
-            mm_infos.as_deref(),
-            lora_name.as_deref(),
-            is_eagle,
-            cache_salt.as_deref(),
-        );
-
-        py.allow_threads(|| inner.publish(event).map_err(to_pyerr))
+        py.allow_threads(|| {
+            let event = self.stored_event(
+                inner.next_event_id(),
+                &token_ids,
+                &num_block_tokens,
+                &block_hashes,
+                parent_hash,
+                mm_infos.as_deref(),
+                lora_name.as_deref(),
+                is_eagle,
+                cache_salt.as_deref(),
+            );
+            inner.publish(event).map_err(to_pyerr)
+        })
     }
 
     fn publish_removed(&self, py: Python, block_hashes: Vec<i64>) -> PyResult<()> {
         let inner = self.inner.clone();
 
-        // Use shared monotonic event_id counter from the inner publisher
-        let event_id = inner.next_event_id();
-        let event = self.removed_event(event_id, block_hashes);
-
-        py.allow_threads(|| inner.publish(event).map_err(to_pyerr))
+        py.allow_threads(|| {
+            let event = self.removed_event(inner.next_event_id(), block_hashes);
+            inner.publish(event).map_err(to_pyerr)
+        })
     }
 
     /// Publish an ordered list of typed KV events as one processor input.
     ///
     /// The complete Python list is deserialized and converted before anything
     /// is enqueued, so invalid input cannot partially publish a batch.
+    /// Event construction and block hashing run without holding the Python GIL.
     fn publish_batch(&self, py: Python, events: Bound<PyAny>) -> PyResult<()> {
-        let inputs: Vec<KvEventInput> = depythonize(&events)
-            .map_err(|error| PyValueError::new_err(format!("invalid KV event batch: {error}")))?;
-        let mut converted = Vec::with_capacity(inputs.len());
-
-        for input in inputs {
-            let event_id = self.inner.next_event_id();
-            let event = match input {
-                KvEventInput::Stored {
-                    token_ids,
-                    num_block_tokens,
-                    block_hashes,
-                    parent_hash,
-                    block_mm_infos,
-                    lora_name,
-                    is_eagle,
-                    cache_salt,
-                } => self.stored_event(
-                    event_id,
-                    &token_ids,
-                    &num_block_tokens,
-                    &block_hashes,
-                    parent_hash,
-                    block_mm_infos.as_deref(),
-                    lora_name.as_deref(),
-                    is_eagle,
-                    cache_salt.as_deref(),
-                ),
-                KvEventInput::Removed { block_hashes } => {
-                    self.removed_event(event_id, block_hashes)
-                }
-            };
-            converted.push(event);
-        }
-
+        let inputs = depythonize_kv_event_inputs(&events)?;
         let inner = self.inner.clone();
-        py.allow_threads(|| inner.publish_batch(converted).map_err(to_pyerr))
+        py.allow_threads(|| {
+            let mut converted = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let event_id = inner.next_event_id();
+                let event = match input {
+                    KvEventInput::Stored {
+                        token_ids,
+                        num_block_tokens,
+                        block_hashes,
+                        parent_hash,
+                        block_mm_infos,
+                        lora_name,
+                        is_eagle,
+                        cache_salt,
+                    } => self.stored_event(
+                        event_id,
+                        &token_ids,
+                        &num_block_tokens,
+                        &block_hashes,
+                        parent_hash,
+                        block_mm_infos.as_deref(),
+                        lora_name.as_deref(),
+                        is_eagle,
+                        cache_salt.as_deref(),
+                    ),
+                    KvEventInput::Removed { block_hashes } => {
+                        self.removed_event(event_id, block_hashes)
+                    }
+                };
+                converted.push(event);
+            }
+
+            inner.publish_batch(converted).map_err(to_pyerr)
+        })
     }
 
     fn shutdown(&mut self) {

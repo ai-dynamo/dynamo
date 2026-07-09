@@ -1161,6 +1161,8 @@ class KvEventPublisher:
 
         The complete list is validated and converted before it is enqueued.
         Compatible events are coalesced while preserving list order.
+        The processor's block cap is evaluated after the complete input list,
+        so it is a boundary flush trigger rather than a hard output-size limit.
         """
         ...
 

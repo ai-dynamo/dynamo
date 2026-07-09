@@ -373,6 +373,7 @@ def _publisher_for_kv_event_test():
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub.additional_metrics = None
     pub._last_engine_event_id_by_rank = {}
+    pub._warned_malformed_kv_event = False
     pub.processing_initial_created_events = False
     pub.partial_block_hashes = set()
     pub.kv_block_size = 4
@@ -521,7 +522,6 @@ async def test_kv_event_polling_loop_records_drained_batch_size():
 async def test_polling_loop_delivers_one_native_drain_to_batch_handler():
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub._stop_event = threading.Event()
-    singleton_handler = MagicMock()
     batches = []
 
     async def fetch_events():
@@ -534,15 +534,64 @@ async def test_polling_loop_delivers_one_native_drain_to_batch_handler():
 
     await pub._polling_loop(
         fetch_events,
-        singleton_handler,
+        None,
         min_sleep=0.001,
         max_sleep=0.001,
         backoff_factor=1.0,
         batch_handler_fn=handle_batch,
     )
 
-    singleton_handler.assert_not_called()
     assert batches == [[{"event_id": 0}, {"event_id": 1}, {"event_id": 2}]]
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_delivers_partial_drain_before_fetch_error():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    batches = []
+    drained_batches = []
+
+    async def fetch_events():
+        yield {"event_id": 0}
+        yield {"event_id": 1}
+        raise RuntimeError("fetch failed")
+
+    with pytest.raises(RuntimeError, match="fetch failed"):
+        await pub._polling_loop(
+            fetch_events,
+            None,
+            min_sleep=0.001,
+            max_sleep=0.001,
+            backoff_factor=1.0,
+            batch_size_handler_fn=drained_batches.append,
+            batch_handler_fn=batches.append,
+        )
+
+    assert batches == [[{"event_id": 0}, {"event_id": 1}]]
+    assert drained_batches == [2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_fn", "batch_handler_fn"),
+    [(None, None), (MagicMock(), MagicMock())],
+)
+async def test_polling_loop_requires_exactly_one_handler(handler_fn, batch_handler_fn):
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+
+    async def fetch_events():
+        yield {"event_id": 0}
+
+    with pytest.raises(ValueError, match="exactly one"):
+        await pub._polling_loop(
+            fetch_events,
+            handler_fn,
+            min_sleep=0.001,
+            max_sleep=0.001,
+            backoff_factor=1.0,
+            batch_handler_fn=batch_handler_fn,
+        )
 
 
 @pytest.mark.asyncio
@@ -658,6 +707,43 @@ def test_handle_kv_event_batch_groups_mixed_events_per_rank_in_order():
     rank_1.publish_batch.assert_called_once_with(
         [{"type": "removed", "block_hashes": [200]}]
     )
+
+
+def test_handle_kv_event_batch_warns_once_for_malformed_events_and_continues(caplog):
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+
+    with caplog.at_level(logging.WARNING):
+        pub._handle_kv_event_batch([{}, {}, _stored_kv_event()])
+
+    publisher.publish_batch.assert_called_once()
+    warnings = [
+        record
+        for record in caplog.records
+        if record.message.startswith("Dropping malformed KV event")
+    ]
+    assert len(warnings) == 1
+
+
+def test_handle_kv_event_batch_propagates_unexpected_normalizer_failure():
+    pub = _publisher_for_kv_event_test()
+    pub._normalize_kv_event = MagicMock(side_effect=RuntimeError("normalizer failed"))
+
+    with pytest.raises(RuntimeError, match="normalizer failed"):
+        pub._handle_kv_event_batch([_stored_kv_event()])
+
+
+def test_handle_kv_event_batch_propagates_publish_failure():
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    publisher.publish_batch.side_effect = RuntimeError("publish failed")
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+
+    with pytest.raises(RuntimeError, match="publish failed"):
+        pub._handle_kv_event_batch([_stored_kv_event()])
 
 
 def test_interleaved_attention_dp_ranks_do_not_create_false_event_id_gaps():

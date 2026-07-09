@@ -139,11 +139,14 @@ pub(super) async fn start_zmq_listener(
                         metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
                     }
                     events.push(event);
-                    messages_processed += 1;
                 }
-                if !events.is_empty() && tx.send(events).is_err() {
-                    tracing::warn!("Failed to send message to channel - receiver dropped");
-                    break 'main String::from("channel receiver dropped");
+                if !events.is_empty() {
+                    let event_count = events.len() as u64;
+                    if tx.send(events).is_err() {
+                        tracing::warn!("Failed to send message to channel - receiver dropped");
+                        break 'main String::from("channel receiver dropped");
+                    }
+                    messages_processed += event_count;
                 }
             }
         }

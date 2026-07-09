@@ -141,8 +141,9 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                     batching_state.last_storage_tier = storage_tier;
                 }
 
-                // The cap is deliberately checked only at the native input-list
-                // boundary. One source list is allowed to produce a larger output.
+                // The cap is deliberately a boundary flush trigger, not a hard
+                // output-size limit. It is checked only after the complete native
+                // input list, which may therefore produce a larger output event.
                 if batching_state.has_pending()
                     && match timeout_ms {
                         None => true,

@@ -201,7 +201,7 @@ class TrtllmLLMEngine(LLMEngine):
         self._partial_block_hashes_by_rank: dict[int, set[int]] = {}
         self._last_event_id_by_rank: dict[int, int] = {}
         # One-shot guards so a misbehaving engine doesn't flood logs.
-        self._warned_dispatch_failed = False
+        self._warned_malformed_kv_event = False
         self._warned_unknown_dp_rank = False
         self._pause_controller: TRTLLMEnginePauseController | None = None
         self._pause_lock = asyncio.Lock()
@@ -520,26 +520,24 @@ class TrtllmLLMEngine(LLMEngine):
         for event in events:
             try:
                 normalized = self._normalize_kv_event(event)
-            except Exception as error:
-                self._warn_kv_dispatch_failed(error)
+            except (KeyError, TypeError, ValueError) as error:
+                self._warn_malformed_kv_event(error)
                 continue
             if normalized is not None:
                 rank, normalized_event = normalized
                 events_by_rank.setdefault(rank, []).append(normalized_event)
 
         for rank, normalized_events in events_by_rank.items():
-            try:
-                self._kv_publishers[rank].publish_batch(normalized_events)
-            except Exception as error:
-                self._warn_kv_dispatch_failed(error)
+            self._kv_publishers[rank].publish_batch(normalized_events)
 
-    def _warn_kv_dispatch_failed(self, error: Exception) -> None:
-        if not self._warned_dispatch_failed:
-            self._warned_dispatch_failed = True
-            logger.exception(
-                "Failed to dispatch KV event; suppressing further "
+    def _warn_malformed_kv_event(self, error: Exception) -> None:
+        if not self._warned_malformed_kv_event:
+            self._warned_malformed_kv_event = True
+            logger.warning(
+                "Dropping malformed KV event; suppressing further "
                 "tracebacks (last error: %s)",
                 error,
+                exc_info=True,
             )
 
     def _dispatch_kv_event(self, event: dict[str, Any]) -> None:

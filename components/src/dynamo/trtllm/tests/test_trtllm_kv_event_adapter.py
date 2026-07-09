@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -69,7 +70,7 @@ def test_dispatch_kv_events_groups_native_drain_by_rank_in_order() -> None:
     engine._kv_publishers = {0: rank_0, 1: rank_1}
     engine._last_event_id_by_rank = {}
     engine._warned_unknown_dp_rank = False
-    engine._warned_dispatch_failed = False
+    engine._warned_malformed_kv_event = False
     engine._additional_metrics = None
     engine._partial_block_hashes_by_rank = {}
     engine.kv_block_size = 4
@@ -104,7 +105,7 @@ def test_dispatch_kv_events_skips_partial_blocks_without_empty_batches() -> None
     engine._kv_publishers = {0: publisher}
     engine._last_event_id_by_rank = {}
     engine._warned_unknown_dp_rank = False
-    engine._warned_dispatch_failed = False
+    engine._warned_malformed_kv_event = False
     engine._additional_metrics = None
     engine._partial_block_hashes_by_rank = {0: {123}}
     engine.kv_block_size = 4
@@ -121,3 +122,54 @@ def test_dispatch_kv_events_skips_partial_blocks_without_empty_batches() -> None
 
     publisher.publish_batch.assert_not_called()
     assert engine._partial_block_hashes_by_rank[0] == set()
+
+
+def test_dispatch_kv_events_warns_once_for_malformed_events_and_continues(
+    caplog,
+) -> None:
+    engine = TrtllmLLMEngine.__new__(TrtllmLLMEngine)
+    publisher = MagicMock()
+    engine._kv_publishers = {0: publisher}
+    engine._last_event_id_by_rank = {}
+    engine._warned_unknown_dp_rank = False
+    engine._warned_malformed_kv_event = False
+    engine._additional_metrics = None
+    engine._partial_block_hashes_by_rank = {}
+    engine.kv_block_size = 4
+
+    with caplog.at_level(logging.WARNING):
+        engine._dispatch_kv_events([{}, {}, _stored_kv_event()])
+
+    publisher.publish_batch.assert_called_once()
+    errors = [
+        record
+        for record in caplog.records
+        if record.message.startswith("Dropping malformed KV event")
+    ]
+    assert len(errors) == 1
+
+
+def test_dispatch_kv_events_propagates_unexpected_normalizer_failure() -> None:
+    engine = TrtllmLLMEngine.__new__(TrtllmLLMEngine)
+    engine._normalize_kv_event = MagicMock(
+        side_effect=RuntimeError("normalizer failed")
+    )
+
+    with pytest.raises(RuntimeError, match="normalizer failed"):
+        engine._dispatch_kv_events([_stored_kv_event()])
+
+
+def test_dispatch_kv_events_propagates_publish_failure() -> None:
+    engine = TrtllmLLMEngine.__new__(TrtllmLLMEngine)
+    publisher = MagicMock()
+    publisher.publish_batch.side_effect = RuntimeError("publish failed")
+    engine._kv_publishers = {0: publisher}
+    engine._last_event_id_by_rank = {}
+    engine._warned_unknown_dp_rank = False
+    engine._warned_malformed_kv_event = False
+    engine._additional_metrics = None
+    engine._partial_block_hashes_by_rank = {}
+    engine.kv_block_size = 4
+
+    with pytest.raises(RuntimeError, match="publish failed"):
+        engine._dispatch_kv_events([_stored_kv_event()])

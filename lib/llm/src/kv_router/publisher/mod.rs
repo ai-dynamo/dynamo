@@ -336,20 +336,15 @@ impl KvEventPublisher {
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        self.publish_batch(vec![event]).map_err(|err| {
-            mpsc::error::SendError(
-                err.0
-                    .into_iter()
-                    .next()
-                    .expect("singleton publish returned an empty failed batch"),
-            )
-        })
+        self.send_singleton(PlacementEvent::local_gpu(self.worker_id, event))
     }
 
     /// Publish an ordered list of engine events as one processor input.
     ///
     /// The processor handles the complete list without receiving another list or
     /// servicing its batching timer in between events. Empty lists are ignored.
+    /// Its block cap is evaluated after this complete list, so the cap is a
+    /// boundary flush trigger rather than a hard output-size limit.
     pub fn publish_batch(
         &self,
         events: Vec<KvCacheEvent>,
@@ -376,16 +371,22 @@ impl KvEventPublisher {
             Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
             event,
         );
-        match self.tx.send(vec![placement_event]) {
-            Ok(()) => Ok(()),
-            Err(err) => Err(mpsc::error::SendError(
+        self.send_singleton(placement_event)
+    }
+
+    fn send_singleton(
+        &self,
+        event: PlacementEvent,
+    ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+        self.tx.send(vec![event]).map_err(|err| {
+            mpsc::error::SendError(
                 err.0
                     .into_iter()
                     .next()
                     .expect("singleton publish returned an empty failed batch")
                     .event,
-            )),
-        }
+            )
+        })
     }
 
     pub fn next_event_id(&self) -> u64 {
