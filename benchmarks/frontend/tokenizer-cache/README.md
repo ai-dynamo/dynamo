@@ -3,6 +3,28 @@
 This benchmark demonstrates the frontend throughput benefit of Dynamo's L1
 tokenizer cache using an AgentX trace and fast mock workers.
 
+## Build Dynamo
+
+Dynamo v1.2.1 does not include the tokenizer cache. Use `v1.3.0-rc1`, which
+includes the opt-in L1 cache and its multi-turn extension. The tag predates
+these benchmark files, so restore this directory from the benchmark branch
+before building:
+
+```bash
+git clone --branch jthomson04/tokenizer-cache-benchmark-main-20260709 \
+    https://github.com/ai-dynamo/dynamo.git
+cd dynamo
+git checkout v1.3.0-rc1
+git checkout jthomson04/tokenizer-cache-benchmark-main-20260709 -- \
+    benchmarks/frontend/tokenizer-cache
+
+# With your Python build environment activated:
+uv pip install pip 'maturin[patchelf]'
+(cd lib/bindings/python && maturin develop --uv --release)
+uv pip install -e lib/gpu_memory_service
+uv pip install -e .
+```
+
 ## Requirements
 
 - Dynamo is already enabled, so `python -m dynamo.frontend` and
@@ -58,7 +80,9 @@ throughput from 107.49 to 189.01 requests/second (+75.8%) and input-token
 throughput from 8.45M to 16.94M tokens/second (+100.6%). The frontend served
 92.9% of input tokens from the tokenizer cache. Both runs completed with zero
 request errors. Treat these as reference results; compare cache off and on on
-the same otherwise-idle host.
+the same otherwise-idle host. These reference runs used post-`v1.3.0-rc1`
+`main` at `d64f398628`; rerun both arms on the tagged build for a
+version-controlled comparison.
 
 AIPerf reconstructs and memory-maps the AgentX dataset. Ensure the host has
 enough available memory before starting the benchmark.
