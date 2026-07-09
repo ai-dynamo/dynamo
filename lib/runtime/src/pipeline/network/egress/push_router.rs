@@ -1445,6 +1445,12 @@ where
     /// and dispatch, fall back to one other instance from `free_ids` (same
     /// filter as pre-selection) and return the updated id so the caller can
     /// `report_instance_down` the right worker on later failures.
+    ///
+    /// Failures are typed so `error_type_from_chain` (route spans) and the
+    /// HTTP error mapping classify the worker-disappeared path instead of
+    /// reporting `unknown`: a vanished instance is `CannotConnect` (migratable,
+    /// same as the `direct()` pre-dispatch check), while "no instances left"
+    /// is `Unavailable` (HTTP 503, not retryable in-process).
     fn resolve_transport(
         &self,
         instance_id: u64,
@@ -1474,11 +1480,15 @@ where
         let allowed_fallback = match fallback {
             TransportFallback::Allow => None,
             TransportFallback::Deny => {
-                return Err(anyhow::anyhow!(
-                    "Instance {} not found for endpoint {}",
-                    instance_id,
-                    self.client.endpoint.id()
-                ));
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message(format!(
+                        "Instance {} not found for endpoint {}",
+                        instance_id,
+                        self.client.endpoint.id()
+                    ))
+                    .build()
+                    .into());
             }
             TransportFallback::Within(allowed) => Some(allowed),
         };
@@ -1495,19 +1505,28 @@ where
                     "Instance disappeared during routing, reselecting"
                 );
                 let (addr, kind, inst) = lookup(id).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Fallback instance {} also not found for endpoint {}",
-                        id,
-                        self.client.endpoint.id()
+                    anyhow::Error::new(
+                        DynamoError::builder()
+                            .error_type(ErrorType::CannotConnect)
+                            .message(format!(
+                                "Fallback instance {} also not found for endpoint {}",
+                                id,
+                                self.client.endpoint.id()
+                            ))
+                            .build(),
                     )
                 })?;
                 Ok((id, addr, kind, inst))
             }
-            None => Err(anyhow::anyhow!(
-                "Instance {} not found and no other instances available for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            )),
+            None => Err(DynamoError::builder()
+                .error_type(ErrorType::Unavailable)
+                .message(format!(
+                    "Instance {} not found and no other instances available for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into()),
         }
     }
 
@@ -1808,6 +1827,7 @@ mod tests {
         pipeline::{
             RequestStream, ResponseStream,
             context::{Context, Controller},
+            network::egress::route_span,
         },
     };
     use serde::{Deserialize, Serialize};
@@ -2735,11 +2755,13 @@ mod tests {
             "constrained dispatch should fall back within the allowed worker set"
         );
         let disallowed = HashSet::new();
-        assert!(
-            router
-                .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
-                .is_err(),
-            "constrained dispatch must not fall back outside the allowed worker set"
+        let error = router
+            .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
+            .expect_err("constrained dispatch must not fall back outside the allowed worker set");
+        assert_eq!(
+            route_span::error_type_from_chain(error.as_ref()),
+            ErrorType::Unavailable,
+            "no-instances-left failure must be typed Unavailable, got: {error}"
         );
         let error = router
             .resolve_transport(stale_id, TransportFallback::Deny)
@@ -2747,6 +2769,11 @@ mod tests {
         assert!(
             error.to_string().contains("not found"),
             "exact dispatch must reject the missing selected worker"
+        );
+        assert_eq!(
+            route_span::error_type_from_chain(error.as_ref()),
+            ErrorType::CannotConnect,
+            "vanished-instance failure must be typed CannotConnect, got: {error}"
         );
 
         rt.shutdown();
