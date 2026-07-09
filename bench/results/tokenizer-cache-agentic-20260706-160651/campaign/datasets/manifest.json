@@ -1,0 +1,32 @@
+{
+  "sessions": 384,
+  "depths": [
+    1,
+    2,
+    4,
+    8,
+    16
+  ],
+  "message_counts": {
+    "1": 2,
+    "2": 4,
+    "4": 8,
+    "8": 16,
+    "16": 32
+  },
+  "pinned": "pinned.jsonl",
+  "handoff": {
+    "1": "handoff-depth-01.jsonl",
+    "2": "handoff-depth-02.jsonl",
+    "4": "handoff-depth-04.jsonl",
+    "8": "handoff-depth-08.jsonl",
+    "16": "handoff-depth-16.jsonl"
+  },
+  "nominal_isl_tokens": {
+    "1": 3517,
+    "2": 4173,
+    "4": 5485,
+    "8": 8109,
+    "16": 13657
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "aiperf": {
+    "configured_path": "/home/biswaranjanp/dev/dynamo_main/dynamo/bin/aiperf",
+    "mtime": "2026-05-23T00:54:06.546603+00:00",
+    "mtime_ns": 1779497646546603350,
+    "resolved_path": "/home/biswaranjanp/dev/dynamo_main/dynamo/bin/aiperf",
+    "rust_build_profile": null,
+    "rust_build_profile_source": null,
+    "sha256": "16b5a1c0e7c8b950a20949b2e00ac253270ef3377ad7d1bbc8b3fb53dc01880b",
+    "size_bytes": 192
+  },
+  "base_harness": {
+    "configured_path": "/home/biswaranjanp/dev/dynamo_main/bench/results/valkey-config-weka-20260707/run_benchmark.py",
+    "mtime": "2026-07-07T10:07:41.607306+00:00",
+    "mtime_ns": 1783418861607306363,
+    "resolved_path": "/home/biswaranjanp/dev/dynamo_main/bench/results/valkey-config-weka-20260707/run_benchmark.py",
+    "rust_build_profile": null,
+    "rust_build_profile_source": null,
+    "sha256": "1b0b9de654d225def2d6a942f286edad93479c1b0c3487ea5733aeee1f797454",
+    "size_bytes": 26475
+  },
+  "dataset": {
+    "captured_slice": "/home/biswaranjanp/dev/dynamo_main/bench/results/valkey-config-weka-20260707/campaign/20260707T100019Z/weka-derived.jsonl",
+    "captured_slice_sha256": "d09127c37fb0f37ae547c97039bda764faafaeedec1c29ba76180f018044338b",
+    "copies": 32,
+    "derived_requests": 15232,
+    "path": "/home/biswaranjanp/dev/dynamo_main/bench/results/valkey-config-weka-ab-20260707/campaign/20260707T153807Z/weka-derived.jsonl",
+    "sha256": "ca79ed00cc6e222093610bba1b8741c1a5816afeda035686ef13dafaa8ae17e1",
+    "source_dataset": "semianalysisai/cc-traces-weka-062126-256k",
+    "source_rows": 476,
+    "transformation": {
+      "derived_prompt_block_size": 512,
+      "max_isl": 8192,
+      "max_osl": 16,
+      "session_mode": "independent full-context requests",
+      "source_block_size": 64
+    }
+  },
+  "dynamo_core": {
+    "configured_path": "/home/biswaranjanp/dev/dynamo_main/lib/bindings/python/src/dynamo/_core.abi3.so",
+    "import_path": "/home/biswaranjanp/dev/dynamo_main/lib/bindings/python/src/dynamo/_core.abi3.so",
+    "mtime": "2026-07-07T09:48:53.485526+00:00",
+    "mtime_ns": 1783417733485525972,
+    "release_artifact": {
+      "configured_path": "/home/biswaranjanp/dev/dynamo_main/lib/bindings/python/target/release/lib_core.so",
+      "mtime": "2026-07-07T09:48:53.374523+00:00",
+      "mtime_ns": 1783417733374523020,
+      "resolved_path": "/home/biswaranjanp/dev/dynamo_main/lib/bindings/python/target/release/lib_core.so",
+      "rust_build_profile": "release",
+      "rust_build_profile_source": "resolved_path",
+      "sha256": "eec09f654725332247f2390b36179695b012dc0a780e1be452bb547e6637725d",
+      "size_bytes": 129262456
+    },
+    "resolved_path": "/home/biswaranjanp/dev/dynamo_main/lib/bindings/python/src/dynamo/_core.abi3.so",
+    "rust_build_profile": "release",
+    "rust_build_profile_source": null,
+    "sha256": "eec09f654725332247f2390b36179695b012dc0a780e1be452bb547e6637725d",
+    "size_bytes": 129262456
+  },
+  "dynkv_module": {
+    "configured_path": "/home/biswaranjanp/dev/dynamo_main/lib/kv-router/valkey-module/dynkv.so",
+    "mtime": "2026-06-30T15:13:24.198993+00:00",
+    "mtime_ns": 1782832404198993220,
+    "resolved_path": "/home/biswaranjanp/dev/dynamo_main/lib/kv-router/valkey-module/dynkv.so",
+    "rust_build_profile": null,
+    "rust_build_profile_source": null,
+    "sha256": "9b2b5e1b04d187b0a1b8d9aaa8d43e05208b3ac64eb18afb09302ab463e40308",
+    "size_bytes": 214264
+  },
+  "model": "Qwen/Qwen3-0.6B",
+  "valkey_server": {
+    "configured_path": "/home/biswaranjanp/dev/valkey/src/valkey-server",
+    "mtime": "2026-06-30T05:19:23.038156+00:00",
+    "mtime_ns": 1782796763038155753,
+    "resolved_path": "/home/biswaranjanp/dev/valkey/src/valkey-server",
+    "rust_build_profile": null,
+    "rust_build_profile_source": null,
+    "sha256": "a1403acb569a79704021aebcfd3ecd4d432334df3368c4e6a81fac0abacece30",
+    "size_bytes": 20374848
+  }
+}

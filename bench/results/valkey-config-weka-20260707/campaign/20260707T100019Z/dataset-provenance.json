@@ -1,0 +1,14 @@
+{
+  "derived_requests": 476,
+  "derived_sessions": 476,
+  "path": "/home/biswaranjanp/dev/dynamo_main/bench/results/valkey-config-weka-20260707/campaign/20260707T100019Z/weka-derived.jsonl",
+  "sha256": "d09127c37fb0f37ae547c97039bda764faafaeedec1c29ba76180f018044338b",
+  "source_dataset": "semianalysisai/cc-traces-weka-062126-256k",
+  "transformation": {
+    "derived_prompt_block_size": 512,
+    "max_isl": 8192,
+    "max_osl": 16,
+    "session_mode": "each row is an independent full-context request",
+    "source_block_size": 64
+  }
+}

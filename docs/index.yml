@@ -511,6 +511,8 @@ navigation:
             contents:
               - page: Router Design
                 path: design-docs/router-design.md
+              - page: Highly Available Valkey KV Router
+                path: design-docs/valkey-ha-router.md
               - page: KVBM Design
                 path: design-docs/kvbm-design.md
               - page: Planner Design

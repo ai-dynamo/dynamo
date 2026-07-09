@@ -1,0 +1,30 @@
+{
+  "allow_insecure_plaintext": true,
+  "connection_pool_size": 16,
+  "index_scope": "weka-json-690527",
+  "required_replica_acks": 1,
+  "sentinel": {
+    "master_name": "dynamo-router-690527",
+    "quorum": 2,
+    "urls": [
+      "valkey://127.0.0.1:15078",
+      "valkey://127.0.0.1:15079",
+      "valkey://127.0.0.1:15080"
+    ]
+  },
+  "tokenizer_cache": {
+    "connection_pool_size": 16,
+    "enabled": true,
+    "l1_bytes": 16777216,
+    "max_pending_writes": 1024,
+    "scope": "weka-json-690527",
+    "sentinel_master_name": "dynamo-tokenizer-690527",
+    "timeout_ms": 100,
+    "ttl_seconds": 3600
+  },
+  "urls": [
+    "valkey://127.0.0.1:15074",
+    "valkey://127.0.0.1:15075"
+  ],
+  "worker_events": true
+}

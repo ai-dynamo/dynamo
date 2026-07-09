@@ -1,0 +1,236 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1050" viewBox="0 0 1600 1050" role="img" aria-labelledby="title desc">
+  <title id="title">Highly available Valkey-backed Dynamo KV router architecture</title>
+  <desc id="desc">Three Dynamo frontends use one replicated Valkey module index and three Sentinel witnesses to route requests to four workers. Valkey carries metadata and admission state, while NIXL optionally transfers GPU KV tensors.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07121f"/>
+      <stop offset="1" stop-color="#101c2d"/>
+    </linearGradient>
+    <linearGradient id="frontendFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#173d61"/>
+      <stop offset="1" stop-color="#102d49"/>
+    </linearGradient>
+    <linearGradient id="valkeyFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5a2434"/>
+      <stop offset="1" stop-color="#341823"/>
+    </linearGradient>
+    <linearGradient id="workerFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#174d45"/>
+      <stop offset="1" stop-color="#10352f"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="9" flood-color="#000000" flood-opacity=".32"/>
+    </filter>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#65b7ff"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ffad5c"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#55d69e"/>
+    </marker>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c8a4ff"/>
+    </marker>
+    <marker id="arrowTeal" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#43d6db"/>
+    </marker>
+    <marker id="arrowGray" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8294aa"/>
+    </marker>
+    <style>
+      text { font-family: Inter, "Segoe UI", Arial, sans-serif; }
+      .title { fill: #f7fbff; font-size: 34px; font-weight: 750; letter-spacing: .2px; }
+      .subtitle { fill: #aabbd0; font-size: 17px; }
+      .section { fill: #d8e5f3; font-size: 16px; font-weight: 700; letter-spacing: 1.5px; }
+      .box-title { fill: #ffffff; font-size: 20px; font-weight: 700; }
+      .box-sub { fill: #b9c9d9; font-size: 14px; }
+      .small-title { fill: #ffffff; font-size: 16px; font-weight: 700; }
+      .small-sub { fill: #b9c9d9; font-size: 12px; }
+      .label { fill: #dce8f5; font-size: 13px; font-weight: 650; }
+      .legend { fill: #b6c6d8; font-size: 13px; }
+      .panel { fill: #0d1a2a; stroke: #2c4057; stroke-width: 1.5; }
+      .soft-panel { fill: #0a1624; stroke: #23384f; stroke-width: 1.4; }
+      .node { filter: url(#shadow); stroke-width: 1.6; }
+      .blue-line { fill: none; stroke: #65b7ff; stroke-width: 3; marker-end: url(#arrowBlue); }
+      .orange-line { fill: none; stroke: #ffad5c; stroke-width: 3; marker-end: url(#arrowOrange); }
+      .green-line { fill: none; stroke: #55d69e; stroke-width: 3; marker-end: url(#arrowGreen); }
+      .purple-line { fill: none; stroke: #c8a4ff; stroke-width: 2.7; stroke-dasharray: 8 7; marker-end: url(#arrowPurple); }
+      .teal-line { fill: none; stroke: #43d6db; stroke-width: 3; marker-end: url(#arrowTeal); }
+      .gray-line { fill: none; stroke: #8294aa; stroke-width: 2.2; stroke-dasharray: 5 6; marker-end: url(#arrowGray); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1050" fill="url(#bg)"/>
+  <circle cx="1400" cy="90" r="260" fill="#1a3850" opacity=".17"/>
+  <circle cx="100" cy="980" r="230" fill="#155947" opacity=".12"/>
+
+  <text x="70" y="64" class="title">Dynamo KV Router with Highly Available Valkey</text>
+  <text x="70" y="94" class="subtitle">Centralized device-tier KV metadata and atomic admission across 3 frontends and 4 workers</text>
+  <rect x="70" y="116" width="1460" height="1.5" fill="#34485e"/>
+
+  <!-- Topology sections -->
+  <rect x="54" y="150" width="225" height="600" rx="18" class="panel"/>
+  <rect x="303" y="150" width="350" height="600" rx="18" class="panel"/>
+  <rect x="677" y="150" width="555" height="600" rx="18" class="panel"/>
+  <rect x="1256" y="150" width="290" height="600" rx="18" class="panel"/>
+
+  <text x="78" y="184" class="section">CLIENTS</text>
+  <text x="327" y="184" class="section">DYNAMO FRONTEND TIER</text>
+  <text x="701" y="184" class="section">VALKEY STATE + HA CONTROL</text>
+  <text x="1280" y="184" class="section">WORKER FLEET</text>
+
+  <!-- Clients -->
+  <rect x="82" y="320" width="170" height="128" rx="16" fill="#202d40" stroke="#52667e" class="node"/>
+  <circle cx="121" cy="367" r="20" fill="#65b7ff" opacity=".18" stroke="#65b7ff"/>
+  <path d="M111 370 h20 M121 360 v20" stroke="#65b7ff" stroke-width="3" stroke-linecap="round"/>
+  <text x="151" y="363" class="box-title">Clients</text>
+  <text x="151" y="387" class="box-sub">aiperf / API</text>
+  <text x="104" y="421" class="box-sub">HTTP streaming requests</text>
+
+  <!-- Frontends -->
+  <rect x="333" y="242" width="290" height="112" rx="16" fill="url(#frontendFill)" stroke="#4b93ca" class="node"/>
+  <circle cx="371" cy="278" r="15" fill="#65b7ff" opacity=".22" stroke="#65b7ff"/>
+  <text x="399" y="282" class="box-title">Frontend 1</text>
+  <text x="358" y="319" class="box-sub">Tokenize · hash blocks · reserve · dispatch</text>
+
+  <rect x="333" y="382" width="290" height="112" rx="16" fill="url(#frontendFill)" stroke="#4b93ca" class="node"/>
+  <circle cx="371" cy="418" r="15" fill="#65b7ff" opacity=".22" stroke="#65b7ff"/>
+  <text x="399" y="422" class="box-title">Frontend 2</text>
+  <text x="358" y="459" class="box-sub">Same authoritative routing state</text>
+
+  <rect x="333" y="522" width="290" height="112" rx="16" fill="url(#frontendFill)" stroke="#4b93ca" class="node"/>
+  <circle cx="371" cy="558" r="15" fill="#65b7ff" opacity=".22" stroke="#65b7ff"/>
+  <text x="399" y="562" class="box-title">Frontend 3</text>
+  <text x="358" y="599" class="box-sub">Scale/restart without index rebuild</text>
+
+  <rect x="333" y="665" width="290" height="58" rx="12" fill="#111f31" stroke="#354a60"/>
+  <text x="356" y="689" class="small-title">Local-only state</text>
+  <text x="356" y="709" class="small-sub">HTTP streams · tokenizer · 1 s match cache</text>
+
+  <!-- Sentinels -->
+  <rect x="709" y="218" width="491" height="124" rx="16" fill="#201b36" stroke="#8d72be" class="node"/>
+  <text x="735" y="251" class="box-title">Sentinel quorum</text>
+  <text x="735" y="276" class="box-sub">Strict majority resolves the named primary · quorum = 2</text>
+  <g>
+    <rect x="735" y="293" width="128" height="32" rx="9" fill="#32284c" stroke="#9b7bd0"/>
+    <rect x="885" y="293" width="128" height="32" rx="9" fill="#32284c" stroke="#9b7bd0"/>
+    <rect x="1035" y="293" width="128" height="32" rx="9" fill="#32284c" stroke="#9b7bd0"/>
+    <text x="761" y="314" class="small-title">Sentinel 1</text>
+    <text x="911" y="314" class="small-title">Sentinel 2</text>
+    <text x="1061" y="314" class="small-title">Sentinel 3</text>
+  </g>
+
+  <!-- Valkey primary -->
+  <rect x="709" y="392" width="231" height="232" rx="18" fill="url(#valkeyFill)" stroke="#e06d83" class="node"/>
+  <rect x="731" y="414" width="96" height="27" rx="13" fill="#8f3448"/>
+  <text x="750" y="433" class="small-title">ACTIVE</text>
+  <text x="731" y="477" class="box-title">Valkey primary</text>
+  <text x="731" y="503" class="box-sub">dynkv.so module</text>
+  <line x1="731" y1="522" x2="918" y2="522" stroke="#784050"/>
+  <text x="731" y="548" class="small-sub">• radix-like prefix index</text>
+  <text x="731" y="570" class="small-sub">• worker/rank leases</text>
+  <text x="731" y="592" class="small-sub">• atomic admission + reservations</text>
+
+  <!-- Valkey replica -->
+  <rect x="969" y="392" width="231" height="232" rx="18" fill="#27202a" stroke="#b97a88" class="node"/>
+  <rect x="991" y="414" width="105" height="27" rx="13" fill="#59404a"/>
+  <text x="1009" y="433" class="small-title">STANDBY</text>
+  <text x="991" y="477" class="box-title">Valkey replica</text>
+  <text x="991" y="503" class="box-sub">same dynkv.so build</text>
+  <line x1="991" y1="522" x2="1178" y2="522" stroke="#5e4650"/>
+  <text x="991" y="548" class="small-sub">• full module state copy</text>
+  <text x="991" y="570" class="small-sub">• eligible for promotion</text>
+  <text x="991" y="592" class="small-sub">• never a blind read fallback</text>
+
+  <!-- Persistence -->
+  <path d="M745 665 q0 -16 45 -16 t45 16 v38 q0 16 -45 16 t-45 -16 z" fill="#162836" stroke="#4f738a"/>
+  <ellipse cx="790" cy="665" rx="45" ry="16" fill="#213d50" stroke="#4f738a"/>
+  <text x="768" y="690" class="small-title">AOF</text>
+  <text x="760" y="709" class="small-sub">+ RDB</text>
+
+  <path d="M1065 665 q0 -16 45 -16 t45 16 v38 q0 16 -45 16 t-45 -16 z" fill="#162836" stroke="#4f738a"/>
+  <ellipse cx="1110" cy="665" rx="45" ry="16" fill="#213d50" stroke="#4f738a"/>
+  <text x="1088" y="690" class="small-title">AOF</text>
+  <text x="1080" y="709" class="small-sub">+ RDB</text>
+
+  <!-- Workers -->
+  <rect x="1284" y="232" width="234" height="100" rx="15" fill="url(#workerFill)" stroke="#4dac98" class="node"/>
+  <text x="1306" y="270" class="box-title">Worker 1</text>
+  <text x="1306" y="296" class="box-sub">8 DP ranks · KVPublisher</text>
+  <rect x="1284" y="350" width="234" height="100" rx="15" fill="url(#workerFill)" stroke="#4dac98" class="node"/>
+  <text x="1306" y="388" class="box-title">Worker 2</text>
+  <text x="1306" y="414" class="box-sub">8 DP ranks · KVPublisher</text>
+  <rect x="1284" y="468" width="234" height="100" rx="15" fill="url(#workerFill)" stroke="#4dac98" class="node"/>
+  <text x="1306" y="506" class="box-title">Worker 3</text>
+  <text x="1306" y="532" class="box-sub">8 DP ranks · KVPublisher</text>
+  <rect x="1284" y="586" width="234" height="100" rx="15" fill="url(#workerFill)" stroke="#4dac98" class="node"/>
+  <text x="1306" y="624" class="box-title">Worker 4</text>
+  <text x="1306" y="650" class="box-sub">8 DP ranks · KVPublisher</text>
+
+  <!-- Main request flow -->
+  <path d="M252 384 H333" class="blue-line"/>
+  <text x="265" y="369" class="label">HTTP</text>
+  <path d="M623 438 H667 V774 H1370 V686" class="blue-line"/>
+  <rect x="816" y="758" width="310" height="31" rx="15" fill="#102b43" stroke="#376c96"/>
+  <text x="842" y="779" class="label">TCP request plane · selected worker</text>
+
+  <!-- Frontend metadata -->
+  <path d="M623 298 H666 V470 H709" class="orange-line"/>
+  <path d="M623 438 H709" class="orange-line"/>
+  <path d="M623 578 H666 V548 H709" class="orange-line"/>
+  <rect x="498" y="194" width="188" height="31" rx="15" fill="#38291b" stroke="#8d6334"/>
+  <text x="519" y="215" class="label">MATCH · RESERVE · RELEASE</text>
+
+  <!-- Worker event publication -->
+  <path d="M1284 282 H1240 M1284 400 H1240 M1284 518 H1240 M1284 636 H1240 M1240 282 V636" fill="none" stroke="#ffad5c" stroke-width="3"/>
+  <path d="M1240 400 H1218 V365 H954 V470 H940" class="orange-line"/>
+  <rect x="1014" y="347" width="184" height="31" rx="15" fill="#38291b" stroke="#8d6334"/>
+  <text x="1035" y="368" class="label">owner-fenced KV events</text>
+
+  <!-- Replication and failover -->
+  <path d="M940 606 H969" class="green-line"/>
+  <rect x="875" y="632" width="158" height="31" rx="15" fill="#163b2f" stroke="#3e8d70"/>
+  <text x="898" y="653" class="label">replication + WAIT 1</text>
+  <path d="M836 342 V392" class="purple-line"/>
+  <path d="M1084 342 V392" class="purple-line"/>
+  <path d="M1178 342 C1240 350 1244 407 1200 454" class="purple-line"/>
+
+  <!-- Discovery -->
+  <rect x="54" y="806" width="530" height="113" rx="16" class="soft-panel"/>
+  <text x="78" y="837" class="section">DISCOVERY PLANE</text>
+  <rect x="82" y="854" width="474" height="43" rx="11" fill="#172638" stroke="#4c6076"/>
+  <text x="105" y="881" class="small-title">Kubernetes / etcd: worker endpoints + model metadata</text>
+  <path d="M410 806 V734" class="gray-line"/>
+  <path d="M556 875 H1486 V686" class="gray-line"/>
+
+  <!-- NIXL boundary -->
+  <rect x="614" y="806" width="932" height="113" rx="16" class="soft-panel"/>
+  <text x="638" y="837" class="section">OPTIONAL GPU KV DATA PLANE</text>
+  <rect x="642" y="854" width="275" height="43" rx="11" fill="#10363a" stroke="#3aa5aa"/>
+  <text x="668" y="881" class="small-title">Prefill worker · GPU KV producer</text>
+  <rect x="1243" y="854" width="275" height="43" rx="11" fill="#10363a" stroke="#3aa5aa"/>
+  <text x="1269" y="881" class="small-title">Decode worker · GPU KV consumer</text>
+  <path d="M917 875 H1243" class="teal-line"/>
+  <text x="1017" y="858" class="label">NIXL / UCX tensor transfer</text>
+
+  <!-- Footer / legend -->
+  <rect x="54" y="950" width="1492" height="68" rx="16" fill="#0a1421" stroke="#23364a"/>
+  <text x="78" y="979" class="section">FLOW LEGEND</text>
+  <line x1="232" y1="974" x2="282" y2="974" class="blue-line"/>
+  <text x="298" y="979" class="legend">requests</text>
+  <line x1="392" y1="974" x2="442" y2="974" class="orange-line"/>
+  <text x="458" y="979" class="legend">KV metadata + admission</text>
+  <line x1="670" y1="974" x2="720" y2="974" class="green-line"/>
+  <text x="736" y="979" class="legend">Valkey replication</text>
+  <line x1="900" y1="974" x2="950" y2="974" class="purple-line"/>
+  <text x="966" y="979" class="legend">Sentinel HA control</text>
+  <line x1="1135" y1="974" x2="1185" y2="974" class="teal-line"/>
+  <text x="1201" y="979" class="legend">GPU KV tensors</text>
+  <text x="78" y="1003" class="small-sub">Valkey stores routing metadata only. NIXL moves tensor bytes only when the serving topology requires transfer.</text>
+</svg>

@@ -1,0 +1,9 @@
+{
+  "campaign_git_revision": "7d4428fc4f9acb9dfddb65afafb4c4a78adc358b",
+  "campaign_git_dirty": true,
+  "canonical_harness_path": "benchmarks/router/tokenizer_cache_agentic.py",
+  "canonical_harness_sha256_at_archive_refactor": "5fa285d7376eefe6ce3d89edc11a7403b94d74058f907010b6face173ac4b442",
+  "retired_result_copy_path": "bench/results/tokenizer-cache-agentic-20260706-160651/run_benchmark.py",
+  "retired_result_copy_sha256": "6dc66249c81f851defbd8ef6dcf75ce2f88ca664091f3dc128cc2a5ad4f347a1",
+  "note": "The campaign provenance records a dirty worktree. These results are historical evidence, not current-HEAD performance evidence."
+}

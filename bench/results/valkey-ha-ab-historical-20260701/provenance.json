@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "status": "historical_pre_hardening_evidence",
+  "created_at": "2026-07-01T00:16:28.710052-07:00",
+  "source_directory_name": "valkey-ab-c4096-3fe-4mocker-4f63c9686b-20260701-001700",
+  "git": {
+    "revision": "4f63c9686b39e5777df67f075bb592749272b9b2",
+    "dirty": true
+  },
+  "warning": "These measurements predate later Sentinel, tokenizer, lifecycle, admission, and safety fixes. They are not current-HEAD performance evidence.",
+  "topology": {
+    "frontends": 3,
+    "mocker_processes": 4,
+    "mocker_data_parallel_size": 8,
+    "router_primary_replicas": 1,
+    "router_valkey_primary_replicas": 1
+  },
+  "workload": {
+    "model": "Qwen/Qwen3-0.6B",
+    "concurrency": 4096,
+    "requests_per_sample": 16384,
+    "warmup_requests_per_sample": 2048,
+    "isl": 1024,
+    "osl": 1024,
+    "runs_per_arm": 3,
+    "arms": [
+      "inprocess",
+      "inprocess_immediate",
+      "valkey_ha"
+    ]
+  },
+  "validation": {
+    "valid": true,
+    "planned_samples": 9,
+    "started_samples": 9,
+    "valid_samples": 9,
+    "input_dataset_consistent": true
+  },
+  "binary_provenance": {
+    "dynamo_core_sha256": "0ceffb8375425784c4e1e073f0c8c052056cfec7aa1dcbbfcf0ba10fb8f1a167",
+    "dynkv_module_sha256": "9b2b5e1b04d187b0a1b8d9aaa8d43e05208b3ac64eb18afb09302ab463e40308",
+    "valkey_server_sha256": "a1403acb569a79704021aebcfd3ecd4d432334df3368c4e6a81fac0abacece30",
+    "benchmark_harness_sha256": "266efebeffa32c11e5c72bcb9e808bdd0f59444d46a1f65e3f4ceac4c1cdf280",
+    "aiperf_sha256": "16b5a1c0e7c8b950a20949b2e00ac253270ef3377ad7d1bbc8b3fb53dc01880b"
+  },
+  "median_metrics": {
+    "inprocess": {
+      "request_throughput_rps": 549.0371342588082,
+      "output_token_throughput_tps": 576296.6068050141,
+      "request_latency_ms_p50": 5616.7277745,
+      "request_latency_ms_p95": 8364.7753763,
+      "ttft_ms_p50": 2915.9272889999997,
+      "ttft_ms_p95": 7169.46634845,
+      "itl_ms_p50": 0.5530471027420533,
+      "itl_ms_p95": 5.326903072904609,
+      "isl_tokens_avg": 1024.0012817382812,
+      "osl_tokens_avg": 1049.6495971679688
+    },
+    "inprocess_immediate": {
+      "request_throughput_rps": 527.9865601474853,
+      "output_token_throughput_tps": 554221.4401924307,
+      "request_latency_ms_p50": 6125.0530115,
+      "request_latency_ms_p95": 8833.47764765,
+      "ttft_ms_p50": 4901.162471,
+      "ttft_ms_p95": 7919.6124636999975,
+      "itl_ms_p50": 0.5558164565845648,
+      "itl_ms_p95": 4.703497892208353,
+      "isl_tokens_avg": 1024.0012817382812,
+      "osl_tokens_avg": 1049.6549682617188
+    },
+    "valkey_ha": {
+      "request_throughput_rps": 568.5241015186796,
+      "output_token_throughput_tps": 596714.8673838711,
+      "request_latency_ms_p50": 5188.274201499999,
+      "request_latency_ms_p95": 8699.888836849997,
+      "ttft_ms_p50": 3702.0058434999996,
+      "ttft_ms_p95": 6748.279211449995,
+      "itl_ms_p50": 0.5308673988586671,
+      "itl_ms_p95": 3.8966390779308524,
+      "isl_tokens_avg": 1024.0012817382812,
+      "osl_tokens_avg": 1049.5858764648438
+    }
+  },
+  "policy_matched_valkey_vs_inprocess_immediate": {
+    "request_throughput_percent": 7.677763893425751,
+    "output_token_throughput_percent": 7.666999827362889,
+    "request_latency_p50_percent": -15.293812637509677,
+    "request_latency_p95_percent": -1.512322853386654,
+    "ttft_p50_percent": -24.46507811685431,
+    "ttft_p95_percent": -14.790319753981166,
+    "itl_p50_percent": -4.489585125025927,
+    "itl_p95_percent": -17.150180104421923
+  }
+}

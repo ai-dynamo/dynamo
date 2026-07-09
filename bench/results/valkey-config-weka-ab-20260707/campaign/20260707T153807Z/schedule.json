@@ -1,0 +1,32 @@
+[
+  {
+    "arm": "inprocess",
+    "repetition": 1,
+    "sample": 1
+  },
+  {
+    "arm": "valkey_ha",
+    "repetition": 1,
+    "sample": 2
+  },
+  {
+    "arm": "valkey_ha",
+    "repetition": 2,
+    "sample": 3
+  },
+  {
+    "arm": "inprocess",
+    "repetition": 2,
+    "sample": 4
+  },
+  {
+    "arm": "inprocess",
+    "repetition": 3,
+    "sample": 5
+  },
+  {
+    "arm": "valkey_ha",
+    "repetition": 3,
+    "sample": 6
+  }
+]

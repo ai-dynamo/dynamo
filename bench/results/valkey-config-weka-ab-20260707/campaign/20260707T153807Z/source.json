@@ -1,0 +1,14 @@
+{
+  "campaign_git_revision": null,
+  "campaign_git_dirty": null,
+  "result_first_committed_in": "532f386c61ea18ba51bd617f8f8b49c1e56858d0",
+  "canonical_harness_path": "benchmarks/router/valkey_weka_ab.py",
+  "canonical_harness_sha256_at_archive_refactor": "71a4728d9ab1505742fb2c1173f61cc0ca2032cd39984e8e9f3b8f4979a5d6bc",
+  "canonical_report_path": "benchmarks/router/valkey_weka_report.py",
+  "canonical_report_sha256_at_archive_refactor": "9425ad3238ab87c31497cc7336052fdbd3552925c16f994fad7838aef98b6734",
+  "retired_result_copy_path": "bench/results/valkey-config-weka-ab-20260707/run_benchmark.py",
+  "retired_result_copy_sha256": "b5a4f5e504215ca3b9c0aec9426e9a7458ff890698ad8325fb0f565da520a435",
+  "retired_report_copy_path": "bench/results/valkey-config-weka-ab-20260707/ab_report.py",
+  "retired_report_copy_sha256": "9f94dacda66a69abdbbecb396285bc9ee030dec11a67d54242b94bac37c06290",
+  "note": "The original A/B campaign did not capture its Git revision or dirty state. Its base-harness hash remains in provenance.json; do not treat the campaign as clean current-HEAD evidence."
+}

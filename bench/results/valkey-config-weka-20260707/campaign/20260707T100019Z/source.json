@@ -1,0 +1,10 @@
+{
+  "campaign_git_revision": null,
+  "campaign_git_dirty": null,
+  "result_first_committed_in": "532f386c61ea18ba51bd617f8f8b49c1e56858d0",
+  "canonical_harness_path": "benchmarks/router/valkey_weka.py",
+  "canonical_harness_sha256_at_archive_refactor": "c4ebd6392502f203a3c4d1078f371dbf867a07ce5dcb82c0f4f7baa41893119d",
+  "retired_result_copy_path": "bench/results/valkey-config-weka-20260707/run_benchmark.py",
+  "retired_result_copy_sha256": "7c5570e2778bee464e03d24278257874d5571f19a50f4119acbe310a41dd2867",
+  "note": "The original smoke campaign did not capture its Git revision or dirty state. Do not treat it as clean current-HEAD evidence."
+}

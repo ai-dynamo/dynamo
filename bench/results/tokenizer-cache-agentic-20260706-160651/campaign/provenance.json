@@ -1,0 +1,63 @@
+{
+  "git_revision": "7d4428fc4f9acb9dfddb65afafb4c4a78adc358b",
+  "git_dirty": true,
+  "dynamo_core": {
+    "configured_path": "/home/biswaranjanp/dev/dynamo_main/lib/bindings/python/src/dynamo/_core.abi3.so",
+    "resolved_path": "/home/biswaranjanp/dev/dynamo_main/lib/bindings/python/src/dynamo/_core.abi3.so",
+    "sha256": "f529665984098ccd94a39b88be7bcdf536ae19b30081342b765c2471995aa6db",
+    "size_bytes": 129270904,
+    "mtime": "2026-07-06T23:06:14.043022+00:00",
+    "mtime_ns": 1783379174043021839,
+    "rust_build_profile": "release",
+    "rust_build_profile_source": "target_artifact_sha256",
+    "matched_build_artifact_paths": [
+      "/home/biswaranjanp/dev/dynamo_main/lib/bindings/python/target/release/lib_core.so"
+    ],
+    "matched_build_artifact_path": "/home/biswaranjanp/dev/dynamo_main/lib/bindings/python/target/release/lib_core.so"
+  },
+  "aiperf": {
+    "configured_path": "/home/biswaranjanp/dev/dynamo_main/dynamo/bin/aiperf",
+    "resolved_path": "/home/biswaranjanp/dev/dynamo_main/dynamo/bin/aiperf",
+    "sha256": "16b5a1c0e7c8b950a20949b2e00ac253270ef3377ad7d1bbc8b3fb53dc01880b",
+    "size_bytes": 192,
+    "mtime": "2026-05-23T00:54:06.546603+00:00",
+    "mtime_ns": 1779497646546603350,
+    "rust_build_profile": null,
+    "rust_build_profile_source": null
+  },
+  "valkey_server": {
+    "configured_path": "/home/biswaranjanp/dev/valkey/src/valkey-server",
+    "resolved_path": "/home/biswaranjanp/dev/valkey/src/valkey-server",
+    "sha256": "a1403acb569a79704021aebcfd3ecd4d432334df3368c4e6a81fac0abacece30",
+    "size_bytes": 20374848,
+    "mtime": "2026-06-30T05:19:23.038156+00:00",
+    "mtime_ns": 1782796763038155753,
+    "rust_build_profile": null,
+    "rust_build_profile_source": null
+  },
+  "configuration": {
+    "model": "Qwen/Qwen3-0.6B",
+    "depths": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "message_counts": {
+      "1": 2,
+      "2": 4,
+      "4": 8,
+      "8": 16,
+      "16": 32
+    },
+    "runs": 3,
+    "sessions": 384,
+    "concurrency": 128,
+    "frontends": 3,
+    "mockers": 4,
+    "l1_bytes": 67108864,
+    "request_rate": "inf",
+    "output_tokens": 16
+  }
+}

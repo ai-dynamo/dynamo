@@ -1,0 +1,317 @@
+{
+  "aiperf": {
+    "metrics": {
+      "records": {
+        "cancelled_profiling_records": 0,
+        "completed_profiling_records": 476,
+        "errored_profiling_records": 0,
+        "isl_tokens": {
+          "avg": 7641.327731092437,
+          "p50": 8192.0
+        },
+        "itl_ms": {
+          "p50": 0.0,
+          "p95": 0.0,
+          "p99": 0.1145736875
+        },
+        "malformed_records": 0,
+        "osl_tokens": {
+          "avg": 16.415966386554622,
+          "p50": 16.0
+        },
+        "records_path": "/home/biswaranjanp/dev/dynamo_main/bench/results/valkey-config-weka-20260707/campaign/20260707T100019Z/aiperf/profile_export.jsonl",
+        "request_latency_ms": {
+          "p50": 22.7030045,
+          "p95": 57.633872749999995,
+          "p99": 65.7770515
+        },
+        "request_throughput_rps": 686.7572617417089,
+        "ttft_ms": {
+          "p50": 22.7030045,
+          "p95": 57.633872749999995,
+          "p99": 65.7770515
+        },
+        "wall_seconds": 0.693112438
+      },
+      "summary": {
+        "error_request_count": null,
+        "error_summary": [],
+        "good_request_count": null,
+        "input_sequence_length": {
+          "avg": 7641.327731092437,
+          "count": 476,
+          "max": 8193.0,
+          "min": 384.0,
+          "p1": 448.0,
+          "p10": 8192.0,
+          "p25": 8192.0,
+          "p5": 640.0,
+          "p50": 8192.0,
+          "p75": 8192.0,
+          "p90": 8192.0,
+          "p95": 8192.25,
+          "p99": 8193.0,
+          "std": 1946.5463581751924,
+          "sum": 3637272.0,
+          "unit": "tokens"
+        },
+        "inter_token_latency": {
+          "avg": 0.003280787611294518,
+          "count": 476,
+          "max": 0.34619,
+          "min": 0.0,
+          "p1": 0.0,
+          "p10": 0.0,
+          "p25": 0.0,
+          "p5": 0.0,
+          "p50": 0.0,
+          "p75": 0.0,
+          "p90": 0.0,
+          "p95": 0.0,
+          "p99": 0.1145736875,
+          "std": 0.026346668780200207,
+          "sum": 1.5616549029761904,
+          "unit": "ms"
+        },
+        "output_sequence_length": {
+          "avg": 16.415966386554622,
+          "count": 476,
+          "max": 21.0,
+          "min": 13.0,
+          "p1": 15.0,
+          "p10": 16.0,
+          "p25": 16.0,
+          "p5": 16.0,
+          "p50": 16.0,
+          "p75": 17.0,
+          "p90": 17.0,
+          "p95": 18.0,
+          "p99": 19.0,
+          "std": 0.7800542098461539,
+          "sum": 7814.0,
+          "unit": "tokens"
+        },
+        "output_token_throughput": {
+          "avg": 11273.784124474189,
+          "unit": "tokens/sec"
+        },
+        "request_count": {
+          "avg": 476.0,
+          "unit": "requests"
+        },
+        "request_latency": {
+          "avg": 28.04632995588235,
+          "count": 476,
+          "max": 81.136696,
+          "min": 1.283971,
+          "p1": 2.055234,
+          "p10": 5.0774345,
+          "p25": 9.87652275,
+          "p5": 3.3764135,
+          "p50": 22.7030045,
+          "p75": 46.545836,
+          "p90": 52.781402,
+          "p95": 57.633872749999995,
+          "p99": 65.7770515,
+          "std": 19.573243698430254,
+          "sum": 13350.053059,
+          "unit": "ms"
+        },
+        "request_throughput": {
+          "avg": 686.7572617417089,
+          "unit": "requests/sec"
+        },
+        "summary_path": "/home/biswaranjanp/dev/dynamo_main/bench/results/valkey-config-weka-20260707/campaign/20260707T100019Z/aiperf/profile_export_aiperf.json",
+        "time_to_first_token": {
+          "avg": 27.995686722689076,
+          "count": 476,
+          "max": 81.136696,
+          "min": 1.222424,
+          "p1": 2.055234,
+          "p10": 4.9284345,
+          "p25": 9.87652275,
+          "p5": 3.06963725,
+          "p50": 22.7030045,
+          "p75": 46.545836,
+          "p90": 52.781402,
+          "p95": 57.633872749999995,
+          "p99": 65.7770515,
+          "std": 19.608453300159628,
+          "sum": 13325.94688,
+          "unit": "ms"
+        },
+        "total_isl": {
+          "avg": 3637272.0,
+          "unit": "tokens"
+        },
+        "total_osl": {
+          "avg": 7814.0,
+          "unit": "tokens"
+        }
+      }
+    },
+    "outcome": {
+      "elapsed_seconds": 9.989574736915529,
+      "fault_injection": {
+        "status": "not_requested"
+      },
+      "returncode": 0,
+      "timed_out": false,
+      "timeout_seconds": 600
+    }
+  },
+  "dataset": {
+    "derived_requests": 476,
+    "derived_sessions": 476,
+    "path": "/home/biswaranjanp/dev/dynamo_main/bench/results/valkey-config-weka-20260707/campaign/20260707T100019Z/weka-derived.jsonl",
+    "sha256": "d09127c37fb0f37ae547c97039bda764faafaeedec1c29ba76180f018044338b",
+    "source_dataset": "semianalysisai/cc-traces-weka-062126-256k",
+    "transformation": {
+      "derived_prompt_block_size": 512,
+      "max_isl": 8192,
+      "max_osl": 16,
+      "session_mode": "each row is an independent full-context request",
+      "source_block_size": 64
+    }
+  },
+  "finished_at": "2026-07-07T10:00:41.944043+00:00",
+  "index_key": "dynamo:kv-router:test-namespace-aynfxnzatb:component-mocker:scope-weka-json-690527:block-size-64",
+  "model": "Qwen/Qwen3-0.6B",
+  "provenance": {
+    "aiperf": {
+      "configured_path": "/home/biswaranjanp/dev/dynamo_main/dynamo/bin/aiperf",
+      "mtime": "2026-05-23T00:54:06.546603+00:00",
+      "mtime_ns": 1779497646546603350,
+      "resolved_path": "/home/biswaranjanp/dev/dynamo_main/dynamo/bin/aiperf",
+      "rust_build_profile": null,
+      "rust_build_profile_source": null,
+      "sha256": "16b5a1c0e7c8b950a20949b2e00ac253270ef3377ad7d1bbc8b3fb53dc01880b",
+      "size_bytes": 192
+    },
+    "dynkv_module": {
+      "configured_path": "/home/biswaranjanp/dev/dynamo_main/lib/kv-router/valkey-module/dynkv.so",
+      "mtime": "2026-06-30T15:13:24.198993+00:00",
+      "mtime_ns": 1782832404198993220,
+      "resolved_path": "/home/biswaranjanp/dev/dynamo_main/lib/kv-router/valkey-module/dynkv.so",
+      "rust_build_profile": null,
+      "rust_build_profile_source": null,
+      "sha256": "9b2b5e1b04d187b0a1b8d9aaa8d43e05208b3ac64eb18afb09302ab463e40308",
+      "size_bytes": 214264
+    },
+    "valkey_server": {
+      "configured_path": "/home/biswaranjanp/dev/valkey/src/valkey-server",
+      "mtime": "2026-06-30T05:19:23.038156+00:00",
+      "mtime_ns": 1782796763038155753,
+      "resolved_path": "/home/biswaranjanp/dev/valkey/src/valkey-server",
+      "rust_build_profile": null,
+      "rust_build_profile_source": null,
+      "sha256": "a1403acb569a79704021aebcfd3ecd4d432334df3368c4e6a81fac0abacece30",
+      "size_bytes": 20374848
+    }
+  },
+  "registered_worker_ranks": 4,
+  "router_valkey_config": {
+    "connection_pool_size": 16,
+    "index_scope": "weka-json-690527",
+    "required_replica_acks": 1,
+    "sentinel": {
+      "master_name": "dynamo-router-690527",
+      "quorum": 2,
+      "urls": [
+        "valkey://127.0.0.1:15078",
+        "valkey://127.0.0.1:15079",
+        "valkey://127.0.0.1:15080"
+      ]
+    },
+    "tokenizer_cache": {
+      "connection_pool_size": 16,
+      "enabled": true,
+      "l1_bytes": 16777216,
+      "max_pending_writes": 1024,
+      "scope": "weka-json-690527",
+      "sentinel_master_name": "dynamo-tokenizer-690527",
+      "timeout_ms": 100,
+      "ttl_seconds": 3600
+    },
+    "urls": [
+      "valkey://127.0.0.1:15074",
+      "valkey://127.0.0.1:15075"
+    ],
+    "worker_events": true
+  },
+  "sentinel_votes": {
+    "dynamo-router-690527": [
+      [
+        "127.0.0.1",
+        15074
+      ],
+      [
+        "127.0.0.1",
+        15074
+      ],
+      [
+        "127.0.0.1",
+        15074
+      ]
+    ],
+    "dynamo-tokenizer-690527": [
+      [
+        "127.0.0.1",
+        15076
+      ],
+      [
+        "127.0.0.1",
+        15076
+      ],
+      [
+        "127.0.0.1",
+        15076
+      ]
+    ]
+  },
+  "started_at": "2026-07-07T10:00:19.590563+00:00",
+  "status": "passed",
+  "tokenizer_cache_metric_delta": {
+    "dynamo_frontend_tokenizer_cache_hits_total": 361.0,
+    "dynamo_frontend_tokenizer_cache_l2_errors_total": 0.0,
+    "dynamo_frontend_tokenizer_cache_l2_hits_total": 25.0,
+    "dynamo_frontend_tokenizer_cache_l2_lookup_seconds_count": 115.0,
+    "dynamo_frontend_tokenizer_cache_l2_lookup_seconds_sum": 0.06122917799999999,
+    "dynamo_frontend_tokenizer_cache_l2_misses_total": 90.0,
+    "dynamo_frontend_tokenizer_cache_l2_write_drops_total": 0.0,
+    "dynamo_frontend_tokenizer_cache_l2_write_errors_total": 0.0,
+    "dynamo_frontend_tokenizer_cache_misses_total": 115.0
+  },
+  "topology": {
+    "frontend_ports": [
+      15071,
+      15072,
+      15073
+    ],
+    "frontends": 3,
+    "mockers": 4,
+    "router_valkey_nodes": 2,
+    "router_valkey_ports": [
+      15074,
+      15075
+    ],
+    "sentinel_ports": [
+      15078,
+      15079,
+      15080
+    ],
+    "shared_sentinels": 3,
+    "tokenizer_valkey_nodes": 2,
+    "tokenizer_valkey_ports": [
+      15076,
+      15077
+    ]
+  },
+  "valkey": {
+    "router_primary_dbsize": 1,
+    "router_replica_dbsize": 1,
+    "tokenizer_eviction_policy": "allkeys-lru",
+    "tokenizer_primary_dbsize": 18,
+    "tokenizer_replica_dbsize": 18
+  }
+}
