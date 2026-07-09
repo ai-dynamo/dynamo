@@ -204,8 +204,8 @@ cargo test -p dynamo-llm kv_router::publisher --lib
 git diff --check
 ```
 
-The focused publisher run passed 96 tests. Run the complete validation set in
-the final section before publishing or reviewing a later descendant.
+The focused publisher run passed 96 tests. The final local audit results are
+recorded below; rerun them before publishing or reviewing a later descendant.
 
 ### 5. Start discovery and event services
 
@@ -715,6 +715,31 @@ Do not call the deployment complete until all of these hold:
   transfer. The mocker result cannot satisfy this gate.
 - CPU requests/limits and node placement are recorded. Horizontal scaling must
   add CPU per frontend rather than divide one fixed CPU set among more Pods.
+
+## Final local validation
+
+The July 9, 2026 audit ran on the final 13-commit review stack:
+
+- `cargo fmt --all -- --check` and
+  `cargo clippy -p dynamo-llm --all-targets -- -D warnings` passed.
+- The loadable-module black-box suite passed against the local Valkey server.
+- The complete `dynamo-llm` library run passed 1,714 tests with six
+  environment-specific tests ignored. Both Valkey-dependent tokenizer tests
+  were then run separately against a disposable server and passed.
+- Focused Valkey indexer and publisher runs passed 44 and 96 tests. The
+  preprocessor integration run passed 15 tests with its live Valkey test
+  ignored, then that live test passed separately.
+- `dynamo-backend-common` passed 141 tests, `dynamo-mocker` passed 500 tests
+  with one known flaky test ignored, and the Python binding crate passed four
+  tests.
+- The Python configuration, startup, Sentinel, and benchmark-harness selection
+  passed 150 tests. The live router suite then passed four tests covering
+  registration-only DP ranks, routing and tokenizer failover, three-frontends,
+  and authoritative admission.
+- Ruff, JSON/YAML parsing, local Markdown-link checks, SVG parsing,
+  `git diff --check`, and all 13 Git signature and DCO checks passed.
+- The exact-tip performance campaign completed all 18 measured samples; every
+  Valkey topology registered 200/200 workers.
 
 ## Known follow-up work
 
