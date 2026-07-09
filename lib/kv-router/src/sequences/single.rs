@@ -134,16 +134,8 @@ impl ActiveSequences {
             active_prefills.is_subset(&active_requests),
             "prefill tracker cannot reference missing request state",
         );
-        assert!(
-            self.blocks.fractional_hashes_are_active(),
-            "fractional_blocks cannot reference non-active blocks",
-        );
-        assert!(
-            self.requests
-                .values()
-                .all(|state| self.blocks.contains_chain(&state.blocks)),
-            "request block chain cannot reference an unindexed block",
-        );
+        self.blocks
+            .assert_consistent(self.requests.values().map(|state| &state.blocks));
     }
 
     #[inline]
@@ -340,7 +332,7 @@ impl ActiveSequences {
     pub(super) fn active_prompt_hashes(&self) -> FxHashSet<SequenceHash> {
         self.requests
             .values()
-            .flat_map(|state| state.blocks.prompt_hashes())
+            .flat_map(|state| self.blocks.prompt_hashes(&state.blocks))
             .collect()
     }
 }
@@ -368,6 +360,22 @@ mod tests {
     fn active_sequences_remains_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ActiveSequences>();
+    }
+
+    #[test]
+    fn active_worker_teardown_with_a_live_long_chain_is_iterative() {
+        const DEPTH: usize = 65_536;
+        let mut sequences = ActiveSequences::new_without_expiry(1);
+        sequences.add_request_with_prefill_tracking(
+            "long-lived".to_string(),
+            Some((1..=DEPTH as u64).collect()),
+            None,
+            false,
+            None,
+            Instant::now(),
+        );
+
+        drop(sequences);
     }
 
     #[test]
