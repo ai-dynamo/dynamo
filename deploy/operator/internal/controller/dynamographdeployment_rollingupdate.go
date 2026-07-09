@@ -1058,7 +1058,7 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
 	rollingUpdateCtx dynamo.RollingUpdateContext,
 ) (map[string]nvidiacomv1beta1.ComponentReplicaStatus, error) {
 	oldStatuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus)
-	runtimeNamespaces := make(map[string]oldWorkerRuntimeNamespaceCandidate)
+	oldDCDsByComponent := make(map[string][]nvidiacomv1beta1.DynamoComponentDeployment)
 
 	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, rollingUpdateCtx.NewWorkerHash)
 	if err != nil {
@@ -1073,69 +1073,69 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
 		if dcd.Status.Component == nil {
 			continue
 		}
-		existing, found := oldStatuses[componentName]
-		if !found {
-			status := *dcd.Status.Component
-			status.ComponentNames = componentReplicaResourceNames(dcd.Status.Component, dcd.Name)
-			status.RuntimeNamespace = ""
-			oldStatuses[componentName] = status
-		} else {
-			// Accumulate across multiple old DCDs
-			existing.Replicas += dcd.Status.Component.Replicas
-			existing.ReadyReplicas = addOptionalInt32(existing.ReadyReplicas, dcd.Status.Component.ReadyReplicas)
-			existing.AvailableReplicas = addOptionalInt32(existing.AvailableReplicas, dcd.Status.Component.AvailableReplicas)
-			existing.ComponentNames = append(existing.ComponentNames, componentReplicaResourceNames(dcd.Status.Component, dcd.Name)...)
-			oldStatuses[componentName] = existing
-		}
-
-		if candidate, ok := oldWorkerRuntimeNamespaceCandidateForDCD(&dcd, rollingUpdateCtx.OldWorkerReplicaTargetsByDCD); ok {
-			current, found := runtimeNamespaces[componentName]
-			if !found || candidate.preferredOver(current) {
-				runtimeNamespaces[componentName] = candidate
-			}
-		}
+		oldDCDsByComponent[componentName] = append(oldDCDsByComponent[componentName], dcd)
 	}
 
-	for componentName, candidate := range runtimeNamespaces {
-		status := oldStatuses[componentName]
-		status.RuntimeNamespace = candidate.namespace
+	for componentName, dcds := range oldDCDsByComponent {
+		sortOldWorkerDCDsNewestFirst(dcds)
+		status := aggregateOldWorkerDCDStatuses(dcds)
+		status.RuntimeNamespace = selectOldWorkerRuntimeNamespace(
+			dcds,
+			rollingUpdateCtx.OldWorkerReplicaTargetsByDCD,
+		)
 		oldStatuses[componentName] = status
 	}
 
 	return oldStatuses, nil
 }
 
-type oldWorkerRuntimeNamespaceCandidate struct {
-	name      string
-	createdAt metav1.Time
-	namespace string
-	targeted  bool
+func sortOldWorkerDCDsNewestFirst(dcds []nvidiacomv1beta1.DynamoComponentDeployment) {
+	sort.Slice(dcds, func(i, j int) bool {
+		if dcds[i].CreationTimestamp.Time.Equal(dcds[j].CreationTimestamp.Time) {
+			return dcds[i].Name > dcds[j].Name
+		}
+		return dcds[i].CreationTimestamp.Time.After(dcds[j].CreationTimestamp.Time)
+	})
 }
 
-func oldWorkerRuntimeNamespaceCandidateForDCD(
-	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+func aggregateOldWorkerDCDStatuses(
+	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
+) nvidiacomv1beta1.ComponentReplicaStatus {
+	var status nvidiacomv1beta1.ComponentReplicaStatus
+	for i, dcd := range dcds {
+		componentStatus := dcd.Status.Component
+		if i == 0 {
+			status = *componentStatus
+			status.ComponentNames = componentReplicaResourceNames(componentStatus, dcd.Name)
+			status.RuntimeNamespace = ""
+			continue
+		}
+
+		status.Replicas += componentStatus.Replicas
+		status.ReadyReplicas = addOptionalInt32(status.ReadyReplicas, componentStatus.ReadyReplicas)
+		status.AvailableReplicas = addOptionalInt32(status.AvailableReplicas, componentStatus.AvailableReplicas)
+		status.ComponentNames = append(status.ComponentNames, componentReplicaResourceNames(componentStatus, dcd.Name)...)
+	}
+	return status
+}
+
+func selectOldWorkerRuntimeNamespace(
+	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
 	replicaTargets map[string]int32,
-) (oldWorkerRuntimeNamespaceCandidate, bool) {
-	if dcd == nil || dcd.Status.Component == nil || dcd.Status.Component.RuntimeNamespace == "" {
-		return oldWorkerRuntimeNamespaceCandidate{}, false
+) string {
+	fallback := ""
+	for _, dcd := range dcds {
+		if dcd.Status.Component == nil || dcd.Status.Component.RuntimeNamespace == "" {
+			continue
+		}
+		if fallback == "" {
+			fallback = dcd.Status.Component.RuntimeNamespace
+		}
+		if replicaTargets[dcd.Name] > 0 {
+			return dcd.Status.Component.RuntimeNamespace
+		}
 	}
-	target, hasTarget := replicaTargets[dcd.Name]
-	return oldWorkerRuntimeNamespaceCandidate{
-		name:      dcd.Name,
-		createdAt: dcd.CreationTimestamp,
-		namespace: dcd.Status.Component.RuntimeNamespace,
-		targeted:  len(replicaTargets) == 0 || (hasTarget && target > 0),
-	}, true
-}
-
-func (c oldWorkerRuntimeNamespaceCandidate) preferredOver(other oldWorkerRuntimeNamespaceCandidate) bool {
-	if c.targeted != other.targeted {
-		return c.targeted
-	}
-	if c.createdAt.Time.Equal(other.createdAt.Time) {
-		return c.name > other.name
-	}
-	return c.createdAt.Time.After(other.createdAt.Time)
+	return fallback
 }
 
 // resolveRollingUpdateParams reads the deployment strategy annotations from a component spec

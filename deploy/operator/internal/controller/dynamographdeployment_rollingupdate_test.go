@@ -1566,6 +1566,14 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 		assert.Equal(t, int32(2), statuses["worker"].Replicas)
 		assert.Equal(t, ptr.To(int32(2)), statuses["worker"].ReadyReplicas)
 		assert.Equal(t, "base-hashbbbb", statuses["worker"].RuntimeNamespace)
+
+		rollingUpdateCtx.OldWorkerReplicaTargetsByDCD = map[string]int32{
+			"test-dgd-worker-hashaaaa": 0,
+			"test-dgd-worker-hashbbbb": 0,
+		}
+		statuses, err = r.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
+		require.NoError(t, err)
+		assert.Equal(t, "base-hashbbbb", statuses["worker"].RuntimeNamespace)
 	})
 
 	t.Run("old DCD not found - skips gracefully", func(t *testing.T) {
