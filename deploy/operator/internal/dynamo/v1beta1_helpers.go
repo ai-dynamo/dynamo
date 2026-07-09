@@ -7,6 +7,7 @@ package dynamo
 
 import (
 	"encoding/json"
+	"errors"
 	"maps"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -15,6 +16,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+// CheckpointFailoverUnsupportedMessage explains why checkpoint/snapshot and
+// active/passive failover cannot be combined on one component. Admission and
+// reconciliation reuse it so the rejection reads the same everywhere.
+const CheckpointFailoverUnsupportedMessage = "checkpoint/snapshot is not supported with active/passive failover"
 
 // ComponentsByName returns the graph deployment components indexed by their
 // stable v1beta1 component name.
@@ -179,6 +185,17 @@ func GetCheckpoint(component *v1beta1.DynamoComponentDeploymentSharedSpec) *v1be
 		return checkpoint
 	}
 	return nil
+}
+
+// ValidateCheckpointFailoverCompatibility rejects the unsupported combination
+// before reconciliation can turn failover engines into restore targets.
+func ValidateCheckpointFailoverCompatibility(component *v1beta1.DynamoComponentDeploymentSharedSpec) error {
+	if GetCheckpoint(component) == nil ||
+		component.Experimental == nil ||
+		component.Experimental.Failover == nil {
+		return nil
+	}
+	return errors.New(CheckpointFailoverUnsupportedMessage)
 }
 
 // ToAlphaCheckpointConfig converts a v1beta1 checkpoint config into the

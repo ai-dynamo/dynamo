@@ -195,6 +195,11 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
+	if err = validateComponentCheckpointFailoverCompatibility(dynamoDeployment); err != nil {
+		reason = "unsupported_checkpoint_failover_configuration"
+		return ctrl.Result{}, err
+	}
+
 	if err = r.migrateCurrentWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
 		logger.Error(err, "Failed to migrate worker hash")
 		reason = "failed_to_migrate_worker_hash"
@@ -297,21 +302,47 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
 
 	// Override state based on rolling update status if a rolling update is in progress
-	if dynamoDeployment.Status.RollingUpdate != nil {
-		switch dynamoDeployment.Status.RollingUpdate.Phase {
-		case nvidiacomv1beta1.RollingUpdatePhaseCompleted:
-			// Keep the reconcileResult state (should be Ready if resources are ready)
-		case nvidiacomv1beta1.RollingUpdatePhasePending, nvidiacomv1beta1.RollingUpdatePhaseInProgress:
-			// Rolling update in progress - resources are being transitioned
-			if state != nvidiacomv1beta1.DGDStateFailed {
-				state = nvidiacomv1beta1.DGDStatePending
-				reason = "rolling_update_in_progress"
-				message = "Rolling update in progress"
-			}
-		}
-	}
+	state, reason, message = applyRollingUpdateStateOverride(dynamoDeployment, state, reason, message)
 
 	return ctrl.Result{}, nil
+}
+
+// applyRollingUpdateStateOverride keeps the DGD in a pending state while a
+// rolling update is still transitioning resources, without masking failures.
+func applyRollingUpdateStateOverride(
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	state nvidiacomv1beta1.DGDState,
+	reason Reason,
+	message Message,
+) (nvidiacomv1beta1.DGDState, Reason, Message) {
+	if dynamoDeployment.Status.RollingUpdate == nil {
+		return state, reason, message
+	}
+	switch dynamoDeployment.Status.RollingUpdate.Phase {
+	case nvidiacomv1beta1.RollingUpdatePhaseCompleted:
+		// Keep the reconcileResult state (should be Ready if resources are ready)
+	case nvidiacomv1beta1.RollingUpdatePhasePending, nvidiacomv1beta1.RollingUpdatePhaseInProgress:
+		// Rolling update in progress - resources are being transitioned
+		if state != nvidiacomv1beta1.DGDStateFailed {
+			state = nvidiacomv1beta1.DGDStatePending
+			reason = "rolling_update_in_progress"
+			message = "Rolling update in progress"
+		}
+	}
+	return state, reason, message
+}
+
+// validateComponentCheckpointFailoverCompatibility rejects DGDs that combine
+// checkpoint/snapshot with active/passive failover on any component. It backs
+// up the admission webhooks for objects that bypassed them.
+func validateComponentCheckpointFailoverCompatibility(dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
+	for i := range dynamoDeployment.Spec.Components {
+		component := &dynamoDeployment.Spec.Components[i]
+		if err := dynamo.ValidateCheckpointFailoverCompatibility(component); err != nil {
+			return fmt.Errorf("component %q: %w", component.ComponentName, err)
+		}
+	}
+	return nil
 }
 
 type Resource interface {
@@ -2103,9 +2134,6 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	}
 	var checkpointGMSClaimTemplateName string
 	if gmsSpec != nil && gmsSpec.Enabled {
-		if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gmsSpec); err != nil {
-			return nil, err
-		}
 		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
 		checkpointGMSGPUCount, err := dra.ExtractGPUCountFromResourceRequirements(targetContainer.Resources)
 		if err != nil {

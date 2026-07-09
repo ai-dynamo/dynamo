@@ -163,6 +163,12 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		return ctrl.Result{}, nil
 	}
 
+	if err = dynamo.ValidateCheckpointFailoverCompatibility(
+		&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+	); err != nil {
+		return ctrl.Result{}, fmt.Errorf("unsupported component configuration: %w", err)
+	}
+
 	if len(dynamoComponentDeployment.Status.Conditions) == 0 {
 		logs.Info("Starting to reconcile DynamoComponentDeployment")
 		logs.Info("Initializing DynamoComponentDeployment status")

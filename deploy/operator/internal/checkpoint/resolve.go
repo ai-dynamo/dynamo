@@ -92,9 +92,6 @@ func ResolveCheckpointForService(
 		if err != nil {
 			return nil, err
 		}
-		if err := validateResolvedGMSSnapshotGate(info); err != nil {
-			return nil, err
-		}
 		if config.TargetContainerName != "" {
 			info.RestoreTargetContainers = []string{config.TargetContainerName}
 		}
@@ -129,20 +126,10 @@ func ResolveCheckpointForService(
 	if err != nil {
 		return nil, err
 	}
-	if err := validateResolvedGMSSnapshotGate(info); err != nil {
-		return nil, err
-	}
 	info.Identity = config.Identity
 	if config.TargetContainerName != "" {
 		info.RestoreTargetContainers = []string{config.TargetContainerName}
 	}
 	info.StartupPolicy = startupPolicy
 	return info, nil
-}
-
-func validateResolvedGMSSnapshotGate(info *CheckpointInfo) error {
-	if info == nil {
-		return nil
-	}
-	return ValidateGMSSnapshotGate("checkpoint.gpuMemoryService", info.Enabled, info.GPUMemoryService)
 }

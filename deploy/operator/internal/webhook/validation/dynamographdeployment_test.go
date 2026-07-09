@@ -72,7 +72,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		mutateRequest func(*testing.T, map[string]any) // mutates the source-version request map
 		manager       ctrl.Manager                     // supplies webhook dependencies
 		groveDisabled bool                             // disables the configured Grove pathway
-		environment   map[string]string                // sets process environment for the case
 		userInfo      *authenticationv1.UserInfo       // supplies the admission request identity
 		operator      string                           // sets the configured operator principal
 
@@ -720,14 +719,57 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:        "GMS snapshot combination requires env gate",
-			environment: map[string]string{consts.DynamoOperatorAllowGMSSnapshotEnvVar: ""},
+			name: "GMS snapshot combination is allowed by default",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				enableBetaIntraPodGMS(worker)
 				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
 			}),
-			wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint: Forbidden: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate"},
+		},
+		{
+			name: "v1beta1 checkpoint with active-passive failover is rejected",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaContainerDiscovery(dgd)
+				worker := betaWorkerComponent(dgd)
+				enableBetaIntraPodGMS(worker)
+				worker.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
+					Mode: nvidiacomv1beta1.GMSModeIntraPod,
+				}
+				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].experimental.checkpoint: Forbidden: checkpoint/snapshot is not supported with active/passive failover",
+			},
+		},
+		{
+			name: "alpha GMS snapshot combination is allowed by default",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.Resources = &nvidiacomv1alpha1.Resources{
+					Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
+				}
+				worker.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				}
+				worker.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true}
+			}),
+		},
+		{
+			name: "v1alpha1 checkpoint with disabled failover configuration is accepted",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services["worker"]
+				worker.Resources = &nvidiacomv1alpha1.Resources{
+					Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
+				}
+				worker.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}
+				worker.Failover = &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    false,
+					Mode:       nvidiacomv1alpha1.GMSModeInterPod,
+					NumShadows: 2,
+				}
+				worker.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true}
+			}),
 		},
 
 		// Source-version compatibility rules.
@@ -1650,9 +1692,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for name, value := range tt.environment {
-				t.Setenv(name, value)
-			}
 			current := admissionUnstructured(t, tt.deployment)
 			if tt.mutateRequest != nil {
 				tt.mutateRequest(t, current)

@@ -25,9 +25,9 @@ import (
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -122,10 +122,9 @@ func (v *SharedSpecValidatorV1Alpha1) Validate(ctx context.Context) (admission.W
 	if err := v.validateFailover(); err != nil {
 		return nil, err
 	}
-	if err := v.validateSnapshotWithGPUMemoryService(); err != nil {
+	if err := v.validateCheckpointWithFailover(); err != nil {
 		return nil, err
 	}
-
 	if v.spec.Ingress != nil && v.spec.Ingress.Enabled {
 		if err := v.validateIngress(); err != nil {
 			return nil, err
@@ -438,11 +437,16 @@ func (v *SharedSpecValidatorV1Alpha1) validateFailover() error {
 	return errors.Join(errs...)
 }
 
-func (v *SharedSpecValidatorV1Alpha1) validateSnapshotWithGPUMemoryService() error {
-	return checkpoint.ValidateGMSSnapshotGate(
-		fmt.Sprintf("%s.checkpoint", v.fieldPath),
-		v.spec.Checkpoint != nil && v.spec.Checkpoint.Enabled,
-		v.spec.GPUMemoryService)
+func (v *SharedSpecValidatorV1Alpha1) validateCheckpointWithFailover() error {
+	if v.spec.Checkpoint == nil || !v.spec.Checkpoint.Enabled ||
+		v.spec.Failover == nil || !v.spec.Failover.Enabled {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s.checkpoint cannot be enabled with failover.enabled=true: %s",
+		v.fieldPath,
+		dynamo.CheckpointFailoverUnsupportedMessage,
+	)
 }
 
 // validateIngress validates the ingress configuration.
