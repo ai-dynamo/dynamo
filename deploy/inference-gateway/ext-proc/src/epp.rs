@@ -390,16 +390,20 @@ impl Router {
     ///
     /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary tier.
-    pub async fn route_decode(
+    async fn route_decode(
         &self,
-        tokens: &[u32],
-        is_disaggregated: bool,
-        cache_namespace: Option<String>,
-        priority_jump: f64,
-        strict_priority: u32,
-        allowed_worker_ids: Option<HashSet<u64>>,
-        routing_constraints: RoutingConstraints,
+        request: DecodeRouteRequest<'_>,
     ) -> Result<(WorkerWithDpRank, u32)> {
+        let DecodeRouteRequest {
+            tokens,
+            is_disaggregated,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            allowed_worker_ids,
+            routing_constraints,
+        } = request;
+
         if let Some(ref ids) = allowed_worker_ids {
             self.decode_router.register_workers(ids);
         }
@@ -524,6 +528,16 @@ struct TokenizeResult {
     strict_priority: u32,
     routing_constraints: RoutingConstraints,
     token_data_policy: TokenDataPolicy,
+}
+
+struct DecodeRouteRequest<'a> {
+    tokens: &'a [u32],
+    is_disaggregated: bool,
+    cache_namespace: Option<String>,
+    priority_jump: f64,
+    strict_priority: u32,
+    allowed_worker_ids: Option<HashSet<u64>>,
+    routing_constraints: RoutingConstraints,
 }
 
 #[derive(serde::Deserialize)]
@@ -1125,15 +1139,15 @@ impl EndpointPicker for Router {
         // booking ID independent of x-request-id, handle cancellation races, roll
         // back endpoint-resolution failures, and never forward to an unbooked fallback.
         let (decode_worker, _overlap) = self
-            .route_decode(
-                &tokens,
+            .route_decode(DecodeRouteRequest {
+                tokens: &tokens,
                 is_disaggregated,
-                cache_namespace.clone(),
+                cache_namespace: cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
                 routing_constraints,
-            )
+            })
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
