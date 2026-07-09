@@ -2880,8 +2880,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "1.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eda65fd29fa8fc5395fc9430155d68d67a7eef216415a152cbf85e9916aa0bbf"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=1cef80a2d789a0f1f43cbce78c6139ab89e0e30e#1cef80a2d789a0f1f43cbce78c6139ab89e0e30e"
 dependencies = [
  "aho-corasick",
  "anyhow",

@@ -197,3 +197,8 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Remove this override and bump the exact workspace dependency after
+# https://github.com/ai-dynamo/frontend-crates/pull/103 is released.
+[patch.crates-io]
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "1cef80a2d789a0f1f43cbce78c6139ab89e0e30e" }

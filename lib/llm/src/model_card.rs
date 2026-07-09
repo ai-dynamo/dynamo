@@ -1188,18 +1188,18 @@ impl ModelDeploymentCard {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
 
+                let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
-                    // Empty specials disable L1, so the wrapper bypasses cache observers.
-                    // The instrumentation helper still binds zero-valued per-model token
-                    // series, ready for future tiktoken special-token extraction.
                     tracing::info!(
                         cache_bytes,
-                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 is disabled until tiktoken special-token extraction is added)",
+                        cache_extend,
+                        boundaries = specials.len(),
+                        "wrapping tiktoken tokenizer in L1 prefix cache",
                     );
                     instrumented_tokenizer_cache(
                         raw,
-                        Vec::new(),
+                        specials,
                         cache_bytes,
                         cache_extend,
                         self.name(),
