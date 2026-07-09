@@ -70,13 +70,13 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:efec382c17b5090114ea8b2b7c8fc6678c5d1a74ce5be6676bf31082e0e44f36",
+      "baseline_digest": "sha256:22b2291f0d515dbffde9d9f2333d82051b72781149fb5c2664076224dd8c53de",
       "baseline_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
-      "baseline_sbom": "vllm-ci-test-repo@efec382c-amd64.cdx.json",
-      "baseline_tag": "ad7125a431e176d4161099480a66f0169609a690-xpu",
-      "from_digest": "sha256:efec382c17b5090114ea8b2b7c8fc6678c5d1a74ce5be6676bf31082e0e44f36",
+      "baseline_sbom": "vllm-ci-test-repo@22b2291f-amd64.cdx.json",
+      "baseline_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
+      "from_digest": "sha256:22b2291f0d515dbffde9d9f2333d82051b72781149fb5c2664076224dd8c53de",
       "from_image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo",
-      "from_tag": "ad7125a431e176d4161099480a66f0169609a690-xpu",
+      "from_tag": "ee0da84ab9e04ac7610e28580af62c365e898389-xpu",
       "platform": "linux/amd64"
     }
   ],
@@ -92,6 +92,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-06-25T10:20:19+00:00",
+  "generated_at": "2026-07-09T16:26:09+00:00",
   "schema_version": 2
 }
