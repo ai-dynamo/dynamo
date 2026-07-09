@@ -12,11 +12,10 @@
 //!
 //! This mirrors the HTTP fleet's EndpointSlice watch, but the target is the EPP's
 //! own Service (siblings), not a separate selector Service, and the peers are
-//! wired into the in-process service rather than remote replicas. Built only with
-//! the `selector-embedded` feature.
+//! wired into the in-process service rather than remote replicas.
 
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -33,13 +32,7 @@ const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 /// LIST before returning; the background task keeps syncing regardless.
 const INITIAL_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Backoff before re-establishing the EndpointSlice watch if its stream ends.
-const WATCH_RESTART_BACKOFF: Duration = Duration::from_secs(3);
-
-/// Shared handle to the current EndpointSlice reflector store. The watch task
-/// swaps in a fresh store when it re-establishes the watch, so the reconcile
-/// loop always reads the live snapshot.
-type SharedStore = Arc<StdMutex<kube::runtime::reflector::Store<EndpointSlice>>>;
+type Store = kube::runtime::reflector::Store<EndpointSlice>;
 
 /// Start the peer-discovery watch for the EPP's own `service_name` in
 /// `namespace`. Registers/deregisters replica-sync peers on `service` as sibling
@@ -51,9 +44,10 @@ pub async fn spawn(
     namespace: &str,
     service_name: &str,
     sync_port: u16,
-    self_ip: Option<String>,
+    self_ip: String,
     cancel: CancellationToken,
 ) -> Result<()> {
+    use futures::StreamExt;
     use kube::{Api, Client, runtime::reflector, runtime::watcher};
 
     let client = Client::try_default()
@@ -63,28 +57,43 @@ pub async fn spawn(
     let cfg_watch =
         watcher::Config::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
 
-    let initial_writer = reflector::store::Writer::default();
-    let store: SharedStore = Arc::new(StdMutex::new(initial_writer.as_reader()));
+    let writer = reflector::store::Writer::default();
+    let store = writer.as_reader();
+    let reflect = reflector::reflector(writer, watcher(slices, cfg_watch));
     let (changes_tx, changes_rx) = watch::channel(0u64);
 
     tracing::info!(
         %namespace,
         service = %service_name,
         sync_port,
-        self_ip = ?self_ip,
+        %self_ip,
         "Starting EPP peer EndpointSlice watch (embedded replication)"
     );
 
-    tokio::spawn(watch_loop(
-        slices,
-        cfg_watch,
-        initial_writer,
-        store.clone(),
-        changes_tx,
-        cancel.clone(),
-    ));
+    // EndpointSlice reflector stream -> bump the change generation. The watcher
+    // retries transient errors internally; the stream ends only on writer drop.
+    let cancel_watch = cancel.clone();
+    tokio::spawn(async move {
+        tokio::pin!(reflect);
+        let mut generation = 0u64;
+        loop {
+            tokio::select! {
+                _ = cancel_watch.cancelled() => return,
+                item = reflect.next() => match item {
+                    Some(_) => {
+                        generation = generation.wrapping_add(1);
+                        let _ = changes_tx.send(generation);
+                    }
+                    None => {
+                        tracing::warn!("EPP peer EndpointSlice reflector stream ended");
+                        return;
+                    }
+                },
+            }
+        }
+    });
 
-    let store_for_wait = store.lock().expect("store lock poisoned").clone();
+    let store_for_wait = store.clone();
     match tokio::time::timeout(INITIAL_LIST_TIMEOUT, store_for_wait.wait_until_ready()).await {
         Ok(Ok(())) => tracing::info!("EPP peer EndpointSlice initial LIST sync complete"),
         Ok(Err(e)) => {
@@ -107,15 +116,15 @@ pub async fn spawn(
 /// change channel closes.
 async fn reconcile_loop(
     service: Arc<SelectionService>,
-    store: SharedStore,
+    store: Store,
     sync_port: u16,
-    self_ip: Option<String>,
+    self_ip: String,
     mut changes_rx: watch::Receiver<u64>,
     cancel: CancellationToken,
 ) {
     let mut known: BTreeSet<String> = BTreeSet::new();
     loop {
-        reconcile_once(&service, &store, sync_port, self_ip.as_deref(), &mut known).await;
+        reconcile_once(&service, &store, sync_port, &self_ip, &mut known).await;
         tokio::select! {
             _ = cancel.cancelled() => break,
             changed = changes_rx.changed() => {
@@ -129,9 +138,9 @@ async fn reconcile_loop(
 
 async fn reconcile_once(
     service: &SelectionService,
-    store: &SharedStore,
+    store: &Store,
     sync_port: u16,
-    self_ip: Option<&str>,
+    self_ip: &str,
     known: &mut BTreeSet<String>,
 ) {
     let live = live_peer_ips(store, self_ip);
@@ -156,75 +165,16 @@ async fn reconcile_once(
     *known = live;
 }
 
-/// Live sibling EPP IPs from the current EndpointSlice snapshot, excluding this
-/// pod's own IP so a replica never registers itself as a peer.
-fn live_peer_ips(store: &SharedStore, self_ip: Option<&str>) -> BTreeSet<String> {
-    let snapshot = store.lock().expect("store lock poisoned").clone();
-    let mut ips = ready_ips(snapshot.state().iter().map(|s| s.as_ref()));
-    if let Some(me) = self_ip {
-        ips.remove(me);
-    }
+/// Live sibling EPP IPs from the current EndpointSlice snapshot, restricted to
+/// `self_ip`'s address family and excluding this pod's own IP. Restricting to a
+/// single family means a dual-stack sibling — which appears in both an IPv4 and
+/// an IPv6 slice — is registered exactly once. Registering both would open two
+/// ZMQ connections to the same peer and double-count its load.
+fn live_peer_ips(store: &Store, self_ip: &str) -> BTreeSet<String> {
+    let want_ipv6 = is_ipv6(self_ip);
+    let mut ips = peer_ips(store.state().iter().map(|s| s.as_ref()), want_ipv6);
+    ips.remove(self_ip);
     ips
-}
-
-/// Long-lived EndpointSlice watch. If the reflector stream ends (writer dropped
-/// / fatal — transient errors are retried inside the watcher), swap in a fresh
-/// store and re-establish after a backoff so discovery never gets stuck on a
-/// stale snapshot. Stops when `cancel` fires.
-async fn watch_loop(
-    slices: kube::Api<EndpointSlice>,
-    cfg_watch: kube::runtime::watcher::Config,
-    initial_writer: kube::runtime::reflector::store::Writer<EndpointSlice>,
-    store: SharedStore,
-    changes_tx: watch::Sender<u64>,
-    cancel: CancellationToken,
-) {
-    use futures::StreamExt;
-    use kube::runtime::{reflector, watcher};
-
-    let mut writer = Some(initial_writer);
-    let mut generation = 0u64;
-    loop {
-        if cancel.is_cancelled() {
-            return;
-        }
-        // First pass reuses the initial writer (already published to `store`);
-        // later passes create and publish a fresh one.
-        let writer = match writer.take() {
-            Some(w) => w,
-            None => {
-                let w = reflector::store::Writer::default();
-                *store.lock().expect("store lock poisoned") = w.as_reader();
-                w
-            }
-        };
-
-        let reflect = reflector::reflector(writer, watcher(slices.clone(), cfg_watch.clone()));
-        tokio::pin!(reflect);
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                item = reflect.next() => {
-                    if item.is_none() {
-                        break;
-                    }
-                    generation = generation.wrapping_add(1);
-                    let _ = changes_tx.send(generation);
-                }
-            }
-        }
-
-        tracing::warn!(
-            "EPP peer EndpointSlice reflector stream ended; re-establishing the watch in {}s",
-            WATCH_RESTART_BACKOFF.as_secs()
-        );
-        tokio::select! {
-            _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(WATCH_RESTART_BACKOFF) => {}
-        }
-        generation = generation.wrapping_add(1);
-        let _ = changes_tx.send(generation);
-    }
 }
 
 /// Format `host:port`, bracketing IPv6 literals (`fd00::1` -> `[fd00::1]`) so the
@@ -237,13 +187,23 @@ fn authority(ip: &str, port: u16) -> String {
     }
 }
 
-/// Collect non-terminating endpoint IPs from a set of EndpointSlices. Not-ready
-/// endpoints are kept: registering a peer whose ZMQ socket is not up yet is
-/// harmless (the sync connect retries), and it avoids missing a sibling that is
-/// still starting. Pure function.
-fn ready_ips<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> BTreeSet<String> {
+fn is_ipv6(ip: &str) -> bool {
+    ip.contains(':')
+}
+
+/// Collect non-terminating endpoint IPs of the requested address family from a
+/// set of EndpointSlices. Not-ready endpoints are kept: registering a peer whose
+/// ZMQ socket is not up yet is harmless (the sync connect retries), and it avoids
+/// missing a sibling that is still starting. Pure function.
+fn peer_ips<'a>(
+    slices: impl Iterator<Item = &'a EndpointSlice>,
+    want_ipv6: bool,
+) -> BTreeSet<String> {
     let mut ips = BTreeSet::new();
     for slice in slices {
+        if slice.address_type.eq_ignore_ascii_case("IPv6") != want_ipv6 {
+            continue;
+        }
         for endpoint in &slice.endpoints {
             if endpoint
                 .conditions
@@ -268,9 +228,9 @@ mod tests {
     use super::*;
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
 
-    fn slice_with(ips: &[&str], terminating: bool) -> EndpointSlice {
+    fn slice_with(ips: &[&str], terminating: bool, address_type: &str) -> EndpointSlice {
         EndpointSlice {
-            address_type: "IPv4".to_string(),
+            address_type: address_type.to_string(),
             endpoints: ips
                 .iter()
                 .map(|ip| Endpoint {
@@ -287,17 +247,34 @@ mod tests {
     }
 
     #[test]
-    fn ready_ips_keeps_non_terminating() {
-        let slices = [slice_with(&["10.0.0.1", "10.0.0.2"], false)];
-        let ips = ready_ips(slices.iter());
+    fn peer_ips_keeps_non_terminating() {
+        let slices = [slice_with(&["10.0.0.1", "10.0.0.2"], false, "IPv4")];
+        let ips = peer_ips(slices.iter(), false);
         assert!(ips.contains("10.0.0.1"));
         assert!(ips.contains("10.0.0.2"));
     }
 
     #[test]
-    fn ready_ips_drops_terminating() {
-        let slices = [slice_with(&["10.0.0.9"], true)];
-        assert!(ready_ips(slices.iter()).is_empty());
+    fn peer_ips_drops_terminating() {
+        let slices = [slice_with(&["10.0.0.9"], true, "IPv4")];
+        assert!(peer_ips(slices.iter(), false).is_empty());
+    }
+
+    #[test]
+    fn peer_ips_filters_by_address_family() {
+        // A dual-stack sibling is present in both an IPv4 and an IPv6 slice; only
+        // the family matching our own IP is kept, so it is registered once.
+        let slices = [
+            slice_with(&["10.0.0.1"], false, "IPv4"),
+            slice_with(&["fd00::1"], false, "IPv6"),
+        ];
+        let v4 = peer_ips(slices.iter(), false);
+        assert_eq!(v4.len(), 1);
+        assert!(v4.contains("10.0.0.1"));
+
+        let v6 = peer_ips(slices.iter(), true);
+        assert_eq!(v6.len(), 1);
+        assert!(v6.contains("fd00::1"));
     }
 
     #[test]
