@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -179,14 +178,7 @@ pub struct PreprocessedRequest {
     /// must not mutate this payload before the worker adapter consumes it.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generate_request: Option<crate::protocols::inference::generate::GenerateRequest>,
-
-    /// Sampling keys present in the original JSON body, including keys whose
-    /// value was explicitly null. This preserves vLLM's defaulting semantics
-    /// across the serialized worker boundary.
-    #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub generate_sampling_fields: Option<BTreeSet<String>>,
+    pub generate_request: Option<crate::protocols::inference::generate::GenerateWorkerRequest>,
 
     /// Base64-encoded PyTorch tensor containing pre-computed embeddings
     /// If provided, this takes precedence over token_ids for inference

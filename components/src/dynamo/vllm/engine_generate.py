@@ -1,9 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """vLLM request adaptation for Dynamo's engine-native generate API."""
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
 from vllm.inputs import TokensPrompt, mm_input
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
@@ -19,7 +21,10 @@ from vllm.sampling_params import (
 
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 
-from .response_adapters import EngineGenerateResponseAdapter, serialize_vllm_routed_experts
+from .response_adapters import (
+    EngineGenerateResponseAdapter,
+    serialize_vllm_routed_experts,
+)
 
 
 @dataclass(frozen=True)
@@ -50,7 +55,9 @@ class EngineGenerateRequest:
         )
 
     def priority(self, routing: Dict[str, Any]) -> int:
-        return int(routing.get("priority", 0))
+        return int(
+            self.generate_request.get("priority", -int(routing.get("priority", 0)))
+        )
 
     def response_adapter(self) -> EngineGenerateResponseAdapter:
         return EngineGenerateResponseAdapter()
@@ -66,7 +73,12 @@ def payload(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def priority(request: Dict[str, Any], routing: Dict[str, Any]) -> int:
     value = int(routing.get("priority", 0))
-    return value if payload(request) is not None else -value
+    generate_request = payload(request)
+    return (
+        int(generate_request.get("priority", -value))
+        if generate_request is not None
+        else -value
+    )
 
 
 def merge_kv_transfer_params(caller: Any, framework: Any) -> Dict[str, Any] | Any:
@@ -118,6 +130,11 @@ def _build_prompt(request: Dict[str, Any], generate_request: Dict[str, Any]) -> 
     }
     mm_kwargs: Dict[str, list[MultiModalKwargsItem | None]] = {}
     if isinstance(kwargs_data, dict):
+        # This helper is only present in full vLLM serving installations. Keep
+        # the import on the multimodal kwargs path so importing Dynamo's vLLM
+        # handlers does not break lightweight tooling and unit-test collection.
+        from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
+
         for modality, items in kwargs_data.items():
             mm_kwargs[modality] = [
                 decode_mm_kwargs_item(item) if item is not None else None

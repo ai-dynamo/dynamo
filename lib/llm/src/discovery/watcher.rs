@@ -37,7 +37,9 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{EncoderRouter, PrefillRouter},
-    local_model::runtime_config::{TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY},
+    local_model::runtime_config::{
+        ENGINE_GENERATE_CAPABILITY, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -139,13 +141,21 @@ fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
             .any(|worker_type| *worker_type == WorkerType::Encode)
 }
 
-fn supports_vllm_generate(card: &ModelDeploymentCard) -> bool {
-    matches!(
-        card.runtime_config
-            .runtime_data
-            .get(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
-        Some(serde_json::Value::Bool(true))
-    )
+fn supports_engine_generate(card: &ModelDeploymentCard) -> bool {
+    match card
+        .runtime_config
+        .runtime_data
+        .get(ENGINE_GENERATE_CAPABILITY)
+    {
+        Some(serde_json::Value::Bool(supported)) => *supported,
+        Some(_) => false,
+        None => matches!(
+            card.runtime_config
+                .runtime_data
+                .get(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+            Some(serde_json::Value::Bool(true))
+        ),
+    }
 }
 
 const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
@@ -1503,8 +1513,9 @@ impl ModelWatcher {
             // opt-in token-native generate pipeline will exist.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
+            let needs_generate_pipeline = self.enable_engine_apis && supports_engine_generate(card);
             let needs_preprocessed_routing =
-                needs_factory_chat_pipeline || tokenizer.is_some() || self.enable_engine_apis;
+                needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
             // Create the KV router whenever any routed pipeline will be built.
             // Python chat factories receive a Rust-routed engine, so they also
@@ -1626,7 +1637,7 @@ impl ModelWatcher {
                 None
             };
 
-            if self.enable_engine_apis {
+            if needs_generate_pipeline {
                 // Token-native generation needs no tokenizer or chat processor
                 // and shares the normal model manager, KV router, and P/D path.
                 let routing = preprocessed_routing.as_ref().ok_or_else(|| {
@@ -1685,7 +1696,7 @@ impl ModelWatcher {
                             )
                             .context("PreprocessedRouting::build_pipeline")?,
                         )
-                } else if self.enable_engine_apis {
+                } else if needs_generate_pipeline {
                     tracing::warn!(
                         "Skipping chat engine: no supported Rust tokenizer or chat_engine_factory; Generate remains available"
                     );
@@ -2015,20 +2026,28 @@ mod tests {
     use crate::model_card::ModelDeploymentCard;
 
     #[test]
-    fn vllm_generate_requires_explicit_worker_capability() {
+    fn engine_generate_requires_explicit_worker_capability() {
         let mut card = ModelDeploymentCard::with_name_only("model");
         card.model_type = ModelType::Chat | ModelType::Completions;
-        assert!(!supports_vllm_generate(&card));
+        assert!(!supports_engine_generate(&card));
 
+        card.runtime_config
+            .set_engine_specific(ENGINE_GENERATE_CAPABILITY, true)
+            .unwrap();
+        assert!(supports_engine_generate(&card));
+
+        card.runtime_config
+            .set_engine_specific(ENGINE_GENERATE_CAPABILITY, false)
+            .unwrap();
+        assert!(!supports_engine_generate(&card));
+
+        card.runtime_config
+            .runtime_data
+            .remove(ENGINE_GENERATE_CAPABILITY);
         card.runtime_config
             .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
             .unwrap();
-        assert!(supports_vllm_generate(&card));
-
-        card.runtime_config
-            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, false)
-            .unwrap();
-        assert!(!supports_vllm_generate(&card));
+        assert!(supports_engine_generate(&card));
     }
 
     #[test]

@@ -47,6 +47,15 @@ pub enum StructuralTagScope {
 
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
 
+/// Worker-advertised support for the engine-native Generate request contract.
+/// Frontends must gate the route-to-worker pipeline on this capability during
+/// rolling upgrades so a request never lands on a worker that cannot decode it.
+pub const ENGINE_GENERATE_CAPABILITY: &str = "engine_generate";
+
+/// Deprecated capability name used by the original vLLM-specific Generate API.
+/// Keep accepting and advertising it while old frontends and workers coexist.
+pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

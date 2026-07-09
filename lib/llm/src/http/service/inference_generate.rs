@@ -6,11 +6,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use axum::response::{IntoResponse, sse::Event, sse::KeepAlive, sse::Sse};
-use axum::{Json, Router, extract::State, http::HeaderMap, middleware, routing::post};
+use axum::body::{Body, to_bytes};
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response, sse::Event, sse::KeepAlive, sse::Sse};
+use axum::{Json, Router, middleware, routing::post};
 use dynamo_protocols::types::CompletionUsage;
-use dynamo_runtime::pipeline::AsyncEngineContextProvider;
+use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider};
 use futures::StreamExt;
+use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::{create_connection_monitor, monitor_for_disconnects};
@@ -26,9 +31,9 @@ use crate::protocols::common::FinishReason;
 use crate::protocols::common::extensions::HEADER_DATA_PARALLEL_RANK_ALIAS;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, TopLogprob};
 use crate::protocols::inference::generate::{
-    GENERATE_DP_RANK_CONTEXT_KEY, GENERATE_PATH, GenerateChoiceLogprobs, GenerateProtocolError,
-    GenerateRequest, GenerateResponse, GenerateResponseChoice, GenerateStreamResponse,
-    GenerateStreamResponseChoice, GenerateTokenLogprob, GenerateTopLogprob,
+    GENERATE_DP_RANK_CONTEXT_KEY, GENERATE_PATH, GenerateChoiceLogprobs, GenerateLogprob,
+    GenerateProtocolError, GenerateRequest, GenerateResponse, GenerateResponseChoice,
+    GenerateStreamResponse, GenerateStreamResponseChoice, GenerateTokenLogprob, GenerateTopLogprob,
 };
 
 pub(super) fn router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
@@ -37,6 +42,7 @@ pub(super) fn router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
         .route(GENERATE_PATH, post(handler))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .layer(middleware::from_fn(vllm_error_envelope_middleware))
         .with_state(state);
     (vec![doc], router)
 }
@@ -44,8 +50,18 @@ pub(super) fn router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
 async fn handler(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<GenerateRequest>,
-) -> Result<axum::response::Response, ErrorResponse> {
+    Json(request): Json<GenerateRequest>,
+) -> Response {
+    handle_generate(state, headers, request)
+        .await
+        .unwrap_or_else(vllm_error_response)
+}
+
+async fn handle_generate(
+    state: Arc<service_v2::State>,
+    headers: HeaderMap,
+    mut request: GenerateRequest,
+) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
     request.validate().map_err(protocol_error)?;
 
@@ -95,12 +111,12 @@ async fn handler(
             continuous_usage,
             stream_handle,
         )
-        .await?;
+        .await;
         connection_handle.disarm();
-        return Ok(response);
+        return response;
     }
 
-    let response = tokio::spawn(
+    let response = match tokio::spawn(
         generate_unary(
             state,
             request,
@@ -113,14 +129,111 @@ async fn handler(
         .in_current_span(),
     )
     .await
-    .map_err(|error| {
-        ErrorMessage::internal_server_error_with_details(
+    {
+        Ok(response) => response,
+        Err(error) => Err(ErrorMessage::internal_server_error_with_details(
             "Failed to await token generation task",
             format!("{error:?}"),
-        )
-    })??;
+        )),
+    };
     connection_handle.disarm();
+    let response = response?;
     Ok(Json(response).into_response())
+}
+
+#[derive(Serialize)]
+struct VllmErrorEnvelope {
+    error: VllmErrorBody,
+}
+
+#[derive(Serialize)]
+struct VllmErrorBody {
+    message: String,
+    #[serde(rename = "type")]
+    error_type: &'static str,
+    code: u16,
+}
+
+fn vllm_error_type(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "invalid_request_error",
+        404 => "not_found",
+        499 => "request_cancelled",
+        500 => "internal_error",
+        501 => "not_implemented",
+        503 => "service_unavailable",
+        429 | 529 => "overloaded",
+        _ if status.is_client_error() => "invalid_request_error",
+        _ => "internal_error",
+    }
+}
+
+fn vllm_error_body(status: StatusCode, message: String) -> Response {
+    (
+        status,
+        Json(VllmErrorEnvelope {
+            error: VllmErrorBody {
+                message,
+                error_type: vllm_error_type(status),
+                code: status.as_u16(),
+            },
+        }),
+    )
+        .into_response()
+}
+
+fn vllm_error_response((status, Json(error)): ErrorResponse) -> Response {
+    let message = serde_json::to_value(error)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "Internal server error".to_string());
+    vllm_error_body(status, message)
+}
+
+async fn vllm_error_envelope_middleware(request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    if !response.status().is_client_error() && !response.status().is_server_error() {
+        return response;
+    }
+
+    let status = response.status();
+    let (mut parts, body) = response.into_parts();
+    let bytes = match to_bytes(body, get_body_limit()).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(%error, "failed to read generate error response body");
+            return vllm_error_body(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            );
+        }
+    };
+    if serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .is_some_and(|value| value.get("error").is_some())
+    {
+        parts.headers.remove(header::CONTENT_LENGTH);
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    let message = if status == StatusCode::INTERNAL_SERVER_ERROR {
+        "Internal server error".to_string()
+    } else {
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned())
+    };
+    vllm_error_body(status, message)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -237,6 +350,28 @@ fn stream_error(error: GenerateProtocolError) -> axum::Error {
     axum::Error::new(std::io::Error::other(error.to_string()))
 }
 
+async fn run_until_killed<T>(
+    context: &dyn AsyncEngineContext,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+
+        // Keep an ownership-bearing result when completion races with a kill.
+        // Callers re-check both contexts before consuming the result.
+        result = &mut operation => Some(result),
+        _ = context.killed() => None,
+    }
+}
+
+fn cancelled_error() -> ErrorResponse {
+    ErrorMessage::from_http_error(HttpError {
+        code: 499,
+        message: "request was cancelled".to_string(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn generate_unary(
     state: Arc<service_v2::State>,
@@ -247,8 +382,9 @@ async fn generate_unary(
     require_logprobs: bool,
     _stream_handle: super::disconnect::ConnectionHandle,
 ) -> Result<GenerateResponse, ErrorResponse> {
+    let request_context = request.context();
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        state.manager().metric_model_for(&model),
         Endpoint::InferenceGenerate,
         false,
         &request_id,
@@ -264,18 +400,66 @@ async fn generate_unary(
             });
             response
         })?;
-    let mut stream = engine.generate(request).await.map_err(|error| {
-        let response = ErrorMessage::from_anyhow(error, "Failed to generate tokens");
-        inflight.mark_error(ErrorType::Internal);
-        response
-    })?;
-    let context = stream.context();
+    let generate_result =
+        match run_until_killed(request_context.as_ref(), engine.generate(request)).await {
+            Some(result) => result,
+            None => {
+                inflight.mark_error(ErrorType::Cancelled);
+                return Err(cancelled_error());
+            }
+        };
+    if request_context.is_killed() {
+        inflight.mark_error(ErrorType::Cancelled);
+        return Err(cancelled_error());
+    }
+    let mut stream = match generate_result {
+        Ok(stream) => stream,
+        Err(error) => {
+            let was_cancelled = request_context.is_killed()
+                || super::metrics::request_was_cancelled(error.as_ref());
+            inflight.mark_error(if was_cancelled {
+                ErrorType::Cancelled
+            } else {
+                ErrorType::Internal
+            });
+            if was_cancelled {
+                return Err(cancelled_error());
+            }
+            return Err(ErrorMessage::from_anyhow(
+                error,
+                "Failed to generate tokens",
+            ));
+        }
+    };
+    let engine_context = stream.context();
     let mut accumulator =
         GenerateAccumulator::new(request_id, expected_choices as usize, require_logprobs);
 
-    while let Some(mut event) = stream.next().await {
+    loop {
+        let next = match run_until_killed(request_context.as_ref(), stream.next()).await {
+            Some(next) => next,
+            None => {
+                inflight.mark_error(ErrorType::Cancelled);
+                return Err(cancelled_error());
+            }
+        };
+        if request_context.is_killed() || engine_context.is_killed() {
+            inflight.mark_error(ErrorType::Cancelled);
+            return Err(cancelled_error());
+        }
+        let Some(mut event) = next else {
+            break;
+        };
         if let Some(error) = event.error.take() {
-            inflight.mark_error(ErrorType::Internal);
+            let was_cancelled = super::metrics::request_was_cancelled(&error);
+            inflight.mark_error(if was_cancelled {
+                ErrorType::Cancelled
+            } else {
+                ErrorType::Internal
+            });
+            if was_cancelled {
+                return Err(cancelled_error());
+            }
             return Err(ErrorMessage::from_anyhow(
                 anyhow::Error::new(error),
                 "Token generation failed",
@@ -294,6 +478,10 @@ async fn generate_unary(
             ));
         }
         if let Some(output) = event.data.take() {
+            if matches!(output.finish_reason.as_ref(), Some(FinishReason::Cancelled)) {
+                inflight.mark_error(ErrorType::Cancelled);
+                return Err(cancelled_error());
+            }
             accumulator.push(output).map_err(|error| {
                 inflight.mark_error(ErrorType::Internal);
                 protocol_error(error)
@@ -301,14 +489,15 @@ async fn generate_unary(
         }
     }
 
+    if request_context.is_killed() || engine_context.is_killed() {
+        inflight.mark_error(ErrorType::Cancelled);
+        return Err(cancelled_error());
+    }
     let response = accumulator.finish().map_err(|error| {
         inflight.mark_error(ErrorType::Internal);
         protocol_error(error)
     })?;
     inflight.mark_ok();
-    if context.is_killed() {
-        inflight.mark_error(ErrorType::Cancelled);
-    }
     Ok(response)
 }
 
@@ -569,7 +758,8 @@ impl GenerateAccumulator {
         choice.token_ids.extend(output.token_ids);
 
         if let Some(metadata) = output.generate_metadata {
-            if let Some(prompt_logprobs) = metadata.prompt_logprobs {
+            if let Some(mut prompt_logprobs) = metadata.prompt_logprobs {
+                normalize_prompt_logprobs(&mut prompt_logprobs);
                 if self
                     .prompt_logprobs
                     .as_ref()
@@ -635,25 +825,67 @@ impl GenerateAccumulator {
     }
 }
 
+fn clamp_vllm_logprob(logprob: f64) -> f32 {
+    let logprob = logprob as f32;
+    if logprob.is_finite() {
+        logprob.max(-9999.0)
+    } else {
+        -9999.0
+    }
+}
+
+fn token_bytes(token: &str, backend_bytes: Option<&Vec<u8>>) -> Option<Vec<u8>> {
+    backend_bytes
+        .cloned()
+        .or_else(|| (!token.is_empty()).then(|| token.as_bytes().to_vec()))
+}
+
 fn build_token_logprob(token_id: u32, selected: f64, top: &[TopLogprob]) -> GenerateTokenLogprob {
     let selected_candidate = top.iter().find(|candidate| candidate.token_id == token_id);
+    let token = selected_candidate
+        .and_then(|candidate| candidate.token.clone())
+        .unwrap_or_else(|| format!("token_id:{token_id}"));
+    let bytes = token_bytes(
+        &token,
+        selected_candidate.and_then(|candidate| candidate.bytes.as_ref()),
+    );
+    let selected = clamp_vllm_logprob(selected);
+    let mut top_logprobs = top
+        .iter()
+        .map(|candidate| {
+            let token = candidate
+                .token
+                .clone()
+                .unwrap_or_else(|| format!("token_id:{}", candidate.token_id));
+            GenerateTopLogprob {
+                bytes: token_bytes(&token, candidate.bytes.as_ref()),
+                token,
+                logprob: clamp_vllm_logprob(candidate.logprob),
+            }
+        })
+        .collect::<Vec<_>>();
+    if selected_candidate.is_none() {
+        top_logprobs.push(GenerateTopLogprob {
+            token: token.clone(),
+            logprob: selected,
+            bytes: bytes.clone(),
+        });
+    }
     GenerateTokenLogprob {
-        token: selected_candidate
-            .and_then(|candidate| candidate.token.clone())
-            .unwrap_or_else(|| format!("token_id:{token_id}")),
-        logprob: selected as f32,
-        bytes: selected_candidate.and_then(|candidate| candidate.bytes.clone()),
-        top_logprobs: top
-            .iter()
-            .map(|candidate| GenerateTopLogprob {
-                token: candidate
-                    .token
-                    .clone()
-                    .unwrap_or_else(|| format!("token_id:{}", candidate.token_id)),
-                logprob: candidate.logprob as f32,
-                bytes: candidate.bytes.clone(),
-            })
-            .collect(),
+        token,
+        logprob: selected,
+        bytes,
+        top_logprobs,
+    }
+}
+
+fn normalize_prompt_logprobs(
+    prompt_logprobs: &mut [Option<std::collections::HashMap<u32, GenerateLogprob>>],
+) {
+    for entries in prompt_logprobs.iter_mut().flatten() {
+        for entry in entries.values_mut() {
+            entry.logprob = clamp_vllm_logprob(f64::from(entry.logprob));
+        }
     }
 }
 
@@ -662,7 +894,7 @@ fn public_finish_reason(reason: FinishReason) -> Result<String, GenerateProtocol
         FinishReason::EoS | FinishReason::Stop => Ok("stop".to_string()),
         FinishReason::Length => Ok("length".to_string()),
         FinishReason::ContentFilter => Ok("content_filter".to_string()),
-        FinishReason::Cancelled => Ok("stop".to_string()),
+        FinishReason::Cancelled => Err(invalid_response("backend generation was cancelled")),
         FinishReason::Error(message) => Err(invalid_response(format!(
             "backend generation failed: {message}"
         ))),

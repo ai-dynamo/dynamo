@@ -94,6 +94,35 @@ impl<'de> Deserialize<'de> for GenerateRequest {
     }
 }
 
+/// Owned request payload sent to backend workers.
+///
+/// Prompt tokens deliberately live only in [`PreprocessedRequest::token_ids`]
+/// so routing and backend dispatch share one allocation and one wire field.
+/// Sampling parameters use their original field-presence set to preserve the
+/// distinction between an omitted value and an explicitly supplied `null`.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct GenerateWorkerRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<MultiModalFeatures>,
+    pub sampling_params: Map<String, Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_salt: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub priority: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_params: Option<Map<String, Value>>,
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
+}
+
 impl GenerateRequest {
     pub fn provided_sampling_fields(&self) -> &BTreeSet<String> {
         &self.provided_sampling_fields
@@ -101,6 +130,48 @@ impl GenerateRequest {
 
     pub fn is_sampling_param_provided(&self, name: &str) -> bool {
         self.provided_sampling_fields.contains(name)
+    }
+
+    /// Split the public request into the canonical prompt-token allocation and
+    /// the backend-owned envelope that accompanies it.
+    pub fn into_worker_parts(self) -> serde_json::Result<(Vec<u32>, GenerateWorkerRequest)> {
+        let Self {
+            request_id,
+            model,
+            token_ids,
+            features,
+            sampling_params,
+            stream,
+            stream_options,
+            cache_salt,
+            priority,
+            kv_transfer_params,
+            other,
+            provided_sampling_fields,
+        } = self;
+        let mut sampling_params = serde_json::to_value(sampling_params)?
+            .as_object()
+            .cloned()
+            .expect("GenerateSamplingParams always serializes as an object");
+        for field in provided_sampling_fields {
+            sampling_params.entry(field).or_insert(Value::Null);
+        }
+
+        Ok((
+            token_ids,
+            GenerateWorkerRequest {
+                request_id,
+                model,
+                features,
+                sampling_params,
+                stream,
+                stream_options,
+                cache_salt,
+                priority,
+                kv_transfer_params,
+                other,
+            },
+        ))
     }
 
     pub fn validate(&self) -> Result<(), GenerateProtocolError> {
@@ -665,6 +736,34 @@ mod tests {
         }))
         .unwrap();
         assert!(!absent.is_sampling_param_provided("max_tokens"));
+    }
+
+    #[test]
+    fn worker_envelope_owns_non_token_fields_and_reinserts_explicit_nulls() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "request_id": "request-1",
+            "model": "model-a",
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "max_tokens": null,
+                "temperature": 0.5,
+                "future_sampling": null
+            },
+            "cache_salt": "tenant-a",
+            "priority": i32::MIN,
+            "future_top_level": {"enabled": true}
+        }))
+        .unwrap();
+
+        let (token_ids, envelope) = request.into_worker_parts().unwrap();
+        assert_eq!(token_ids, vec![1, 2, 3]);
+        let wire = serde_json::to_value(envelope).unwrap();
+        assert!(wire.get("token_ids").is_none());
+        assert_eq!(wire["sampling_params"]["max_tokens"], Value::Null);
+        assert_eq!(wire["sampling_params"]["future_sampling"], Value::Null);
+        assert_eq!(wire["priority"], serde_json::json!(i32::MIN));
+        assert_eq!(wire["cache_salt"], "tenant-a");
+        assert_eq!(wire["future_top_level"]["enabled"], true);
     }
 
     #[test]

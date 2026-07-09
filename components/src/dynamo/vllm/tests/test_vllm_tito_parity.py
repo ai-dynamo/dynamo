@@ -256,7 +256,10 @@ class TestNonFiniteLogprobs:
     def test_serialize_prompt_logprobs_clamps_inf(self):
         from types import SimpleNamespace
 
-        from dynamo.vllm.response_adapters import MIN_FINITE_LOGPROB, serialize_prompt_logprobs
+        from dynamo.vllm.response_adapters import (
+            MIN_FINITE_LOGPROB,
+            serialize_prompt_logprobs,
+        )
 
         out = serialize_prompt_logprobs([{7: SimpleNamespace(logprob=float("-inf"))}])
         assert out[0]["7"]["logprob"] == MIN_FINITE_LOGPROB

@@ -34,10 +34,6 @@ from vllm import PoolingParams
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import (
-    MultiModalKwargsItem,
-    PlaceholderRange,
-)
 from vllm.outputs import RequestOutput
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.sampling_params import (
@@ -90,11 +86,9 @@ from dynamo.vllm.kv_connector_protocols import (
 
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
+from .engine_generate import EngineGenerateRequest
+from .engine_generate import merge_kv_transfer_params as _merge_kv_transfer_params
 from .engine_monitor import VllmEngineMonitor
-from .engine_generate import (
-    EngineGenerateRequest,
-    merge_kv_transfer_params as _merge_kv_transfer_params,
-)
 from .multimodal_utils.async_vision_encoder import AsyncVisionEncoder
 from .multimodal_utils.embed_assembler import build_mixed_embeds
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
@@ -109,10 +103,10 @@ from .response_adapters import (
     GenerationResponseContext,
     LegacyResponseAdapter,
     ResponseAdapter,
-    build_completion_usage as _build_completion_usage,
-    finite_logprob as _finite_logprob,
-    serialize_prompt_logprobs as _serialize_prompt_logprobs,
 )
+from .response_adapters import build_completion_usage as _build_completion_usage
+from .response_adapters import finite_logprob as _finite_logprob
+from .response_adapters import serialize_prompt_logprobs as _serialize_prompt_logprobs
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -647,7 +641,9 @@ def build_sampling_params(
     """
     engine_request = EngineGenerateRequest.from_request(request)
     if engine_request is not None:
-        return engine_request.build_sampling_params(default_sampling_params, model_max_len)
+        return engine_request.build_sampling_params(
+            default_sampling_params, model_max_len
+        )
 
     if enable_rl and _is_token_in_request(request):
         # Use vLLM defaults without model generation_config overlays.
@@ -2990,7 +2986,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Build sampling params from request
         sampling_params = (
-            engine_request.build_sampling_params(self.default_sampling_params, self.model_max_len)
+            engine_request.build_sampling_params(
+                self.default_sampling_params, self.model_max_len
+            )
             if engine_request is not None
             else build_sampling_params(
                 request,
@@ -3003,7 +3001,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if kv_params is not None:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = _merge_kv_transfer_params(
+            sampling_params.extra_args[
+                "kv_transfer_params"
+            ] = _merge_kv_transfer_params(
                 sampling_params.extra_args.get("kv_transfer_params"), kv_params
             )
             logger.debug(
@@ -3338,7 +3338,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Build sampling params from request using shared utility
         sampling_params = (
-            engine_request.build_sampling_params(self.default_sampling_params, self.model_max_len)
+            engine_request.build_sampling_params(
+                self.default_sampling_params, self.model_max_len
+            )
             if engine_request is not None
             else build_sampling_params(
                 request,

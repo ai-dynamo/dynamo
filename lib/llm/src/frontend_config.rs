@@ -13,6 +13,20 @@ use dynamo_runtime::config::{
     environment_names::llm::{self as env_llm, metrics as env_metrics},
 };
 
+fn engine_api_enabled_from_env() -> bool {
+    if std::env::var_os(env_llm::DYN_ENABLE_ENGINE_API).is_some() {
+        return env_is_truthy(env_llm::DYN_ENABLE_ENGINE_API);
+    }
+    if std::env::var_os(env_llm::DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE).is_some() {
+        tracing::warn!(
+            legacy = env_llm::DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE,
+            replacement = env_llm::DYN_ENABLE_ENGINE_API,
+            "deprecated engine API environment variable is in use"
+        );
+    }
+    env_is_truthy(env_llm::DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE)
+}
+
 /// Metrics naming controls for frontend-owned services.
 ///
 /// Contains the optional metric name prefix resolved from `--metrics-prefix` or
@@ -263,7 +277,7 @@ impl Default for FrontendApiConfig {
     fn default() -> Self {
         Self {
             anthropic: AnthropicApiConfig::default(),
-            engine_api_enabled: env_is_truthy(env_llm::DYN_ENABLE_ENGINE_API),
+            engine_api_enabled: engine_api_enabled_from_env(),
             streaming_dispatch: StreamingDispatchConfig::default(),
         }
     }
@@ -324,6 +338,26 @@ mod tests {
                 assert!(config.streaming_dispatch().tool_dispatch());
                 assert!(!config.streaming_dispatch().reasoning_dispatch());
             },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn legacy_generate_env_enables_generic_engine_api_unless_replaced() {
+        temp_env::with_vars(
+            [
+                (env_llm::DYN_ENABLE_ENGINE_API, None::<&str>),
+                (env_llm::DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE, Some("1")),
+            ],
+            || assert!(FrontendApiConfig::default().engine_api_enabled()),
+        );
+
+        temp_env::with_vars(
+            [
+                (env_llm::DYN_ENABLE_ENGINE_API, Some("0")),
+                (env_llm::DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE, Some("1")),
+            ],
+            || assert!(!FrontendApiConfig::default().engine_api_enabled()),
         );
     }
 }

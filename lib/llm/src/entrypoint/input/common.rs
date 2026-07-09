@@ -129,22 +129,23 @@ fn preprocessed_generate_request(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("generate request model must be resolved before routing"))?;
     let expected_output_tokens = generate.sampling_params.max_tokens;
-    let priority = generate.priority;
-    let token_ids = generate.token_ids.clone();
-    let provided_sampling_fields = generate.provided_sampling_fields().clone();
+    let routing_priority = generate.priority.saturating_neg();
+    let cache_namespace = generate.cache_salt.clone();
+    let (token_ids, generate_request) = generate.into_worker_parts()?;
 
     PreprocessedRequest::builder()
         .model(model)
         .token_ids(token_ids)
-        .generate_request(Some(generate))
-        .generate_sampling_fields(Some(provided_sampling_fields))
+        .generate_request(Some(generate_request))
         .stop_conditions(Default::default())
         .sampling_options(Default::default())
         .output_options(Default::default())
         .routing(Some(RoutingHints {
             expected_output_tokens,
             lora_name,
-            priority: Some(priority),
+            cache_namespace,
+            priority_jump: Some(routing_priority.max(0) as f64),
+            priority: Some(routing_priority),
             dp_rank,
             ..Default::default()
         }))
@@ -652,19 +653,44 @@ mod tests {
                 .unwrap();
         assert_eq!(preprocessed.model, "test-model");
         assert_eq!(preprocessed.token_ids, vec![11, 22, 33]);
-        assert_eq!(preprocessed.generate_request, Some(request));
-        assert!(
-            preprocessed
-                .generate_sampling_fields
-                .as_ref()
-                .unwrap()
-                .contains("temperature")
+        let serialized = serde_json::to_value(&preprocessed).unwrap();
+        assert_eq!(serialized["token_ids"], serde_json::json!([11, 22, 33]));
+        assert!(serialized["generate_request"].get("token_ids").is_none());
+        assert_eq!(
+            serialized["generate_request"]["sampling_params"]["temperature"],
+            serde_json::Value::Null
         );
         let routing = preprocessed.routing.unwrap();
         assert_eq!(routing.dp_rank, Some(6));
-        assert_eq!(routing.priority, Some(-4));
+        assert_eq!(routing.cache_namespace, None);
+        assert_eq!(routing.priority_jump, Some(4.0));
+        assert_eq!(routing.priority, Some(4));
         assert_eq!(routing.expected_output_tokens, Some(17));
         assert_eq!(routing.lora_name.as_deref(), Some("adapter-a"));
+    }
+
+    #[test]
+    fn generate_adapter_keeps_native_min_priority_in_worker_envelope() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "token_ids": [11],
+            "sampling_params": {},
+            "cache_salt": "tenant-a",
+            "priority": i32::MIN
+        }))
+        .unwrap();
+
+        let preprocessed = preprocessed_generate_request(request, None, None).unwrap();
+        let routing = preprocessed.routing.as_ref().unwrap();
+        assert_eq!(routing.cache_namespace.as_deref(), Some("tenant-a"));
+        assert_eq!(routing.priority, Some(i32::MAX));
+        assert_eq!(routing.priority_jump, Some(i32::MAX as f64));
+
+        let serialized = serde_json::to_value(preprocessed).unwrap();
+        assert_eq!(
+            serialized["generate_request"]["priority"],
+            serde_json::json!(i32::MIN)
+        );
     }
 
     #[test]

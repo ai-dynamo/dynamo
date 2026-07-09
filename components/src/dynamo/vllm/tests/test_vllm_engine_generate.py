@@ -24,7 +24,10 @@ from dynamo.vllm.engine_generate import (
     serialize_routed_experts,
 )
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
-from dynamo.vllm.response_adapters import GenerationResponseContext, LegacyResponseAdapter
+from dynamo.vllm.response_adapters import (
+    GenerationResponseContext,
+    LegacyResponseAdapter,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -135,9 +138,10 @@ def test_backend_extension_collision_is_rejected():
 
 
 def test_framework_kv_metadata_merges_without_replacing_caller_fields():
-    assert merge_kv_transfer_params(
-        {"caller": 1}, {"framework": 2}
-    ) == {"caller": 1, "framework": 2}
+    assert merge_kv_transfer_params({"caller": 1}, {"framework": 2}) == {
+        "caller": 1,
+        "framework": 2,
+    }
     with pytest.raises(ValueError, match="collide"):
         merge_kv_transfer_params({"same": 1}, {"same": 2})
 
@@ -168,19 +172,24 @@ def test_multimodal_cache_hit_prompt_preserves_hashes_and_placeholders():
 
 
 def test_priority_is_native_for_engine_generate_and_legacy_for_chat():
-    assert priority(_request({}), {"priority": -4}) == -4
+    request = _request({})
+    request["generate_request"]["priority"] = -(2**31)
+    assert priority(request, {"priority": 2**31 - 1}) == -(2**31)
     assert priority({}, {"priority": -4}) == 4
 
 
 def test_request_adapter_owns_engine_prompt_sampling_and_priority():
-    request = _request({"temperature": 0.25, "max_tokens": 17}, cache_salt="checkpoint-7")
+    request = _request(
+        {"temperature": 0.25, "max_tokens": 17}, cache_salt="checkpoint-7"
+    )
     adapter = EngineGenerateRequest.from_request(request)
 
     assert adapter is not None
     assert adapter.build_prompt()["prompt_token_ids"] == [11, 22, 33]
     assert adapter.build_prompt()["cache_salt"] == "checkpoint-7"
     assert adapter.build_sampling_params({}, model_max_len=64).max_tokens == 17
-    assert adapter.priority({"priority": -4}) == -4
+    request["generate_request"]["priority"] = -4
+    assert adapter.priority({"priority": 4}) == -4
 
 
 def test_request_adapter_ignores_legacy_requests():
@@ -284,7 +293,9 @@ def test_engine_generate_worker_emits_usage_on_every_delta():
             prompt={"prompt_token_ids": [11, 22, 33]},
             sampling_params=SamplingParams(max_tokens=2),
             request_id="request-1",
-            response_adapter=EngineGenerateRequest.from_request(_request({})).response_adapter(),
+            response_adapter=EngineGenerateRequest.from_request(
+                _request({})
+            ).response_adapter(),
         ):
             chunks.append(chunk)
         return chunks

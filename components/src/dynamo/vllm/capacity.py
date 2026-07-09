@@ -9,6 +9,16 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Keep these values in sync with dynamo-llm's runtime_config capability keys.
+ENGINE_GENERATE_CAPABILITY = "engine_generate"
+LEGACY_VLLM_GENERATE_CAPABILITY = "vllm_inference_v1_generate"
+
+
+def advertise_engine_generate_capability(runtime_config: Any) -> None:
+    """Advertise Generate support to both current and rolling-upgrade frontends."""
+    runtime_config.set_engine_specific(ENGINE_GENERATE_CAPABILITY, "true")
+    runtime_config.set_engine_specific(LEGACY_VLLM_GENERATE_CAPABILITY, "true")
+
 
 def per_rank_kv_blocks(
     total_kv_blocks: int | None, data_parallel_size: int

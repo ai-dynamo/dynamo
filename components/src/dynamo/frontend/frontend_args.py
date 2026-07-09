@@ -30,6 +30,7 @@ from . import __version__
 
 _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
+_LEGACY_ENGINE_API_ENV = "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE"
 
 
 def validate_model_name(value: str) -> str:
@@ -403,10 +404,11 @@ class FrontendArgGroup(ArgGroup):
             g,
             flag_name="--enable-engine-apis",
             env_var="DYN_ENABLE_ENGINE_API",
-            default=False,
+            default=env_or_default(_LEGACY_ENGINE_API_ENV, False),
             help=(
                 "[EXPERIMENTAL] Enable engine-native HTTP APIs, including "
-                "POST /inference/v1/generate."
+                "POST /inference/v1/generate. "
+                f"{_LEGACY_ENGINE_API_ENV} is a deprecated environment alias."
             ),
         )
         add_negatable_bool_argument(

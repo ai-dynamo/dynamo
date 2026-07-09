@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Protocol-specific adaptation of vLLM generation outputs."""
 
 import base64
@@ -48,19 +51,25 @@ def serialize_prompt_logprobs(raw_prompt_logprobs: list) -> list:
     return result
 
 
-def attach_prompt_logprobs_engine_data(output: Dict[str, Any], prompt_logprobs: list) -> None:
+def attach_prompt_logprobs_engine_data(
+    output: Dict[str, Any], prompt_logprobs: list
+) -> None:
     engine_data = output.setdefault("engine_data", {})
     if isinstance(engine_data, dict):
         engine_data["prompt_logprobs"] = prompt_logprobs
 
 
-def attach_routed_experts_engine_data(output: Dict[str, Any], routed_experts: Dict[str, Any]) -> None:
+def attach_routed_experts_engine_data(
+    output: Dict[str, Any], routed_experts: Dict[str, Any]
+) -> None:
     engine_data = output.setdefault("engine_data", {})
     if isinstance(engine_data, dict):
         engine_data["routed_experts"] = routed_experts
 
 
-def serialize_legacy_routed_experts(routed_experts: Any, start: int = 0) -> Optional[Dict[str, Any]]:
+def serialize_legacy_routed_experts(
+    routed_experts: Any, start: int = 0
+) -> Optional[Dict[str, Any]]:
     if routed_experts is None:
         return None
     shape = getattr(routed_experts, "shape", None)
@@ -109,12 +118,16 @@ def build_completion_usage(
     if completion_token_counts is not None:
         completion_tokens = sum(completion_token_counts.values())
     else:
-        completion_tokens = sum(len(output.token_ids) for output in request_output.outputs)
+        completion_tokens = sum(
+            len(output.token_ids) for output in request_output.outputs
+        )
 
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens if prompt_tokens is not None else None,
+        "total_tokens": prompt_tokens + completion_tokens
+        if prompt_tokens is not None
+        else None,
         "prompt_tokens_details": (
             {"cached_tokens": num_cached}
             if (num_cached := getattr(request_output, "num_cached_tokens", None))
@@ -137,7 +150,8 @@ class GenerationResponseContext:
 
 
 class ResponseAdapter(Protocol):
-    def adapt(self, output: Dict[str, Any], context: GenerationResponseContext) -> None: ...
+    def adapt(self, output: Dict[str, Any], context: GenerationResponseContext) -> None:
+        ...
 
 
 class LegacyResponseAdapter:
@@ -157,8 +171,12 @@ class LegacyResponseAdapter:
         )
         if context.prompt_logprobs is not None:
             attach_prompt_logprobs_engine_data(output, context.prompt_logprobs)
-        raw_start = int(getattr(context.sampling_params, "routed_experts_prompt_start", 0) or 0)
-        prompt_len = len(getattr(context.request_output, "prompt_token_ids", None) or [])
+        raw_start = int(
+            getattr(context.sampling_params, "routed_experts_prompt_start", 0) or 0
+        )
+        prompt_len = len(
+            getattr(context.request_output, "prompt_token_ids", None) or []
+        )
         serialized = serialize_legacy_routed_experts(
             context.routed_experts,
             start=min(raw_start, prompt_len),
