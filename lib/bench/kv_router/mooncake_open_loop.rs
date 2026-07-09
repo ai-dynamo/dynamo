@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::{
-    ObservationError, SyncIndexer, ThreadPoolIndexer, ThreadPoolObservationPlan,
+    KvIndexerInterface, ObservationError, SyncIndexer, ThreadPoolIndexer, ThreadPoolObservationPlan,
 };
 use dynamo_kv_router::protocols::{KvCacheEventData, RouterEvent};
 use serde::Serialize;
@@ -19,7 +19,7 @@ use tokio::sync::{Notify, oneshot};
 
 use super::mooncake_shared::{MooncakeTraceTotals, PreparedMooncakeBenchmark, WorkerTraceEntry};
 
-const RESULT_SCHEMA_VERSION: u32 = 1;
+const RESULT_SCHEMA_VERSION: u32 = 2;
 const EMPTY_OPERATION_ID: u32 = u32::MAX;
 
 #[derive(Clone, Debug)]
@@ -872,6 +872,7 @@ pub struct OpenLoopResult {
     pub generator_valid: bool,
     pub kept_up: bool,
     pub failure_reasons: Vec<String>,
+    pub backend_timing_report: String,
 }
 
 fn partition_dispatch(
@@ -1135,6 +1136,8 @@ pub async fn run_open_loop<T: SyncIndexer>(
         .unwrap_or(start_ns);
     let end_ns = query_drain_ns.max(sealed.latest_seal_ns());
     let snapshot = sealed.harvest().await?;
+    KvIndexerInterface::flush(indexer.as_ref()).await;
+    let backend_timing_report = KvIndexerInterface::timing_report(indexer.as_ref());
 
     Ok(analyze_result(
         backend_name,
@@ -1149,6 +1152,7 @@ pub async fn run_open_loop<T: SyncIndexer>(
         issuer_analysis,
         query_results,
         snapshot,
+        backend_timing_report,
     ))
 }
 
@@ -1166,6 +1170,7 @@ fn analyze_result(
     issuer: IssuerAnalysisInput,
     query_results: Vec<QueryLaneResult>,
     snapshot: dynamo_kv_router::indexer::ThreadPoolObservationSnapshot,
+    backend_timing_report: String,
 ) -> OpenLoopResult {
     let IssuerAnalysisInput {
         records,
@@ -1411,6 +1416,7 @@ fn analyze_result(
         generator_valid,
         kept_up,
         failure_reasons,
+        backend_timing_report,
     }
 }
 

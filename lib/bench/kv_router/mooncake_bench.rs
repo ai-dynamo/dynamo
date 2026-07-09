@@ -71,6 +71,10 @@ enum IndexerArgs {
         /// Logical block capacity provisioned for each DC lane.
         #[clap(long, default_value = "16384")]
         expected_blocks_per_dc: usize,
+
+        /// Number of normalized events accumulated per DC lane before publication.
+        #[clap(long, default_value = "1")]
+        publish_every_n_events: usize,
     },
 
     /// Branch-sharded CRTC: N independent CRTC shards routed by a bounded
@@ -110,7 +114,9 @@ impl IndexerArgs {
             IndexerArgs::TransposedCkf {
                 num_event_workers,
                 expected_blocks_per_dc,
-            } => MooncakeIndexerConfig::transposed_ckf(*num_event_workers, *expected_blocks_per_dc),
+                publish_every_n_events,
+            } => MooncakeIndexerConfig::transposed_ckf(*num_event_workers, *expected_blocks_per_dc)
+                .with_publish_every_n_events(*publish_every_n_events),
             IndexerArgs::BranchShardedCrtc {
                 num_shards,
                 num_event_workers_per_shard,
@@ -265,6 +271,9 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
             );
         }
         if config.kind == MooncakeIndexerKind::TransposedCkf {
+            if config.publish_every_n_events == 0 {
+                anyhow::bail!("transposed-ckf publish cadence must be at least 1");
+            }
             let total_workers = args
                 .common
                 .num_unique_inference_workers
@@ -387,17 +396,18 @@ async fn run_open_loop_for_config(
         }
         MooncakeIndexerKind::TransposedCkf => {
             let workers = std::array::from_fn(|lane| WorkerWithDpRank::new(lane as u64, 0));
-            let backend = EventTransposedCkfIndexer::new(
-                workers,
-                CkfConfig::new(config.expected_blocks_per_dc),
-            )?;
+            let mut ckf_config = CkfConfig::new(config.expected_blocks_per_dc);
+            ckf_config.publish_every_n_events = config.publish_every_n_events;
+            let backend = EventTransposedCkfIndexer::new(workers, ckf_config)?;
             let indexer = Arc::new(ThreadPoolIndexer::new_with_metrics(
                 backend,
                 config.num_event_workers,
                 args.common.block_size,
                 metrics(),
             ));
-            run_backend(config.short_name(), indexer, trial, open_config).await
+            let backend_name =
+                format!("{}-n{}", config.short_name(), config.publish_every_n_events);
+            run_backend(&backend_name, indexer, trial, open_config).await
         }
         MooncakeIndexerKind::RadixTree | MooncakeIndexerKind::BranchShardedCrtc => {
             anyhow::bail!(
@@ -455,6 +465,9 @@ fn print_open_loop_result(result: &OpenLoopResult) {
         result.issue_span_ns as f64 / 1e6,
         result.drain_ns as f64 / 1e6,
     );
+    if !result.backend_timing_report.is_empty() {
+        println!("{}", result.backend_timing_report);
+    }
 }
 
 fn open_loop_output_path(base: &str, backend: &str, duration_ms: Option<u64>) -> String {

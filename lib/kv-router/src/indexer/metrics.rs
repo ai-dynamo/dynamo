@@ -59,6 +59,21 @@ pub enum EventWarningKind {
     DuplicateStore,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum CkfMutationKind {
+    UnknownRemove,
+    CapacityExhausted,
+}
+
+impl std::fmt::Display for CkfMutationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownRemove => f.write_str(METRIC_CKF_MUTATION_UNKNOWN_REMOVE),
+            Self::CapacityExhausted => f.write_str(METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED),
+        }
+    }
+}
+
 impl std::fmt::Display for EventWarningKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -136,6 +151,9 @@ pub struct KvIndexerMetrics {
     /// Counters for CKF provenance-fallback behavior.
     #[cfg(feature = "metrics")]
     pub ckf_search_fallback: IntCounterVec,
+    /// Counters for CKF mutation outcomes that are finer-grained than event status.
+    #[cfg(feature = "metrics")]
+    pub ckf_mutation: IntCounterVec,
 }
 
 /// Metric status labels.
@@ -160,6 +178,10 @@ pub const METRIC_CKF_FALLBACK_ACTIVATED_LANES: &str = "activated_lanes";
 pub const METRIC_CKF_FALLBACK_PROBE_CALLS: &str = "probe_calls";
 pub const METRIC_CKF_FALLBACK_LANE_PROBES: &str = "lane_probes";
 pub const METRIC_CKF_FALLBACK_PROVENANCE_SKIPS: &str = "provenance_skips";
+
+/// CKF mutation metric labels.
+pub const METRIC_CKF_MUTATION_UNKNOWN_REMOVE: &str = "unknown_remove";
+pub const METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED: &str = "capacity_exhausted";
 
 /// Metric name for KV cache events applied counter.
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
@@ -187,6 +209,14 @@ const CKF_SEARCH_FALLBACK_NAME: &str = "dynamo_kvrouter_ckf_search_fallback";
 const CKF_SEARCH_FALLBACK_HELP: &str = "CKF provenance-fallback activity and grouped probe cost";
 #[cfg(feature = "metrics")]
 const CKF_SEARCH_FALLBACK_LABELS: &[&str] = &["kind"];
+#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+const CKF_MUTATION_SUFFIX: &str = "ckf_mutation_total";
+#[cfg(feature = "metrics")]
+const CKF_MUTATION_NAME: &str = "dynamo_kvrouter_ckf_mutation_total";
+#[cfg(feature = "metrics")]
+const CKF_MUTATION_HELP: &str = "Total number of CKF block-level mutation outcomes";
+#[cfg(feature = "metrics")]
+const CKF_MUTATION_LABELS: &[&str] = &["outcome"];
 
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
@@ -197,11 +227,13 @@ impl KvIndexerMetrics {
         kv_cache_events_applied: IntCounterVec,
         kv_cache_event_warnings: IntCounterVec,
         ckf_search_fallback: IntCounterVec,
+        ckf_mutation: IntCounterVec,
     ) -> Self {
         Self {
             kv_cache_events_applied,
             kv_cache_event_warnings,
             ckf_search_fallback,
+            ckf_mutation,
         }
     }
 
@@ -220,6 +252,10 @@ impl KvIndexerMetrics {
                 Opts::new(CKF_SEARCH_FALLBACK_NAME, CKF_SEARCH_FALLBACK_HELP),
                 CKF_SEARCH_FALLBACK_LABELS,
             )?,
+            IntCounterVec::new(
+                Opts::new(CKF_MUTATION_NAME, CKF_MUTATION_HELP),
+                CKF_MUTATION_LABELS,
+            )?,
         ))
     }
 
@@ -230,6 +266,7 @@ impl KvIndexerMetrics {
         registry.register(Box::new(metrics.kv_cache_events_applied.clone()))?;
         registry.register(Box::new(metrics.kv_cache_event_warnings.clone()))?;
         registry.register(Box::new(metrics.ckf_search_fallback.clone()))?;
+        registry.register(Box::new(metrics.ckf_mutation.clone()))?;
         Ok(metrics)
     }
 
@@ -260,17 +297,28 @@ impl KvIndexerMetrics {
                             CKF_SEARCH_FALLBACK_LABELS,
                             &[],
                         ),
+                        component.metrics().create_intcountervec(
+                            CKF_MUTATION_SUFFIX,
+                            CKF_MUTATION_HELP,
+                            CKF_MUTATION_LABELS,
+                            &[],
+                        ),
                     ) {
                         (
                             Ok(kv_cache_events_applied),
                             Ok(kv_cache_event_warnings),
                             Ok(ckf_search_fallback),
+                            Ok(ckf_mutation),
                         ) => Arc::new(Self::new(
                             kv_cache_events_applied,
                             kv_cache_event_warnings,
                             ckf_search_fallback,
+                            ckf_mutation,
                         )),
-                        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                        (Err(e), _, _, _)
+                        | (_, Err(e), _, _)
+                        | (_, _, Err(e), _)
+                        | (_, _, _, Err(e)) => {
                             tracing::warn!("Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.", e);
                             Arc::new(Self::new_unregistered())
                         }
@@ -424,6 +472,13 @@ struct PreBoundMetricCounters {
     removed: ResultCounters,
     cleared: ResultCounters,
     duplicate_store_warning: IntCounter,
+    ckf_mutation: CkfMutationCounters,
+}
+
+#[cfg(feature = "metrics")]
+struct CkfMutationCounters {
+    unknown_remove: IntCounter,
+    capacity_exhausted: IntCounter,
 }
 
 #[cfg(feature = "metrics")]
@@ -478,6 +533,14 @@ impl PreBoundEventCounters {
                     cleared: ResultCounters::new(cv, METRIC_EVENT_CLEARED),
                     duplicate_store_warning: warnings
                         .with_label_values(&[METRIC_WARNING_DUPLICATE_STORE]),
+                    ckf_mutation: CkfMutationCounters {
+                        unknown_remove: metrics
+                            .ckf_mutation
+                            .with_label_values(&[METRIC_CKF_MUTATION_UNKNOWN_REMOVE]),
+                        capacity_exhausted: metrics
+                            .ckf_mutation
+                            .with_label_values(&[METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED]),
+                    },
                 },
             }
         }
@@ -517,5 +580,21 @@ impl PreBoundEventCounters {
         }
         #[cfg(not(feature = "metrics"))]
         let _ = (self, kind);
+    }
+
+    pub fn inc_ckf_mutation(&self, kind: CkfMutationKind, count: u64) {
+        #[cfg(feature = "metrics")]
+        {
+            if count == 0 {
+                return;
+            }
+            let counter = match kind {
+                CkfMutationKind::UnknownRemove => &self.inner.ckf_mutation.unknown_remove,
+                CkfMutationKind::CapacityExhausted => &self.inner.ckf_mutation.capacity_exhausted,
+            };
+            counter.inc_by(count);
+        }
+        #[cfg(not(feature = "metrics"))]
+        let _ = (self, kind, count);
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::CkfBuildError;
@@ -71,6 +72,57 @@ pub(super) trait CuckooBucketStore {
 }
 
 #[derive(Debug)]
+pub(super) struct OwnedPackedCkfLane {
+    buckets: Box<[Cell<u64>]>,
+}
+
+impl OwnedPackedCkfLane {
+    pub(super) fn new(bucket_count: usize) -> Result<Self, CkfBuildError> {
+        let allocation_bytes = bucket_count
+            .checked_mul(std::mem::size_of::<u64>())
+            .ok_or(CkfBuildError::CapacityOverflow)?;
+        if allocation_bytes > isize::MAX as usize {
+            return Err(CkfBuildError::CapacityOverflow);
+        }
+
+        let mut buckets = Vec::new();
+        buckets
+            .try_reserve_exact(bucket_count)
+            .map_err(|_| CkfBuildError::AllocationFailed)?;
+        buckets.extend((0..bucket_count).map(|_| Cell::new(0)));
+        Ok(Self {
+            buckets: buckets.into_boxed_slice(),
+        })
+    }
+
+    pub(super) fn clear(&mut self) {
+        for bucket in &mut self.buckets {
+            bucket.set(0);
+        }
+    }
+
+    pub(super) fn byte_len(&self) -> usize {
+        std::mem::size_of_val(self.buckets.as_ref())
+    }
+}
+
+impl CuckooBucketStore for OwnedPackedCkfLane {
+    #[inline]
+    fn load_bucket(&self, bucket: usize) -> PackedBucket {
+        PackedBucket(self.buckets[bucket].get())
+    }
+
+    #[inline]
+    fn store_bucket(&self, bucket: usize, value: PackedBucket) {
+        self.buckets[bucket].set(value.0);
+    }
+
+    fn bucket_count(&self) -> usize {
+        self.buckets.len()
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct TransposedCkfTable<const D: usize> {
     bucket_count: usize,
     lanes: Box<[AtomicU64]>,
@@ -101,9 +153,33 @@ impl<const D: usize> TransposedCkfTable<D> {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn lane(&self, lane: usize) -> TransposedDcView<'_, D> {
         debug_assert!(lane < D);
         TransposedDcView { table: self, lane }
+    }
+
+    pub(super) fn bucket_count(&self) -> usize {
+        self.bucket_count
+    }
+
+    pub(super) fn store_image(&self, bucket: usize, lane: usize, value: PackedBucket) {
+        debug_assert!(bucket < self.bucket_count);
+        debug_assert!(lane < D);
+        self.store(bucket, lane, value);
+    }
+
+    pub(super) fn load_image(&self, bucket: usize, lane: usize) -> PackedBucket {
+        debug_assert!(bucket < self.bucket_count);
+        debug_assert!(lane < D);
+        self.load(bucket, lane)
+    }
+
+    pub(super) fn clear_lane(&self, lane: usize) {
+        debug_assert!(lane < D);
+        for bucket in 0..self.bucket_count {
+            self.store(bucket, lane, PackedBucket::default());
+        }
     }
 
     #[inline]
@@ -144,11 +220,13 @@ impl<const D: usize> TransposedCkfTable<D> {
     }
 }
 
+#[cfg(test)]
 pub(super) struct TransposedDcView<'a, const D: usize> {
     table: &'a TransposedCkfTable<D>,
     lane: usize,
 }
 
+#[cfg(test)]
 impl<const D: usize> CuckooBucketStore for TransposedDcView<'_, D> {
     #[inline]
     fn load_bucket(&self, bucket: usize) -> PackedBucket {

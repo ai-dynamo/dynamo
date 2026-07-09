@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(test)]
 use rustc_hash::FxHashSet;
 
 use super::addressing::CkfAddressing;
@@ -9,12 +10,14 @@ use crate::protocols::{ExternalSequenceBlockHash, KvCacheEventError};
 
 const SPLITMIX_INCREMENT: u64 = 0x9E37_79B9_7F4A_7C15;
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DirtyBucket {
     pub(super) bucket: usize,
     pub(super) value: PackedBucket,
 }
 
+#[derive(Debug)]
 pub(super) struct CuckooInsertionScratch {
     touched: Vec<(usize, PackedBucket)>,
     dirty_buckets: Vec<usize>,
@@ -43,14 +46,20 @@ impl CuckooInsertionScratch {
         self.touched.clear();
         self.dirty_buckets.clear();
     }
+
+    pub(super) fn capacity(&self) -> usize {
+        self.touched.capacity() + self.dirty_buckets.capacity()
+    }
 }
 
+#[cfg(test)]
 pub(super) struct DcWriterState {
     pub(super) resident: FxHashSet<ExternalSequenceBlockHash>,
     pub(super) rng: u64,
     pub(super) scratch: CuckooInsertionScratch,
 }
 
+#[cfg(test)]
 impl DcWriterState {
     pub(super) fn new(
         expected_blocks: usize,
@@ -84,12 +93,39 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn insert(
         &self,
         hash: ExternalSequenceBlockHash,
         rng: &mut u64,
         scratch: &mut CuckooInsertionScratch,
         mut on_dirty: impl FnMut(DirtyBucket),
+    ) -> Result<(), KvCacheEventError> {
+        self.insert_inner(hash, rng, scratch)?;
+        self.emit_final_dirty(scratch, &mut on_dirty);
+        Ok(())
+    }
+
+    pub(super) fn insert_touched(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        rng: &mut u64,
+        scratch: &mut CuckooInsertionScratch,
+        mut on_touched: impl FnMut(usize),
+    ) -> Result<(), KvCacheEventError> {
+        self.insert_inner(hash, rng, scratch)?;
+        for &bucket in &scratch.dirty_buckets {
+            on_touched(bucket);
+        }
+        scratch.clear();
+        Ok(())
+    }
+
+    fn insert_inner(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        rng: &mut u64,
+        scratch: &mut CuckooInsertionScratch,
     ) -> Result<(), KvCacheEventError> {
         debug_assert!(self.store.bucket_count().is_power_of_two());
         scratch.clear();
@@ -98,7 +134,6 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         if self.insert_into_empty(probe.bucket_a, probe.fingerprint, scratch)
             || self.insert_into_empty(probe.bucket_b, probe.fingerprint, scratch)
         {
-            self.emit_final_dirty(scratch, &mut on_dirty);
             return Ok(());
         }
 
@@ -118,7 +153,6 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
             bucket = self.addressing.alternate_bucket(bucket, fingerprint);
 
             if self.insert_into_empty(bucket, fingerprint, scratch) {
-                self.emit_final_dirty(scratch, &mut on_dirty);
                 return Ok(());
             }
         }
@@ -127,6 +161,7 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         Err(KvCacheEventError::CapacityExhausted)
     }
 
+    #[cfg(test)]
     pub(super) fn remove(
         &self,
         hash: ExternalSequenceBlockHash,
@@ -144,6 +179,25 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
                 bucket,
                 value: after,
             });
+            return Ok(());
+        }
+
+        Err(KvCacheEventError::IndexerInvariantViolation)
+    }
+
+    pub(super) fn remove_touched(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        mut on_touched: impl FnMut(usize),
+    ) -> Result<(), KvCacheEventError> {
+        let probe = self.addressing.prepare(hash.0);
+        for bucket in [probe.bucket_a, probe.bucket_b] {
+            let before = self.store.load_bucket(bucket);
+            let Some(slot) = before.first(probe.fingerprint) else {
+                continue;
+            };
+            self.store.store_bucket(bucket, before.with_slot(slot, 0));
+            on_touched(bucket);
             return Ok(());
         }
 
@@ -183,6 +237,7 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         scratch.clear();
     }
 
+    #[cfg(test)]
     fn emit_final_dirty(
         &self,
         scratch: &mut CuckooInsertionScratch,

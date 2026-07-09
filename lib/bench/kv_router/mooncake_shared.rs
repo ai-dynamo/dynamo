@@ -37,6 +37,7 @@ pub struct MooncakeIndexerConfig {
     pub num_event_workers_per_shard: usize,
     pub prefix_depth: usize,
     pub expected_blocks_per_dc: usize,
+    pub publish_every_n_events: usize,
 }
 
 #[allow(dead_code)]
@@ -50,6 +51,7 @@ impl MooncakeIndexerConfig {
             num_event_workers_per_shard: 4,
             prefix_depth: 2,
             expected_blocks_per_dc: 16_384,
+            publish_every_n_events: 1,
         }
     }
 
@@ -85,6 +87,11 @@ impl MooncakeIndexerConfig {
             expected_blocks_per_dc,
             ..Self::radix_tree()
         }
+    }
+
+    pub fn with_publish_every_n_events(mut self, publish_every_n_events: usize) -> Self {
+        self.publish_every_n_events = publish_every_n_events;
+        self
     }
 
     pub fn branch_sharded_crtc(
@@ -167,10 +174,9 @@ impl MooncakeIndexerConfig {
             }
             MooncakeIndexerKind::TransposedCkf => {
                 let workers = std::array::from_fn(|lane| WorkerWithDpRank::new(lane as u64, 0));
-                let backend = EventTransposedCkfIndexer::new(
-                    workers,
-                    CkfConfig::new(self.expected_blocks_per_dc),
-                )?;
+                let mut ckf_config = CkfConfig::new(self.expected_blocks_per_dc);
+                ckf_config.publish_every_n_events = self.publish_every_n_events;
+                let backend = EventTransposedCkfIndexer::new(workers, ckf_config)?;
                 Arc::new(ThreadPoolIndexer::new_with_metrics(
                     backend,
                     self.num_event_workers,

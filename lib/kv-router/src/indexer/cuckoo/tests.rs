@@ -7,6 +7,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use rustc_hash::FxHashSet;
+
 use crate::indexer::pruning::PruneConfig;
 use crate::indexer::{KvIndexerInterface, SyncIndexer, ThreadPoolIndexer, WorkerTask};
 use crate::protocols::{
@@ -23,9 +25,21 @@ use super::search::{
     find_prefix_depths, find_prefix_depths_with_test_stats, fixed_window_prefix_depths,
     linear_prefix_depths,
 };
-use super::{CkfBuildError, CkfConfig, DC_COUNT, EventTransposedCkfIndexer};
+use super::{
+    CkfBuildError, CkfConfig, DC_COUNT, EventTransposedCkfIndexer, RelayLaneConfig, RelayManifest,
+    RouterLocalCkfPipeline,
+};
 
 const TEST_SEED: u64 = 0x1234_5678_9ABC_DEF0;
+
+fn single_lane_manifest(
+    members: Vec<WorkerWithDpRank>,
+    expected_contributions: usize,
+) -> RelayManifest {
+    let mut lanes = std::array::from_fn(|_| RelayLaneConfig::empty());
+    lanes[0] = RelayLaneConfig::new(members, expected_contributions);
+    RelayManifest::new(lanes).unwrap()
+}
 
 #[test]
 fn validates_config_and_worker_mapping() {
@@ -50,6 +64,528 @@ fn validates_config_and_worker_mapping() {
             worker: duplicate_workers[0]
         }
     );
+}
+
+#[test]
+fn validates_publish_cadence_and_defaults_to_immediate_publication() {
+    assert_eq!(CkfConfig::default().publish_every_n_events, 1);
+
+    let config = CkfConfig {
+        publish_every_n_events: 0,
+        ..CkfConfig::default()
+    };
+    assert_eq!(
+        EventTransposedCkfIndexer::new(workers(), config).unwrap_err(),
+        CkfBuildError::InvalidPublishEveryNEvents
+    );
+}
+
+#[test]
+fn validates_manifest_contribution_capacity_and_rank_identity() {
+    let rank_zero = WorkerWithDpRank::new(100, 0);
+    let rank_one = WorkerWithDpRank::new(100, 1);
+    let manifest = single_lane_manifest(vec![rank_zero, rank_one], 31);
+    assert_eq!(
+        RouterLocalCkfPipeline::new(manifest, CkfConfig::new(32)).unwrap_err(),
+        CkfBuildError::InvalidContributionCapacity {
+            lane: 0,
+            value: 31,
+            minimum: 32,
+        }
+    );
+
+    let mut lanes = std::array::from_fn(|_| RelayLaneConfig::empty());
+    lanes[4] = RelayLaneConfig::new(Vec::new(), 1);
+    assert_eq!(
+        RouterLocalCkfPipeline::new(RelayManifest::new(lanes).unwrap(), CkfConfig::new(32))
+            .unwrap_err(),
+        CkfBuildError::InvalidEmptyLaneContributionCapacity { lane: 4, value: 1 }
+    );
+}
+
+#[test]
+fn publish_counters_are_lane_independent() {
+    let workers = workers();
+    let mut config = CkfConfig::new(32);
+    config.publish_every_n_events = 2;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    let first = index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    assert!(!first.batch_applied());
+    let second = index.apply_event_with_batch(store_event(workers[1], &[20], 2), &mut batch);
+    assert!(!second.batch_applied());
+
+    let lane_zero = index.apply_event_with_batch(store_event(workers[0], &[], 3), &mut batch);
+    assert!(lane_zero.batch_applied());
+    assert!(batch.images().iter().all(|image| image.lane() == 0));
+    assert_ne!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(10))
+            & 1,
+        0
+    );
+    assert_eq!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(20))
+            & (1 << 1),
+        0
+    );
+
+    let lane_one = index.apply_event_with_batch(store_event(workers[1], &[], 4), &mut batch);
+    assert!(lane_one.batch_applied());
+    assert!(batch.images().iter().all(|image| image.lane() == 1));
+}
+
+#[test]
+fn sixteenth_event_publishes_fifteen_event_tail() {
+    let workers = workers();
+    let mut config = CkfConfig::new(32);
+    config.publish_every_n_events = 16;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    let first = index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    assert!(!first.batch_applied());
+    for event_id in 2..16 {
+        let outcome =
+            index.apply_event_with_batch(store_event(workers[0], &[10], event_id), &mut batch);
+        assert!(!outcome.batch_applied(), "event_id={event_id}");
+    }
+    assert_eq!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(10))
+            & 1,
+        0
+    );
+
+    let outcome = index.apply_event_with_batch(store_event(workers[0], &[], 16), &mut batch);
+    assert!(outcome.batch_applied());
+    assert_eq!(batch.images().len(), 1);
+    assert_ne!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(10))
+            & 1,
+        0
+    );
+}
+
+#[test]
+fn publication_window_coalesces_repeated_bucket_touches_across_events() {
+    let workers = workers();
+    let mut config = CkfConfig::new(32);
+    config.publish_every_n_events = 3;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    assert!(
+        !index
+            .apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch)
+            .batch_applied()
+    );
+    assert!(
+        !index
+            .apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch)
+            .batch_applied()
+    );
+    let outcome = index.apply_event_with_batch(store_event(workers[0], &[10], 3), &mut batch);
+    assert!(outcome.batch_applied());
+    assert_eq!(batch.images().len(), 1);
+    assert_eq!(batch.reset_lanes(), 0);
+}
+
+#[test]
+fn due_net_reversion_is_unchanged_and_applies_no_batch() {
+    let workers = workers();
+    let mut config = CkfConfig::new(32);
+    config.publish_every_n_events = 2;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    index.pipeline.flush_pending(&mut batch).unwrap();
+    index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
+    let outcome = index.apply_event_with_batch(store_event(workers[0], &[10], 2), &mut batch);
+
+    assert!(!outcome.batch_applied());
+    assert!(batch.images().is_empty());
+    assert_eq!(batch.reset_lanes(), 0);
+    assert!(!index.pipeline.flush_pending(&mut batch).unwrap());
+}
+
+#[test]
+fn partially_net_reverted_window_emits_only_changed_buckets() {
+    let workers = workers();
+    let mut config = CkfConfig::new(32);
+    config.publish_every_n_events = 3;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    index.apply_event_with_batch(store_event(workers[0], &[10, 20], 1), &mut batch);
+    index.pipeline.flush_pending(&mut batch).unwrap();
+    index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
+    index.apply_event_with_batch(store_event(workers[0], &[10], 2), &mut batch);
+    let outcome = index.apply_event_with_batch(remove_event(workers[0], &[20]), &mut batch);
+
+    assert!(outcome.batch_applied());
+    assert_eq!(batch.reset_lanes(), 0);
+    assert_eq!(batch.images().len(), 1);
+    assert_ne!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(10))
+            & 1,
+        0
+    );
+    assert_eq!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(20))
+            & 1,
+        0
+    );
+}
+
+#[test]
+fn unpublished_empty_populated_empty_window_emits_nothing() {
+    let workers = workers();
+    let mut config = CkfConfig::new(32);
+    config.publish_every_n_events = 2;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    let outcome = index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
+
+    assert!(!outcome.batch_applied());
+    assert!(batch.images().is_empty());
+    assert_eq!(batch.reset_lanes(), 0);
+}
+
+#[test]
+fn published_nonempty_lane_emptied_at_boundary_emits_reset() {
+    let workers = workers();
+    let mut config = CkfConfig::new(32);
+    config.publish_every_n_events = 2;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    index.pipeline.flush_pending(&mut batch).unwrap();
+    index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
+    let outcome = index.apply_event_with_batch(store_event(workers[0], &[], 2), &mut batch);
+
+    assert!(outcome.batch_applied());
+    assert_ne!(batch.reset_lanes() & 1, 0);
+    assert!(batch.images().is_empty());
+}
+
+#[test]
+fn partial_failure_preserves_pending_successes_until_due_publication() {
+    let workers = workers();
+    let mut config = CkfConfig::new(1);
+    config.max_kicks = 1;
+    config.publish_every_n_events = 2;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    let first = index.apply_event_with_batch(
+        store_event(workers[0], &(0..7).collect::<Vec<_>>(), 1),
+        &mut batch,
+    );
+    assert!(!first.batch_applied());
+
+    let second = index.apply_event_with_batch(store_event(workers[0], &[7, 8], 2), &mut batch);
+    assert!(matches!(
+        second.first_error(),
+        Some(crate::protocols::KvCacheEventError::CapacityExhausted)
+    ));
+    assert!(second.batch_applied());
+    assert_eq!(index.pipeline.memory_snapshot().actual_contributions, 8);
+    assert_ne!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(7))
+            & 1,
+        0
+    );
+}
+
+#[test]
+fn flush_publishes_a_subthreshold_tail() {
+    let workers = workers();
+    let mut config = CkfConfig::new(32);
+    config.publish_every_n_events = 16;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    let outcome = index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    assert!(!outcome.batch_applied());
+    assert!(index.pipeline.flush_pending(&mut batch).unwrap());
+    assert_ne!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(10))
+            & 1,
+        0
+    );
+    assert!(!index.pipeline.flush_pending(&mut batch).unwrap());
+}
+
+#[test]
+fn lifecycle_removal_forces_pending_publication() {
+    let workers = workers();
+    let mut config = CkfConfig::new(32);
+    config.publish_every_n_events = 16;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    index.pipeline.flush_pending(&mut batch).unwrap();
+    let outcome = index.pipeline.remove_worker_rank(workers[0], &mut batch);
+    assert!(outcome.batch_applied());
+    assert_ne!(batch.reset_lanes() & 1, 0);
+    assert_eq!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(10))
+            & 1,
+        0
+    );
+}
+
+#[test]
+fn empty_then_repopulated_window_cancels_stale_reset() {
+    let workers = workers();
+    let mut config = CkfConfig::new(32);
+    config.publish_every_n_events = 3;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+    let mut batch = index.pipeline.new_batch();
+
+    index.apply_event_with_batch(store_event(workers[0], &[10], 1), &mut batch);
+    index.pipeline.flush_pending(&mut batch).unwrap();
+    index.apply_event_with_batch(remove_event(workers[0], &[10]), &mut batch);
+    index.apply_event_with_batch(store_event(workers[0], &[20], 2), &mut batch);
+    let outcome = index.apply_event_with_batch(store_event(workers[0], &[], 3), &mut batch);
+
+    assert!(outcome.batch_applied());
+    assert_eq!(batch.reset_lanes() & 1, 0);
+    assert_eq!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(10))
+            & 1,
+        0
+    );
+    assert_ne!(
+        index
+            .pipeline
+            .replica()
+            .table
+            .probe(index.pipeline.replica().addressing.prepare(20))
+            & 1,
+        0
+    );
+}
+
+#[test]
+fn shared_dc_hash_survives_until_the_final_owner_is_removed() {
+    let first = WorkerWithDpRank::new(100, 0);
+    let second = WorkerWithDpRank::new(200, 0);
+    let manifest = single_lane_manifest(vec![first, second], 64);
+    let pipeline = RouterLocalCkfPipeline::new(manifest, CkfConfig::new(32)).unwrap();
+    let mut batch = pipeline.new_batch();
+
+    let first_store = pipeline.apply_event(store_event(first, &[10], 1), &mut batch);
+    assert!(first_store.batch_applied());
+    assert_eq!(batch.images().len(), 1);
+    let second_store = pipeline.apply_event(store_event(second, &[10], 2), &mut batch);
+    assert!(!second_store.batch_applied());
+    assert!(batch.images().is_empty());
+
+    pipeline.apply_event(remove_event(first, &[10]), &mut batch);
+    assert_ne!(
+        pipeline
+            .replica()
+            .table
+            .probe(pipeline.replica().addressing.prepare(10))
+            & 1,
+        0
+    );
+    pipeline.apply_event(remove_event(second, &[10]), &mut batch);
+    assert_ne!(batch.reset_lanes() & 1, 0);
+}
+
+#[test]
+fn clear_one_owner_preserves_another_owner_in_the_same_dc() {
+    let first = WorkerWithDpRank::new(100, 0);
+    let second = WorkerWithDpRank::new(200, 0);
+    let pipeline = RouterLocalCkfPipeline::new(
+        single_lane_manifest(vec![first, second], 64),
+        CkfConfig::new(32),
+    )
+    .unwrap();
+    let mut batch = pipeline.new_batch();
+
+    pipeline.apply_event(store_event(first, &[10], 1), &mut batch);
+    pipeline.apply_event(store_event(second, &[10], 2), &mut batch);
+    let outcome = pipeline.apply_event(clear_event(first.worker_id), &mut batch);
+
+    assert!(outcome.first_error().is_none());
+    assert!(!pipeline.member_contains(first, ExternalSequenceBlockHash(10)));
+    assert!(pipeline.member_contains(second, ExternalSequenceBlockHash(10)));
+    assert_eq!(batch.reset_lanes(), 0);
+    assert_ne!(
+        pipeline
+            .replica()
+            .table
+            .probe(pipeline.replica().addressing.prepare(10))
+            & 1,
+        0
+    );
+}
+
+#[test]
+fn worker_wide_clear_spans_lanes_and_preserves_unrelated_members() {
+    let rank_zero = WorkerWithDpRank::new(100, 0);
+    let rank_one = WorkerWithDpRank::new(100, 1);
+    let other = WorkerWithDpRank::new(200, 0);
+    let mut lanes = std::array::from_fn(|_| RelayLaneConfig::empty());
+    lanes[0] = RelayLaneConfig::new(vec![rank_zero, other], 64);
+    lanes[1] = RelayLaneConfig::new(vec![rank_one], 32);
+    let pipeline =
+        RouterLocalCkfPipeline::new(RelayManifest::new(lanes).unwrap(), CkfConfig::new(32))
+            .unwrap();
+    let mut batch = pipeline.new_batch();
+
+    pipeline.apply_event(store_event(rank_zero, &[10], 1), &mut batch);
+    pipeline.apply_event(store_event(other, &[10], 2), &mut batch);
+    pipeline.apply_event(store_event(rank_one, &[20], 3), &mut batch);
+    let mut clear = clear_event(rank_zero.worker_id);
+    clear.event.dp_rank = 999;
+    let outcome = pipeline.apply_event(clear, &mut batch);
+
+    assert!(outcome.first_error().is_none());
+    assert!(pipeline.member_contains(other, ExternalSequenceBlockHash(10)));
+    assert!(!pipeline.member_contains(rank_zero, ExternalSequenceBlockHash(10)));
+    assert!(!pipeline.member_contains(rank_one, ExternalSequenceBlockHash(20)));
+    assert_eq!(batch.reset_lanes() & 1, 0);
+    assert_ne!(batch.reset_lanes() & (1 << 1), 0);
+}
+
+#[test]
+fn non_device_events_are_ignored_and_unknown_clear_is_rejected() {
+    let worker = WorkerWithDpRank::new(100, 0);
+    let pipeline =
+        RouterLocalCkfPipeline::new(single_lane_manifest(vec![worker], 32), CkfConfig::new(32))
+            .unwrap();
+    let mut batch = pipeline.new_batch();
+    let mut host_store = store_event(worker, &[10], 1);
+    host_store.storage_tier = StorageTier::HostPinned;
+
+    let host_outcome = pipeline.apply_event(host_store, &mut batch);
+    assert!(!host_outcome.batch_applied());
+    assert!(!pipeline.member_contains(worker, ExternalSequenceBlockHash(10)));
+
+    let unknown = pipeline.apply_event(clear_event(999), &mut batch);
+    assert!(matches!(
+        unknown.first_error(),
+        Some(crate::protocols::KvCacheEventError::InvalidBlockSequence)
+    ));
+}
+
+#[test]
+fn shared_hash_stats_are_per_member_and_model_instances_are_isolated() {
+    let first = WorkerWithDpRank::new(100, 0);
+    let second = WorkerWithDpRank::new(200, 0);
+    let make_pipeline = || {
+        RouterLocalCkfPipeline::new(
+            single_lane_manifest(vec![first, second], 64),
+            CkfConfig::new(32),
+        )
+        .unwrap()
+    };
+    let first_model = make_pipeline();
+    let second_model = make_pipeline();
+    let mut batch = first_model.new_batch();
+    first_model.apply_event(store_event(first, &[10], 1), &mut batch);
+    first_model.apply_event(store_event(second, &[10], 2), &mut batch);
+
+    let worker_ids = FxHashSet::from_iter([first.worker_id, second.worker_id]);
+    let stats = first_model.worker_stats(&worker_ids);
+    assert_eq!(stats.block_count_for_worker(first), Some(1));
+    assert_eq!(stats.block_count_for_worker(second), Some(1));
+    assert_eq!(first_model.memory_snapshot().actual_contributions, 2);
+    assert_eq!(
+        second_model
+            .replica()
+            .table
+            .probe(second_model.replica().addressing.prepare(10)),
+        0
+    );
+}
+
+#[cfg(feature = "bench")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "temporary occupied-bucket tracking benchmark gate"]
+async fn occupied_tracking_study() {
+    const EVENTS_PER_CELL: usize = 30_000;
+    let replica_occupancy = std::env::var_os("DYNAMO_CKF_REPLICA_OCCUPANCY").is_some();
+    let aggregator_occupancy = std::env::var_os("DYNAMO_CKF_AGGREGATOR_OCCUPANCY").is_some();
+
+    for clear_every in [100usize, 1_000, 10_000] {
+        let workers = workers();
+        let index = ThreadPoolIndexer::new(
+            EventTransposedCkfIndexer::new(workers, CkfConfig::new(16_384)).unwrap(),
+            1,
+            32,
+        );
+        for event_index in 0..EVENTS_PER_CELL {
+            let hash = (event_index % clear_every) as u64 + 1;
+            KvIndexerInterface::apply_event(
+                &index,
+                store_event(workers[0], &[hash], event_index as u64 + 1),
+            )
+            .await;
+            if (event_index + 1) % clear_every == 0 {
+                KvIndexerInterface::apply_event(&index, clear_event(workers[0].worker_id)).await;
+            }
+        }
+        KvIndexerInterface::flush(&index).await;
+        println!(
+            "CKF_OCCUPANCY_STUDY replica_occupancy={} aggregator_occupancy={} clear_every={} events={} {}",
+            replica_occupancy,
+            aggregator_occupancy,
+            clear_every,
+            EVENTS_PER_CELL,
+            index.backend().timing_report(),
+        );
+        index.shutdown();
+    }
 }
 
 #[test]
@@ -290,19 +826,25 @@ async fn thread_pool_reports_unsupported_dump_and_exact_stats() {
 #[test]
 fn worker_acknowledges_partial_event_failure_and_continues_serving_tasks() {
     let workers = workers();
-    let index = EventTransposedCkfIndexer::new(workers, CkfConfig::new(32)).unwrap();
+    let mut config = CkfConfig::new(1);
+    config.max_kicks = 1;
+    let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
     let (sender, receiver) = flume::unbounded();
 
     std::thread::scope(|scope| {
         let worker = scope.spawn(|| index.worker(receiver, None).unwrap());
         sender
-            .send(WorkerTask::Event(store_event(workers[0], &[10, 20], 1000)))
+            .send(WorkerTask::Event(store_event(
+                workers[0],
+                &(0..7).collect::<Vec<_>>(),
+                1000,
+            )))
             .unwrap();
 
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         sender
             .send(WorkerTask::EventWithAck {
-                event: remove_event(workers[0], &[999, 20]),
+                event: store_event(workers[0], &[7, 8], 2000),
                 resp: ack_tx,
             })
             .unwrap();
@@ -311,7 +853,7 @@ fn worker_acknowledges_partial_event_failure_and_continues_serving_tasks() {
         let (stats_tx, stats_rx) = tokio::sync::oneshot::channel();
         sender.send(WorkerTask::Stats(stats_tx)).unwrap();
         let stats = stats_rx.blocking_recv().unwrap();
-        assert_eq!(stats.block_count_for_worker(workers[0]), Some(1));
+        assert_eq!(stats.block_count_for_worker(workers[0]), Some(8));
 
         let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
         sender.send(WorkerTask::Flush(flush_tx)).unwrap();
@@ -319,6 +861,51 @@ fn worker_acknowledges_partial_event_failure_and_continues_serving_tasks() {
         sender.send(WorkerTask::Terminate).unwrap();
         worker.join().unwrap();
     });
+}
+
+#[test]
+fn worker_termination_and_receiver_closure_drain_pending_publication() {
+    for terminate in [true, false] {
+        let workers = workers();
+        let mut config = CkfConfig::new(32);
+        config.publish_every_n_events = 16;
+        let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
+        let (sender, receiver) = flume::unbounded();
+
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| index.worker(receiver, None).unwrap());
+            sender
+                .send(WorkerTask::Event(store_event(workers[0], &[10], 1)))
+                .unwrap();
+            let (flush_tx, flush_rx) = tokio::sync::oneshot::channel();
+            sender.send(WorkerTask::Stats(flush_tx)).unwrap();
+            flush_rx.blocking_recv().unwrap();
+            assert_eq!(
+                index
+                    .pipeline
+                    .replica()
+                    .table
+                    .probe(index.pipeline.replica().addressing.prepare(10))
+                    & 1,
+                0
+            );
+            if terminate {
+                sender.send(WorkerTask::Terminate).unwrap();
+            }
+            drop(sender);
+            worker.join().unwrap();
+        });
+
+        assert_ne!(
+            index
+                .pipeline
+                .replica()
+                .table
+                .probe(index.pipeline.replica().addressing.prepare(10))
+                & 1,
+            0
+        );
+    }
 }
 
 #[test]
@@ -331,32 +918,25 @@ fn pruning_construction_is_rejected_before_threads_start() {
 }
 
 #[test]
-fn removal_continues_after_a_missing_hash_and_retains_first_error() {
+fn unknown_removal_is_ignored_while_valid_removal_continues() {
     let workers = workers();
     let index = EventTransposedCkfIndexer::new(workers, CkfConfig::new(32)).unwrap();
-    let mut states = std::array::from_fn(|_| None);
     index
-        .apply_event(&mut states, store_event(workers[0], &[10, 20], 1000), None)
+        .apply_event(store_event(workers[0], &[10, 20], 1000), None)
         .unwrap();
 
-    let result = index.apply_event(&mut states, remove_event(workers[0], &[999, 20]), None);
-    assert!(matches!(
-        result,
-        Err(crate::protocols::KvCacheEventError::BlockNotFound)
-    ));
+    index
+        .apply_event(remove_event(workers[0], &[999, 20]), None)
+        .unwrap();
     assert!(
-        states[0]
-            .as_ref()
-            .expect("writer state")
-            .resident
-            .contains(&ExternalSequenceBlockHash(10))
+        index
+            .pipeline
+            .member_contains(workers[0], ExternalSequenceBlockHash(10))
     );
     assert!(
-        !states[0]
-            .as_ref()
-            .expect("writer state")
-            .resident
-            .contains(&ExternalSequenceBlockHash(20))
+        !index
+            .pipeline
+            .member_contains(workers[0], ExternalSequenceBlockHash(20))
     );
 }
 
@@ -366,92 +946,72 @@ fn digest_updates_roll_back_when_ckf_mutation_fails() {
     let mut config = CkfConfig::new(1);
     config.max_kicks = 1;
     let index = EventTransposedCkfIndexer::new(workers, config).unwrap();
-    let mut states = std::array::from_fn(|_| None);
     index
         .apply_event(
-            &mut states,
             store_event(workers[0], &(0..8).collect::<Vec<_>>(), 1000),
             None,
         )
         .unwrap();
 
     assert!(matches!(
-        index.apply_event(&mut states, store_event(workers[0], &[8], 2000), None),
+        index.apply_event(store_event(workers[0], &[8], 2000), None),
         Err(crate::protocols::KvCacheEventError::CapacityExhausted)
     ));
-    let state = states[0].as_ref().expect("writer state");
-    assert_eq!(state.resident.len(), 8);
-    assert!(!state.resident.contains(&ExternalSequenceBlockHash(8)));
+    assert_eq!(index.pipeline.memory_snapshot().actual_contributions, 8);
+    assert!(
+        !index
+            .pipeline
+            .member_contains(workers[0], ExternalSequenceBlockHash(8))
+    );
 
     let resident = ExternalSequenceBlockHash(0);
-    let probe = index.addressing.prepare(resident.0);
-    let view = index.table.lane(0);
-    view.store_bucket(probe.bucket_a, PackedBucket::default());
-    view.store_bucket(probe.bucket_b, PackedBucket::default());
+    index
+        .pipeline
+        .clear_owned_representation(workers[0], resident);
     assert!(matches!(
-        index.apply_event(&mut states, remove_event(workers[0], &[resident.0]), None),
+        index.apply_event(remove_event(workers[0], &[resident.0]), None),
         Err(crate::protocols::KvCacheEventError::IndexerInvariantViolation)
     ));
-    assert!(
-        states[0]
-            .as_ref()
-            .expect("writer state")
-            .resident
-            .contains(&resident)
-    );
+    assert!(index.pipeline.member_contains(workers[0], resident));
 }
 
 #[test]
 fn invalid_representation_collision_removal_does_not_delete_the_resident_hash() {
     let workers = workers();
     let index = EventTransposedCkfIndexer::new(workers, CkfConfig::new(1)).unwrap();
-    let (resident, absent, probe) = colliding_hashes(index.addressing);
-    let mut states = std::array::from_fn(|_| None);
+    let (resident, absent, probe) = colliding_hashes(index.pipeline.replica().addressing);
     index
-        .apply_event(
-            &mut states,
-            store_event(workers[0], &[resident.0], 5000),
-            None,
-        )
+        .apply_event(store_event(workers[0], &[resident.0], 5000), None)
         .unwrap();
 
-    let result = index.apply_event(&mut states, remove_event(workers[0], &[absent.0]), None);
-    assert!(matches!(
-        result,
-        Err(crate::protocols::KvCacheEventError::BlockNotFound)
-    ));
-    assert_eq!(index.table.probe(probe) & 1, 1);
-    assert!(
-        states[0]
-            .as_ref()
-            .expect("writer state")
-            .resident
-            .contains(&resident)
-    );
+    index
+        .apply_event(remove_event(workers[0], &[absent.0]), None)
+        .unwrap();
+    assert_eq!(index.pipeline.replica().table.probe(probe) & 1, 1);
+    assert!(index.pipeline.member_contains(workers[0], resident));
 }
 
 #[test]
 fn successful_mutation_reports_each_final_dirty_image_once() {
     let workers = workers();
     let index = EventTransposedCkfIndexer::new(workers, CkfConfig::new(32)).unwrap();
-    let mut states = std::array::from_fn(|_| None);
-    let mut dirty = Vec::new();
-    index
-        .apply_event_with_dirty(
-            &mut states,
-            store_event(workers[0], &[10], 6000),
-            None,
-            |lane, bucket| dirty.push((lane, bucket)),
-        )
-        .unwrap();
+    let mut batch = index.pipeline.new_batch();
+    let outcome = index.apply_event_with_batch(store_event(workers[0], &[10], 6000), &mut batch);
+    assert!(outcome.first_error().is_none());
 
-    assert!(!dirty.is_empty());
+    assert!(!batch.images().is_empty());
     let mut unique = HashSet::new();
-    for (lane, bucket) in dirty {
-        assert!(unique.insert((lane, bucket.bucket)));
+    for image in batch.images() {
+        let lane = usize::from(image.lane());
+        assert!(unique.insert((lane, image.bucket())));
         assert_eq!(
-            index.table.lane(lane).load_bucket(bucket.bucket),
-            bucket.value
+            index
+                .pipeline
+                .replica()
+                .table
+                .lane(lane)
+                .load_bucket(image.bucket()),
+            PackedBucket(image.value())
         );
     }
 }
@@ -730,8 +1290,8 @@ fn new_event_errors_have_finite_metric_labels() {
 #[tokio::test]
 async fn duplicate_warning_and_partial_error_metrics_are_event_scoped() {
     use crate::indexer::{
-        KvIndexerMetrics, METRIC_EVENT_REMOVED, METRIC_STATUS_BLOCK_NOT_FOUND,
-        METRIC_WARNING_DUPLICATE_STORE,
+        KvIndexerMetrics, METRIC_CKF_MUTATION_UNKNOWN_REMOVE, METRIC_EVENT_REMOVED,
+        METRIC_STATUS_OK, METRIC_WARNING_DUPLICATE_STORE,
     };
 
     let workers = workers();
@@ -758,7 +1318,14 @@ async fn duplicate_warning_and_partial_error_metrics_are_event_scoped() {
     assert_eq!(
         metrics
             .kv_cache_events_applied
-            .with_label_values(&[METRIC_EVENT_REMOVED, METRIC_STATUS_BLOCK_NOT_FOUND])
+            .with_label_values(&[METRIC_EVENT_REMOVED, METRIC_STATUS_OK])
+            .get(),
+        1
+    );
+    assert_eq!(
+        metrics
+            .ckf_mutation
+            .with_label_values(&[METRIC_CKF_MUTATION_UNKNOWN_REMOVE])
             .get(),
         1
     );

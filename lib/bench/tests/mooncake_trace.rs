@@ -705,9 +705,11 @@ async fn measure_ckf_parity(
     artifact_sets: &[MockEngineReplayArtifacts],
     warning_count: &Arc<std::sync::atomic::AtomicUsize>,
     enforce_budgets: bool,
+    publish_every_n_events: usize,
 ) -> anyhow::Result<CkfParityStats> {
     let exact = MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS);
-    let ckf = MooncakeIndexerConfig::transposed_ckf(NUM_EVENT_WORKERS, NUM_GPU_BLOCKS);
+    let ckf = MooncakeIndexerConfig::transposed_ckf(NUM_EVENT_WORKERS, NUM_GPU_BLOCKS)
+        .with_publish_every_n_events(publish_every_n_events);
     assert_eq!(ckf.kind, MooncakeIndexerKind::TransposedCkf);
     let mut global = CkfParityStats::default();
 
@@ -740,7 +742,10 @@ async fn measure_ckf_parity(
         );
 
         let stats = compare_ckf_scores(artifact_set.engine_name, &actual, &expected);
-        println!("CKF_PARITY engine={} {stats:?}", artifact_set.engine_name);
+        println!(
+            "CKF_PARITY publish_every_n_events={} engine={} {stats:?}",
+            publish_every_n_events, artifact_set.engine_name
+        );
         assert_eq!(stats.under_reports, 0);
         assert_eq!(stats.under_report_magnitude, 0);
         if enforce_budgets {
@@ -755,7 +760,10 @@ async fn measure_ckf_parity(
         global.merge(stats);
     }
 
-    println!("CKF_PARITY global {global:?}");
+    println!(
+        "CKF_PARITY publish_every_n_events={} global {global:?}",
+        publish_every_n_events
+    );
     if enforce_budgets {
         assert_ckf_parity_budget("global", global, CKF_PARITY_GLOBAL_BUDGET);
     }
@@ -1222,12 +1230,14 @@ async fn mooncake_trace_replays_through_fixed_d16_ckf() -> anyhow::Result<()> {
     let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
     let mut artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
     make_ckf_parity_corpus_quiescent(&mut artifact_sets);
-    let stats = measure_ckf_parity(&artifact_sets, &warning_count, true).await?;
+    let stats = measure_ckf_parity(&artifact_sets, &warning_count, true, 1).await?;
     assert!(stats.queries > 0);
     assert_eq!(
         stats.lane_observations,
         stats.queries * CKF_PARITY_WORKERS as u64
     );
+    let batched = measure_ckf_parity(&artifact_sets, &warning_count, true, 16).await?;
+    assert_eq!(batched.lane_observations, stats.lane_observations);
 
     Ok(())
 }
@@ -1240,7 +1250,7 @@ async fn mooncake_trace_measures_fixed_d16_ckf_tolerance() -> anyhow::Result<()>
     let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
     let mut artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
     make_ckf_parity_corpus_quiescent(&mut artifact_sets);
-    let stats = measure_ckf_parity(&artifact_sets, &warning_count, false).await?;
+    let stats = measure_ckf_parity(&artifact_sets, &warning_count, false, 1).await?;
     assert!(stats.queries > 0);
     assert_eq!(
         stats.lane_observations,
