@@ -177,6 +177,9 @@ impl<const D: usize> TransposedCkfTable<D> {
 
     pub(super) fn clear_lane(&self, lane: usize) {
         debug_assert!(lane < D);
+        // A per-image atomic occupancy tracker won the reset microbenchmark but regressed the
+        // combined Relay workload by about 5.1% at N=1 and 3.0% at N=16. Keep the full scan
+        // unless a replacement avoids steady-state image bookkeeping and passes end-to-end.
         for bucket in 0..self.bucket_count {
             self.store(bucket, lane, PackedBucket::default());
         }

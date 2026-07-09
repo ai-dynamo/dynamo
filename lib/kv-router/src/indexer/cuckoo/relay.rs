@@ -337,6 +337,9 @@ pub struct CkfMemorySnapshot {
     pub insertion_scratch_capacity: usize,
 }
 
+// One bit per bucket plus first-touch order keeps publication-window draining O(touched).
+// Generation marks add per-bucket memory and wrap handling; reconsider them only for a measured
+// marking bottleneck.
 #[derive(Debug)]
 struct DirtyBatchScratch {
     words: Box<[u64]>,
@@ -445,6 +448,8 @@ impl RelayLaneState {
             .expected_contributions
             .checked_rem(member_count)
             .unwrap_or(0);
+        // Equal-share reservation is intentional. Use the capacity telemetry to demonstrate
+        // real ownership skew before introducing a weighted or lazy policy.
         for (member_index, &member) in lane_config.members.iter().enumerate() {
             let mut blocks = FxHashSet::default();
             blocks
@@ -628,6 +633,8 @@ impl RelayLaneState {
             distinct_touched: self.dirty_scratch.len() as u64,
             ..FinalizeImageStats::default()
         };
+        // First-touch order is intentional. Only revisit sorting or destination-store prefetch
+        // when replica_apply_ns is a measured hotspot, and validate it in the combined workload.
         for index in 0..self.dirty_scratch.len() {
             let bucket = self.dirty_scratch.bucket(index);
             let value = self.filter.load_bucket(bucket);
@@ -647,6 +654,8 @@ impl RelayLaneState {
     }
 
     fn reset_filter(&mut self) {
+        // Aggregator occupancy tracking added 1.44% without Clears and had no material benefit
+        // at one Clear per 1,000 events. This contiguous full clear is deliberate.
         self.filter.clear();
         self.dirty_scratch.clear();
     }
@@ -858,6 +867,8 @@ impl TransposedCkfReplica {
         &self,
         sequence: &[crate::protocols::LocalBlockHash],
     ) -> Vec<CkfProbe> {
+        // TODO(perf): Add a canonical sequence-hash sink or iterator so this can build probes
+        // without an intermediate Vec while preserving the shared hashing implementation.
         crate::protocols::compute_seq_hash_for_block(sequence)
             .into_iter()
             .map(|hash| self.addressing.prepare(hash))

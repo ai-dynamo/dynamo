@@ -48,6 +48,8 @@ impl CkfAddressing {
 
     #[inline]
     fn bucket_delta(&self, fingerprint: u16) -> usize {
+        // TODO(perf): Benchmark a seed/mask-specific fingerprint delta table before replacing
+        // this hash, including its per-indexer memory and cache effects.
         let mixed = xxh3::xxh3_64_with_seed(
             &fingerprint.to_le_bytes(),
             self.seed ^ ALTERNATE_BUCKET_DOMAIN,
