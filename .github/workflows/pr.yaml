@@ -620,6 +620,9 @@ jobs:
     name: frontend
     needs: [changed-files, frontend-build]
     if: needs.changed-files.outputs.frontend == 'true' || needs.changed-files.outputs.aic == 'true'
+    # This is intentionally a lightweight import/payload/native-engine contract smoke
+    # on both architectures. The full AIC behavior suite remains amd64-only via
+    # the aic_full marker exclusion used by the shared pytest jobs.
     strategy:
       fail-fast: false
       matrix:
