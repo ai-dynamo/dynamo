@@ -78,6 +78,8 @@ try:
     from tensorrt_llm.llmapi import ConversationParams
 except ImportError:
     # Older TRT-LLM builds carry conversation_id on DisaggregatedParams instead.
+    # TODO: Drop this fallback once Dynamo's minimum TRT-LLM version guarantees
+    # ConversationParams.
     ConversationParams = None
 
 if TYPE_CHECKING:
