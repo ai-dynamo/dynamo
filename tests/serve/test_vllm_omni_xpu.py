@@ -61,7 +61,7 @@ vllm_omni_configs = {
         model="Qwen/Qwen-Image",
         request_payloads=[
             ImageGenerationPayload(
-                body={。
+                body={
                     "prompt": "A red apple on a table",
                     "size": "512x512",
                     "num_inference_steps": 20,
