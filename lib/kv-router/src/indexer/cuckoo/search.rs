@@ -3,6 +3,9 @@
 
 use super::MAX_VERIFICATION_WINDOW;
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 const MAX_LANES: usize = 16;
 const MAX_VERIFICATION_GROUPS: usize = MAX_LANES * MAX_VERIFICATION_WINDOW;
 
@@ -27,6 +30,51 @@ pub(super) struct PrefixSearchResult<const D: usize> {
     pub(super) fallback: FallbackStats,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SearchPhase {
+    Initial,
+    Exponential,
+    Binary,
+    Verification,
+    Fallback,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SearchTraceKind {
+    Prefetch,
+    Probe,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SearchTraceEvent {
+    pub(super) kind: SearchTraceKind,
+    pub(super) phase: SearchPhase,
+    pub(super) position: usize,
+    pub(super) lanes: u16,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SEARCH_TRACE: RefCell<Option<Vec<SearchTraceEvent>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn record_trace(kind: SearchTraceKind, phase: SearchPhase, position: usize, lanes: u16) {
+    SEARCH_TRACE.with_borrow_mut(|trace| {
+        if let Some(trace) = trace {
+            trace.push(SearchTraceEvent {
+                kind,
+                phase,
+                position,
+                lanes,
+            });
+        }
+    });
+}
+
 #[cfg(any(not(feature = "metrics"), test))]
 pub(super) fn find_prefix_depths<const D: usize>(
     sequence_len: usize,
@@ -35,7 +83,7 @@ pub(super) fn find_prefix_depths<const D: usize>(
     prefetch: impl FnMut(usize),
     probe: impl FnMut(usize) -> u16,
 ) -> [u32; D] {
-    find_prefix_depths_impl::<D, true>(
+    find_prefix_depths_impl::<D, true, false>(
         sequence_len,
         initial_mask,
         verification_window,
@@ -53,7 +101,7 @@ pub(super) fn find_prefix_depths_with_stats<const D: usize>(
     prefetch: impl FnMut(usize),
     probe: impl FnMut(usize) -> u16,
 ) -> PrefixSearchResult<D> {
-    find_prefix_depths_impl::<D, true>(
+    find_prefix_depths_impl::<D, true, false>(
         sequence_len,
         initial_mask,
         verification_window,
@@ -70,7 +118,7 @@ pub(super) fn fixed_window_prefix_depths<const D: usize>(
     prefetch: impl FnMut(usize),
     probe: impl FnMut(usize) -> u16,
 ) -> [u32; D] {
-    find_prefix_depths_impl::<D, false>(
+    find_prefix_depths_impl::<D, false, false>(
         sequence_len,
         initial_mask,
         verification_window,
@@ -88,7 +136,7 @@ pub(super) fn find_prefix_depths_with_test_stats<const D: usize>(
     prefetch: impl FnMut(usize),
     probe: impl FnMut(usize) -> u16,
 ) -> PrefixSearchResult<D> {
-    find_prefix_depths_impl::<D, true>(
+    find_prefix_depths_impl::<D, true, false>(
         sequence_len,
         initial_mask,
         verification_window,
@@ -97,7 +145,34 @@ pub(super) fn find_prefix_depths_with_test_stats<const D: usize>(
     )
 }
 
-fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool>(
+#[cfg(test)]
+pub(super) fn find_prefix_depths_with_test_trace<const D: usize>(
+    sequence_len: usize,
+    initial_mask: u16,
+    verification_window: usize,
+    prefetch: impl FnMut(usize),
+    probe: impl FnMut(usize) -> u16,
+) -> (PrefixSearchResult<D>, Vec<SearchTraceEvent>) {
+    SEARCH_TRACE.with_borrow_mut(|trace| {
+        assert!(trace.is_none(), "nested CKF search tracing is unsupported");
+        *trace = Some(Vec::new());
+    });
+    let result = find_prefix_depths_impl::<D, true, true>(
+        sequence_len,
+        initial_mask,
+        verification_window,
+        prefetch,
+        probe,
+    );
+    let trace = SEARCH_TRACE.with_borrow_mut(|trace| {
+        trace
+            .take()
+            .expect("CKF search trace must remain active through the search")
+    });
+    (result, trace)
+}
+
+fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool, const TRACE: bool>(
     sequence_len: usize,
     initial_mask: u16,
     verification_window: usize,
@@ -113,7 +188,12 @@ fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool>(
     debug_assert!((1..=MAX_LANES).contains(&D));
     debug_assert!((1..=MAX_VERIFICATION_WINDOW).contains(&verification_window));
     let configured_mask = lane_mask::<D>();
-    let active = initial_mask & configured_mask & probe(0);
+    let configured = initial_mask & configured_mask;
+    #[cfg(test)]
+    if TRACE {
+        record_trace(SearchTraceKind::Probe, SearchPhase::Initial, 0, configured);
+    }
+    let active = configured & probe(0);
     if active == 0 {
         return PrefixSearchResult { depths, fallback };
     }
@@ -124,12 +204,39 @@ fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool>(
     let mut sampling = active;
     let mut position = 1usize;
     if position < sequence_len {
+        #[cfg(test)]
+        if TRACE {
+            record_trace(
+                SearchTraceKind::Prefetch,
+                SearchPhase::Exponential,
+                position,
+                sampling,
+            );
+        }
         prefetch(position);
     }
 
     while position < sequence_len && sampling != 0 {
         if let Some(next) = position.checked_mul(2).filter(|&next| next < sequence_len) {
+            #[cfg(test)]
+            if TRACE {
+                record_trace(
+                    SearchTraceKind::Prefetch,
+                    SearchPhase::Exponential,
+                    next,
+                    sampling,
+                );
+            }
             prefetch(next);
+        }
+        #[cfg(test)]
+        if TRACE {
+            record_trace(
+                SearchTraceKind::Probe,
+                SearchPhase::Exponential,
+                position,
+                sampling,
+            );
         }
         let hits = probe(position);
         let hit_lanes = sampling & hits;
@@ -167,9 +274,27 @@ fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool>(
         }
 
         for group in &groups[..group_count] {
+            #[cfg(test)]
+            if TRACE {
+                record_trace(
+                    SearchTraceKind::Prefetch,
+                    SearchPhase::Binary,
+                    group.position,
+                    group.lanes,
+                );
+            }
             prefetch(group.position);
         }
         for group in &groups[..group_count] {
+            #[cfg(test)]
+            if TRACE {
+                record_trace(
+                    SearchTraceKind::Probe,
+                    SearchPhase::Binary,
+                    group.position,
+                    group.lanes,
+                );
+            }
             let hits = probe(group.position);
             for lane in 0..D {
                 let lane_bit = 1u16 << lane;
@@ -220,7 +345,25 @@ fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool>(
         if participants == 0 {
             continue;
         }
+        #[cfg(test)]
+        if TRACE {
+            record_trace(
+                SearchTraceKind::Prefetch,
+                SearchPhase::Verification,
+                group.position,
+                participants,
+            );
+        }
         prefetch(group.position);
+        #[cfg(test)]
+        if TRACE {
+            record_trace(
+                SearchTraceKind::Probe,
+                SearchPhase::Verification,
+                group.position,
+                participants,
+            );
+        }
         let misses = participants & !probe(group.position);
         for (lane, depth) in depths.iter_mut().enumerate() {
             let lane_bit = 1u16 << lane;
@@ -281,7 +424,25 @@ fn find_prefix_depths_impl<const D: usize, const FALLBACK: bool>(
             }
         }
 
+        #[cfg(test)]
+        if TRACE {
+            record_trace(
+                SearchTraceKind::Prefetch,
+                SearchPhase::Fallback,
+                position,
+                participants,
+            );
+        }
         prefetch(position);
+        #[cfg(test)]
+        if TRACE {
+            record_trace(
+                SearchTraceKind::Probe,
+                SearchPhase::Fallback,
+                position,
+                participants,
+            );
+        }
         let misses = participants & !probe(position);
         fallback.probe_calls += 1;
         fallback.lane_probes += u64::from(participants.count_ones());

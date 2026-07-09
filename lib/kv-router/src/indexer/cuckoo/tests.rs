@@ -21,8 +21,9 @@ use super::bucket::{CuckooBucketStore, PackedBucket, TransposedCkfTable};
 use super::event_indexer::bucket_count;
 use super::mutator::{CuckooMutator, DcWriterState};
 use super::search::{
-    find_prefix_depths, find_prefix_depths_with_test_stats, fixed_window_prefix_depths,
-    linear_prefix_depths,
+    SearchPhase, SearchTraceEvent, SearchTraceKind, find_prefix_depths,
+    find_prefix_depths_with_test_stats, find_prefix_depths_with_test_trace,
+    fixed_window_prefix_depths, linear_prefix_depths,
 };
 use super::{
     CkfBuildError, CkfConfig, DC_COUNT, EventTransposedCkfIndexer, RelayLaneConfig, RelayManifest,
@@ -30,6 +31,44 @@ use super::{
 };
 
 const TEST_SEED: u64 = 0x1234_5678_9ABC_DEF0;
+
+const fn search_trace_event(
+    kind: SearchTraceKind,
+    phase: SearchPhase,
+    position: usize,
+    lanes: u16,
+) -> SearchTraceEvent {
+    SearchTraceEvent {
+        kind,
+        phase,
+        position,
+        lanes,
+    }
+}
+
+fn grouped_level_events(phase: SearchPhase, groups: &[(usize, u16)]) -> Vec<SearchTraceEvent> {
+    groups
+        .iter()
+        .map(|&(position, lanes)| {
+            search_trace_event(SearchTraceKind::Prefetch, phase, position, lanes)
+        })
+        .chain(groups.iter().map(|&(position, lanes)| {
+            search_trace_event(SearchTraceKind::Probe, phase, position, lanes)
+        }))
+        .collect()
+}
+
+fn sequential_probe_events(phase: SearchPhase, groups: &[(usize, u16)]) -> Vec<SearchTraceEvent> {
+    groups
+        .iter()
+        .flat_map(|&(position, lanes)| {
+            [
+                search_trace_event(SearchTraceKind::Prefetch, phase, position, lanes),
+                search_trace_event(SearchTraceKind::Probe, phase, position, lanes),
+            ]
+        })
+        .collect()
+}
 
 fn single_lane_manifest(
     members: Vec<WorkerWithDpRank>,
@@ -755,22 +794,64 @@ fn full_binary_search_and_terminal_window_follow_the_defined_contract() {
 }
 
 #[test]
-fn grouped_search_probes_each_binary_midpoint_once() {
-    let masks = [u16::MAX, u16::MAX, u16::MAX, 0, 0, 0, 0, 0];
-    let mut counts = [0usize; 8];
-    let depths = find_prefix_depths::<16>(
-        masks.len(),
-        u16::MAX,
-        1,
-        |_| {},
-        |position| {
-            counts[position] += 1;
-            masks[position]
-        },
-    );
+fn exponential_search_prefetches_exactly_one_sample_ahead() {
+    let (result, trace) = find_prefix_depths_with_test_trace::<1>(9, 1, 1, |_| {}, |_| 1);
+    let schedule: Vec<_> = trace
+        .into_iter()
+        .filter(|event| matches!(event.phase, SearchPhase::Initial | SearchPhase::Exponential))
+        .collect();
 
-    assert!(depths.into_iter().all(|depth| depth == 3));
-    assert!(counts.into_iter().all(|count| count <= 2));
+    assert_eq!(result.depths, [9]);
+    assert_eq!(
+        schedule,
+        vec![
+            search_trace_event(SearchTraceKind::Probe, SearchPhase::Initial, 0, 1),
+            search_trace_event(SearchTraceKind::Prefetch, SearchPhase::Exponential, 1, 1),
+            search_trace_event(SearchTraceKind::Prefetch, SearchPhase::Exponential, 2, 1),
+            search_trace_event(SearchTraceKind::Probe, SearchPhase::Exponential, 1, 1),
+            search_trace_event(SearchTraceKind::Prefetch, SearchPhase::Exponential, 4, 1),
+            search_trace_event(SearchTraceKind::Probe, SearchPhase::Exponential, 2, 1),
+            search_trace_event(SearchTraceKind::Prefetch, SearchPhase::Exponential, 8, 1),
+            search_trace_event(SearchTraceKind::Probe, SearchPhase::Exponential, 4, 1),
+            search_trace_event(SearchTraceKind::Probe, SearchPhase::Exponential, 8, 1),
+        ]
+    );
+}
+
+#[test]
+fn divergent_lanes_group_binary_midpoints_once_per_level() {
+    const PREFIX_DEPTHS: [usize; 16] = [3, 3, 6, 7, 11, 11, 15, 17, 3, 6, 11, 15, 17, 7, 3, 11];
+    let membership = |position: usize| {
+        PREFIX_DEPTHS
+            .iter()
+            .enumerate()
+            .fold(0u16, |mask, (lane, &depth)| {
+                mask | (u16::from(position < depth) << lane)
+            })
+    };
+    let (result, trace) =
+        find_prefix_depths_with_test_trace::<16>(17, u16::MAX, 1, |_| {}, membership);
+    let binary_schedule: Vec<_> = trace
+        .into_iter()
+        .filter(|event| event.phase == SearchPhase::Binary)
+        .collect();
+
+    assert_eq!(result.depths, PREFIX_DEPTHS.map(|depth| depth as u32));
+    assert_eq!(
+        binary_schedule,
+        [
+            grouped_level_events(
+                SearchPhase::Binary,
+                &[(3, 0x4103), (6, 0x220c), (12, 0x8c70)]
+            ),
+            grouped_level_events(
+                SearchPhase::Binary,
+                &[(5, 0x0204), (7, 0x2008), (10, 0x8430), (14, 0x0840)],
+            ),
+            grouped_level_events(SearchPhase::Binary, &[(11, 0x8430), (15, 0x0840)]),
+        ]
+        .concat()
+    );
 }
 
 #[tokio::test]
@@ -1039,6 +1120,43 @@ fn successful_mutation_reports_each_final_dirty_image_once() {
 }
 
 #[test]
+fn overlapping_verification_windows_isolate_lanes_and_retire_first_misses() {
+    const PREFIX_DEPTHS: [usize; 4] = [9, 10, 11, 12];
+    let membership = |position: usize| {
+        PREFIX_DEPTHS
+            .iter()
+            .enumerate()
+            .fold(0u16, |mask, (lane, &depth)| {
+                let hole = matches!((lane, position), (0, 5 | 7) | (1, 7) | (2, 6 | 9) | (3, 5));
+                mask | (u16::from(position < depth && !hole) << lane)
+            })
+    };
+    let (result, trace) =
+        find_prefix_depths_with_test_trace::<4>(17, 0b1111, 4, |_| {}, membership);
+    let verification_schedule: Vec<_> = trace
+        .into_iter()
+        .filter(|event| event.phase == SearchPhase::Verification)
+        .collect();
+
+    assert_eq!(result.depths, [5, 7, 9, 12]);
+    assert_eq!(
+        verification_schedule,
+        sequential_probe_events(
+            SearchPhase::Verification,
+            &[
+                (5, 0b0001),
+                (6, 0b0010),
+                (7, 0b0110),
+                (8, 0b1100),
+                (9, 0b1100),
+                (10, 0b1000),
+                (11, 0b1000),
+            ],
+        )
+    );
+}
+
+#[test]
 fn window_eight_repairs_holes_at_offsets_two_through_eight() {
     const QUERY_LEN: usize = 33;
 
@@ -1116,6 +1234,70 @@ fn terminal_branch_fallback_groups_lanes_and_repairs_a_clipped_false_pivot() {
     assert_eq!(result.fallback.probe_calls, 8);
     assert_eq!(result.fallback.lane_probes, 16);
     assert_eq!(result.fallback.provenance_skips, 0);
+}
+
+#[test]
+fn staggered_fallback_cursors_group_only_lanes_at_the_same_position() {
+    let membership = |position: usize| {
+        u16::from(position < 44 || position == 48)
+            | (u16::from(position < 42 || position == 44) << 1)
+    };
+    let (result, trace) = find_prefix_depths_with_test_trace::<2>(65, 0b11, 2, |_| {}, membership);
+    let fallback_schedule: Vec<_> = trace
+        .into_iter()
+        .filter(|event| event.phase == SearchPhase::Fallback)
+        .collect();
+    let expected_groups: Vec<_> = (33..=40)
+        .map(|position| (position, 0b01))
+        .chain((41..=42).map(|position| (position, 0b11)))
+        .chain((43..=44).map(|position| (position, 0b01)))
+        .collect();
+
+    assert_eq!(result.depths, [44, 42]);
+    assert_eq!(result.fallback.left_edge_lanes, 2);
+    assert_eq!(result.fallback.activated_lanes, 2);
+    assert_eq!(result.fallback.probe_calls, 12);
+    assert_eq!(result.fallback.lane_probes, 14);
+    assert_eq!(result.fallback.provenance_skips, 0);
+    assert_eq!(
+        fallback_schedule,
+        sequential_probe_events(SearchPhase::Fallback, &expected_groups)
+    );
+}
+
+#[test]
+fn valid_fallback_lane_progresses_while_second_order_lane_is_skipped() {
+    let membership = |position: usize| {
+        u16::from(position < 40 || position == 48)
+            | (u16::from(position < 41 || (48..=51).contains(&position)) << 1)
+    };
+    let (result, trace) = find_prefix_depths_with_test_trace::<2>(65, 0b11, 8, |_| {}, membership);
+    let fallback_probes: Vec<_> = trace
+        .into_iter()
+        .filter(|event| {
+            event.phase == SearchPhase::Fallback && event.kind == SearchTraceKind::Probe
+        })
+        .collect();
+
+    assert_eq!(result.depths, [40, 44]);
+    assert_eq!(result.fallback.left_edge_lanes, 2);
+    assert_eq!(result.fallback.activated_lanes, 1);
+    assert_eq!(result.fallback.probe_calls, 8);
+    assert_eq!(result.fallback.lane_probes, 8);
+    assert_eq!(result.fallback.provenance_skips, 1);
+    assert_eq!(
+        fallback_probes,
+        (33..=40)
+            .map(|position| {
+                search_trace_event(
+                    SearchTraceKind::Probe,
+                    SearchPhase::Fallback,
+                    position,
+                    0b01,
+                )
+            })
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
