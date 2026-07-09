@@ -25,8 +25,11 @@ on:
           build-xpu
           test-xpu
     secrets:
+      # Keep optional: a `required: true` reusable-workflow secret gates the
+      # caller's startup even under `secrets: inherit`, failing the run at
+      # startup (0 jobs) when the secret is absent.
       SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL:
-        required: true
+        required: false
 
 jobs:
   notify-slack:
