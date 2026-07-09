@@ -906,10 +906,7 @@ class SglangStreamingPostProcessor:
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
         # Reasoning text deltas, accumulated so usage can report
-        # reasoning_tokens. Counting here (not in the worker) is the only
-        # per-request-correct place: SGLang's scheduler only counts reasoning
-        # when require_reasoning=True, which the Dynamo bare-Engine path never
-        # sets. See reasoning_token_count().
+        # reasoning_tokens. See reasoning_token_count().
         self._reasoning_text_parts: list[str] = []
 
     def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
