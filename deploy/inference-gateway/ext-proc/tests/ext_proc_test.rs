@@ -76,6 +76,7 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
             ("x-dynamo-prefill-dp-rank".to_string(), "0".to_string()),
         ],
         token_ids: Some(vec![1, 2, 3, 4, 5]),
+        strip_token_data: false,
     };
 
     let picker = Arc::new(MockPicker {

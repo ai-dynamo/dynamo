@@ -561,8 +561,7 @@ fn tokenize_completion_prompt_embeds(
         return Ok(None);
     }
 
-    let fields: CompletionPromptEmbedsRoutingFields =
-        serde_json::from_value(request_json.clone())?;
+    let fields: CompletionPromptEmbedsRoutingFields = serde_json::from_value(request_json.clone())?;
     let nvext = fields.nvext.as_ref();
     let priority_jump = extract_priority_jump(nvext);
     let strict_priority = extract_strict_priority(nvext);
