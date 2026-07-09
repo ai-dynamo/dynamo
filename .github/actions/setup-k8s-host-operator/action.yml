@@ -161,10 +161,14 @@ runs:
         echo "::notice::[$(date -u +%H:%M:%S)] waiting for grove-operator to be ready"
         kubectl --kubeconfig="${KUBECONFIG_PATH}" wait --for=condition=Available deployment/grove-operator -n "${NAMESPACE}" --timeout=300s
 
+        count_words() {
+          tr -s ' ' '\n' | awk 'NF { count += 1 } END { print count + 0 }'
+        }
+
         WEBHOOK_READY=0
         for attempt in $(seq 1 30); do
-          ENDPOINT_ADDR_COUNT=$(kubectl --kubeconfig="${KUBECONFIG_PATH}" get endpoints grove-operator -n "${NAMESPACE}" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | awk '{print NF}')
-          ENDPOINTSLICE_READY_ADDR_COUNT=$(kubectl --kubeconfig="${KUBECONFIG_PATH}" get endpointslices -n "${NAMESPACE}" -l kubernetes.io/service-name=grove-operator -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}' 2>/dev/null | awk '{print NF}')
+          ENDPOINT_ADDR_COUNT="$({ kubectl --kubeconfig="${KUBECONFIG_PATH}" get endpoints grove-operator -n "${NAMESPACE}" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true; } | count_words)"
+          ENDPOINTSLICE_READY_ADDR_COUNT="$({ kubectl --kubeconfig="${KUBECONFIG_PATH}" get endpointslices -n "${NAMESPACE}" -l kubernetes.io/service-name=grove-operator -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}' 2>/dev/null || true; } | count_words)"
 
           if [[ "${ENDPOINT_ADDR_COUNT}" -ge 1 || "${ENDPOINTSLICE_READY_ADDR_COUNT}" -ge 1 ]]; then
             WEBHOOK_READY=1
@@ -204,5 +208,6 @@ runs:
         fi
 
         KUBECONFIG_B64=$(base64 < "${KUBECONFIG_PATH}" | tr -d '\n')
+        echo "::add-mask::${KUBECONFIG_B64}"
         echo "kubeconfig_base64=${KUBECONFIG_B64}" >> "$GITHUB_OUTPUT"
         trap - EXIT

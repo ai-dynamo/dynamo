@@ -40,17 +40,17 @@ runs:
         strip_finalizers() {
           local resource_name
           local resource_kind
+          local obj
 
           resource_name="$1"
           resource_kind="$2"
 
-          kubectl --kubeconfig="${KUBECONFIG_PATH}" get "${resource_name}" -n "${NAMESPACE}" -o name 2>/dev/null \
-            | while read -r obj; do
-                if [[ -n "${obj}" ]]; then
-                  echo "Stripping finalizers from ${resource_kind}/${obj##*/}"
-                  kubectl --kubeconfig="${KUBECONFIG_PATH}" patch "${obj}" -n "${NAMESPACE}" --type merge -p '{"metadata":{"finalizers":[]}}' || true
-                fi
-              done
+          while IFS= read -r obj; do
+            if [[ -n "${obj}" ]]; then
+              echo "Stripping finalizers from ${resource_kind}/${obj##*/}"
+              kubectl --kubeconfig="${KUBECONFIG_PATH}" patch "${obj}" -n "${NAMESPACE}" --type merge -p '{"metadata":{"finalizers":[]}}' || true
+            fi
+          done < <(kubectl --kubeconfig="${KUBECONFIG_PATH}" get "${resource_name}" -n "${NAMESPACE}" -o name 2>/dev/null || true)
         }
 
         strip_finalizers "podcliquesets.grove.io" "podcliqueset"

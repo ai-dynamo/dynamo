@@ -65,6 +65,7 @@ env:
 jobs:
   deploy-test-xpu:
     runs-on: xpu-deploy
+    timeout-minutes: 90
     permissions:
       contents: read
     strategy:
@@ -104,17 +105,16 @@ jobs:
           set -euo pipefail
           IMAGE_URI="${LOCAL_REGISTRY}/ai-dynamo/dynamo:${SOURCE_REF}-${FRAMEWORK}-${TARGET}-xpu${IMAGE_TAG_SUFFIX}"
 
-          # Check if image already exists to avoid redundant builds
           if docker image inspect "${IMAGE_URI}" >/dev/null 2>&1; then
-            echo "::notice::Image ${IMAGE_URI} already exists, skipping build"
+            echo "::notice::Image ${IMAGE_URI} already exists locally, skipping build"
           else
             docker build \
               --tag "${IMAGE_URI}" \
               -f ./container/rendered.Dockerfile \
               . 2>&1 | tee "build-${{ matrix.name }}.log"
-
-            docker push "${IMAGE_URI}"
           fi
+
+          docker push "${IMAGE_URI}"
 
           echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
 
@@ -125,16 +125,16 @@ jobs:
           OPERATOR_IMAGE_URI="${LOCAL_REGISTRY}/ai-dynamo/dynamo:${SOURCE_REF}-operator${IMAGE_TAG_SUFFIX}"
 
           if docker image inspect "${OPERATOR_IMAGE_URI}" >/dev/null 2>&1; then
-            echo "::notice::Image ${OPERATOR_IMAGE_URI} already exists, skipping build"
+            echo "::notice::Image ${OPERATOR_IMAGE_URI} already exists locally, skipping build"
           else
             docker build \
               --build-context snapshot=./deploy/snapshot \
               --tag "${OPERATOR_IMAGE_URI}" \
               -f ./deploy/operator/Dockerfile \
               ./deploy/operator 2>&1 | tee "build-operator-${{ matrix.name }}.log"
-
-            docker push "${OPERATOR_IMAGE_URI}"
           fi
+
+          docker push "${OPERATOR_IMAGE_URI}"
 
           echo "OPERATOR_IMAGE_URI=${OPERATOR_IMAGE_URI}" >> "$GITHUB_ENV"
 
