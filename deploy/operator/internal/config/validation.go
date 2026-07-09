@@ -15,17 +15,17 @@
  * limitations under the License.
  */
 
-package validation
+package config
 
 import (
 	"net/url"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	configapi "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
-// ValidateOperatorConfiguration validates an OperatorConfiguration object.
-func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration) field.ErrorList {
+// Validate checks the configuration for invalid values.
+func Validate(config *configapi.OperatorConfiguration) field.ErrorList {
 	if config == nil {
 		return field.ErrorList{field.Required(field.NewPath(""), "operator configuration is required")}
 	}
@@ -45,7 +45,7 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 	return allErrs
 }
 
-func validateServer(server *configv1alpha1.ServerConfiguration, fldPath *field.Path) field.ErrorList {
+func validateServer(server *configapi.ServerConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	if server.Metrics.Port < 0 || server.Metrics.Port > 65535 {
@@ -61,7 +61,7 @@ func validateServer(server *configv1alpha1.ServerConfiguration, fldPath *field.P
 	return allErrs
 }
 
-func validateLeaderElection(le *configv1alpha1.LeaderElectionConfiguration, fldPath *field.Path) field.ErrorList {
+func validateLeaderElection(le *configapi.LeaderElectionConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	if le.Enabled && le.ID == "" {
@@ -71,7 +71,7 @@ func validateLeaderElection(le *configv1alpha1.LeaderElectionConfiguration, fldP
 	return allErrs
 }
 
-func validateNamespace(ns *configv1alpha1.NamespaceConfiguration, fldPath *field.Path) field.ErrorList {
+func validateNamespace(ns *configapi.NamespaceConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	// Namespace-restricted mode validations
@@ -92,7 +92,7 @@ func validateNamespace(ns *configv1alpha1.NamespaceConfiguration, fldPath *field
 	return allErrs
 }
 
-func validateMPI(mpi *configv1alpha1.MPIConfiguration, fldPath *field.Path) field.ErrorList {
+func validateMPI(mpi *configapi.MPIConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	if mpi.SSHSecretName == "" {
@@ -105,7 +105,7 @@ func validateMPI(mpi *configv1alpha1.MPIConfiguration, fldPath *field.Path) fiel
 	return allErrs
 }
 
-func validateInfrastructure(infra *configv1alpha1.InfrastructureConfiguration, fldPath *field.Path) field.ErrorList {
+func validateInfrastructure(infra *configapi.InfrastructureConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	if infra.ModelExpressURL != "" {
@@ -117,10 +117,10 @@ func validateInfrastructure(infra *configv1alpha1.InfrastructureConfiguration, f
 	return allErrs
 }
 
-func validateDiscovery(discovery *configv1alpha1.DiscoveryConfiguration, fldPath *field.Path) field.ErrorList {
+func validateDiscovery(discovery *configapi.DiscoveryConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	if discovery.Backend != configv1alpha1.DiscoveryBackendKubernetes && discovery.Backend != configv1alpha1.DiscoveryBackendEtcd {
+	if discovery.Backend != configapi.DiscoveryBackendKubernetes && discovery.Backend != configapi.DiscoveryBackendEtcd {
 		allErrs = append(allErrs, field.NotSupported(fldPath.Child("backend"), discovery.Backend, []string{"kubernetes", "etcd"}))
 	}
 
@@ -128,7 +128,7 @@ func validateDiscovery(discovery *configv1alpha1.DiscoveryConfiguration, fldPath
 }
 
 // validateRBAC is mode-aware: validates RBAC fields based on namespace mode.
-func validateRBAC(config *configv1alpha1.OperatorConfiguration) field.ErrorList {
+func validateRBAC(config *configapi.OperatorConfiguration) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	// RBAC validation only applies in cluster-wide mode
@@ -150,7 +150,7 @@ func validateRBAC(config *configv1alpha1.OperatorConfiguration) field.ErrorList 
 	return allErrs
 }
 
-func validateOrchestrators(orch *configv1alpha1.OrchestratorConfiguration, fldPath *field.Path) field.ErrorList {
+func validateOrchestrators(orch *configapi.OrchestratorConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	if orch.Grove.TerminationDelay.Duration < 0 {
@@ -160,7 +160,7 @@ func validateOrchestrators(orch *configv1alpha1.OrchestratorConfiguration, fldPa
 	return allErrs
 }
 
-func validateIngress(ingress *configv1alpha1.IngressConfiguration, fldPath *field.Path) field.ErrorList {
+func validateIngress(ingress *configapi.IngressConfiguration, fldPath *field.Path) field.ErrorList {
 	// No required fields — all ingress configuration is optional
 	_ = fldPath
 	_ = ingress
@@ -172,7 +172,7 @@ func validateIngress(ingress *configv1alpha1.IngressConfiguration, fldPath *fiel
 // private key (and optionally a CA certificates file); without them Istio's
 // validation webhook rejects the EPP DestinationRule and the operator can
 // never finish reconciling the DGD.
-func validateServiceMesh(sm *configv1alpha1.ServiceMeshConfiguration, fldPath *field.Path) field.ErrorList {
+func validateServiceMesh(sm *configapi.ServiceMeshConfiguration, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	if !sm.IsEnabled() {
