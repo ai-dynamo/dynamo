@@ -4,7 +4,6 @@
 import types
 
 import pytest
-from aiconfigurator.sdk import common, memory
 
 from dynamo._internal.aic import (
     _DEFAULT_NEXTN_ACCEPT_RATES,
@@ -35,6 +34,8 @@ def _patch_memory(monkeypatch, return_value=123):
     truth), so these tests assert the dynamo->AIC mapping rather than recompute
     the math themselves.
     """
+    from aiconfigurator.sdk import memory
+
     calls = []
 
     def fake(model_path, system, backend, **kwargs):
@@ -268,6 +269,8 @@ def test_estimate_num_gpu_blocks_forwards_normalized_quant_modes(monkeypatch):
 
 
 def test_resolve_quant_mode_per_field():
+    from aiconfigurator.sdk import common
+
     assert _resolve_quant_mode("gemm", "int4") == common.GEMMQuantMode.int4_wo
     assert _resolve_quant_mode("gemm", "fp8") == common.GEMMQuantMode.fp8
     assert _resolve_quant_mode("moe", "w4a16_mxfp4") == common.MoEQuantMode.w4a16_mxfp4
@@ -294,6 +297,8 @@ def test_resolve_quant_mode_rejects_unsupported_per_field():
 
 
 def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
+    from aiconfigurator.sdk import common
+
     import dynamo._internal.aic as aic_mod
 
     captured: dict = {}

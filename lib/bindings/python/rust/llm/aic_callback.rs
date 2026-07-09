@@ -81,6 +81,7 @@ impl PrefillLoadEstimator for RustAicCallback {
 }
 
 /// Point the Rust AIC core at the data bundled in the installed Python wheel.
+#[cfg(feature = "aic-forward-pass")]
 pub(super) fn configure_default_data_roots(py: Python<'_>) {
     if let Err(error) = py
         .import("aiconfigurator.sdk.rust_engine_step")

@@ -6,11 +6,6 @@
 from __future__ import annotations
 
 import pytest
-from aiconfigurator.sdk.engine import compile_engine
-from aiconfigurator.sdk.memory import estimate_num_gpu_blocks
-
-from dynamo.mocker import MockEngineArgs
-from dynamo.replay import run_synthetic_trace_replay
 
 pytestmark = [
     pytest.mark.aic_full,
@@ -32,7 +27,9 @@ def _offline_aic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
 
 
-def _engine_args(worker_type: str | None = None) -> MockEngineArgs:
+def _engine_args(worker_type: str | None = None):
+    from dynamo.mocker import MockEngineArgs
+
     worker_options = {"worker_type": worker_type} if worker_type is not None else {}
     return MockEngineArgs(
         aic_backend="vllm",
@@ -48,6 +45,8 @@ def _engine_args(worker_type: str | None = None) -> MockEngineArgs:
 
 
 def test_real_aic_memory_estimates_gpu_blocks() -> None:
+    from aiconfigurator.sdk.memory import estimate_num_gpu_blocks
+
     blocks = estimate_num_gpu_blocks(
         model_path=AIC_MODEL,
         system=AIC_SYSTEM,
@@ -64,7 +63,11 @@ def test_real_aic_memory_estimates_gpu_blocks() -> None:
 
 
 def test_aggregated_replay_uses_native_aic_engine() -> None:
-    assert compile_engine
+    from aiconfigurator.sdk.engine import compile_engine
+
+    from dynamo.replay import run_synthetic_trace_replay
+
+    assert callable(compile_engine)
     report = run_synthetic_trace_replay(
         128,
         8,
@@ -80,6 +83,8 @@ def test_aggregated_replay_uses_native_aic_engine() -> None:
 
 
 def test_disaggregated_replay_uses_native_aic_engine() -> None:
+    from dynamo.replay import run_synthetic_trace_replay
+
     report = run_synthetic_trace_replay(
         128,
         8,

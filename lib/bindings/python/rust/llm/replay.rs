@@ -163,6 +163,7 @@ impl MockEngineArgs {
         self.inner.clone()
     }
 
+    #[cfg(feature = "aic-forward-pass")]
     pub(crate) fn has_aic_backend(&self) -> bool {
         self.inner.aic_backend.is_some()
     }

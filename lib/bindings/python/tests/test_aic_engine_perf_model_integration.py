@@ -8,18 +8,6 @@ from __future__ import annotations
 import json
 
 import pytest
-from aiconfigurator.sdk.engine import compile_engine
-
-from dynamo.common.forward_pass_metrics import (
-    ForwardPassMetrics,
-    ScheduledRequestMetrics,
-)
-from dynamo.mocker import (
-    AicEngineConfig,
-    EngineCapacityRequest,
-    EnginePerfLimits,
-    RustEnginePerfModel,
-)
 
 pytestmark = [
     pytest.mark.aic_full,
@@ -42,8 +30,12 @@ def _offline_aic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
 
 
-def _native_model(worker_type: str) -> RustEnginePerfModel:
-    assert compile_engine
+def _native_model(worker_type: str):
+    from aiconfigurator.sdk.engine import compile_engine
+
+    from dynamo.mocker import AicEngineConfig, EnginePerfLimits, RustEnginePerfModel
+
+    assert callable(compile_engine)
     return RustEnginePerfModel.from_native(
         aic_config=AicEngineConfig(
             model_name=AIC_MODEL,
@@ -63,6 +55,12 @@ def _native_model(worker_type: str) -> RustEnginePerfModel:
 
 
 def test_native_aic_model_estimates_prefill_and_decode() -> None:
+    from dynamo.common.forward_pass_metrics import (
+        ForwardPassMetrics,
+        ScheduledRequestMetrics,
+    )
+    from dynamo.mocker import EngineCapacityRequest
+
     prefill_model = _native_model("prefill")
     decode_model = _native_model("decode")
 
