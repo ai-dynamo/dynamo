@@ -74,7 +74,7 @@ if [ -n "$DLLM_ALGORITHM_CONFIG" ]; then
 fi
 
 # Execute the command
-eval $CMD &
+eval $CMD "$@" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

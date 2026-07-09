@@ -791,12 +791,16 @@ sglang_configs = {
         name="diffusion_llada",
         directory=sglang_dir,
         script_name="diffusion_llada.sh",
+        # diffusion_llada.sh forwards "$@", so VRAM is bounded from the test
+        # (not the example default). --mem-fraction-static 0.4 is the tightest
+        # bound that boots: LLaDA2.0-mini-preview weights + diffusion activation
+        # need ~22-31 GiB, and 0.2 SIGQUITs (too little for the model). Profiled
+        # peak is 31.6 GiB -> this does NOT fit the 24 GiB gpu_1 CI runner; it
+        # needs a larger single-GPU lane (nightly). Kept gpu_1 for the record.
+        script_args=["--mem-fraction-static", "0.4"],
         marks=[
             pytest.mark.gpu_1,
-            # No profiled_vram_gib: needs the sglang runtime image +
-            # LLaDA2.0-mini-preview to profile locally. Not guessed — runs in the
-            # sequential GPU stage; profile the real peak with
-            # tests/utils/profile_pytest.py in the sglang env.
+            pytest.mark.profiled_vram_gib(31.6),
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],
