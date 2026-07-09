@@ -36,6 +36,7 @@ from tests.utils.payload_builder import (
     elastic_ep_scale_payload,
     embedding_payload,
     embedding_payload_default,
+    guided_decoding_chat_payload_default,
     kv_events_metrics_payload,
     metric_payload_default,
     router_cached_tokens_chat_payload,
@@ -178,6 +179,7 @@ vllm_configs = {
             chat_payload_default(),
             completion_payload_default(),
             clear_kv_blocks_payload(),
+            guided_decoding_chat_payload_default(),
         ],
     ),
     "elastic_ep_unified": VLLMConfig(
