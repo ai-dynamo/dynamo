@@ -132,6 +132,42 @@ def discover_example_targets(
     return targets
 
 
+def discover_xpu_example_targets(
+    workspace: Optional[Path] = None,
+) -> List[DeploymentTarget]:
+    """Discover XPU deployment targets from examples/backends/{framework}/deploy/xpu/*.yaml."""
+    if workspace is None:
+        workspace = Path(_get_workspace_dir())
+
+    backends_dir = workspace / "examples" / "backends"
+    targets: List[DeploymentTarget] = []
+
+    if not backends_dir.exists():
+        return targets
+
+    for framework_dir in backends_dir.iterdir():
+        if not framework_dir.is_dir():
+            continue
+
+        deploy_dir = framework_dir / "deploy"
+        xpu_dir = deploy_dir / "xpu"
+        if not xpu_dir.exists():
+            continue
+
+        framework_name = framework_dir.name
+        for yaml_file in xpu_dir.glob("*.yaml"):
+            targets.append(
+                DeploymentTarget(
+                    yaml_path=yaml_file,
+                    framework=framework_name,
+                    profile=yaml_file.stem,
+                    source="examples-xpu",
+                )
+            )
+
+    return targets
+
+
 def _collect_all_targets() -> List[DeploymentTarget]:
     """Collect deployment targets from all sources.
 
@@ -223,6 +259,18 @@ def _find_target(
     return None
 
 
+def _target_marks(target: DeploymentTarget) -> List[pytest.MarkDecorator]:
+    """Attach pytest marks for a discovered deployment target.
+
+    XPU-specific deployment manifests should participate in XPU CI selection
+    without affecting the GPU-backed deploy matrix.
+    """
+    marks: List[pytest.MarkDecorator] = []
+    if "xpu" in target.yaml_path.stem.lower():
+        marks.append(pytest.mark.xpu_1)
+    return marks
+
+
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     """Dynamically parametrize tests based on CLI options or full matrix.
 
@@ -239,18 +287,25 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     profile_opt = metafunc.config.getoption("--profile")
 
     # Filter targets based on CLI options
+    markexpr = getattr(metafunc.config.option, "markexpr", "") or ""
+    if ("xpu_1" in markexpr) or ("xpu_2" in markexpr):
+        selected_targets = discover_xpu_example_targets()
+    else:
+        selected_targets = ALL_DEPLOYMENT_TARGETS
+    selected_matrix = _build_test_matrix(selected_targets)
+
     filtered_targets = _filter_targets(
-        ALL_DEPLOYMENT_TARGETS,
+        selected_targets,
         framework=framework_opt,
         profile=profile_opt,
     )
 
     # Validate that requested combination exists
     if framework_opt and profile_opt and not filtered_targets:
-        if framework_opt not in DEPLOY_TEST_MATRIX:
+        if framework_opt not in selected_matrix:
             pytest.skip(f"Framework '{framework_opt}' not found in discovered profiles")
             return
-        if profile_opt not in DEPLOY_TEST_MATRIX.get(framework_opt, []):
+        if profile_opt not in selected_matrix.get(framework_opt, []):
             pytest.skip(
                 f"Profile '{profile_opt}' not found for framework '{framework_opt}'"
             )
@@ -260,7 +315,10 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     if filtered_targets:
         metafunc.parametrize(
             "deployment_target",
-            filtered_targets,
+            [
+                pytest.param(target, marks=_target_marks(target))
+                for target in filtered_targets
+            ],
             ids=[t.test_id for t in filtered_targets],
         )
 

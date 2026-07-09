@@ -1,0 +1,72 @@
+name: 'Clean Up K8s Host'
+description: 'Strip grove finalizers and delete a host Kubernetes namespace'
+
+inputs:
+  namespace:
+    description: 'Namespace to clean up'
+    required: true
+  kubeconfig_path:
+    description: 'Path to host kubeconfig'
+    required: false
+    default: ''
+  cleanup_timeout:
+    description: 'kubectl namespace delete timeout'
+    required: false
+    default: '180s'
+  final_wait_seconds:
+    description: 'Seconds to wait for namespace disappearance'
+    required: false
+    default: '120'
+
+runs:
+  using: composite
+  steps:
+    - name: Cleanup namespace on host cluster
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        KUBECONFIG_PATH: ${{ inputs.kubeconfig_path }}
+        CLEANUP_TIMEOUT: ${{ inputs.cleanup_timeout }}
+        FINAL_WAIT_SECONDS: ${{ inputs.final_wait_seconds }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${KUBECONFIG_PATH}" ]]; then
+          KUBECONFIG_PATH="${HOME}/.kube/config"
+        fi
+        KUBECONFIG_PATH="${KUBECONFIG_PATH//\$\{HOME\}/${HOME}}"
+        KUBECONFIG_PATH="${KUBECONFIG_PATH//\$HOME/${HOME}}"
+
+        strip_finalizers() {
+          local resource_name
+          local resource_kind
+
+          resource_name="$1"
+          resource_kind="$2"
+
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" get "${resource_name}" -n "${NAMESPACE}" -o name 2>/dev/null \
+            | while read -r obj; do
+                if [[ -n "${obj}" ]]; then
+                  echo "Stripping finalizers from ${resource_kind}/${obj##*/}"
+                  kubectl --kubeconfig="${KUBECONFIG_PATH}" patch "${obj}" -n "${NAMESPACE}" --type merge -p '{"metadata":{"finalizers":[]}}' || true
+                fi
+              done
+        }
+
+        strip_finalizers "podcliquesets.grove.io" "podcliqueset"
+        strip_finalizers "podcliques.grove.io" "podclique"
+
+        echo "Deleting namespace ${NAMESPACE}"
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" delete namespace "${NAMESPACE}" --ignore-not-found=true --timeout="${CLEANUP_TIMEOUT}" || true
+
+        for _ in $(seq 1 ${FINAL_WAIT_SECONDS}); do
+          if ! kubectl --kubeconfig="${KUBECONFIG_PATH}" get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          sleep 1
+        done
+
+        echo "::error::namespace ${NAMESPACE} was not fully removed after final cleanup"
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" get namespace "${NAMESPACE}" -o wide || true
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" describe namespace "${NAMESPACE}" || true
+        exit 1

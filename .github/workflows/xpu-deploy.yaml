@@ -16,11 +16,11 @@ on:
         required: false
         type: string
         default: ''
-      image_tag_suffix:
-        description: 'Suffix appended to the SHA-keyed image tag (e.g. "-nightly").'
+      registry_host:
+        description: 'Local registry host to push images to.'
         required: false
         type: string
-        default: '-nightly'
+        default: 'localhost:5000'
   workflow_call:
     inputs:
       framework:
@@ -33,54 +33,46 @@ on:
         required: false
         type: string
         default: ''
-      image_tag_suffix:
-        description: 'Suffix appended to the SHA-keyed image tag (e.g. "-nightly").'
+      registry_host:
+        description: 'Local registry host to push images to.'
         required: false
         type: string
-        default: '-nightly'
-    secrets:
-      AZURE_ACR_HOSTNAME:
-        required: true
-      AZURE_ACR_USER:
-        required: true
-      AZURE_ACR_PASSWORD:
-        required: true
-      HF_TOKEN:
-        required: true
-      DOCKERHUB_LOGIN_USER:
-        required: true
-      DOCKERHUB_ACCESS_TOKEN:
-        required: true
+        default: 'localhost:5000'
+
+concurrency:
+  group: xpu-deploy-host-k8s
+  cancel-in-progress: false
 
 env:
   FRAMEWORK: ${{ inputs.framework || 'vllm' }}
+  SOURCE_REF: ${{ inputs.source_ref || github.sha }}
+  LOCAL_REGISTRY: ${{ inputs.registry_host || 'localhost:5000' }}
   TARGET: runtime
   DEVICE: xpu
   PLATFORM: linux/amd64
-  SOURCE_REF: ${{ inputs.source_ref || github.sha }}
-  IMAGE_TAG_SUFFIX: ${{ inputs.image_tag_suffix || '-nightly' }}
 
 jobs:
-  build-xpu:
-    runs-on: xpu
+  deploy-test-xpu:
+    runs-on: xpu-deploy
     permissions:
       contents: read
-    outputs:
-      image_uri: ${{ steps.tags.outputs.image_uri }}
-      target_tag_plain: ${{ steps.tags.outputs.target_tag_plain }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - profile: agg_xpu_dra
+            name: agg_xpu_dra
+            slug: agg-xpu-dra
+          - profile: disagg_xpu_dra
+            name: disagg_xpu_dra
+            slug: disagg-xpu-dra
+    name: ${{ matrix.name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           ref: ${{ env.SOURCE_REF }}
-          lfs: true
-
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
       - name: Generate Dockerfile
         shell: bash
@@ -95,106 +87,167 @@ jobs:
               --output-short-filename
           echo "::endgroup::"
 
-      - name: Calculate image tags
-        id: tags
+      - name: Build local XPU image
         shell: bash
-        env:
-          AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
         run: |
           set -euo pipefail
-          TAG_BUILDER="${FRAMEWORK}-${TARGET}-xpu"
-          SOURCE_SHA="${SOURCE_REF}"
-          TARGET_TAG_PLAIN="${TAG_BUILDER}"
-          IMAGE_TAG="${SOURCE_SHA}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}"
+          IMAGE_URI="${LOCAL_REGISTRY}/ai-dynamo/dynamo:${SOURCE_REF}-${FRAMEWORK}-${TARGET}-xpu"
 
-          IMAGE_URI="${AZURE_ACR_HOSTNAME}/ai-dynamo/dynamo:${IMAGE_TAG}"
-          MUTABLE_IMAGE_URI=""
-          if [[ -n "${IMAGE_TAG_SUFFIX}" ]]; then
-            MUTABLE_IMAGE_URI="${AZURE_ACR_HOSTNAME}/ai-dynamo/dynamo:${TAG_BUILDER}${IMAGE_TAG_SUFFIX}"
+          # Check if image already exists to avoid redundant builds
+          if docker image inspect "${IMAGE_URI}" >/dev/null 2>&1; then
+            echo "::notice::Image ${IMAGE_URI} already exists, skipping build"
+          else
+            docker build \
+              --tag "${IMAGE_URI}" \
+              -f ./container/rendered.Dockerfile \
+              . 2>&1 | tee "build-${{ matrix.name }}.log"
+
+            docker push "${IMAGE_URI}"
           fi
 
-          echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> "$GITHUB_OUTPUT"
-          echo "image_uri=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
-          echo "mutable_image_uri=${MUTABLE_IMAGE_URI}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
 
-          echo "### 🐳 XPU Image Targets" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Image URI | \`${IMAGE_URI}\` |" >> "$GITHUB_STEP_SUMMARY"
-          if [[ -n "${MUTABLE_IMAGE_URI}" ]]; then
-            echo "| Mutable URI | \`${MUTABLE_IMAGE_URI}\` |" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Build and Push XPU Image
+      - name: Build local operator image
         shell: bash
-        env:
-          AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
         run: |
           set -euo pipefail
-          LOCAL_IMAGE_TAG="dynamo-${FRAMEWORK}-${TARGET}-${DEVICE}:${SOURCE_REF}"
-          IMAGE_URI="${{ steps.tags.outputs.image_uri }}"
-          MUTABLE_IMAGE_URI="${{ steps.tags.outputs.mutable_image_uri }}"
+          OPERATOR_IMAGE_URI="${LOCAL_REGISTRY}/ai-dynamo/dynamo:${SOURCE_REF}-operator"
 
-          docker build \
-            --progress=plain \
-            --tag "${LOCAL_IMAGE_TAG}" \
-            -f ./container/rendered.Dockerfile \
-            . 2>&1 | tee build-xpu.log
+          if docker image inspect "${OPERATOR_IMAGE_URI}" >/dev/null 2>&1; then
+            echo "::notice::Image ${OPERATOR_IMAGE_URI} already exists, skipping build"
+          else
+            docker build \
+              --build-context snapshot=./deploy/snapshot \
+              --tag "${OPERATOR_IMAGE_URI}" \
+              -f ./deploy/operator/Dockerfile \
+              ./deploy/operator 2>&1 | tee "build-operator-${{ matrix.name }}.log"
 
-          docker tag "${LOCAL_IMAGE_TAG}" "${IMAGE_URI}"
-          docker push "${IMAGE_URI}"
-
-          if [[ -n "${MUTABLE_IMAGE_URI}" ]]; then
-            docker tag "${LOCAL_IMAGE_TAG}" "${MUTABLE_IMAGE_URI}"
-            docker push "${MUTABLE_IMAGE_URI}"
+            docker push "${OPERATOR_IMAGE_URI}"
           fi
 
-  deploy-test-xpu:
-    needs: [build-xpu]
-    if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
-    runs-on: prod-deploy-tester-v1
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - profile: agg_xpu_dra
-            name: agg
-          - profile: disagg_xpu_dra
-            name: disagg
-    name: ${{ matrix.name }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Setup vCluster and operator
-        id: setup
-        uses: ./.github/actions/setup-dynamo-operator
+          echo "OPERATOR_IMAGE_URI=${OPERATOR_IMAGE_URI}" >> "$GITHUB_ENV"
+
+      - name: Setup Kubernetes namespace and operator
+        id: k8s-setup
+        uses: ./.github/actions/setup-k8s-host-operator
         with:
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: main-operator
-          hf_token: ${{ secrets.HF_TOKEN }}
-          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-          vcluster_name: ci-${{ github.run_id }}-${{ matrix.name }}-xpu
-          vcluster_namespace: gh-id-${{ github.run_id }}-${{ matrix.name }}-xpu
-      - name: Connect to vCluster
-        id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
-        with:
-          vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
-          vcluster_namespace: ${{ steps.setup.outputs.namespace }}
+          matrix_slug: ${{ matrix.slug }}
+          operator_repository: ${{ env.LOCAL_REGISTRY }}/ai-dynamo/dynamo
+          operator_tag: ${{ env.SOURCE_REF }}-operator
+
+      - name: Setup XPU Deploy Test Environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NAMESPACE="${{ steps.k8s-setup.outputs.namespace }}"
+
+          echo "${{ steps.k8s-setup.outputs.kubeconfig_base64 }}" | base64 -d > "${{ github.workspace }}/.kubeconfig"
+          chmod 600 "${{ github.workspace }}/.kubeconfig"
+          echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> "$GITHUB_ENV"
+
+          kubectl --kubeconfig="${{ github.workspace }}/.kubeconfig" config set-context --current --namespace="${NAMESPACE}"
+          kubectl --kubeconfig="${{ github.workspace }}/.kubeconfig" config get-contexts
+
+          VENV_DIR="${{ github.workspace }}/.venv-deploy-test"
+          python3 -m venv "${VENV_DIR}"
+          echo "${VENV_DIR}/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=${VENV_DIR}" >> "$GITHUB_ENV"
+
+          "${VENV_DIR}/bin/python" -m pip install --upgrade pip
+          "${VENV_DIR}/bin/python" -m pip install -r container/deps/requirements.test.txt
+
       - name: Run XPU Deploy Test
-        uses: ./.github/actions/dynamo-deploy-test
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+          NAMESPACE: ${{ steps.k8s-setup.outputs.namespace }}
+          FRAMEWORK: ${{ inputs.framework || 'vllm' }}
+          PROFILE: ${{ matrix.profile }}
+          IMAGE: ${{ env.IMAGE_URI }}
+          DYN_TEST_OUTPUT_PATH: ${{ github.workspace }}/test-output
+          TEST_FILE: tests/deploy/test_deploy.py
+          EXTRA_PYTEST_ARGS: -m "framework_only and xpu_1"
+          DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework || 'vllm' }}
+          DYNAMO_TEST_PLATFORM: amd64
+          DYNAMO_TEST_TYPE: deploy_${{ matrix.profile }}
+          DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p test-results
+
+          PYTEST_ARGS=(
+            "--framework=${FRAMEWORK}"
+            "--profile=${PROFILE}"
+            "--image=${IMAGE}"
+          )
+
+          EXTRA_PYTEST_ARGS_ARRAY=()
+          if [ -n "${EXTRA_PYTEST_ARGS}" ]; then
+            # shellcheck disable=SC2206,SC2294
+            eval "EXTRA_PYTEST_ARGS_ARRAY=(${EXTRA_PYTEST_ARGS})"
+          fi
+
+          TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
+
+          "${{ github.workspace }}/.venv-deploy-test/bin/python" -m pytest "${TEST_FILE}" \
+            --namespace="${NAMESPACE}" \
+            "${PYTEST_ARGS[@]}" \
+            "${EXTRA_PYTEST_ARGS_ARRAY[@]}" \
+            -v -s \
+            --durations=10 \
+            --junitxml="test-results/pytest_deploy_${TEST_NAME}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml" \
+            --alluredir=test-results/allure-results \
+            --log-cli-level=INFO
+
+      - name: Dump Kubernetes pod logs
+        if: always() && steps.k8s-setup.outputs.namespace != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NAMESPACE="${{ steps.k8s-setup.outputs.namespace }}"
+          KUBECONFIG_PATH="${HOME}/.kube/config"
+
+          echo "::group::Pod inventory for ${NAMESPACE}"
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" get pods -n "${NAMESPACE}" -o wide || true
+          echo "::endgroup::"
+
+          PODS=$(kubectl --kubeconfig="${KUBECONFIG_PATH}" get pods -n "${NAMESPACE}" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)
+          if [[ -z "${PODS}" ]]; then
+            echo "::warning::No pods found in ${NAMESPACE} when attempting to dump logs"
+            exit 0
+          fi
+
+          for POD in ${PODS}; do
+            echo "::group::kubectl describe pod/${POD}"
+            kubectl --kubeconfig="${KUBECONFIG_PATH}" describe pod "${POD}" -n "${NAMESPACE}" || true
+            echo "::endgroup::"
+
+            CONTAINERS=$(kubectl --kubeconfig="${KUBECONFIG_PATH}" get pod "${POD}" -n "${NAMESPACE}" -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null || true)
+            if [[ -z "${CONTAINERS}" ]]; then
+              echo "::warning::No containers found for pod ${POD}"
+              continue
+            fi
+
+            for CONTAINER in ${CONTAINERS}; do
+              echo "::group::kubectl logs pod/${POD} container/${CONTAINER}"
+              kubectl --kubeconfig="${KUBECONFIG_PATH}" logs "${POD}" -n "${NAMESPACE}" -c "${CONTAINER}" --all-containers=false --tail=300 --timestamps=true --prefix=true || true
+              echo "::endgroup::"
+
+              if kubectl --kubeconfig="${KUBECONFIG_PATH}" get pod "${POD}" -n "${NAMESPACE}" -o jsonpath="{.status.containerStatuses[?(@.name=='${CONTAINER}')].restartCount}" 2>/dev/null | grep -Eq '^[1-9]'; then
+                echo "::group::kubectl logs --previous pod/${POD} container/${CONTAINER}"
+                kubectl --kubeconfig="${KUBECONFIG_PATH}" logs "${POD}" -n "${NAMESPACE}" -c "${CONTAINER}" --previous --tail=300 --timestamps=true --prefix=true || true
+                echo "::endgroup::"
+              fi
+            done
+          done
+
+      - name: Cleanup Kubernetes namespace
+        if: always() && steps.k8s-setup.outputs.namespace != ''
+        uses: ./.github/actions/clean-up-k8s-host
         with:
-          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
-          namespace: default
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ steps.setup.outputs.operator_tag }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          framework: ${{ inputs.framework || 'vllm' }}
-          profile: ${{ matrix.profile }}
-          image: ${{ needs.build-xpu.outputs.image_uri }}
-          platform_arch: amd64
-          test_name: ${{ inputs.framework || 'vllm' }}-${{ matrix.name }}-xpu
-          extra_pytest_args: -m framework_only
+          namespace: ${{ steps.k8s-setup.outputs.namespace }}
+          cleanup_timeout: 180s
+          final_wait_seconds: '120'

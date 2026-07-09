@@ -1,0 +1,208 @@
+name: 'Setup K8s Host Operator'
+description: 'Setup host Kubernetes namespace, install Dynamo platform operator, and verify webhook readiness'
+
+inputs:
+  matrix_slug:
+    description: 'Matrix slug used in namespace naming'
+    required: true
+  hf_token:
+    description: 'HuggingFace token for model access'
+    required: false
+    default: ''
+  operator_tag:
+    description: 'Operator image tag'
+    required: false
+    default: ''
+  operator_repository:
+    description: 'Operator image repository'
+    required: false
+    default: ''
+  kubeconfig_path:
+    description: 'Path to host kubeconfig'
+    required: false
+    default: ''
+
+outputs:
+  namespace:
+    description: 'Created namespace name'
+    value: ${{ steps.setup.outputs.namespace }}
+  operator_tag:
+    description: 'Resolved operator tag'
+    value: ${{ steps.setup.outputs.operator_tag }}
+  kubeconfig_base64:
+    description: 'Base64 encoded host kubeconfig'
+    value: ${{ steps.setup.outputs.kubeconfig_base64 }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup namespace and install operator
+      id: setup
+      shell: bash
+      env:
+        MATRIX_SLUG: ${{ inputs.matrix_slug }}
+        INPUT_HF_TOKEN: ${{ inputs.hf_token }}
+        OPERATOR_TAG: ${{ inputs.operator_tag }}
+        OPERATOR_REPOSITORY: ${{ inputs.operator_repository }}
+        KUBECONFIG_PATH: ${{ inputs.kubeconfig_path }}
+      run: |
+        set -Eeuo pipefail
+
+        KUBECONFIG_PATH="${KUBECONFIG_PATH:-${HOME}/.kube/config}"
+        KUBECONFIG_PATH="${KUBECONFIG_PATH//\$\{HOME\}/${HOME}}"
+        KUBECONFIG_PATH="${KUBECONFIG_PATH//\$HOME/${HOME}}"
+        HELM_BIN="${HELM_BIN:-${HOME}/.local/bin/helm}"
+        HELM_TIMEOUT="${HELM_TIMEOUT:-20m}"
+
+        if [[ ! -x "${HELM_BIN}" ]]; then
+          echo "::error::helm binary is required on xpu-deploy runner but was not found at ${HELM_BIN}"
+          exit 1
+        fi
+
+        NAMESPACE="gh-id-${GITHUB_RUN_ID}-${MATRIX_SLUG}-xpu"
+        NAMESPACE_CREATED=0
+
+        cleanup_setup_namespace() {
+          if [[ "${NAMESPACE_CREATED}" -ne 1 ]]; then
+            return 0
+          fi
+
+          echo "::warning::[$(date -u +%H:%M:%S)] setup failed, deleting namespace ${NAMESPACE}"
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" delete namespace "${NAMESPACE}" --ignore-not-found=true --timeout=180s >/dev/null 2>&1 || true
+        }
+
+        trap cleanup_setup_namespace EXIT
+
+        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+        echo "operator_tag=${OPERATOR_TAG}" >> "$GITHUB_OUTPUT"
+
+        echo "::notice::[$(date -u +%H:%M:%S)] creating namespace ${NAMESPACE}"
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl --kubeconfig="${KUBECONFIG_PATH}" apply -f -
+        NAMESPACE_CREATED=1
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" label namespace "${NAMESPACE}" \
+          nscleanup/enabled=true \
+          nscleanup/ttl=7200 \
+          dynamo.github/run-id="${GITHUB_RUN_ID}" \
+          ngc-api=enabled \
+          nvcr-imagepull=enabled \
+          --overwrite
+
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" annotate namespace "${NAMESPACE}" \
+          dynamo.github/workflow="xpu-deploy" \
+          dynamo.github/runner="host-k8s" \
+          dynamo.github/run-attempt="${GITHUB_RUN_ATTEMPT}" \
+          --overwrite
+
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" auth can-i create namespace >/dev/null
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" auth can-i create deployment -n "${NAMESPACE}" >/dev/null
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" auth can-i create validatingwebhookconfigurations >/dev/null
+
+        echo "::notice::[$(date -u +%H:%M:%S)] waiting for namespace to be ready"
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" wait --for=jsonpath='{.status.phase}'=Active namespace/"${NAMESPACE}" --timeout=60s
+
+        HF_TOKEN="${INPUT_HF_TOKEN:-${HF_TOKEN:-}}"
+        if [[ -n "${HF_TOKEN}" ]]; then
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" \
+            create secret generic hf-token-secret \
+            --from-literal=HF_TOKEN="${HF_TOKEN}" \
+            -n "${NAMESPACE}" --dry-run=client -o yaml | kubectl --kubeconfig="${KUBECONFIG_PATH}" apply -f -
+        fi
+
+        echo "::notice::[$(date -u +%H:%M:%S)] installing operator and grove"
+        OPERATOR_REPO="${OPERATOR_REPOSITORY:-nvcr.io/nvidia/ai-dynamo/kubernetes-operator}"
+
+        dump_install_diagnostics() {
+          echo "::group::Operator install diagnostics"
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" get pods,events -n "${NAMESPACE}" -o wide || true
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" describe deployment dynamo-platform-dynamo-operator-controller-manager -n "${NAMESPACE}" || true
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" describe deployment grove-operator -n "${NAMESPACE}" || true
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" get pods -n "${NAMESPACE}" -o yaml || true
+          echo "::endgroup::"
+        }
+
+        "${HELM_BIN}" repo add bitnami https://charts.bitnami.com/bitnami
+        pushd deploy/helm/charts/platform >/dev/null
+        "${HELM_BIN}" dep build .
+        IMAGE_ARGS=(
+          --set dynamo-operator.controllerManager.manager.image.pullPolicy=Always
+          --set dynamo-operator.upgradeCRD=true
+          --set dynamo-operator.gpuDiscovery.enabled=false
+          --set dynamo-operator.checkpoint.enabled=false
+          --set global.grove.install=true
+          --set global.kai-scheduler.install=false
+        )
+        if [[ -n "${OPERATOR_TAG}" ]]; then
+          IMAGE_ARGS=(
+            --set dynamo-operator.controllerManager.manager.image.repository="${OPERATOR_REPO}"
+            --set dynamo-operator.controllerManager.manager.image.tag="${OPERATOR_TAG}"
+            --set dynamo-operator.controllerManager.manager.image.pullPolicy=Always
+            --set dynamo-operator.upgradeCRD=true
+            --set dynamo-operator.gpuDiscovery.enabled=false
+            --set dynamo-operator.checkpoint.enabled=false
+            --set global.grove.install=true
+            --set global.kai-scheduler.install=false
+          )
+        fi
+        if ! KUBECONFIG="${KUBECONFIG_PATH}" "${HELM_BIN}" upgrade --install dynamo-platform . --namespace "${NAMESPACE}" \
+          "${IMAGE_ARGS[@]}" \
+          --take-ownership \
+          --atomic \
+          --wait \
+          --timeout "${HELM_TIMEOUT}" \
+          --debug; then
+          dump_install_diagnostics
+          exit 1
+        fi
+        popd >/dev/null
+
+        echo "::notice::[$(date -u +%H:%M:%S)] waiting for dynamo-operator to be ready"
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" wait --for=condition=Available deployment/dynamo-platform-dynamo-operator-controller-manager -n "${NAMESPACE}" --timeout=600s
+
+        echo "::notice::[$(date -u +%H:%M:%S)] waiting for grove-operator to be ready"
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" wait --for=condition=Available deployment/grove-operator -n "${NAMESPACE}" --timeout=300s
+
+        WEBHOOK_READY=0
+        for attempt in $(seq 1 30); do
+          ENDPOINT_ADDR_COUNT=$(kubectl --kubeconfig="${KUBECONFIG_PATH}" get endpoints grove-operator -n "${NAMESPACE}" -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | awk '{print NF}')
+          ENDPOINTSLICE_READY_ADDR_COUNT=$(kubectl --kubeconfig="${KUBECONFIG_PATH}" get endpointslices -n "${NAMESPACE}" -l kubernetes.io/service-name=grove-operator -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].addresses[*]}' 2>/dev/null | awk '{print NF}')
+
+          if [[ "${ENDPOINT_ADDR_COUNT}" -ge 1 || "${ENDPOINTSLICE_READY_ADDR_COUNT}" -ge 1 ]]; then
+            WEBHOOK_READY=1
+            break
+          fi
+
+          if (( attempt % 6 == 0 )); then
+            echo "::warning::grove webhook endpoints not ready yet (attempt ${attempt}/30)"
+            kubectl --kubeconfig="${KUBECONFIG_PATH}" get pods -n "${NAMESPACE}" -l app.kubernetes.io/name=grove-operator -o wide || true
+          fi
+          sleep 5
+        done
+
+        if [[ "${WEBHOOK_READY}" -ne 1 ]]; then
+          PROBE_POD="webhook-probe-$(date +%s)"
+          if kubectl --kubeconfig="${KUBECONFIG_PATH}" run "${PROBE_POD}" \
+            -n "${NAMESPACE}" \
+            --image=curlimages/curl:8.11.1 \
+            --restart=Never \
+            --rm \
+            --attach \
+            --quiet \
+            --command -- sh -ceu "for i in 1 2 3; do curl -sk --connect-timeout 2 --max-time 5 https://grove-operator.${NAMESPACE}.svc:9443/ >/dev/null && exit 0; sleep 2; done; exit 1"; then
+            WEBHOOK_READY=1
+          else
+            WEBHOOK_READY=0
+          fi
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" delete pod "${PROBE_POD}" -n "${NAMESPACE}" --ignore-not-found=true --wait=true --timeout=60s >/dev/null 2>&1 || true
+        fi
+
+        if [[ "${WEBHOOK_READY}" -ne 1 ]]; then
+          echo "::error::grove-operator webhook service is not reachable after readiness and connectivity checks"
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" get svc,endpoints,endpointslices -n "${NAMESPACE}" | grep grove-operator || true
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" describe svc grove-operator -n "${NAMESPACE}" || true
+          kubectl --kubeconfig="${KUBECONFIG_PATH}" get pods -n "${NAMESPACE}" -l app.kubernetes.io/name=grove-operator -o wide || true
+          exit 1
+        fi
+
+        KUBECONFIG_B64=$(base64 < "${KUBECONFIG_PATH}" | tr -d '\n')
+        echo "kubeconfig_base64=${KUBECONFIG_B64}" >> "$GITHUB_OUTPUT"
+        trap - EXIT
