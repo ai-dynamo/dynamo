@@ -6,7 +6,7 @@ use crate::kv_router::Indexer;
 use anyhow::Result;
 use dynamo_kv_router::{
     config::KvRouterConfig,
-    protocols::{RouterEvent, KV_EVENT_SUBJECT},
+    protocols::{KV_EVENT_SUBJECT, RouterEvent},
 };
 use dynamo_runtime::{
     component::Component, discovery::EventTransportKind, prelude::*,

@@ -685,17 +685,17 @@ impl WorkerQueryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_router::{indexer::LowerTierIndexers, Indexer};
+    use crate::kv_router::{Indexer, indexer::LowerTierIndexers};
     use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
     };
     use dynamo_runtime::{
+        DistributedRuntime, Runtime,
         component::{Instance, TransportType},
         discovery::{DiscoveryInstance, DiscoveryInstanceId, EndpointInstanceId},
         distributed::DistributedConfig,
-        DistributedRuntime, Runtime,
     };
     use std::collections::VecDeque;
     use std::sync::Mutex as StdMutex;
