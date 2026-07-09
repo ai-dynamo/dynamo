@@ -17,7 +17,7 @@
 //! `worker_id = hash_pod_name(pod_name)`, so the IDs produced here line up with
 //! whatever consumes them (the topology adapter and selector catalog).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -52,14 +52,23 @@ pub struct RawWorker {
     pub stable_routing_id: String,
 }
 
+/// Immutable snapshot of the `Ready`, pool-selected workers, rebuilt whenever the
+/// pod set or the pool changes. Holds the materialized worker list plus a
+/// `worker_id -> "ip:port"` endpoint index so request-path reads (notably
+/// [`PodDiscovery::resolve_endpoint`]) are O(1) lookups that never construct a
+/// [`RawWorker`] or clone the [`PoolState`].
+#[derive(Debug, Default)]
+struct Snapshot {
+    workers: Vec<RawWorker>,
+    endpoints: HashMap<u64, String>,
+}
+
 /// Lock-free view over the `Ready` raw vLLM pods selected by the EPP's
-/// `InferencePool`. Reads never touch the Kubernetes API.
+/// `InferencePool`. Reads never touch the Kubernetes API; they read a cached
+/// [`Snapshot`] that a background task rebuilds on pod/pool changes.
 #[derive(Clone)]
 pub struct PodDiscovery {
-    store: kube::runtime::reflector::Store<Pod>,
-    pool_rx: watch::Receiver<Option<PoolState>>,
-    kv_event_port: u16,
-    replay_port: Option<u16>,
+    snapshot: watch::Receiver<Arc<Snapshot>>,
     changes: watch::Receiver<u64>,
 }
 
@@ -91,6 +100,20 @@ impl PodDiscovery {
 
         let (changes_tx, changes_rx) = watch::channel(0u64);
 
+        let kv_event_port = cfg.kv_event_port;
+        let replay_port = cfg.replay_port;
+
+        // Cached snapshot of the ready, pool-selected workers. Rebuilt by the two
+        // tasks below (before they bump the change generation), so any consumer
+        // that wakes on a generation bump observes a snapshot that is already
+        // consistent with the store/pool that triggered it.
+        let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(build_snapshot(
+            &store,
+            pool_rx.borrow().as_ref(),
+            kv_event_port,
+            replay_port,
+        )));
+
         tracing::info!(
             namespace = %namespace,
             pool = %cfg.inference_pool_name,
@@ -98,12 +121,22 @@ impl PodDiscovery {
             "Starting namespace pod reflector for standalone mode"
         );
 
-        // Pod reflector stream -> bump the change generation.
+        // Pod reflector stream -> rebuild snapshot, then bump the change generation.
         let changes_for_pods = changes_tx.clone();
+        let snapshot_for_pods = snapshot_tx.clone();
+        let store_for_pods = store.clone();
+        let pool_for_pods = pool_rx.clone();
         tokio::spawn(async move {
             tokio::pin!(reflect);
             let mut generation = 0u64;
             while reflect.next().await.is_some() {
+                let snap = build_snapshot(
+                    &store_for_pods,
+                    pool_for_pods.borrow().as_ref(),
+                    kv_event_port,
+                    replay_port,
+                );
+                let _ = snapshot_for_pods.send(Arc::new(snap));
                 generation = generation.wrapping_add(1);
                 let _ = changes_for_pods.send(generation);
             }
@@ -112,9 +145,18 @@ impl PodDiscovery {
 
         // Pool changes also drive reconciliation (membership/target port may move).
         let mut pool_rx_for_changes = pool_rx.clone();
+        let store_for_pool = store.clone();
+        let snapshot_for_pool = snapshot_tx;
         tokio::spawn(async move {
             let mut generation = u64::MAX / 2; // distinct space from pod bumps
             while pool_rx_for_changes.changed().await.is_ok() {
+                let snap = build_snapshot(
+                    &store_for_pool,
+                    pool_rx_for_changes.borrow().as_ref(),
+                    kv_event_port,
+                    replay_port,
+                );
+                let _ = snapshot_for_pool.send(Arc::new(snap));
                 generation = generation.wrapping_add(1);
                 let _ = changes_tx.send(generation);
             }
@@ -148,10 +190,7 @@ impl PodDiscovery {
 
         Ok((
             Self {
-                store,
-                pool_rx,
-                kv_event_port: cfg.kv_event_port,
-                replay_port: cfg.replay_port,
+                snapshot: snapshot_rx,
                 changes: changes_rx,
             },
             ready,
@@ -160,35 +199,24 @@ impl PodDiscovery {
 
     /// All currently `Ready` workers selected by the pool, normalized for
     /// selector registration. Empty until the `InferencePool` has resolved.
+    /// Reads the cached snapshot; no per-call filtering or API access.
     pub fn ready_workers(&self) -> Vec<RawWorker> {
-        let pool = self.pool_rx.borrow().clone();
-        let Some(pool) = pool else {
-            return Vec::new();
-        };
-        self.store
-            .state()
-            .iter()
-            .filter_map(|pod| raw_worker_from_pod(pod, &pool, self.kv_event_port, self.replay_port))
-            .collect()
+        self.snapshot.borrow().workers.clone()
     }
 
-    /// Worker IDs of all currently `Ready`, pool-selected workers.
+    /// Worker IDs of all currently `Ready`, pool-selected workers. Reads the
+    /// cached snapshot's endpoint index, so it stays consistent with
+    /// [`Self::resolve_endpoint`].
     pub fn ready_worker_ids(&self) -> HashSet<u64> {
-        self.ready_workers()
-            .into_iter()
-            .map(|w| w.worker_id)
-            .collect()
+        self.snapshot.borrow().endpoints.keys().copied().collect()
     }
 
     /// Resolve a `worker_id` to its current `ip:port` HTTP endpoint, if the pod
-    /// is still `Ready` and pool-selected. Short-circuits on the first match
-    /// instead of building the full worker list.
+    /// is still `Ready` and pool-selected. On the request hot path: an O(1)
+    /// lookup into the cached endpoint index — no `RawWorker` materialization,
+    /// no `PoolState` clone, no pod scan.
     pub fn resolve_endpoint(&self, worker_id: u64) -> Option<String> {
-        let pool = self.pool_rx.borrow().clone()?;
-        self.store.state().iter().find_map(|pod| {
-            let worker = raw_worker_from_pod(pod, &pool, self.kv_event_port, self.replay_port)?;
-            (worker.worker_id == worker_id).then(|| strip_scheme(&worker.http_endpoint).to_string())
-        })
+        self.snapshot.borrow().endpoints.get(&worker_id).cloned()
     }
 
     /// Subscribe to change notifications (a generation counter) bumped on pod or
@@ -196,13 +224,6 @@ impl PodDiscovery {
     pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.changes.clone()
     }
-}
-
-fn strip_scheme(endpoint: &str) -> &str {
-    endpoint
-        .strip_prefix("http://")
-        .or_else(|| endpoint.strip_prefix("https://"))
-        .unwrap_or(endpoint)
 }
 
 /// Return `true` iff the pod is `Ready` and not terminating. Mirrors llm-d's
@@ -232,6 +253,38 @@ fn pod_matches(pod: &Pod, match_labels: &BTreeMap<String, String>) -> bool {
     match_labels
         .iter()
         .all(|(k, v)| labels.get(k).map(|pv| pv == v).unwrap_or(false))
+}
+
+fn strip_scheme(endpoint: &str) -> &str {
+    endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"))
+        .unwrap_or(endpoint)
+}
+
+/// Build the cached [`Snapshot`] from the current pod store and pool selector.
+/// Empty until the `InferencePool` has resolved. Pure function — unit-testable.
+fn build_snapshot(
+    store: &kube::runtime::reflector::Store<Pod>,
+    pool: Option<&PoolState>,
+    kv_event_port: u16,
+    replay_port: Option<u16>,
+) -> Snapshot {
+    let Some(pool) = pool else {
+        return Snapshot::default();
+    };
+    let mut workers = Vec::new();
+    let mut endpoints = HashMap::new();
+    for pod in store.state().iter() {
+        if let Some(worker) = raw_worker_from_pod(pod, pool, kv_event_port, replay_port) {
+            endpoints.insert(
+                worker.worker_id,
+                strip_scheme(&worker.http_endpoint).to_string(),
+            );
+            workers.push(worker);
+        }
+    }
+    Snapshot { workers, endpoints }
 }
 
 /// Build a [`RawWorker`] from a pod, or `None` if it is not `Ready`, not
@@ -382,5 +435,62 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    fn store_from_pods(pods: Vec<Pod>) -> kube::runtime::reflector::Store<Pod> {
+        use kube::runtime::watcher;
+        let mut writer = kube::runtime::reflector::store::Writer::<Pod>::default();
+        let store = writer.as_reader();
+        writer.apply_watcher_event(&watcher::Event::Init);
+        for p in pods {
+            writer.apply_watcher_event(&watcher::Event::InitApply(p));
+        }
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+        store
+    }
+
+    #[test]
+    fn build_snapshot_indexes_only_ready_selected_pods() {
+        let store = store_from_pods(vec![
+            pod(
+                "vllm-0",
+                Some("10.0.0.1"),
+                Some(true),
+                &[("app", "vllm-qwen")],
+            ),
+            pod(
+                "vllm-1",
+                Some("10.0.0.2"),
+                Some(false),
+                &[("app", "vllm-qwen")],
+            ),
+            pod("other-0", Some("10.0.0.3"), Some(true), &[("app", "nope")]),
+        ]);
+
+        let snap = build_snapshot(&store, Some(&pool()), 5557, Some(5560));
+
+        // Only the ready, correctly-labeled pod is materialized.
+        assert_eq!(snap.workers.len(), 1);
+        let id = hash_pod_name("vllm-0");
+        assert_eq!(snap.workers[0].worker_id, id);
+        // Endpoint index is keyed by worker_id and carries a scheme-less ip:port.
+        assert_eq!(snap.endpoints.len(), 1);
+        assert_eq!(
+            snap.endpoints.get(&id).map(String::as_str),
+            Some("10.0.0.1:8000")
+        );
+    }
+
+    #[test]
+    fn build_snapshot_is_empty_without_pool() {
+        let store = store_from_pods(vec![pod(
+            "vllm-0",
+            Some("10.0.0.1"),
+            Some(true),
+            &[("app", "vllm-qwen")],
+        )]);
+        let snap = build_snapshot(&store, None, 5557, None);
+        assert!(snap.workers.is_empty());
+        assert!(snap.endpoints.is_empty());
     }
 }

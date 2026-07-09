@@ -105,6 +105,7 @@ STUB_MODULES = [
     "aiofiles",
     "httpx",
     "yarl",
+    "uvloop",
     "pytest_asyncio",
     "tabulate",
     "prometheus_api_client",
