@@ -557,7 +557,7 @@ async fn occupied_tracking_study() {
     let replica_occupancy = std::env::var_os("DYNAMO_CKF_REPLICA_OCCUPANCY").is_some();
     let aggregator_occupancy = std::env::var_os("DYNAMO_CKF_AGGREGATOR_OCCUPANCY").is_some();
 
-    for clear_every in [100usize, 1_000, 10_000] {
+    for clear_every in [Some(100usize), Some(1_000), Some(10_000), None] {
         let workers = workers();
         let index = ThreadPoolIndexer::new(
             EventTransposedCkfIndexer::new(workers, CkfConfig::new(16_384)).unwrap(),
@@ -565,13 +565,26 @@ async fn occupied_tracking_study() {
             32,
         );
         for event_index in 0..EVENTS_PER_CELL {
-            let hash = (event_index % clear_every) as u64 + 1;
-            KvIndexerInterface::apply_event(
-                &index,
-                store_event(workers[0], &[hash], event_index as u64 + 1),
-            )
-            .await;
-            if (event_index + 1) % clear_every == 0 {
+            if let Some(clear_every) = clear_every {
+                let hash = (event_index % clear_every) as u64 + 1;
+                KvIndexerInterface::apply_event(
+                    &index,
+                    store_event(workers[0], &[hash], event_index as u64 + 1),
+                )
+                .await;
+            } else {
+                let event = if event_index == 0 {
+                    store_event(workers[0], &[1], 1)
+                } else if event_index % 2 == 1 {
+                    let hash = ((event_index + 3) / 2) as u64;
+                    store_event(workers[0], &[hash], event_index as u64 + 1)
+                } else {
+                    let hash = (event_index / 2) as u64;
+                    remove_event(workers[0], &[hash])
+                };
+                KvIndexerInterface::apply_event(&index, event).await;
+            }
+            if clear_every.is_some_and(|interval| (event_index + 1) % interval == 0) {
                 KvIndexerInterface::apply_event(&index, clear_event(workers[0].worker_id)).await;
             }
         }
@@ -580,7 +593,7 @@ async fn occupied_tracking_study() {
             "CKF_OCCUPANCY_STUDY replica_occupancy={} aggregator_occupancy={} clear_every={} events={} {}",
             replica_occupancy,
             aggregator_occupancy,
-            clear_every,
+            clear_every.unwrap_or(0),
             EVENTS_PER_CELL,
             index.backend().timing_report(),
         );
