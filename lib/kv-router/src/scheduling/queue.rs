@@ -13,18 +13,20 @@ use tokio::time::Instant;
 use super::config::RouterQueuePolicy;
 use super::filter::RoutingEligibility;
 use super::overlap_refresh::{
-    NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, read_overlap_refresh_after,
-    refresh_overlap,
+    NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
+use super::queue_admission::WorkerPlacement;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
     SchedulingResponse,
 };
-use crate::protocols::{LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId};
+use crate::protocols::{
+    LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
@@ -60,6 +62,7 @@ enum AdmissionCommand {
         ack_tx: oneshot::Sender<()>,
     },
     Update {
+        worker: Option<WorkerWithDpRank>,
         ack_tx: oneshot::Sender<()>,
     },
 }
@@ -380,6 +383,14 @@ impl<
     /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
     /// sees fresh state on the next iteration.
     pub async fn update(&self) {
+        self.update_after(None).await;
+    }
+
+    pub(crate) async fn update_worker(&self, worker: WorkerWithDpRank) {
+        self.update_after(Some(worker)).await;
+    }
+
+    async fn update_after(&self, worker: Option<WorkerWithDpRank>) {
         if !self.queueing_enabled {
             return;
         }
@@ -387,7 +398,7 @@ impl<
         let (ack_tx, ack_rx) = oneshot::channel();
         if self
             .admission_tx
-            .send(AdmissionCommand::Update { ack_tx })
+            .send(AdmissionCommand::Update { worker, ack_tx })
             .await
             .is_ok()
         {
@@ -447,8 +458,8 @@ impl<
                     self.handle_enqueue(request, block_hashes);
                     let _ = ack_tx.send(());
                 }
-                AdmissionCommand::Update { ack_tx } => {
-                    self.handle_update().await;
+                AdmissionCommand::Update { worker, ack_tx } => {
+                    self.handle_update(worker).await;
                     let _ = ack_tx.send(());
                 }
             }
@@ -517,6 +528,9 @@ impl<
         let arrival_offset = self.start_time.elapsed().as_secs_f64();
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
+        let placement = request
+            .pinned_worker
+            .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
         let queued = QueuedRequest {
             request,
             enqueue_at: decay_now,
@@ -530,6 +544,7 @@ impl<
             arrival_offset,
             priority_jump,
             strict_priority,
+            placement,
             queued,
         ) {
             let mut request = queued.request;
@@ -568,9 +583,17 @@ impl<
         QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
     }
 
-    async fn handle_update(&mut self) {
+    async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
         if self.pending.pending_count() == 0 {
             return;
+        }
+
+        if let Some(worker) = worker {
+            self.pending.recheck_worker(worker);
+        } else {
+            // ponytail: periodic/topology updates use the safe full fallback; thread worker IDs
+            // through replica updates if this scan becomes measurable.
+            self.pending.recheck_all_workers();
         }
 
         // Continuation draining stays actor-local; never self-send through the
@@ -626,24 +649,13 @@ impl<
             )
             .await;
             let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
-            if let Some(RefreshedOverlap {
-                tier_overlap_blocks,
-                effective_overlap_blocks,
-                effective_cached_tokens,
-            }) = refreshed
-            {
+            if let Some(overlap) = refreshed {
                 tracing::info!(
-                    request_id = queued
-                        .request
-                        .maybe_request_id
-                        .as_deref()
-                        .unwrap_or("unknown"),
+                    request_id = queued.request.mode.request_id().unwrap_or("unknown"),
                     wait_ms,
                     "refreshed overlap scores after long queue wait"
                 );
-                queued.request.tier_overlap_blocks = tier_overlap_blocks;
-                queued.request.effective_overlap_blocks = effective_overlap_blocks;
-                queued.request.effective_cached_tokens = effective_cached_tokens;
+                queued.request.overlap = overlap;
             }
             let admit_now = Instant::now();
             let class_index = popped.class_index();
@@ -673,9 +685,18 @@ impl<
             let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
             self.selector
                 .select_worker(&workers, &request, eligibility, self.block_size)
+                .map(|selection| {
+                    let config = workers
+                        .get(&selection.worker.worker_id)
+                        .expect("selected worker config must exist");
+                    let selected_worker_tiers = request
+                        .overlap
+                        .selected_worker_tiers(selection.worker, config);
+                    (selection, selected_worker_tiers)
+                })
         };
 
-        let selection = match selection {
+        let (selection, selected_worker_tiers) = match selection {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -688,20 +709,19 @@ impl<
             best_worker: selection.worker,
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
+            selected_worker_tiers,
         };
 
-        if !request.update_states {
+        if !request.mode.is_tracked() {
             request.respond(Ok(response));
             return;
         }
 
-        let Some(request_id) = request.maybe_request_id.clone() else {
-            tracing::error!("No request_id provided to add_request to the slot tracker");
-            request.respond(Err(KvSchedulerError::BookingFailed(
-                "tracked scheduling request did not include a request_id".to_string(),
-            )));
-            return;
-        };
+        let request_id = request
+            .mode
+            .tracked_request_id()
+            .expect("tracked mode always has a request ID")
+            .to_string();
 
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
@@ -721,6 +741,13 @@ impl<
         self.book_and_respond(request, sequence_request, response);
     }
 
+    /// Completes the tracked-admission ownership handoff.
+    ///
+    /// A closed receiver means the actor-owned request was abandoned before
+    /// booking, so there is nothing to install. Otherwise booking precedes the
+    /// response: once delivery succeeds, the response channel no longer tracks
+    /// request lifetime and the caller must install its RAII cleanup owner. If
+    /// delivery loses that race, roll back the booking here.
     fn book_and_respond(
         &self,
         mut request: SchedulingRequest,
@@ -875,8 +902,9 @@ mod tests {
     use crate::protocols::{
         ActiveLoad, ActiveSequenceEvent, WorkerSelectionResult, WorkerWithDpRank,
     };
-    use crate::scheduling::RouterPolicyConfig;
-    use crate::scheduling::types::KvSchedulerError;
+    use crate::scheduling::OverlapSignals;
+    use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
+    use crate::scheduling::{RefreshedOverlap, RouterPolicyConfig};
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
     use crate::{DefaultWorkerSelector, WorkerSelector};
@@ -1402,20 +1430,20 @@ mod tests {
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let req = SchedulingRequest {
-            maybe_request_id: Some(request_id.to_string()),
+            mode: ScheduleMode::Tracked {
+                request_id: request_id.to_string(),
+            },
             token_seq: None,
             isl_tokens,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::new(),
-            effective_cached_tokens: HashMap::new(),
+            overlap: OverlapSignals::default(),
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: true,
             lora_name: None,
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1850,7 +1878,10 @@ policy_classes:
 
         let (mut latency_cached, _latency_cached_rx) = make_request("latency-cached", 64);
         latency_cached.policy_class = Some("latency".to_string());
-        latency_cached.effective_cached_tokens.insert(worker, 64);
+        latency_cached
+            .overlap
+            .effective_cached_tokens
+            .insert(worker, 64);
         queue.enqueue(latency_cached).await;
 
         let (mut latency_uncached, _latency_uncached_rx) = make_request("latency-uncached", 64);
@@ -1859,7 +1890,10 @@ policy_classes:
 
         let (mut unknown_cached, _unknown_cached_rx) = make_request("unknown-cached", 64);
         unknown_cached.policy_class = Some("unknown".to_string());
-        unknown_cached.effective_cached_tokens.insert(worker, 64);
+        unknown_cached
+            .overlap
+            .effective_cached_tokens
+            .insert(worker, 64);
         queue.enqueue(unknown_cached).await;
 
         let (mut ordinary_class_name, _ordinary_class_name_rx) =
@@ -2039,23 +2073,6 @@ policy_classes:
         let response = scheduled.expect("scheduling returned error");
         assert_eq!(response.best_worker.worker_id, 0);
         assert_eq!(queue.pending_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_no_workers_returns_error() {
-        let (queue, _slots) = make_queue(0, 16, 512, None);
-
-        let (req, rx) = make_request("lonely-req", 512);
-        queue.enqueue(req).await;
-
-        let resp = rx.await.expect("oneshot dropped");
-        assert!(
-            matches!(
-                resp,
-                Err(crate::scheduling::types::KvSchedulerError::NoEndpoints)
-            ),
-            "expected NoEndpoints, got {resp:?}"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2309,7 +2326,7 @@ policy_classes:
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_pinned_head_blocks_class_backlog_despite_other_worker_capacity() {
+    async fn test_blocked_pinned_lane_does_not_block_other_worker() {
         let (queue, slots) = make_queue(2, 16, 256, Some(0.0));
 
         let (mut first, first_rx) = make_request("pinned-1", 256);
@@ -2327,17 +2344,19 @@ policy_classes:
             "request should remain queued"
         );
 
-        let (unpinned, mut unpinned_rx) = make_request("unpinned", 256);
-        queue.enqueue(unpinned).await;
+        let (mut other_worker, mut other_worker_rx) = make_request("pinned-0", 256);
+        other_worker.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        queue.enqueue(other_worker).await;
         assert_eq!(queue.pending_count(), 2);
 
         queue.update().await;
 
-        assert_eq!(queue.pending_count(), 2);
-        assert!(
-            unpinned_rx.try_recv().is_err(),
-            "unpinned request should remain queued behind the pinned head"
-        );
+        assert_eq!(queue.pending_count(), 1);
+        let other_worker_resp = other_worker_rx
+            .try_recv()
+            .expect("other worker request should have been scheduled")
+            .expect("scheduling returned error");
+        assert_eq!(other_worker_resp.best_worker, WorkerWithDpRank::new(0, 0));
         assert!(
             second_rx.try_recv().is_err(),
             "pinned request should still be queued"
@@ -2347,19 +2366,13 @@ policy_classes:
             .mark_prefill_completed(&"pinned-1".to_string(), decay_now())
             .unwrap();
         slots.free(&"pinned-1".to_string(), decay_now()).unwrap();
-        queue.update().await;
+        queue.update_worker(WorkerWithDpRank::new(1, 0)).await;
 
         let second_resp = second_rx
             .try_recv()
             .expect("pinned request should have been scheduled");
         let second_resp = second_resp.expect("scheduling returned error");
         assert_eq!(second_resp.best_worker, WorkerWithDpRank::new(1, 0));
-
-        let unpinned_resp = unpinned_rx
-            .try_recv()
-            .expect("unpinned request should have been scheduled");
-        let unpinned_resp = unpinned_resp.expect("scheduling returned error");
-        assert_eq!(unpinned_resp.best_worker, WorkerWithDpRank::new(0, 0));
         assert_eq!(queue.pending_count(), 0);
     }
 
@@ -2412,31 +2425,39 @@ policy_classes:
             make_queue_with_refresher(2, block_size, isl, Some(0.0), refresher.clone());
 
         let (mut req1, rx1) = make_request("req-1", isl);
-        req1.effective_overlap_blocks
+        req1.overlap
+            .effective_overlap_blocks
             .insert(WorkerWithDpRank::new(0, 0), 3.0);
-        req1.effective_cached_tokens
+        req1.overlap
+            .effective_cached_tokens
             .insert(WorkerWithDpRank::new(0, 0), 48);
         queue.enqueue(req1).await;
         let resp1 = rx1.await.expect("rx1 dropped").expect("req-1 failed");
         assert_eq!(resp1.best_worker, WorkerWithDpRank::new(0, 0));
 
         let (mut req2, rx2) = make_request("req-2", isl);
-        req2.effective_overlap_blocks
+        req2.overlap
+            .effective_overlap_blocks
             .insert(WorkerWithDpRank::new(1, 0), 3.0);
-        req2.effective_cached_tokens
+        req2.overlap
+            .effective_cached_tokens
             .insert(WorkerWithDpRank::new(1, 0), 48);
         queue.enqueue(req2).await;
         let resp2 = rx2.await.expect("rx2 dropped").expect("req-2 failed");
         assert_eq!(resp2.best_worker, WorkerWithDpRank::new(1, 0));
 
         let (mut req3, rx3) = make_request("req-3", isl);
-        req3.effective_overlap_blocks
+        req3.overlap
+            .effective_overlap_blocks
             .insert(WorkerWithDpRank::new(0, 0), 8.0);
-        req3.effective_overlap_blocks
+        req3.overlap
+            .effective_overlap_blocks
             .insert(WorkerWithDpRank::new(1, 0), 2.0);
-        req3.effective_cached_tokens
+        req3.overlap
+            .effective_cached_tokens
             .insert(WorkerWithDpRank::new(0, 0), 128);
-        req3.effective_cached_tokens
+        req3.overlap
+            .effective_cached_tokens
             .insert(WorkerWithDpRank::new(1, 0), 32);
         queue
             .enqueue_with_block_hashes(req3, Some(vec![LocalBlockHash(42)]))
@@ -2482,9 +2503,11 @@ policy_classes:
         let _ = rx1.await.expect("rx1 dropped").expect("req-1 failed");
 
         let (mut req2, rx2) = make_request("req-2", isl);
-        req2.effective_overlap_blocks
+        req2.overlap
+            .effective_overlap_blocks
             .insert(WorkerWithDpRank::new(0, 0), 4.0);
-        req2.effective_cached_tokens
+        req2.overlap
+            .effective_cached_tokens
             .insert(WorkerWithDpRank::new(0, 0), 64);
         queue
             .enqueue_with_block_hashes(req2, Some(vec![LocalBlockHash(42)]))

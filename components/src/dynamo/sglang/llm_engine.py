@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Optional
@@ -56,10 +57,11 @@ from dynamo.common.backend.health_check import (
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
-from dynamo.sglang._compat import get_scheduler_info
+from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
     compute_bootstrap_address,
@@ -68,6 +70,7 @@ from dynamo.sglang._disagg import (
 )
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.capacity import (
+    get_hicache_native_offloading_capacity,
     kv_metrics_block_values,
     local_dp_rank_bounds,
     runtime_capacity,
@@ -92,11 +95,19 @@ def _warmup_enabled() -> bool:
     return raw.strip().lower() not in ("1", "true", "yes", "on")
 
 
-def _get_runtime_data(server_args) -> dict[str, Any] | None:
+def _get_runtime_data(
+    server_args, scheduler_info: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    runtime_data: dict[str, Any] = {}
     worker_group_id = get_sglang_worker_group_id(server_args)
-    if worker_group_id is None:
-        return None
-    return {SGLANG_WORKER_GROUP_ID_KEY: worker_group_id}
+    if worker_group_id is not None:
+        runtime_data[SGLANG_WORKER_GROUP_ID_KEY] = worker_group_id
+    offloading_capacity = get_hicache_native_offloading_capacity(
+        server_args, scheduler_info or {}
+    )
+    if offloading_capacity is not None:
+        runtime_data[NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY] = offloading_capacity
+    return runtime_data or None
 
 
 def _local_dp_rank_range(server_args) -> tuple[int, int]:
@@ -150,7 +161,10 @@ class SglangLLMEngine(LLMEngine):
     async def from_args(
         cls, argv: list[str] | None = None
     ) -> tuple[SglangLLMEngine, WorkerConfig]:
-        config = await parse_args(argv if argv is not None else sys.argv[1:])
+        config = await parse_args(
+            argv if argv is not None else sys.argv[1:],
+            fpm_trace_relay_supported=False,
+        )
         server_args = config.server_args
         dynamo_args = config.dynamo_args
 
@@ -219,7 +233,7 @@ class SglangLLMEngine(LLMEngine):
                     _DYN_SGLANG_SKIP_WARMUP_ENV,
                 )
 
-        scheduler_info = get_scheduler_info(self.engine)
+        scheduler_info = self.engine._scheduler_init_result.scheduler_infos[0]
         capacity = runtime_capacity(self.server_args, scheduler_info)
         page_size = self.server_args.page_size
 
@@ -230,7 +244,7 @@ class SglangLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
-            runtime_data=_get_runtime_data(self.server_args),
+            runtime_data=_get_runtime_data(self.server_args, scheduler_info),
             llm=LlmRegistration(
                 context_length=self.server_args.context_length,
                 kv_cache_block_size=page_size,
@@ -389,6 +403,7 @@ class SglangLLMEngine(LLMEngine):
             **input_param,
             sampling_params=sampling_params,
             stream=True,
+            **require_reasoning_kwargs(self.engine, request),
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
             **telemetry.engine_trace_kwargs(
@@ -510,6 +525,11 @@ class SglangLLMEngine(LLMEngine):
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
+                    "prompt_tokens_details": (
+                        {"cached_tokens": meta_info["cached_tokens"]}
+                        if meta_info.get("cached_tokens") is not None
+                        else None
+                    ),
                 }
                 prompt_payload = (
                     _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(meta_info)
@@ -984,7 +1004,21 @@ class SglangLLMEngine(LLMEngine):
         if isinstance(guided_decoding, dict):
             json_schema = guided_decoding.get("json")
             if json_schema is not None:
-                return {"json_schema": json.dumps(json_schema)}
+                if not isinstance(json_schema, str):
+                    json_schema = json.dumps(json_schema)
+                return {"json_schema": json_schema}
+            regex = guided_decoding.get("regex")
+            if regex is not None:
+                return {"regex": regex}
+            grammar = guided_decoding.get("grammar")
+            if grammar is not None:
+                return {"ebnf": grammar}
+            choice = guided_decoding.get("choice")
+            if choice:
+                valid_choices = [item for item in choice if item is not None]
+                if valid_choices:
+                    alternatives = "|".join(re.escape(item) for item in valid_choices)
+                    return {"regex": f"({alternatives})"}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:
                 return {"structural_tag": serialize_structural_tag(structural_tag)}

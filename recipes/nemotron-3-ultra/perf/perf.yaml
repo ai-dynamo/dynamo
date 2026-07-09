@@ -59,7 +59,7 @@ spec:
         - |
           set -euo pipefail
           ulimit -n 600000
-          apt-get update && apt-get install -y curl jq procps git coreutils && apt-get clean
+          apt-get update && apt-get install -y curl jq procps git coreutils build-essential && apt-get clean
           pip install "aiperf==${AIPERF_VERSION}" protobuf "transformers==4.57.3" "tiktoken==0.13.0"
           sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
           export COLUMNS=200
@@ -183,7 +183,7 @@ spec:
         - name: AIPERF_HTTP_CONNECTION_LIMIT
           value: "200"
         - name: AIPERF_VERSION
-          value: "0.8.0"
+          value: "0.10.0"
         - name: AIPERF_HTTP_SO_RCVTIMEO
           value: "120"
         - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT

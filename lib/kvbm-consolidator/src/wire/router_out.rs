@@ -7,6 +7,7 @@
 //! (matching vLLM's `msgspec(array_like=True)` envelope).
 
 use serde::Serialize;
+use std::sync::Arc;
 
 /// Batch envelope: `(timestamp, events, data_parallel_rank)`.
 #[derive(Debug, Serialize)]
@@ -25,6 +26,12 @@ pub enum Event {
         block_size: i32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
+        #[serde(
+            default,
+            rename = "cache_salt",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cache_namespace: Option<Arc<str>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
     },

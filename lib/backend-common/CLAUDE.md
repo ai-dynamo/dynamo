@@ -510,6 +510,13 @@ async fn my_engine_satisfies_contract() {
 constructs one engine for the main lifecycle test and a second
 pristine engine for the "cleanup before start" check.
 
+Encode-role engines call `run_encode_conformance`. It sends a multimodal
+request and checks the narrower handoff response contract: one terminal `Stop`
+chunk, no generated tokens, and an object-shaped `encoder_result`. Terminal
+usage remains optional; when provided, it must report zero completion tokens
+consistently. Encode engines must also satisfy the common KV source, metrics,
+concurrency, cancellation, and cleanup lifecycle guarantees.
+
 The kit asserts:
 
 - `start()` returns a non-empty `EngineConfig.model`.
@@ -550,7 +557,7 @@ Also available: `testing::mock_context()` and
 | `adapter.rs` | `EngineAdapter` — bridges `LLMEngine` to `AsyncEngine` (token telemetry, disagg first-token, debug validator). `RawEngineAdapter` — bridges `RawEngine` to `AsyncEngine` (JSON passthrough, cancellation monitor; no token telemetry/disagg). `JsonProbeAdapter` — JSON health-check wrapper for the LLM path (the raw path is already JSON-shaped). |
 | `run.rs` | `pub fn run(engine, config)` (LLM) and `pub fn run_raw(engine, config)` (raw media) — entry points used by per-backend `main.rs`. Non-generic. |
 | `args.rs` | `CommonArgs` — shared CLI flags (`--namespace`, `--component`, `--disaggregation-mode`, etc.) that every engine's `Args` flattens in. |
-| `disagg.rs` | `DisaggregationMode` enum (`Aggregated` / `Prefill` / `Decode`) with `clap::ValueEnum` derive. |
+| `disagg.rs` | `DisaggregationMode` enum (`Aggregated` / `Prefill` / `Decode` / `Encode`) with `clap::ValueEnum` derive. |
 | `error.rs` | Re-exports `DynamoError`, `ErrorType`, `BackendError` from `dynamo-runtime`. No custom error types. |
 | `validate.rs` | Debug-build stream validator. Compiled out in release. |
 | `testing.rs` | Conformance test kit. Gated behind the `testing` feature. |

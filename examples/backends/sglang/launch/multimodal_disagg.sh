@@ -156,6 +156,7 @@ echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREF
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 env ${_PREFILL_CUDA_PIN:+"$_PREFILL_CUDA_PIN"} python3 -m dynamo.sglang \
   --enable-multimodal \
+  --dedicated-mm-encoder \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \
   --page-size 16 \
@@ -179,6 +180,7 @@ fi
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE_GPU_MEM)..."
 env ${_DECODE_CUDA_PIN:+"$_DECODE_CUDA_PIN"} python3 -m dynamo.sglang \
   --enable-multimodal \
+  --dedicated-mm-encoder \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \
   --page-size 16 \

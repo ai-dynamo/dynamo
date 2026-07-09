@@ -20,7 +20,7 @@ support the current version plus 1 version back (N and N-1). The pattern:
    enough surface area to cover what Dynamo actually calls.
 4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
    version it supports and when it can be removed, e.g.:
-   `# Fallback for sglang <= 0.5.10. Remove when min supported version is 0.5.12+`
+   `# Fallback for sglang <= 0.5.12. Remove when min supported version is 0.5.14+`
 5. When a new SGLang version is released and the old N-1 falls outside the support
    window, delete the corresponding fallback branches and polyfills from `_compat.py`.
    If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
@@ -44,8 +44,12 @@ Worker dispatch (main.py:60-132):
   --image-diffusion-worker    -> init_diffusion.init_image_diffusion()
   --video-generation-worker   -> init_diffusion.init_video_diffusion()
   --embedding-worker          -> init_embedding.init_embedding()
-  --multimodal-encode-worker  -> init_multimodal.init_multimodal_encode_worker()
-  --multimodal-worker         -> init_multimodal.init_multimodal_worker() or _prefill_worker()
+  --enable-multimodal --disaggregation-mode encode
+                              -> init_multimodal.init_multimodal_encode_worker()
+  --enable-multimodal --dedicated-mm-encoder --disaggregation-mode pd/decode
+                              -> init_multimodal.init_multimodal_worker()
+  --enable-multimodal --dedicated-mm-encoder --disaggregation-mode prefill
+                              -> init_multimodal.init_multimodal_prefill_worker()
   --dllm-algorithm <algo>     -> init_diffusion.init_llm_diffusion()
   (default, prefill mode)     -> init_llm.init_prefill()
   (default, decode/agg mode)  -> init_llm.init_decode()
@@ -57,7 +61,7 @@ Worker dispatch (main.py:60-132):
 
 **Two config paths:**
 
-1. **LLM workers** (decode, prefill, embedding, multimodal-worker, dllm): Creates full
+1. **LLM workers** (decode, prefill, embedding, internal multimodal, dllm): Creates full
    `sglang.srt.server_args.ServerArgs` via `ServerArgs.from_cli_args()`. This triggers
    model config loading, tokenizer detection, etc.
 
@@ -68,7 +72,7 @@ Worker dispatch (main.py:60-132):
 
 **DynamoConfig** combines `DynamoRuntimeConfig` (common flags like `--namespace`,
 `--output-modalities`, `--media-output-fs-url`) with `DynamoSGLangConfig` (sglang-specific
-flags like `--multimodal-encode-worker`, `--embedding-worker`).
+flags like `--enable-multimodal`, `--dedicated-mm-encoder`, `--embedding-worker`).
 
 Key gotcha: `--output-modalities` defaults to `["text"]` globally. Image/video diffusion
 workers override this in their init functions to `["image"]`/`["video"]` to ensure correct
@@ -117,8 +121,8 @@ BaseGenerativeHandler (handler_base.py)
 | Worker | Engine | Notes |
 |--------|--------|-------|
 | decode, prefill, dllm, embedding | `sgl.Engine` | Full SGLang inference engine |
-| multimodal-worker, multimodal-prefill | `sgl.Engine` | Plus EmbeddingsProcessor |
-| multimodal-encode-worker | None | `MMEncoder` from SGLang, pre-tokenized input |
+| internal multimodal worker / prefill | `sgl.Engine` | `--dedicated-mm-encoder`; plus EmbeddingsProcessor |
+| multimodal encode worker | None | `--disaggregation-mode encode`; `MMEncoder` from SGLang, pre-tokenized input |
 | image-diffusion-worker | `DiffGenerator` | From `sglang.multimodal_gen` |
 | video-generation-worker | `DiffGenerator` | From `sglang.multimodal_gen` |
 
@@ -309,10 +313,11 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   Always slice with an offset, don't assume per-chunk logprobs.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
-- **Session radix cache**: With `--enable-session-radix-cache`, the handler
-  passes `agent_context.session_id` to SGLang as `session_params.id`. Agent KV
-  hints are forwarded as metadata but are not acted on by the SGLang backend.
-  This path does not create router affinity.
+- **Session identity**: SGLang 0.5.14 does not support passive session-aware radix
+  ownership. Do not pass `agent_context.session_id` as `session_params.id`;
+  SGLang treats that field as an explicit session lifecycle and rejects IDs that
+  were not created through `open_session`. Session headers remain available for
+  tracing and router affinity.
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.

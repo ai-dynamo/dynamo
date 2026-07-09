@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Sequence,
     Set,
     Tuple,
 )
@@ -31,77 +32,6 @@ def get_tool_parser_names() -> list[str]:
 
 def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
-    ...
-
-async def parse_tool_calls_batch(
-    parser_name: str,
-    message: str,
-    tools_json: Optional[str] = None,
-) -> str:
-    """Parse tool calls from a model output string using the specified parser.
-
-    Args:
-        parser_name: Parser name (e.g. "kimi_k25"). Empty string falls back to default.
-        message:     Model output text to parse.
-        tools_json:  Optional JSON-serialized list of tool definitions in the form
-                     `[{"name": "...", "parameters": {...}}, ...]` (or OpenAI shape
-                     with `{"function": {...}}` wrapper). Used by parsers that need
-                     schema-aware coercion (e.g. XML family).
-
-    Returns:
-        JSON-serialized string `{"calls": [...], "normal_text": str | None}`.
-        Each entry in `calls` is `{"id", "type", "function": {"name", "arguments"}}`
-        with `arguments` itself a JSON-serialized string.
-
-    Raises:
-        ValueError on parser failure or malformed `tools_json`.
-    """
-    ...
-
-async def parse_tool_calls_stream(
-    parser_name: str,
-    chunks_json: str,
-    tools_json: Optional[str] = None,
-) -> str:
-    """Parse streamed tool-call chunks using the specified parser.
-
-    Args:
-        parser_name: Parser name (e.g. "kimi_k2"). Empty string falls back to default.
-        chunks_json: JSON-serialized list of chunks with `delta_text` and optional `finish_reason`.
-        tools_json: Optional JSON-serialized list of tool definitions.
-
-    Returns:
-        JSON-serialized string `{"calls": [{"name", "arguments"}], "normal_text": str}`.
-
-    Raises:
-        ValueError on parser failure or malformed JSON.
-    """
-    ...
-
-def parse_reasoning_batch(
-    parser_name: str,
-    message: str,
-    token_ids: Optional[List[int]] = None,
-    in_reasoning: bool = False,
-) -> str:
-    """Parse reasoning from a complete model output string using the specified parser.
-
-    Returns:
-        JSON-serialized string `{"reasoning_text": str, "normal_text": str}`.
-    """
-    ...
-
-def parse_reasoning_stream(
-    parser_name: str,
-    chunks: List[str],
-    token_chunks: Optional[List[List[int]]] = None,
-    in_reasoning: bool = False,
-) -> str:
-    """Parse reasoning from streaming chunks using one stateful parser instance.
-
-    Returns:
-        JSON-serialized string with accumulated `reasoning_text` and `normal_text`.
-    """
     ...
 
 def run_kv_indexer(args: List[str]) -> None:
@@ -416,6 +346,7 @@ def compute_block_hash_for_seq(
     block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     lora_name: Optional[str] = None,
     is_eagle: Optional[bool] = None,
+    cache_namespace: Optional[str] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -526,6 +457,13 @@ class Context:
         """
         ...
 
+    def detached(self, id: str) -> "Context":
+        """
+        Create a context with a fresh cancellation controller and request ID
+        while preserving trace parentage and a metadata snapshot.
+        """
+        ...
+
     def async_killed_or_stopped(self) -> asyncio.Future[bool]:
         """
         Asynchronously wait until the context is killed or stopped.
@@ -587,8 +525,8 @@ class Context:
         Build W3C trace headers for propagating to downstream inference engines.
 
         Returns:
-            ``{"traceparent": "00-<trace_id>-<span_id>-01"}`` when this request
-            carries trace context, ``None`` otherwise. Also emits ``tracestate``,
+            ``{"traceparent": "00-<trace_id>-<span_id>-<flags>"}`` when this
+            request carries trace context, ``None`` otherwise. Also emits ``tracestate``,
             ``x-request-id``, ``request-id`` when upstream propagated them.
             Forward unchanged to the inference engine's ``trace_headers`` kwarg.
         """
@@ -843,6 +781,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    tokenizer_backend: str | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -1159,6 +1098,7 @@ class KvEventPublisher:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         is_eagle: Optional[bool] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -1634,7 +1574,7 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            enforce_disagg: Strictly enforce disaggregated mode, failing requests if no prefill workers are available
+            enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
         """
         ...
 
@@ -1651,6 +1591,11 @@ class AicPerfConfig:
         aic_attention_dp_size: Optional[int] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
     ) -> None:
         ...
 
@@ -1990,14 +1935,22 @@ class MockEngineArgs:
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: int = 42,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
+        handoff_session_timeout_ms: int = 300000,
         kv_bytes_per_token: Optional[int] = None,
         kv_transfer_bandwidth: Optional[float] = None,
+        kv_transfer_timing_mode: str = "full_prompt",
         reasoning: Optional[ReasoningConfig] = None,
+        response_replay_trace_path: Optional[str | os.PathLike[str]] = None,
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,
         preemption_mode: str = "lifo",
@@ -2014,6 +1967,7 @@ class MockEngineArgs:
         enable_g4_storage: bool = False,
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
+        max_model_len: Optional[int] = None,
     ) -> None:
         ...
 
@@ -2031,6 +1985,9 @@ class MockEngineArgs:
 
     @num_gpu_blocks.setter
     def num_gpu_blocks(self, value: int) -> None: ...
+
+    @property
+    def max_model_len(self) -> Optional[int]: ...
 
     @property
     def max_num_seqs(self) -> Optional[int]: ...
@@ -2052,6 +2009,18 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def handoff_session_timeout_ms(self) -> int: ...
+
+    @property
+    def kv_transfer_timing_mode(self) -> str: ...
+
+    @property
+    def engine_type(self) -> str: ...
+
+    @property
+    def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
 
     @property
     def num_g2_blocks(self) -> Optional[int]: ...
@@ -2132,6 +2101,36 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def aic_gemm_dtype(self) -> Optional[str]: ...
+
+    @aic_gemm_dtype.setter
+    def aic_gemm_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_moe_dtype(self) -> Optional[str]: ...
+
+    @aic_moe_dtype.setter
+    def aic_moe_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_fmha_dtype(self) -> Optional[str]: ...
+
+    @aic_fmha_dtype.setter
+    def aic_fmha_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_kv_cache_dtype(self) -> Optional[str]: ...
+
+    @aic_kv_cache_dtype.setter
+    def aic_kv_cache_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_comm_dtype(self) -> Optional[str]: ...
+
+    @aic_comm_dtype.setter
+    def aic_comm_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
     def aic_nextn(self) -> Optional[int]: ...
 
     @aic_nextn.setter
@@ -2195,6 +2194,11 @@ class MockEngineArgs:
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: Optional[int] = None,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
@@ -2242,6 +2246,7 @@ async def register_model(
     needs: Optional[List[List[WorkerType]]] = None,
     self_host_metadata: Optional[bool] = None,
     ignore_weights: bool = False,
+    max_gpu_lora_count: Optional[int] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -2345,7 +2350,7 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
     ...
 
 def run_mocker_trace_replay(
-    trace_file: str | os.PathLike[str],
+    trace_files: Sequence[str | os.PathLike[str]],
     extra_engine_args: Optional[MockEngineArgs] = None,
     prefill_engine_args: Optional[MockEngineArgs] = None,
     decode_engine_args: Optional[MockEngineArgs] = None,
@@ -2358,8 +2363,16 @@ def run_mocker_trace_replay(
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
-    trace_block_size: int = 512,
-    trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
+    trace_block_size: Optional[int] = None,
+    trace_format: Literal[
+        "mooncake",
+        "mooncake-delta",
+        "mooncake_delta",
+        "agentic_mooncake",
+        "agentic-mooncake",
+        "applied_compute_agentic",
+        "dynamo",
+    ] = "mooncake",
     trace_shared_prefix_ratio: float = 0.0,
     trace_num_prefix_groups: int = 0,
     report_jsonl_path: Optional[str | os.PathLike[str]] = None,
@@ -2369,7 +2382,9 @@ def run_mocker_trace_replay(
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs.
+    """Replay mocker trace files and return the simulation report.
+
+    Supports aggregated or disaggregated engine configurations.
 
     When ``report_jsonl_path`` is provided (offline disagg replay only), one
     JSON object per request is written to that path. Each line includes
@@ -2404,12 +2419,23 @@ def run_mocker_synthetic_trace_replay(
     num_prefix_groups: int = 0,
     inter_turn_delay_ms: float = 0.0,
     model_name: Optional[str] = None,
+    sla_ttft_ms: Optional[float] = None,
+    sla_itl_ms: Optional[float] = None,
+    sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay a synthetic mocker workload without requiring a trace file."""
+    """Replay a synthetic mocker workload without requiring a trace file.
+
+    ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
+    (offline replay only); when any is set the report carries ``goodput_*`` keys
+    classifying SLA-satisfying requests.
+    """
     ...
 
 class PlannerReplayBridge:
-    """Step-based bridge for driving an offline replay with a Python planner."""
+    """Drives an offline replay to completion with a Python planner. The Rust
+    simulation owns the drive loop and calls back into ``planner`` once per
+    ``PlannerTick`` via ``run(planner)`` (``planner`` exposes
+    ``initial_tick_ms() -> float`` and ``on_tick(metrics: dict) -> dict``)."""
 
     def __init__(
         self,
@@ -2491,9 +2517,7 @@ class PlannerReplayBridge:
         sla_e2e_ms: Optional[float] = None,
     ) -> "PlannerReplayBridge": ...
 
-    def advance_to(self, until_ms: float) -> Dict[str, Any]: ...
-    def apply_scaling(self, target_prefill: int, target_decode: int) -> None: ...
-    def finalize(self) -> Dict[str, Any]: ...
+    def run(self, planner: Any) -> Dict[str, Any]: ...
 
 class Layer:
     """
@@ -2823,6 +2847,7 @@ class KvRouter:
         routing_constraints: Optional[RoutingConstraints] = None,
         strict_priority: int = 0,
         policy_class: Optional[str] = None,
+        cache_namespace: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -2840,6 +2865,7 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
+            cache_namespace: Optional cache namespace used in block hash computation.
             policy_class: Requested policy family, or an exact explicit class.
                           Missing, unknown, and ordinary physical-class names use the
                           configured default family before cache-bucket resolution.
@@ -2857,6 +2883,7 @@ class KvRouter:
         token_ids: List[int],
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        cache_namespace: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
         Get potential prefill and decode loads for all workers.
@@ -2889,6 +2916,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         include_shared: bool = True,
+        cache_namespace: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Get per-worker KV overlap by storage tier.
@@ -2987,8 +3015,16 @@ class EntrypointArgs:
         is_prefill: bool = False,
         is_decode: bool = False,
         migration_limit: int = 0,
+        migration_max_seq_len: Optional[int] = None,
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        *,
+        metrics_prefix: Optional[str] = None,
+        enable_anthropic_api: Optional[bool] = None,
+        strip_anthropic_preamble: Optional[bool] = None,
+        enable_streaming_tool_dispatch: Optional[bool] = None,
+        enable_streaming_reasoning_dispatch: Optional[bool] = None,
+        tokenizer_backend: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3014,8 +3050,15 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
+            migration_max_seq_len: Optional max sequence length for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
+            metrics_prefix: Optional Prometheus metrics prefix override
+            enable_anthropic_api: Optional Anthropic Messages API override
+            strip_anthropic_preamble: Optional Anthropic preamble stripping override
+            enable_streaming_tool_dispatch: Optional streaming tool dispatch override
+            enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
+            tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
         """
         ...
 
@@ -3156,6 +3199,7 @@ class backend:
         Aggregated: "backend.DisaggregationMode"
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
+        Encode: "backend.DisaggregationMode"
 
     class LlmRegistration:
         def __init__(
@@ -3237,6 +3281,9 @@ class backend:
             structural_tag_mode: str = ...,
             structural_tag_scope: str = ...,
             structural_tag_schema: str = ...,
+            route_to_encoder: bool = ...,
+            media_decoder: Optional[MediaDecoder] = None,
+            media_fetcher: Optional[MediaFetcher] = None,
         ) -> None: ...
 
     class Worker:

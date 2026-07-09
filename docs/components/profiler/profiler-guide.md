@@ -78,14 +78,18 @@ flowchart TD
 
 ### Rapid
 
-Uses AIC's performance simulation to estimate optimal configurations without deploying real engines. Completes in ~30 seconds.
+Uses AIC's performance simulation to estimate optimal configurations without
+deploying real engines. Completes in ~30 seconds; see the
+[AIC support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/).
 
 ```yaml
 searchStrategy: rapid
 ```
 
 - Supports all backends: vLLM, SGLang, TensorRT-LLM
-- If the model/hardware/backend combination is not supported by AIC, falls back to a naive config (memory-fit TP calculation)
+- Falls back to a naive config (memory-fit TP calculation) only after DGDR
+  accepts the GPU SKU. Fallback sizing depends on AIC system metadata and does
+  not add support for additional GPU SKUs.
 - No GPU resources consumed during profiling
 
 ### Thorough
@@ -262,6 +266,30 @@ curl http://localhost:8000/v1/models
 
 > [!NOTE]
 > DGDRs are **immutable**. To update SLAs or configuration, delete the existing DGDR and create a new one.
+
+### Local Runs with DGD Overrides
+
+The operator supplies `dgd-apply-overrides` to Kubernetes profiling jobs when
+`overrides.dgd` is present. For a local run, put the matching binary on `PATH`.
+From a Dynamo checkout with Go installed, build and install it with:
+
+```bash
+go -C deploy/operator install ./cmd/dgd-apply-overrides
+python -m dynamo.profiler --config /path/to/dgdr-spec.yaml
+```
+
+`go install` writes the binary to `GOBIN`, or to `$(go env GOPATH)/bin` when
+`GOBIN` is unset. Add that directory to `PATH` if needed. Alternatively, set
+`DYNAMO_DGD_APPLY_OVERRIDES_BIN` to the binary's absolute path. The profiler
+does not download the binary at runtime.
+
+Use a binary from the same Dynamo release as the profiler. The profiler checks
+the binary protocol before applying an override and rejects incompatible versions.
+
+Registry credentials are namespace-scoped. The operator chart's
+`imagePullSecrets` pull the operator Pod only. A profiling Job that needs
+credentials for the operator image must receive them from its ServiceAccount or
+from `overrides.profilingJob.template.spec.imagePullSecrets` in the DGDR namespace.
 
 ## Profiling Method
 

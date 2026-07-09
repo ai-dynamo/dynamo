@@ -276,11 +276,7 @@ pub(super) fn simulate_decode_step_with_sampler(
     let mut output_signals = Vec::with_capacity(sampled_bursts.iter().copied().sum::<usize>());
     let mut completed_indices = Vec::new();
 
-    for (idx, (req, burst)) in running
-        .iter_mut()
-        .zip(sampled_bursts.into_iter())
-        .enumerate()
-    {
+    for (idx, (req, burst)) in running.iter_mut().zip(sampled_bursts).enumerate() {
         for _ in 0..burst {
             let crossing_page_boundary = req.current_sequence_len() + 1 > req.allocated_tokens;
             let last_idx = req.kv_indices.last().copied();
@@ -291,12 +287,14 @@ pub(super) fn simulate_decode_step_with_sampler(
             if crossing_page_boundary {
                 req.allocated_tokens += config.block_size;
             }
-            req.append_output_token(req.next_output_token());
+            let token_id = req.next_output_token();
+            req.append_output_token(token_id);
             req.debug_assert_invariants(config.block_size);
 
             let is_complete = req.output_len() >= req.max_output_tokens;
             output_signals.push(OutputSignal {
                 uuid: req.uuid,
+                token_id: Some(token_id),
                 completed: is_complete,
                 rejected: false,
                 handoff_delay_ms: compute_prefill_handoff_delay_ms(

@@ -68,6 +68,10 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
+from dynamo.trtllm.utils.request_utils import (
+    request_cache_salt,
+    stored_event_cache_salt,
+)
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 
 if TYPE_CHECKING:
@@ -587,6 +591,7 @@ class TrtllmLLMEngine(LLMEngine):
                 block_hashes,
                 parent_hash,
                 lora_name=data.get("lora_name"),
+                cache_salt=stored_event_cache_salt(data),
             )
         elif kind == "removed":
             partial = self._partial_block_hashes_by_rank.get(rank)
@@ -844,12 +849,14 @@ class TrtllmLLMEngine(LLMEngine):
         # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
+        cache_salt = request_cache_salt(request)
         generation_result = self._engine.llm.generate_async(
             inputs=token_ids,
             sampling_params=sampling_params,
             streaming=streaming,
             disaggregated_params=disaggregated_params,
             scheduling_params=scheduling_params,
+            cache_salt=cache_salt,
             **telemetry.engine_trace_kwargs(context),
         )
 

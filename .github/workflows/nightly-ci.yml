@@ -252,7 +252,12 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
+      # Source archival temporarily disabled until the wheel-builder build
+      # context includes deploy/inference-gateway/ext-proc (a cargo vendor
+      # workspace member).
+      archive_sources: false
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -267,7 +272,9 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
+      archive_sources: false
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -282,10 +289,22 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
+      archive_sources: false
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
+
+  # ============================================================================
+  # COMPLIANCE
+  # ============================================================================
+  # Compliance extract + verify now runs as an inline step INSIDE each build job
+  # (inline_compliance: true above), on the same warm builder — a cache hit + small
+  # scratch export instead of a cold full-image rebuild on the fresh builder. The
+  # build jobs currently set archive_sources: false (archival temporarily
+  # disabled — see above), so /sources.zip is not emitted; /legal + /sboms still
+  # upload at the default 30-day retention. A compliance failure fails the build.
 
   # ============================================================================
   # TEST JOBS
@@ -334,6 +353,9 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
+      # Includes elastic_ep, locally validated DP=2->4->2 on H200 GPUs with
+      # vLLM 0.24.0. That test remains pytest-skipped because this runner has
+      # 24 GiB/GPU, while its unquantized EPLB model needs >=80 GiB/GPU.
       gpu_test_markers: vllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
@@ -818,70 +840,13 @@ jobs:
 
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
-    name: Notify Slack
-    runs-on: prod-default-v2
     if: always()
     needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
     permissions:
       contents: read
-    steps:
-      - name: Get Failed jobs
-        id: failed-jobs
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Jobs whose names contain any of these substrings are excluded from Slack failure reporting
-          # (see ops-support). Add one substring per line to silence additional jobs.
-          IGNORED_JOBS: |
-            build-xpu
-            test-xpu
-        run: |
-          JOBS_JSON=$(mktemp)
-          curl -sSL \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            >$JOBS_JSON
-
-          # Turn the newline-separated IGNORED_JOBS list into a trimmed, non-empty JSON array for jq.
-          IGNORED_JSON=$(printf '%s\n' "$IGNORED_JOBS" | jq -R 'gsub("^\\s+|\\s+$";"")' | jq -s 'map(select(length > 0))')
-
-          # Drop any failed job whose name contains one of the ignored substrings.
-          FAILED_JOBS=$(jq -r --argjson ignored "$IGNORED_JSON" '.jobs[] | select(.conclusion == "failure") | select(.name as $n | ($ignored | any(. as $i | $n | contains($i))) | not) | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
-          echo $FAILED_JOBS
-          {
-            echo "FAILED_JOBS<<EOF"
-            echo "$FAILED_JOBS"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
-
-          # Skip the Slack alert when there are no reportable failures (e.g. only IGNORED_JOBS failed).
-          if [ -n "$(echo "$FAILED_JOBS" | tr -d '[:space:]')" ]; then
-            echo "has_failures=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_failures=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Notify Slack
-        if: steps.failed-jobs.outputs.has_failures == 'true'
-        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
-        with:
-          webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: |
-            blocks:
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: ":alert: *Github Nightly Pipeline Failure*"
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: "<https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }}|Workflow Summary>"
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: "${{ env.FAILED_JOBS }}"
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: "@ops-support Please investigate the failures above."
+      actions: read   # grant the reusable notifier read access to list this run's jobs
+    uses: ./.github/workflows/notify-slack.yml
+    with:
+      pipeline_name: Nightly
+      runs_on: prod-default-v2
+    secrets: inherit

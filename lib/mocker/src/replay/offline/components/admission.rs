@@ -141,10 +141,30 @@ impl AdmissionQueue {
         uuid: Uuid,
         now_ms: f64,
     ) -> Result<()> {
+        self.on_request_terminal(uuid, now_ms, false)
+    }
+
+    pub(in crate::replay::offline) fn on_request_terminal(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+        rejected: bool,
+    ) -> Result<()> {
         let AdmissionSource::Workload(driver) = &mut self.source else {
             return Ok(());
         };
-        driver.on_complete(uuid, now_ms)
+        driver.on_terminal(uuid, now_ms, rejected)
+    }
+
+    pub(in crate::replay::offline) fn on_output_token(
+        &mut self,
+        uuid: Uuid,
+        token_id: u32,
+    ) -> Result<()> {
+        let AdmissionSource::Workload(driver) = &mut self.source else {
+            return Ok(());
+        };
+        driver.on_output_token(uuid, token_id)
     }
 
     pub(in crate::replay::offline) fn is_drained(&self) -> bool {

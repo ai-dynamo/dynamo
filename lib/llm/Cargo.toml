@@ -68,10 +68,10 @@ dynamo-renderer = { workspace = true }
 dynamo-tokens = { workspace = true }
 
 # workspace
-aho-corasick = "1.1"
 anyhow = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-parsers = { workspace = true }
+dynamo-parsers-v2 = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 async-nats = { workspace = true }
@@ -101,6 +101,9 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
 validator = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
@@ -196,13 +199,14 @@ rmp-serde = "1.3"
 # smart-resize parameters are tuned. Bumping should be a deliberate,
 # reviewed step paired with re-running our golden cross-check against
 # `transformers`.
-llm-multimodal = { version = "=1.5.0", optional = true }
+llm-multimodal = { version = "=1.7.0", optional = true }
 # Companion to llm-multimodal: provides `HuggingFaceTokenizer` so the
 # model_dir's `tokenizer.json` can be passed to the
 # `ModelRegistry::lookup` for image-placeholder token-id resolution.
-llm-tokenizer = { version = "=1.3.2", optional = true }
+llm-tokenizer = { version = "=1.4.1", optional = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 approx = "0.5"
 assert_matches = "1.5"
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -214,6 +218,7 @@ rstest = "0.18.2"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = "3.17.1"
+tracing-subscriber = { workspace = true }
 insta = { version = "1.41", features = [
   "glob",
   "json",
@@ -225,6 +230,10 @@ lazy_static = "1.4"
 mockito = "1.7.0"
 dynamo-bench = { path = "../bench" }
 tokio-tungstenite = "0.26"
+
+[[test]]
+name = "lora_simulation"
+path = "tests/lora_simulation/main.rs"
 
 [[bin]]
 name = "generate-frontend-openapi"

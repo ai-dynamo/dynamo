@@ -9,11 +9,15 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
+from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
-from dynamo.sglang.request_handlers.llm.mm_disagg_utils import build_disagg_mm_kwargs
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
+    build_disagg_mm_kwargs,
+    raise_if_unextracted_multimodal,
+)
 
 # Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
 # This remains as a compatibility fallback for older callers that still encode
@@ -150,18 +154,20 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Prefill request {context.id()} will use LoRA adapter: {lora_path}"
             )
 
+        raise_if_unextracted_multimodal(inner_request)
+
         results = await self.engine.async_generate(
             **input_param,
             **mm_kwargs,
             sampling_params=sampling_params,
             stream=True,
+            **require_reasoning_kwargs(self.engine, inner_request),
             bootstrap_host=bootstrap_host,
             bootstrap_port=bootstrap_port,
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
             rid=trace_id,
             data_parallel_rank=dp_rank,
-            **self._session_kwargs(inner_request),
             lora_path=lora_path,
             **self._priority_kwargs(priority),
         )

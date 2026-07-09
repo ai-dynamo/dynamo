@@ -399,7 +399,7 @@ def test_admission_control_token_capacity_preserves_busy_thresholds(
         "active_decode_blocks_threshold": 1.0,
         "active_prefill_tokens_threshold": 10_000_000,
         "active_prefill_tokens_threshold_frac": 64.0,
-        "enforce_disagg": False,
+        "session_affinity_ttl_secs": None,
     }
 
 
@@ -437,9 +437,43 @@ def test_admission_control_token_capacity_with_custom_thresholds(
         "active_decode_blocks_threshold": 0.5,
         "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
-        "enforce_disagg": False,
+        "session_affinity_ttl_secs": None,
     }
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
+
+
+def test_enforce_disagg_cli_is_deprecated_and_not_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.delenv("DYN_ENFORCE_DISAGG", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args(["--enforce-disagg"]))
+    config.validate()
+    kwargs = config.router_kwargs()
+
+    assert config.enforce_disagg is True
+    assert "enforce_disagg" not in kwargs
+    assert "deprecated and ignored" in caplog.text
+
+
+def test_enforce_disagg_environment_is_deprecated_and_not_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("DYN_ENFORCE_DISAGG", "true")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+    kwargs = config.router_kwargs()
+
+    assert config.enforce_disagg is True
+    assert "enforce_disagg" not in kwargs
+    assert "deprecated and ignored" in caplog.text
 
 
 def test_admission_control_explicit_none_with_threshold_raises(
@@ -465,6 +499,43 @@ def test_admission_control_explicit_none_with_threshold_raises(
 
     config = FrontendConfig.from_cli_args(args)
     with pytest.raises(ValueError, match="cannot be combined with explicit"):
+        config.validate()
+
+
+def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+    assert config.session_affinity_ttl_secs is None
+    assert config.router_kwargs()["session_affinity_ttl_secs"] is None
+
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", "600")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+    assert config.session_affinity_ttl_secs == 600
+    assert config.router_kwargs()["session_affinity_ttl_secs"] == 600
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-ttl-secs", "900"])
+    )
+    config.validate()
+    assert config.session_affinity_ttl_secs == 900
+
+
+@pytest.mark.parametrize("ttl", [0, 31_536_001])
+def test_session_affinity_ttl_rejects_out_of_range(ttl: int) -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-ttl-secs", str(ttl)])
+    )
+    with pytest.raises(ValueError, match="router-session-affinity-ttl-secs"):
         config.validate()
 
 

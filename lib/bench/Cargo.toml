@@ -25,10 +25,6 @@ harness = false
 name = "claude_trace_export"
 path = "claude_trace_export.rs"
 
-[[bin]]
-name = "request_trace_to_mooncake"
-path = "request_trace_to_mooncake.rs"
-
 [[bench]]
 name = "offline_replay_bench"
 path = "offline_replay_bench.rs"
@@ -69,6 +65,9 @@ dynamo-tokens = { workspace = true }
 dynamo-data-gen = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["bench", "metrics", "shard-metrics"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 dynamo-tokens = { workspace = true }

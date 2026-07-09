@@ -6,8 +6,8 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, SchedulingRequest,
-    SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
+    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -30,6 +30,7 @@ use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 pub struct KvScheduler<Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
@@ -60,6 +61,7 @@ where
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         model_name: Option<&str>,
         worker_type: &'static str,
+        cancellation_token: CancellationToken,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
@@ -72,6 +74,7 @@ where
             kv_router_config.router_replica_sync,
             router_id,
             worker_type,
+            cancellation_token.child_token(),
         )
         .await
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
@@ -107,14 +110,14 @@ where
             overloaded_worker_provider,
             kv_router_config.router_queue_recheck_interval(),
             kv_router_config.router_track_prefill_tokens,
-            component.drt().child_token(),
+            cancellation_token.child_token(),
             worker_type,
             watch_worker_configs,
         ));
 
         let metrics_scheduler = Arc::clone(&inner);
         let background_metrics = queue_metrics.clone();
-        let metrics_cancel_token = component.drt().child_token();
+        let metrics_cancel_token = cancellation_token.child_token();
         let mut queue_updates = inner.subscribe_queue_updates();
         tokio::spawn(async move {
             let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
@@ -147,6 +150,15 @@ where
             queue_metrics,
             queue_metric_indices,
         })
+    }
+
+    pub async fn schedule_request(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let response = self.inner.schedule_request(request).await;
+        self.observe_schedule_result(&response);
+        response
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -283,7 +295,12 @@ where
                 shared_cache_hits,
             )
             .await;
-        if let Err(KvSchedulerError::QueueRejected(rejection)) = &response
+        self.observe_schedule_result(&response);
+        response
+    }
+
+    fn observe_schedule_result(&self, response: &Result<SchedulingResponse, KvSchedulerError>) {
+        if let Err(KvSchedulerError::QueueRejected(rejection)) = response
             && let Some(metrics) = self
                 .queue_metric_indices
                 .get(&rejection.policy_class)
@@ -302,7 +319,6 @@ where
             }
         }
         self.update_queue_metrics();
-        response
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
@@ -458,6 +474,7 @@ mod tests {
             router_track_active_blocks: false,
             ..Default::default()
         };
+        let cancellation_token = CancellationToken::new();
 
         let scheduler = KvScheduler::start(
             component.clone(),
@@ -470,6 +487,7 @@ mod tests {
             None,
             Some("test-model"),
             "decode",
+            cancellation_token.clone(),
         )
         .await
         .unwrap();
@@ -501,6 +519,6 @@ mod tests {
         .await
         .unwrap();
 
-        component.drt().primary_token().cancel();
+        cancellation_token.cancel();
     }
 }

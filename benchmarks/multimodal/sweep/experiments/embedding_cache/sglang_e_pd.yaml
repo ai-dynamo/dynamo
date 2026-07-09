@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SGLang EPD embedding-cache comparison.
+#
+# Usage:
+#   python -m benchmarks.multimodal.sweep \
+#     --config benchmarks/multimodal/sweep/experiments/embedding_cache/sglang_e_pd.yaml
+
+model: Qwen/Qwen3-VL-2B-Instruct
+concurrencies: [1, 2, 4, 8]
+osl: 128
+warmup_count: 2
+port: 8000
+timeout: 1200
+output_dir: benchmarks/multimodal/sweep/results/sglang_e_pd
+
+input_files:
+  - benchmarks/multimodal/jsonl/100req_1vid_20pool_300word_local.jsonl
+  - benchmarks/multimodal/jsonl/100req_1vid_80pool_300word_local.jsonl
+  - benchmarks/multimodal/jsonl/100req_2vid_160pool_300word_local.jsonl
+
+configs:
+  - label: cache-off
+    workflow: examples/backends/sglang/launch/multimodal_epd.sh
+    extra_args:
+      - --chat-template
+      - qwen2-vl
+      - --multimodal-embedding-cache-capacity-gb
+      - "0"
+
+  - label: cache-on
+    workflow: examples/backends/sglang/launch/multimodal_epd.sh
+    extra_args:
+      - --chat-template
+      - qwen2-vl
+      - --multimodal-embedding-cache-capacity-gb
+      - "10"

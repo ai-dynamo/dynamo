@@ -17,8 +17,6 @@ use tokio_util::sync::CancellationToken;
 #[cfg(feature = "metrics")]
 use crate::indexer::KvIndexerMetrics;
 use crate::indexer::TieredMatchDetails;
-#[cfg(test)]
-use crate::protocols::StorageTier;
 use crate::protocols::{BlockHashOptions, LocalBlockHash, WorkerId, compute_block_hash_for_seq};
 use crate::services::overlap::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
 
@@ -129,8 +127,7 @@ pub struct QueryRequest {
     pub tenant_id: String,
     #[serde(default)]
     pub lora_name: Option<String>,
-    /// Optional per-request cache salt (Mooncake RFC #1403). Currently accepted
-    /// but not yet mixed into hashes — engines apply their own internally.
+    /// Optional per-request cache salt (Mooncake RFC #1403), mixed into `/query` hashes.
     #[serde(default)]
     pub cache_salt: Option<String>,
 }
@@ -141,8 +138,8 @@ pub struct QueryByHashRequest {
     pub model_name: String,
     #[serde(default = "default_tenant")]
     pub tenant_id: String,
-    /// Optional per-request cache salt (Mooncake RFC #1403). Currently accepted
-    /// but not yet mixed into hashes — engines apply their own internally.
+    /// Invalid for `/query_by_hash`. Callers must precompute `block_hashes` with the intended
+    /// cache salt and omit this field; a non-null value is rejected.
     #[serde(default)]
     pub cache_salt: Option<String>,
 }
@@ -341,6 +338,7 @@ async fn query(State(state): State<Arc<AppState>>, Json(req): Json<QueryRequest>
         block_size,
         BlockHashOptions {
             lora_name: req.lora_name.as_deref(),
+            cache_namespace: req.cache_salt.as_deref(),
             ..Default::default()
         },
     );
@@ -355,6 +353,18 @@ async fn query_by_hash(
     Json(req): Json<QueryByHashRequest>,
 ) -> Response {
     let model = req.model_name.clone();
+    if req.cache_salt.is_some() {
+        let mut resp = (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cache_salt is not accepted by /query_by_hash; block_hashes must already include the intended cache salt"
+            })),
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
+    }
+
     let key = IndexerKey {
         model_name: req.model_name,
         tenant_id: req.tenant_id,
@@ -605,117 +615,9 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::KvIndexerInterface;
-    use crate::services::indexer::backend::create_indexer;
-    use crate::services::indexer::backend::test_util::store_event;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
-
-    /// Drive a tiered query through `build_score_response` after feeding
-    /// mixed-tier events. The response must carry both shapes:
-    /// - flat `scores`/`tree_sizes` (legacy; used by existing callers), and
-    /// - `instances` map keyed by stringified `worker_id` with per-tier
-    ///   counts plus `longest_matched`, matching Mooncake RFC #1403.
-    #[tokio::test]
-    async fn build_score_response_contains_per_instance_tier_breakdown() {
-        let block_size: u32 = 4;
-        let indexer = create_indexer(block_size, 1);
-
-        // Worker 7 owns 2 device blocks and a 3rd anchored on host-pinned.
-        // Worker 8 owns the same 2 device blocks with no lower tier.
-        for &worker_id in &[7u64, 8] {
-            indexer
-                .apply_event_routed(store_event(
-                    worker_id,
-                    0,
-                    1,
-                    &[],
-                    &[11, 12],
-                    StorageTier::Device,
-                ))
-                .await;
-        }
-        indexer
-            .apply_event_routed(store_event(
-                7,
-                0,
-                2,
-                &[11, 12],
-                &[13],
-                StorageTier::HostPinned,
-            ))
-            .await;
-
-        // Flush primary + lower tiers.
-        if let Indexer::Single {
-            primary,
-            lower_tier,
-        } = &indexer
-        {
-            let _ = primary.flush().await;
-            for inner in lower_tier.all() {
-                let _ = inner.dump_events().await.unwrap();
-            }
-        }
-
-        let sequence = vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)];
-        let tiered = indexer.find_tiered_matches(sequence).await.unwrap();
-        let response = build_score_response(&tiered, block_size);
-
-        // Flat shape (legacy callers) carries device-tier overlap scaled by block_size.
-        assert_eq!(
-            response
-                .scores
-                .get("7")
-                .and_then(|by_dp| by_dp.get("0").copied()),
-            Some(2 * block_size),
-            "legacy `scores` must still reflect device-tier hits"
-        );
-
-        // Per-instance breakdown (Mooncake RFC #1403 alignment).
-        // Tier counts are CUMULATIVE through each tier's walk: cpu includes
-        // device's reach plus the host-pinned extension; disk includes
-        // everything below it. Without a disk extension, disk == cpu.
-        let inst_7 = response
-            .instances
-            .get("7")
-            .expect("instance 7 must appear with tier breakdown");
-        assert_eq!(inst_7.gpu, 2 * block_size, "instance 7 device count");
-        assert_eq!(
-            inst_7.cpu,
-            3 * block_size,
-            "instance 7 host-pinned cumulative count = device + host extension"
-        );
-        assert_eq!(
-            inst_7.disk,
-            3 * block_size,
-            "instance 7 disk cumulative falls back to cpu when no disk extension exists"
-        );
-        assert_eq!(
-            inst_7.dp.get("0").copied(),
-            Some(2 * block_size),
-            "instance 7 dp_rank=0 device count"
-        );
-        assert_eq!(
-            inst_7.longest_matched,
-            3 * block_size,
-            "longest_matched should be the max across device/host/disk"
-        );
-
-        let inst_8 = response
-            .instances
-            .get("8")
-            .expect("instance 8 must appear with tier breakdown");
-        assert_eq!(inst_8.gpu, 2 * block_size);
-        assert_eq!(
-            inst_8.cpu,
-            2 * block_size,
-            "instance 8 cpu falls back to device when no host extension exists"
-        );
-        assert_eq!(inst_8.disk, 2 * block_size);
-        assert_eq!(inst_8.longest_matched, 2 * block_size);
-    }
 
     fn oversized_query_body() -> String {
         let mut body = String::from(r#"{"token_ids":["#);

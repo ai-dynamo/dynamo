@@ -316,9 +316,7 @@ so it cannot be used to add a missing `Epp` service to a DGDR-generated
 deployment. Use a direct DGD manifest or a GAIE recipe for EPP deployments.
 For manifests, `frontendSidecar` configuration, direct routing, EPP routing
 variables such as `DYN_USE_KV_EVENTS`, and route setup, see
-[Gateway API Inference Extension](inference-gateway.md). The same guide also
-documents the optional [Rust EPP](inference-gateway.md#4b-build-rust-epp-image-optional--experimental),
-which is currently experimental.
+[Gateway API Inference Extension](gateway-api/README.mdx).
 
 ### SKU Format
 
@@ -392,10 +390,6 @@ kubectl logs -f <profiling-pod-name> -n $NAMESPACE
 # View generated DGD spec (when autoApply: false)
 kubectl get dgdr my-model -n $NAMESPACE \
   -o jsonpath='{.status.profilingResults.selectedConfig}' | python3 -m json.tool
-
-# View Pareto-optimal configs from profiling
-kubectl get dgdr my-model -n $NAMESPACE \
-  -o jsonpath='{.status.profilingResults.pareto}'
 ```
 
 ### Resource Ownership
