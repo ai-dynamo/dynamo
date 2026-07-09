@@ -193,11 +193,14 @@ impl ValkeyIndexer {
     async fn registration_generation(&self, worker_id: WorkerId) -> Result<u64> {
         let worker = worker_id.to_be_bytes();
         let response = self
-            .command_primary_read_with_retry(&[
-                b"DYNKV.REGISTRATION_GENERATION",
-                &self.inner.index_key,
-                &worker,
-            ])
+            .command_primary_read_with_retry_timeout(
+                &[
+                    b"DYNKV.REGISTRATION_GENERATION",
+                    &self.inner.index_key,
+                    &worker,
+                ],
+                REGISTRATION_READ_FAILOVER_TIMEOUT,
+            )
             .await?;
         decode_u64_bulk(response, "DYNKV.REGISTRATION_GENERATION")
     }

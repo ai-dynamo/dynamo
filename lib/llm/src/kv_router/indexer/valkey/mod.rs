@@ -97,6 +97,11 @@ const MATCH_CACHE_TTL: Duration = Duration::from_secs(1);
 /// primary indefinitely. Retry through the externally managed stable primary
 /// endpoint for a bounded window before reporting the indexer offline.
 const PRIMARY_READ_FAILOVER_TIMEOUT: Duration = Duration::from_secs(5);
+// Worker registration can coincide with thousands of lazy frontend
+// connections and hundreds of worker-owned leases. Keep request-path reads
+// fail-fast, but give the replay-safe startup generation query enough time to
+// retry through that bounded connection burst.
+const REGISTRATION_READ_FAILOVER_TIMEOUT: Duration = Duration::from_secs(30);
 const PRIMARY_READ_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(25);
 const PRIMARY_READ_RETRY_MAX_DELAY: Duration = Duration::from_millis(250);
 const ADMISSION_WIRE_VERSION: u8 = 1;
@@ -472,6 +477,15 @@ impl ValkeyIndexer {
         &self,
         arguments: &[&[u8]],
     ) -> std::result::Result<RespValue, RespError> {
+        self.command_primary_read_with_retry_timeout(arguments, PRIMARY_READ_FAILOVER_TIMEOUT)
+            .await
+    }
+
+    async fn command_primary_read_with_retry_timeout(
+        &self,
+        arguments: &[&[u8]],
+        retry_timeout: Duration,
+    ) -> std::result::Result<RespValue, RespError> {
         let retry = async {
             let mut delay = PRIMARY_READ_RETRY_INITIAL_DELAY;
             loop {
@@ -494,7 +508,7 @@ impl ValkeyIndexer {
             _ = self.inner.cancellation_token.cancelled() => {
                 Err(RespError::Protocol("Valkey primary read cancelled during shutdown".to_string()))
             }
-            result = timeout(PRIMARY_READ_FAILOVER_TIMEOUT, retry) => {
+            result = timeout(retry_timeout, retry) => {
                 result.map_err(|_| RespError::Timeout)?
             }
         }
