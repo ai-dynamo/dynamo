@@ -7,9 +7,9 @@ routing, health-check canaries, OpenTelemetry tracing, and request-side
 guided decoding / structural tag.
 
 > **Work in progress.** Multimodal support is backend-specific: vLLM supports
-> aggregated and prefill/decode image and video inference, while separate
-> encode workers and SGLang / TRT-LLM multimodal execution remain on their
-> non-unified paths. Diffusion (image/video/DLLM),
+> aggregated and prefill/decode image and video inference plus separate
+> image encode workers, while SGLang / TRT-LLM multimodal execution remains
+> on their non-unified paths. Diffusion (image/video/DLLM),
 > LoRA (SGLang / TRT-LLM — vLLM is supported),
 > engine routes (pause/resume, profiling, weight updates),
 > text-in-text-out, and snapshot/CRIU are still on the non-unified
@@ -571,8 +571,8 @@ Lifecycle and runtime:
 - **Multimodal (vLLM)** — image and video inference in aggregated and
   prefill/decode deployments, frontend-rendered `mm_kwargs` transfer over
   shared memory or NIXL, stable frontend hash forwarding, CPU embedding cache,
-  and Qwen-VL decode metadata reconstruction. Separate encode workers are not
-  supported by the unified vLLM entry point.
+  Qwen-VL decode metadata reconstruction, and separate URL-image Encode workers
+  with Local or NIXL embedding transfer.
 
 Observability:
 - **Health-check canary** — `health_check_payload()` + operator
@@ -618,7 +618,7 @@ Request handling:
 | Feature | Description |
 |---------|-------------|
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
-| Multimodal parity | The shared request and encoder-handoff contract are available. vLLM supports aggregated and prefill/decode image and video inference; SGLang / TRT-LLM execution and separate encode workers remain separate work. |
+| Multimodal parity | The shared request and encoder-handoff contract are available. vLLM supports aggregated and prefill/decode image and video inference plus separate URL-image Encode workers; SGLang / TRT-LLM execution remains separate work. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters (SGLang / TRT-LLM) | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading. **vLLM is supported on the unified path** — see [What works today](#what-works-today); SGLang and TRT-LLM advertise no LoRA updates yet. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
@@ -635,7 +635,7 @@ Request handling:
 | `KvConnectorProtocol` abstraction | Legacy abstracts NIXL pull / Mooncake push; unified uses vLLM's internal connector only |
 | `--benchmark-mode` family | The `--benchmark-*` flag family (mode, prefill/decode granularities, warmup, output path, timeout) injects into `vllm_config.additional_config` |
 | "Omni" alternative entry point | `dynamo.vllm.omni.*` parallel mode for alternative tensor workflows |
-| Separate multimodal encode worker | The unified entry point rejects `--disaggregation-mode encode` and `--route-to-encoder`. Encoder-managed embedding transfer remains on the legacy worker path. P/D video requests also reload raw media on decode because the handoff carries image metadata only. |
+| Separate encoder modalities | The separate Encode worker handles URL-based images only. Video and audio stay on the aggregated/prefill worker, and P/D video requests reload raw media on decode because the handoff carries image metadata only. |
 
 ### SGLang-specific gaps
 

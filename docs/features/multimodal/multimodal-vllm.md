@@ -20,7 +20,7 @@ base64 data).
 
 | Modality | Aggregated | P/D | Separate encode worker |
 | --- | --- | --- | --- |
-| **Image** | Yes | Yes | Legacy entry point only |
+| **Image** | Yes | Yes | Yes |
 | **Video** | Yes | Yes | Processed by the language-model worker |
 | **Audio** | Yes | Yes, with decode reload | Not routed to the separate encoder |
 
@@ -40,8 +40,8 @@ The main multimodal vLLM launchers in this repo are:
 | Aggregated | CUDA | `agg_multimodal.sh` | `--unified` | Simplest image/video serving from one worker |
 | Aggregated | XPU | `xpu/agg_multimodal_xpu.sh` | No | Image/video serving on XPU devices |
 | P/D | CUDA | `disagg_multimodal_p_d.sh` | `--unified` | Prefill/decode separation without a dedicated encoder |
-| E/PD (Encode + PD) | CUDA | `disagg_multimodal_e_pd.sh` | No | Separate encoder and embedding-cache workflows |
-| E/P/D (Full Disaggregation) | CUDA | `disagg_multimodal_epd.sh` | No | Separate encode, prefill, and decode workers |
+| E/PD (Encode + PD) | CUDA | `disagg_multimodal_e_pd.sh` | `--unified` | Separate encoder and embedding-cache workflows |
+| E/P/D (Full Disaggregation) | CUDA | `disagg_multimodal_epd.sh` | `--unified` | Separate encode, prefill, and decode workers |
 
 
 ## Image/Video Serving
@@ -182,11 +182,9 @@ failure after a full transfer does not currently have a raw-media fallback.
 P/D prefill deliberately uses the original media because it still needs
 raw-media-derived metadata for the decode handoff.
 
-<Warning>
-The unified vLLM entry point does not provide a separate Encode worker and
-rejects both `--disaggregation-mode encode` and `--route-to-encoder`. Use the
-legacy E/PD or E/P/D launchers when a dedicated encoder is required.
-</Warning>
+**Experimental in development builds.** The unified vLLM entry point supports
+separate Encode workers for URL-based images. It forwards a versioned transfer
+handoff through the frontend before the aggregated or prefill worker runs.
 
 ### E/PD Serving (Encode + PD)
 
@@ -201,6 +199,9 @@ cd $DYNAMO_HOME/examples/backends/vllm
 
 # Multi-GPU deployment
 bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct
+
+# Unified backend
+bash launch/disagg_multimodal_e_pd.sh --unified --model Qwen/Qwen3-VL-2B-Instruct
 
 # Single-GPU (functional testing with small models)
 bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
@@ -220,6 +221,9 @@ cd $DYNAMO_HOME/examples/backends/vllm
 
 # Multi-GPU deployment
 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct
+
+# Unified backend
+bash launch/disagg_multimodal_epd.sh --unified --model Qwen/Qwen3-VL-2B-Instruct
 
 # Single-GPU (functional testing with small models)
 bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu

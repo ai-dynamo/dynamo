@@ -8,6 +8,9 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
+set -- "${REMAINING_ARGS[@]}"
+
 # Use TCP transport for multimodal workloads (base64 images can exceed NATS 1MB limit)
 export DYN_REQUEST_PLANE=tcp
 
@@ -38,6 +41,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --model <model_name>          Specify the VLM model to use (default: $MODEL_NAME)"
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
             echo "  --single-gpu                  Run encode and PD workers on the same GPU (for small models, e.g. 2B)"
+            echo "  --unified                     Use the unified vLLM backend"
             echo "  -h, --help                    Show this help message"
             echo ""
             echo "All additional arguments are passed through to the PD worker's dynamo.vllm."
@@ -127,7 +131,7 @@ fi
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
-python -m dynamo.vllm \
+python -m "$WORKER_MODULE" \
   --enable-multimodal \
   --disaggregation-mode encode \
   --model "$MODEL_NAME" \
@@ -138,7 +142,7 @@ python -m dynamo.vllm \
 echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (${PD_GPU_MEM_ARGS})..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
-python -m dynamo.vllm \
+python -m "$WORKER_MODULE" \
   --route-to-encoder \
   --enable-multimodal \
   --disaggregation-mode pd \

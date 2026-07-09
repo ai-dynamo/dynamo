@@ -52,7 +52,9 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     # config below toggles `--frontend-decoding` on the worker via env.
     "agg_router_frontend_decode": "agg_multimodal_router.sh",
     "e_pd": "disagg_multimodal_e_pd.sh",
+    "e_pd_unified": "disagg_multimodal_e_pd.sh",
     "epd": "disagg_multimodal_epd.sh",
+    "epd_unified": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
     "p_d_unified": "disagg_multimodal_p_d.sh",
@@ -227,12 +229,37 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=4_096_361_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
+            "e_pd_unified": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=340,
+                single_gpu=True,
+                profiled_vram_gib=15.0,
+                requested_vllm_kv_cache_bytes=4_096_361_000,
+                tests=[
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                    )
+                ],
+            ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+            "epd_unified": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=300,
+                single_gpu=True,
+                requested_vllm_kv_cache_bytes=1_714_881_000,
+                tests=[
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                    )
+                ],
             ),
             "epd_video": TopologyConfig(
                 marks=[pytest.mark.post_merge],

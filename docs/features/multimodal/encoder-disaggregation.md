@@ -62,9 +62,11 @@ cd $DYNAMO_HOME/examples/backends/vllm
 
 # E/PD
 bash launch/disagg_multimodal_e_pd.sh --model "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+bash launch/disagg_multimodal_e_pd.sh --unified --model "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 
 # E/P/D
 bash launch/disagg_multimodal_epd.sh --model "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+bash launch/disagg_multimodal_epd.sh --unified --model "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 ```
 
 ### TRT-LLM

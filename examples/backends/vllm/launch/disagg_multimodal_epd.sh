@@ -8,6 +8,9 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
+set -- "${REMAINING_ARGS[@]}"
+
 # Use TCP transport for multimodal workloads (base64 images can exceed NATS 1MB limit)
 export DYN_REQUEST_PLANE=tcp
 
@@ -59,6 +62,7 @@ while [[ $# -gt 0 ]]; do
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
             echo "  --single-gpu                  Pack all 3 workers on 1 GPU (for small models, e.g. 2B)"
             echo "  --two-gpu                     Pack 3 workers on 2 GPUs (encode+prefill on GPU 0, decode on GPU 1)"
+            echo "  --unified                     Use the unified vLLM backend"
             echo "  -h, --help                    Show this help message"
             echo ""
             echo "Examples:"
@@ -203,19 +207,19 @@ echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utiliza
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
-python -m dynamo.vllm --enable-multimodal --disaggregation-mode encode --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_ENCODE}\"}" &
+python -m "$WORKER_MODULE" --enable-multimodal --disaggregation-mode encode --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_ENCODE}\"}" &
 
 # Start prefill worker (also handles encode routing via --route-to-encoder)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_ARGS})..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL \
-CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $PREFILL_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
+CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m "$WORKER_MODULE" --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $PREFILL_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE \
-CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m dynamo.vllm  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $DECODE_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
+CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m "$WORKER_MODULE"  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $DECODE_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."
