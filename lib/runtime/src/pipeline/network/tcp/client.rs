@@ -265,99 +265,115 @@ async fn handle_request_reader(
     context: Arc<dyn AsyncEngineContext>,
     cancellation_counter: Option<IntCounter>,
 ) {
-    // Only mark cancellation on fatal errors or explicit upstream cancellation.
-    let mut cancellation_seen = false;
-    loop {
-        tokio::select! {
-            biased;
+    let cancellation_seen = {
+        // Keep cancellation and receiver-close notifications alive across frames instead of
+        // rebuilding their watch/Notify state for every request-stream message.
+        let killed = context.killed();
+        let stopped = context.stopped();
+        // The function explicitly drops `bytes_tx` after the loop, so let the persistent
+        // `closed()` future borrow a stream-lifetime clone instead.
+        let bytes_closed_tx = bytes_tx.clone();
+        let bytes_closed = bytes_closed_tx.closed();
+        tokio::pin!(killed, stopped, bytes_closed);
 
-            _ = context.killed() => {
-                tracing::trace!("context kill signal received on request stream; shutting down");
-                break;
-            }
+        // Only mark cancellation on fatal errors or explicit upstream cancellation.
+        let mut cancellation_seen = false;
+        loop {
+            tokio::select! {
+                biased;
 
-            _ = context.stopped() => {
-                tracing::trace!("context stop signal received on request stream; shutting down");
-                break;
-            }
+                _ = &mut killed => {
+                    tracing::trace!("context kill signal received on request stream; shutting down");
+                    break;
+                }
 
-            // Downstream consumer dropped the StreamReceiver. Exit promptly
-            // instead of staying parked on `framed_reader.next()` until the
-            // socket closes — the data has nowhere to go. This is the consumer's
-            // own choice, so it is not a cancellation (no kill, no count).
-            _ = bytes_tx.closed() => {
-                tracing::debug!("downstream consumer dropped; exiting request-stream reader");
-                break;
-            }
+                _ = &mut stopped => {
+                    tracing::trace!("context stop signal received on request stream; shutting down");
+                    break;
+                }
 
-            msg = framed_reader.next() => {
-                match msg {
-                    Some(Ok(two_part_msg)) => match two_part_msg.into_message_type() {
-                        TwoPartMessageType::HeaderOnly(header) => {
-                            let ctrl = match serde_json::from_slice::<ControlMessage>(&header) {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        err = ?e,
-                                        "invalid control message, closing connection"
-                                    );
-                                    cancellation_seen = true;
-                                    context.kill();
-                                    break;
+                // Downstream consumer dropped the StreamReceiver. Exit promptly
+                // instead of staying parked on `framed_reader.next()` until the
+                // socket closes — the data has nowhere to go. This is the consumer's
+                // own choice, so it is not a cancellation (no kill, no count).
+                _ = &mut bytes_closed => {
+                    tracing::debug!("downstream consumer dropped; exiting request-stream reader");
+                    break;
+                }
+
+                msg = framed_reader.next() => {
+                    match msg {
+                        Some(Ok(two_part_msg)) => match two_part_msg.into_message_type() {
+                            TwoPartMessageType::HeaderOnly(header) => {
+                                let ctrl = match serde_json::from_slice::<ControlMessage>(&header) {
+                                    Ok(c) => c,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            err = ?e,
+                                            "invalid control message, closing connection"
+                                        );
+                                        cancellation_seen = true;
+                                        context.kill();
+                                        break;
+                                    }
+                                };
+                                match ctrl {
+                                    ControlMessage::Stop => {
+                                        cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "stop");
+                                        context.stop();
+                                        break;
+                                    }
+                                    ControlMessage::Kill => {
+                                        cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "kill");
+                                        context.kill();
+                                        break;
+                                    }
+                                    ControlMessage::Sentinel => {
+                                        tracing::trace!("upstream signaled end of request stream");
+                                        break;
+                                    }
                                 }
-                            };
-                            match ctrl {
-                                ControlMessage::Stop => {
-                                    cancellation_seen = true;
-                                    record_upstream_cancellation(context.as_ref(), "stop");
-                                    context.stop();
-                                    break;
-                                }
-                                ControlMessage::Kill => {
-                                    cancellation_seen = true;
-                                    record_upstream_cancellation(context.as_ref(), "kill");
-                                    context.kill();
-                                    break;
-                                }
-                                ControlMessage::Sentinel => {
-                                    tracing::trace!("upstream signaled end of request stream");
+                            }
+                            TwoPartMessageType::DataOnly(data) => {
+                                if bytes_tx.send(data).await.is_err() {
+                                    tracing::debug!("downstream consumer dropped; exiting request-stream reader");
                                     break;
                                 }
                             }
-                        }
-                        TwoPartMessageType::DataOnly(data) => {
-                            if bytes_tx.send(data).await.is_err() {
-                                tracing::debug!("downstream consumer dropped; exiting request-stream reader");
+                            _ => {
+                                tracing::warn!("fatal error - unexpected message shape on request stream");
+                                cancellation_seen = true;
+                                context.kill();
                                 break;
                             }
                         }
-                        _ => {
-                            tracing::warn!("fatal error - unexpected message shape on request stream");
+                        Some(Err(e)) => {
+                            tracing::warn!("fatal error - failed to decode message on request stream: {e:?}");
+                            cancellation_seen = true;
+                            context.kill();
+                            break;
+                        }
+                        None => {
+                            // Socket closed before a Sentinel/Stop/Kill: the request
+                            // input is truncated. Kill the context so the consumer
+                            // sees an aborted stream rather than a clean end, and
+                            // count it as a cancellation.
+                            tracing::warn!("request stream closed by upstream before sentinel; treating as truncated");
                             cancellation_seen = true;
                             context.kill();
                             break;
                         }
                     }
-                    Some(Err(e)) => {
-                        tracing::warn!("fatal error - failed to decode message on request stream: {e:?}");
-                        cancellation_seen = true;
-                        context.kill();
-                        break;
-                    }
-                    None => {
-                        // Socket closed before a Sentinel/Stop/Kill: the request
-                        // input is truncated. Kill the context so the consumer
-                        // sees an aborted stream rather than a clean end, and
-                        // count it as a cancellation.
-                        tracing::warn!("request stream closed by upstream before sentinel; treating as truncated");
-                        cancellation_seen = true;
-                        context.kill();
-                        break;
-                    }
                 }
             }
         }
-    }
+
+        // Leaving this scope drops the pinned `closed()` future and its sender clone
+        // before the original sender below signals end-of-stream.
+        cancellation_seen
+    };
 
     if cancellation_seen && let Some(counter) = &cancellation_counter {
         counter.inc();
@@ -555,6 +571,12 @@ async fn handle_writer(
     alive_rx: tokio::sync::oneshot::Receiver<()>,
     context: Arc<dyn AsyncEngineContext>,
 ) -> Result<FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>> {
+    // Keep one cancellation future per stream. Recreating these futures for every queued
+    // frame repeatedly clones the context's watch receivers and churns Notify state.
+    let killed = context.killed();
+    let stopped = context.stopped();
+    tokio::pin!(killed, stopped);
+
     // Only send sentinel for normal channel closure
     let mut send_sentinel = true;
 
@@ -562,13 +584,13 @@ async fn handle_writer(
         let msg = tokio::select! {
             biased;
 
-            _ = context.killed() => {
+            _ = &mut killed => {
                 tracing::trace!("context kill signal received; shutting down");
                 send_sentinel = false;
                 break;
             }
 
-            _ = context.stopped() => {
+            _ = &mut stopped => {
                 tracing::trace!("context stop signal received; shutting down");
                 send_sentinel = false;
                 break;

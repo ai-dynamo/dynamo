@@ -55,6 +55,11 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
+  # Standalone CRD apiVersion converter: classification-only so it satisfies
+  # the changed-files coverage check without triggering the operator deploy
+  # pipeline (it is excluded from the `deploy` filter below).
+  - 'deploy/utils/convert_api_version.py'
+  - 'deploy/utils/tests/**'
   - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
@@ -75,6 +80,7 @@ ignore:
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
+  - 'scripts/validate_skills.py'
 
 ci: &ci
   - '.github/workflows/**'
@@ -129,12 +135,17 @@ operator:
   - 'deploy/snapshot/**'
   - 'docs/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
+  # The operator check owns the real Go/Python DGD override contract test.
+  - 'components/src/dynamo/profiler/utils/dgd_override.py'
+  - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 snapshot:
-  - *ci
   - 'deploy/snapshot/**'
   - 'deploy/snapshot/.*'
+  - 'components/src/dynamo/common/snapshot/**'
+  - 'deploy/operator/internal/checkpoint/**'
+  - 'tests/deploy/test_dynamocheckpoint.py'
 
 power_agent:
   - *ci
@@ -150,6 +161,10 @@ deploy:
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   - 'tests/utils/managed_deployment.py'
+  # Standalone CRD apiVersion converter: not used by the deploy-test harness and
+  # has no CI test wiring, so it should not trigger the operator deploy pipeline.
+  - '!deploy/utils/convert_api_version.py'
+  - '!deploy/utils/tests/**'
   - '!**/*.md'
   - '!**/*.rst'
 

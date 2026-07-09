@@ -35,7 +35,7 @@ SCCACHE_REGION ?=
 
 DOCKER_BUILDX_CMD ?= docker buildx
 IMAGE_BUILD_CMD ?= $(DOCKER_BUILDX_CMD) build
-RUST_IMAGE ?= $(DOCKER_PROXY)library/rust:1.93.1
+RUST_IMAGE ?= $(DOCKER_PROXY)library/rust:1.96.1
 BUILDER_IMAGE ?= $(DOCKER_PROXY)library/golang:1.26.3
 BASE_IMAGE ?= $(DOCKER_PROXY)library/ubuntu:24.04
 

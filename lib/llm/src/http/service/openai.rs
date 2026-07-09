@@ -29,7 +29,7 @@ use dynamo_runtime::{
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{StreamExt, stream};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     RouteDoc,
@@ -539,7 +539,7 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
-fn context_from_headers<T: Send + Sync + 'static>(
+pub(super) fn context_from_headers<T: Send + Sync + 'static>(
     request: T,
     request_id: String,
     headers: &HeaderMap,
@@ -610,7 +610,7 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
     if nvext_present || header_present {
         tracing::warn!(
             endpoint,
-            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
         );
     }
 }
@@ -626,8 +626,11 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateCompletionRequest>,
+    body: Bytes,
 ) -> Result<Response, ErrorResponse> {
+    ensure_json_content_type(&headers)?;
+    let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
+
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
@@ -1221,8 +1224,11 @@ fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error>
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateChatCompletionRequest>,
+    body: Bytes,
 ) -> Result<Response, ErrorResponse> {
+    ensure_json_content_type(&headers)?;
+    let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
+
     // return a 503 if the service is not ready (process-level + per-model
     // serving readiness). An aggregated request to a decode-only namespace
     // would otherwise hang/crash on the decode worker. Resolve the templated
@@ -1275,6 +1281,142 @@ async fn handler_chat_completions(
     connection_handle.disarm();
 
     response
+}
+
+fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
+where
+    T: DeserializeOwned,
+{
+    match serde_json::from_slice(body) {
+        Ok(request) => Ok(request),
+        Err(original_error) => {
+            if let Some(escaped_body) = escape_json_string_control_chars(body) {
+                match serde_json::from_slice(&escaped_body) {
+                    Ok(request) => {
+                        tracing::warn!(
+                            endpoint,
+                            "Accepted request after escaping unescaped control characters in JSON strings"
+                        );
+                        Ok(request)
+                    }
+                    Err(_) => parse_json_request_lossy(endpoint, body)
+                        .map_err(|_| json_deserialize_error(original_error)),
+                }
+            } else {
+                parse_json_request_lossy(endpoint, body)
+                    .map_err(|_| json_deserialize_error(original_error))
+            }
+        }
+    }
+}
+
+fn parse_json_request_lossy<T>(endpoint: &'static str, body: &[u8]) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    let lossy_body = String::from_utf8_lossy(body);
+    if lossy_body.as_bytes() == body {
+        return serde_json::from_slice(body);
+    }
+
+    let escaped_body = escape_json_string_control_chars(lossy_body.as_bytes())
+        .unwrap_or_else(|| lossy_body.into_owned().into_bytes());
+    let request = serde_json::from_slice(&escaped_body)?;
+    tracing::warn!(
+        endpoint,
+        "Accepted request after replacing invalid UTF-8 and escaping unescaped control characters in JSON strings"
+    );
+    Ok(request)
+}
+
+fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
+    let code = StatusCode::BAD_REQUEST;
+    (
+        code,
+        Json(ErrorMessage {
+            message: format!("Failed to deserialize the JSON body into the target type: {error}"),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+        }),
+    )
+}
+
+fn ensure_json_content_type(headers: &HeaderMap) -> Result<(), ErrorResponse> {
+    let Some(content_type) = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err(unsupported_media_type_error());
+    };
+
+    if is_json_content_type(content_type) {
+        Ok(())
+    } else {
+        Err(unsupported_media_type_error())
+    }
+}
+
+fn unsupported_media_type_error() -> ErrorResponse {
+    let code = StatusCode::UNSUPPORTED_MEDIA_TYPE;
+    (
+        code,
+        Json(ErrorMessage {
+            message: "Expected request with Content-Type application/json".to_string(),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+        }),
+    )
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    let media_type = content_type.split(';').next().unwrap_or_default().trim();
+    let Some((media_type, subtype)) = media_type.split_once('/') else {
+        return false;
+    };
+
+    media_type.eq_ignore_ascii_case("application")
+        && (subtype.eq_ignore_ascii_case("json")
+            || subtype
+                .to_ascii_lowercase()
+                .rsplit_once('+')
+                .is_some_and(|(_, suffix)| suffix == "json"))
+}
+
+fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    for &byte in body {
+        if in_string && byte <= 0x1f {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            if escaped {
+                out.extend_from_slice(b"\\\\u00");
+                escaped = false;
+            } else {
+                out.extend_from_slice(b"\\u00");
+            }
+            out.push(HEX[(byte >> 4) as usize]);
+            out.push(HEX[(byte & 0x0f) as usize]);
+            changed = true;
+            continue;
+        }
+
+        out.push(byte);
+
+        if escaped {
+            escaped = false;
+        } else if in_string && byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            in_string = !in_string;
+        }
+    }
+
+    changed.then_some(out)
 }
 
 /// Checks if an Annotated event represents a backend error and extracts error information.
@@ -2342,6 +2484,21 @@ pub fn validate_response_unsupported_fields(
 ) -> Option<impl IntoResponse> {
     let inner = &request.inner;
 
+    if let Some(field) = request
+        .nvext
+        .as_ref()
+        .and_then(|nvext| nvext.extra_fields.as_ref())
+        .and_then(|fields| {
+            fields
+                .iter()
+                .find(|field| matches!(field.as_str(), "completion_token_ids" | "prompt_logprobs"))
+        })
+    {
+        return Some(ErrorMessage::not_implemented_error(format!(
+            "{VALIDATION_PREFIX}`nvext.extra_fields=[\"{field}\"]` is not supported by the Responses API."
+        )));
+    }
+
     if inner.background == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
@@ -3260,10 +3417,147 @@ mod tests {
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
-        CreateCompletionRequest,
+        CreateCompletionRequest, Prompt,
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    #[test]
+    fn test_is_json_content_type() {
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("application/json; charset=utf-8"));
+        assert!(is_json_content_type("Application/JSON"));
+        assert!(is_json_content_type("application/vnd.dynamo+json"));
+        assert!(!is_json_content_type("text/plain"));
+        assert!(!is_json_content_type("application/json-patch"));
+        assert!(!is_json_content_type("application"));
+    }
+
+    #[test]
+    fn test_ensure_json_content_type_rejects_missing_or_non_json() {
+        let headers = HeaderMap::new();
+        let err = ensure_json_content_type(&headers).expect_err("missing content type should fail");
+        assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain".parse().unwrap(),
+        );
+        let err =
+            ensure_json_content_type(&headers).expect_err("non-json content type should fail");
+        assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_escapes_control_chars_in_strings() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"log \x1b[33mPK\x03\x04\"}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+
+        let message = request
+            .inner
+            .messages
+            .first()
+            .expect("message should exist");
+        let ChatCompletionRequestMessage::User(user_message) = message else {
+            panic!("expected user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Text(content) = &user_message.content else {
+            panic!("expected text content");
+        };
+        assert_eq!(content, "log \u{1b}[33mPK\u{3}\u{4}");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_replaces_invalid_utf8_in_strings() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"raw \xff data\"}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+
+        let message = request
+            .inner
+            .messages
+            .first()
+            .expect("message should exist");
+        let ChatCompletionRequestMessage::User(user_message) = message else {
+            panic!("expected user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Text(content) = &user_message.content else {
+            panic!("expected text content");
+        };
+        assert_eq!(content, "raw \u{fffd} data");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_escapes_control_char_after_backslash() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"slash \\\nnext\"}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+
+        let message = request
+            .inner
+            .messages
+            .first()
+            .expect("message should exist");
+        let ChatCompletionRequestMessage::User(user_message) = message else {
+            panic!("expected user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Text(content) = &user_message.content else {
+            panic!("expected text content");
+        };
+        assert_eq!(content, "slash \\\nnext");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_schema_errors() {
+        let body = br#"{"model":"test-model","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"working"}]}]}"#;
+
+        let err =
+            match parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body) {
+                Ok(_) => panic!("schema should still fail"),
+                Err(err) => err,
+            };
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(
+            err.1
+                .message
+                .contains("ChatCompletionRequestAssistantMessageContent"),
+            "unexpected error: {}",
+            err.1.message
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_request_escapes_control_chars_in_prompt() {
+        let body =
+            b"{\"model\":\"test-model\",\"prompt\":\"log \x1b[33mPK\x03\x04\",\"max_tokens\":1}";
+
+        let request: NvCreateCompletionRequest =
+            parse_json_request("completions", body).expect("request should parse");
+
+        let Prompt::String(prompt) = &request.inner.prompt else {
+            panic!("expected string prompt");
+        };
+        assert_eq!(prompt, "log \u{1b}[33mPK\u{3}\u{4}");
+    }
+
+    #[test]
+    fn test_parse_completion_request_replaces_invalid_utf8_in_prompt() {
+        let body = b"{\"model\":\"test-model\",\"prompt\":\"raw \xff data\",\"max_tokens\":1}";
+
+        let request: NvCreateCompletionRequest =
+            parse_json_request("completions", body).expect("request should parse");
+
+        let Prompt::String(prompt) = &request.inner.prompt else {
+            panic!("expected string prompt");
+        };
+        assert_eq!(prompt, "raw \u{fffd} data");
+    }
 
     fn http_error_from_engine(code: u16) -> Result<(), anyhow::Error> {
         Err(HttpError {
@@ -3597,6 +3891,67 @@ mod tests {
             result.is_none(),
             "store should be supported for audit opt-in"
         );
+    }
+
+    #[tokio::test]
+    async fn test_validate_unsupported_fields_rejects_rl_nvext_fields() {
+        for field in ["completion_token_ids", "prompt_logprobs"] {
+            for stream in [false, true] {
+                let mut request = make_base_request();
+                request.inner.stream = Some(stream);
+                request.nvext = Some(
+                    NvExt::builder()
+                        .extra_fields(vec![field.to_string()])
+                        .build()
+                        .unwrap(),
+                );
+
+                let response = validate_response_unsupported_fields(&request)
+                    .expect("RL nvext response field should be rejected")
+                    .into_response();
+                assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+
+                let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+                    .await
+                    .unwrap();
+                let error: ErrorMessage = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "{VALIDATION_PREFIX}`nvext.extra_fields=[\"{field}\"]` is not supported by the Responses API."
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_rejects_mixed_nvext_fields() {
+        let mut request = make_base_request();
+        request.nvext = Some(
+            NvExt::builder()
+                .extra_fields(vec![
+                    "timing".to_string(),
+                    "completion_token_ids".to_string(),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        assert!(validate_response_unsupported_fields(&request).is_some());
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_accepts_supported_nvext_fields() {
+        let mut request = make_base_request();
+        request.nvext = Some(
+            NvExt::builder()
+                .extra_fields(vec!["timing".to_string(), "worker_id".to_string()])
+                .build()
+                .unwrap(),
+        );
+
+        assert!(validate_response_unsupported_fields(&request).is_none());
     }
 
     #[test]

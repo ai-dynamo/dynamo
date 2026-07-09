@@ -32,8 +32,10 @@ from tests.utils.payload_builder import (
     chat_payload_with_logprobs,
     completion_payload_default,
     completion_payload_with_logprobs,
+    elastic_ep_scale_payload,
     embedding_payload,
     embedding_payload_default,
+    guided_decoding_chat_payload_default,
     kv_events_metrics_payload,
     metric_payload_default,
     router_cached_tokens_chat_payload,
@@ -175,6 +177,54 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            guided_decoding_chat_payload_default(),
+        ],
+    ),
+    "elastic_ep_unified": VLLMConfig(
+        name="elastic_ep_unified",
+        directory=vllm_dir,
+        script_name="elastic_ep.sh",
+        # Start at DP=2 on a 4-GPU node so scale-up to 4 has headroom; the Ray
+        # DP backend places the new DP-worker actors on the free GPUs.
+        script_args=["--dp-size", "2"],
+        marks=[
+            pytest.mark.vllm,
+            pytest.mark.gpu_4,
+            pytest.mark.elastic_ep,
+            pytest.mark.unified,
+            pytest.mark.nightly,
+            # MoE weights + two live reconfigures (scale up then down); generous
+            # ceiling over model download + engine-core respawn.
+            pytest.mark.timeout(1800),
+            pytest.mark.model("Qwen/Qwen3-30B-A3B"),
+            # DISABLED pending CI hardware. Elastic EP needs a real MoE with EPLB
+            # (`--enable-elastic-ep` requires `--enable-eplb`), and vLLM's EPLB
+            # only supports unquantized or FP8 experts — GPTQ/AWQ raise
+            # `NotImplementedError: EPLB is not supported ...`. The smallest
+            # EPLB-capable MoE (Qwen3-30B-A3B, bf16) needs ~57 GiB of weights per
+            # replica at TP=1, and DP=2->4 puts a full replica on each GPU, so it
+            # requires ~80 GiB/GPU. CI's only 4-GPU runner
+            # (prod-tester-amd-gpu-4-v2) has 24 GiB GPUs and OOMs at model load.
+            # Locally validated end-to-end on H200 GPUs with the pinned vLLM
+            # 0.24.0: initial serving, DP=2->4->2, and inference after each scale
+            # transition all pass. Keep this skipped until CI has a >=80 GiB
+            # 4-GPU runner.
+            pytest.mark.skip(
+                reason="Locally passes DP=2->4->2 on H200 with vLLM 0.24.0, but "
+                "needs a >=80 GiB 4-GPU runner (real EPLB MoE is ~57 GiB/GPU at "
+                "TP=1); CI's only 4-GPU runner is 24 GiB and OOMs at model load."
+            ),
+        ],
+        # MoE that exercises real expert parallelism; must match elastic_ep.sh's
+        # default so payload model-name injection resolves to the served model.
+        model="Qwen/Qwen3-30B-A3B",
+        request_payloads=[
+            # Serving works at the initial DP size...
+            chat_payload_default(repeat_count=1),
+            # ...scale up to 4 DP ranks and confirm generation survives...
+            elastic_ep_scale_payload(new_data_parallel_size=4),
+            # ...then scale back down to 2 and confirm generation survives again.
+            elastic_ep_scale_payload(new_data_parallel_size=2),
         ],
     ),
     "aggregated_logprobs": VLLMConfig(
@@ -593,6 +643,35 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "multi_node_tp_headless_unified": VLLMConfig(
+        name="multi_node_tp_headless_unified",
+        directory=os.path.join(WORKSPACE_DIR, "tests/serve"),
+        script_name="multi_node_tp_headless.sh",
+        # --unified runs both nodes via dynamo.vllm.unified_main, so the
+        # headless worker exercises unified_main -> run_dynamo_headless (the
+        # unified backend's headless path, mock-only in unit tests).
+        script_args=["--unified"],
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_2,
+            pytest.mark.pre_merge,
+            pytest.mark.unified,
+            # No profiled_vram_gib / requested_vllm_kv_cache_bytes here: the
+            # single-GPU Qwen3-0.6B values do not transfer to this TP=2 worker.
+            # requested_vllm_kv_cache_bytes forces --kv-cache-memory-bytes +
+            # --gpu-memory-utilization 0.01 onto BOTH ranks, which hangs the
+            # headless multi-node startup past the timeout (CI confirmed). Matches
+            # the legacy multi_node_tp_headless sibling, which is also unprofiled;
+            # real TP=2 profiling is needed before VRAM markers can be added.
+            # TODO: profile to get max_vram for the TP=2 headless topology.
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "guided_decoding": VLLMConfig(
         name="guided_decoding",
         directory=vllm_dir,
@@ -756,6 +835,13 @@ def test_serve_deployment(
 # gives the prefill worker in-flight work; it's then SIGTERMed mid-flight, and
 # the test asserts the Rust Worker drove a graceful shutdown (drain -> cleanup).
 # vLLM has no is_quiescent() override, so the drain waits the full budget.
+#
+# Timing: the launch script's wait_any_exit tears down the frontend and decode
+# worker as soon as the drained prefill worker exits, so the burst's `ok >= 1`
+# floor must be met inside SIGTERM + drain budget + cleanup. The 30s budget
+# (matching the sglang/trtllm variants) and the small per-request decode at the
+# call site keep that window winnable on L4-class CI GPUs; a 3s budget with
+# 256-token decodes lost the race after the vLLM 0.24.0 bump (#11076).
 # ---------------------------------------------------------------------------
 _PREFILL_DRAIN_CONFIG = VLLMConfig(
     name="prefill_drain_unified",
@@ -768,8 +854,10 @@ _PREFILL_DRAIN_CONFIG = VLLMConfig(
     health_check_workers=True,
     env={
         "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
-        "DYN_PREFILL_DRAIN_TIMEOUT_S": "3",
-        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "30",
+        "DYN_PREFILL_DRAIN_TIMEOUT_S": "30",
+        # Must exceed the drain budget by CLEANUP_RESERVE_S (5s) or the Rust
+        # Worker caps the effective drain at timeout - reserve.
+        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "60",
         # The unified decode worker disables its health canary by design
         # (NixlConnector has no local-only bypass), so its system /health is
         # gated on starting status, which defaults to NotReady. Mark it
@@ -806,7 +894,12 @@ def test_prefill_drain_unified(
     config = dataclasses.replace(
         _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    run_prefill_drain_deployment(config, request, ports=dynamo_dynamic_ports)
+    # Short decodes so first completions land well inside the drain window on
+    # slow CI GPUs; the full-size burst still keeps 96 requests in flight when
+    # the SIGTERM lands.
+    run_prefill_drain_deployment(
+        config, request, ports=dynamo_dynamic_ports, burst_max_tokens=32
+    )
 
 
 # LoRA Test Directory

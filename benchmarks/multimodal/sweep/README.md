@@ -123,3 +123,4 @@ Given the config above with two input files and two configs (`cache-off`,
 | Embedding cache (vLLM serve) | `experiments/embedding_cache/vllm_serve.yaml` | Single-node vLLM |
 | Embedding cache (vLLM E+PD) | `experiments/embedding_cache/vllm_e_pd.yaml` | Disaggregated vLLM E+PD |
 | Embedding cache (TRT-LLM E+PD) | `experiments/embedding_cache/trtllm_e_pd.yaml` | Disaggregated TRT-LLM E+PD |
+| Embedding cache (SGLang E+PD) | `experiments/embedding_cache/sglang_e_pd.yaml` | Disaggregated SGLang video understanding |
