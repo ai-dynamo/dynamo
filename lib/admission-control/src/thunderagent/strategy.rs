@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::scheduling::{
     AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
-    PolicyClassAdmissionStrategy, WorkerEligibility, WorkerEligibilitySnapshot, WorkerPlacement,
+    PolicyClassAdmissionStrategy, WorkerAvailability, WorkerAvailabilitySnapshot, WorkerPlacement,
 };
 use indexmap::{IndexMap, IndexSet};
 
@@ -56,7 +56,7 @@ impl Default for Program {
 struct RequestState {
     session_id: String,
     context_tokens: usize,
-    worker_eligibility: WorkerEligibility,
+    worker_availability: WorkerAvailability,
     dispatched: bool,
     prior: Option<Program>,
 }
@@ -121,7 +121,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             RequestState {
                 session_id: session_id.clone(),
                 context_tokens: request.context_tokens(),
-                worker_eligibility: request.worker_eligibility().clone(),
+                worker_availability: request.worker_availability().clone(),
                 dispatched: false,
                 prior: None,
             },
@@ -152,12 +152,12 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             return AdmissionDecision::Defer;
         };
         let context_tokens = request.context_tokens;
-        let worker_eligibility = request.worker_eligibility.clone();
+        let worker_availability = request.worker_availability.clone();
         let capacities = self.capacity.snapshot();
         let capacity_known = !capacities.is_empty();
-        let eligibility = worker_eligibility.snapshot();
-        let worker_is_available = |worker| eligibility.allows(worker);
-        let worker_is_structurally_allowed = |worker| eligibility.structurally_allows(worker);
+        let availability = worker_availability.snapshot();
+        let worker_is_available = |worker| availability.is_available(worker);
+        let worker_is_eligible = |worker| availability.is_eligible(worker);
         let prior = self.programs.get(session_id).cloned();
         let was_new = prior.is_none();
         let Some(request) = self.requests.get_mut(&id) else {
@@ -184,7 +184,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         }
 
         if let Some(worker) = assigned_worker {
-            if worker_is_structurally_allowed(worker) {
+            if worker_is_eligible(worker) {
                 if worker_is_available(worker) {
                     return AdmissionDecision::Ready(WorkerPlacement::Exact(worker));
                 }
@@ -196,9 +196,9 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             }
         }
 
-        // Do not migrate a session just because every structurally valid worker
-        // is temporarily overloaded.
-        if eligibility.has_structural_worker() && !eligibility.has_available_worker() {
+        // Do not migrate a session just because every eligible worker is
+        // temporarily unavailable.
+        if availability.has_eligible_worker() && !availability.has_available_worker() {
             self.defer_request(session_id, id, now, false);
             return AdmissionDecision::Defer;
         }
@@ -382,14 +382,14 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             .count();
         let capacities = self.capacity.snapshot();
         let mut usage = self.worker_usage(now);
-        let eligibility = self.deferred_eligibility_snapshots();
+        let availability = self.deferred_availability_snapshots();
         let (mut actions, greedy_resumes) = if capacities.is_empty() {
             (Vec::new(), 0)
         } else {
-            self.greedy_resume(&capacities, &mut usage, &eligibility, now)
+            self.greedy_resume(&capacities, &mut usage, &availability, now)
         };
         let (forced_actions, forced_resumes) =
-            self.force_timed_out(&capacities, &mut usage, &eligibility, now);
+            self.force_timed_out(&capacities, &mut usage, &availability, now);
         actions.extend(forced_actions);
         let (paused_now, marked_now) = if capacities.is_empty() {
             (0, 0)
@@ -463,7 +463,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         &mut self,
         capacities: &[WorkerCapacity],
         usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
-        eligibility: &HashMap<AdmissionId, WorkerEligibilitySnapshot>,
+        availability: &HashMap<AdmissionId, WorkerAvailabilitySnapshot>,
         now: Instant,
     ) -> (Vec<AdmissionAction>, usize) {
         if self.paused.is_empty() {
@@ -513,7 +513,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 .token_total
                 .saturating_add(self.config.buffer_per_program);
             if !backend_caps.iter().any(|(worker, remaining)| {
-                self.session_allows_worker(&session_id, *worker, eligibility)
+                self.session_allows_worker(&session_id, *worker, availability)
                     && required <= *remaining
             }) {
                 continue;
@@ -532,7 +532,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                     .iter()
                     .enumerate()
                     .find(|(_, (worker, remaining))| {
-                        self.session_allows_worker(&session_id, *worker, eligibility)
+                        self.session_allows_worker(&session_id, *worker, availability)
                             && self.programs[&session_id]
                                 .token_total
                                 .saturating_add(self.config.buffer_per_program)
@@ -571,7 +571,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         &mut self,
         capacities: &[WorkerCapacity],
         usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
-        eligibility: &HashMap<AdmissionId, WorkerEligibilitySnapshot>,
+        availability: &HashMap<AdmissionId, WorkerAvailabilitySnapshot>,
         now: Instant,
     ) -> (Vec<AdmissionAction>, usize) {
         let timeout = Duration::from_secs_f64(self.config.resume_timeout_seconds);
@@ -596,7 +596,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             let target = capacities
                 .iter()
                 .filter(|capacity| {
-                    self.session_allows_worker(&session_id, capacity.worker, eligibility)
+                    self.session_allows_worker(&session_id, capacity.worker, availability)
                 })
                 .max_by_key(|capacity| {
                     (
@@ -606,7 +606,8 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                     )
                 })
                 .map(|capacity| capacity.worker);
-            if target.is_none() && self.session_waits_for_available_worker(&session_id, eligibility)
+            if target.is_none()
+                && self.session_waits_for_available_worker(&session_id, availability)
             {
                 continue;
             }
@@ -718,14 +719,14 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         (paused_total, marked_total)
     }
 
-    fn deferred_eligibility_snapshots(&self) -> HashMap<AdmissionId, WorkerEligibilitySnapshot> {
+    fn deferred_availability_snapshots(&self) -> HashMap<AdmissionId, WorkerAvailabilitySnapshot> {
         self.programs
             .iter()
             .filter(|(_, program)| program.deferred_since.is_some())
             .filter_map(|(session_id, _)| {
                 let id = self.sessions.get(session_id)?.current?;
                 let request = self.requests.get(&id)?;
-                Some((id, request.worker_eligibility.snapshot()))
+                Some((id, request.worker_availability.snapshot()))
             })
             .collect()
     }
@@ -734,7 +735,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         &self,
         session_id: &str,
         worker: WorkerWithDpRank,
-        eligibility: &HashMap<AdmissionId, WorkerEligibilitySnapshot>,
+        availability: &HashMap<AdmissionId, WorkerAvailabilitySnapshot>,
     ) -> bool {
         let Some(program) = self.programs.get(session_id) else {
             return false;
@@ -751,14 +752,14 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         self.sessions
             .get(session_id)
             .and_then(|requests| requests.current)
-            .and_then(|id| eligibility.get(&id))
-            .is_none_or(|eligibility| eligibility.allows(worker))
+            .and_then(|id| availability.get(&id))
+            .is_none_or(|availability| availability.is_available(worker))
     }
 
     fn session_waits_for_available_worker(
         &self,
         session_id: &str,
-        eligibility: &HashMap<AdmissionId, WorkerEligibilitySnapshot>,
+        availability: &HashMap<AdmissionId, WorkerAvailabilitySnapshot>,
     ) -> bool {
         let Some(program) = self.programs.get(session_id) else {
             return false;
@@ -769,9 +770,9 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         self.sessions
             .get(session_id)
             .and_then(|requests| requests.current)
-            .and_then(|id| eligibility.get(&id))
+            .and_then(|id| availability.get(&id))
             .is_some_and(|snapshot| {
-                snapshot.has_structural_worker() && !snapshot.has_available_worker()
+                snapshot.has_eligible_worker() && !snapshot.has_available_worker()
             })
     }
 
@@ -866,7 +867,7 @@ mod tests {
             AdmissionId::new(id),
             session_id,
             context_tokens,
-            WorkerEligibility::new(|| WorkerEligibilitySnapshot::new([worker(1), worker(2)])),
+            WorkerAvailability::new(|| WorkerAvailabilitySnapshot::new([worker(1), worker(2)])),
         )
     }
 
@@ -880,7 +881,7 @@ mod tests {
             AdmissionId::new(id),
             session_id,
             context_tokens,
-            WorkerEligibility::new(move || WorkerEligibilitySnapshot::new(eligible_workers())),
+            WorkerAvailability::new(move || WorkerAvailabilitySnapshot::new(eligible_workers())),
         )
     }
 
@@ -894,10 +895,10 @@ mod tests {
             AdmissionId::new(id),
             session_id,
             context_tokens,
-            WorkerEligibility::new(move || {
-                let (structural, available) = workers();
-                WorkerEligibilitySnapshot::with_availability(
-                    structural.into_iter().collect(),
+            WorkerAvailability::new(move || {
+                let (eligible, available) = workers();
+                WorkerAvailabilitySnapshot::from_sets(
+                    eligible.into_iter().collect(),
                     available.into_iter().collect(),
                 )
             }),
@@ -957,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_respects_request_worker_eligibility() {
+    fn placement_respects_request_worker_availability() {
         let mut strategy =
             ThunderAgent::new(|| capacities(&[(1, 1_000), (2, 1_000)]), Default::default())
                 .unwrap();
@@ -968,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn deferred_request_rechecks_live_worker_eligibility() {
+    fn deferred_request_rechecks_live_worker_availability() {
         let allowed = Arc::new(AtomicBool::new(false));
         let mut strategy =
             ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
@@ -1041,13 +1042,13 @@ mod tests {
         let snapshot = {
             let available = Arc::clone(&available);
             move || {
-                let structural = vec![worker(1), worker(2)];
+                let eligible = vec![worker(1), worker(2)];
                 let available = if available.load(Ordering::Relaxed) {
-                    structural.clone()
+                    eligible.clone()
                 } else {
                     vec![worker(2)]
                 };
-                (structural, available)
+                (eligible, available)
             }
         };
         assert_eq!(
@@ -1067,13 +1068,13 @@ mod tests {
         let snapshot = {
             let available = Arc::clone(&available);
             move || {
-                let structural = vec![worker(1), worker(2)];
+                let eligible = vec![worker(1), worker(2)];
                 let available = if available.load(Ordering::Relaxed) {
-                    structural.clone()
+                    eligible.clone()
                 } else {
                     vec![worker(2)]
                 };
-                (structural, available)
+                (eligible, available)
             }
         };
         assert_eq!(

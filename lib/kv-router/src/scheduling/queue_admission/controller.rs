@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use super::{
     AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
-    PolicyClassAdmissionStrategy, WorkerEligibility,
+    PolicyClassAdmissionStrategy, WorkerAvailability,
 };
 use crate::protocols::WorkerWithDpRank;
 use crate::scheduling::policy_config::PolicyProfile;
@@ -53,7 +53,7 @@ impl PolicyClassAdmissionController {
         class_index: usize,
         session_id: Option<&str>,
         context_tokens: usize,
-        worker_eligibility: WorkerEligibility,
+        worker_availability: WorkerAvailability,
     ) -> Option<(AdmissionTicket, AdmissionDecision)> {
         let strategy = self.strategies[class_index].as_mut()?;
         let id = AdmissionId::new(self.next_id);
@@ -63,7 +63,7 @@ impl PolicyClassAdmissionController {
             id,
             session_id,
             context_tokens,
-            worker_eligibility,
+            worker_availability,
         ));
         Some((ticket, decision))
     }

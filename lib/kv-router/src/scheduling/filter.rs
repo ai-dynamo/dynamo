@@ -33,6 +33,7 @@ pub enum WorkerEligibilityError {
 pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
+    available_worker_ranks: Option<&'a HashSet<WorkerWithDpRank>>,
     pinned_worker: Option<WorkerWithDpRank>,
     routing_constraints: &'a RoutingConstraints,
 }
@@ -48,9 +49,25 @@ impl<'a> RoutingEligibility<'a> {
         Self {
             allowed_worker_ids,
             overloaded_worker_ids,
+            available_worker_ranks: None,
             pinned_worker,
             routing_constraints,
         }
+    }
+
+    #[inline]
+    pub fn with_available_worker_ranks(
+        mut self,
+        available_worker_ranks: &'a HashSet<WorkerWithDpRank>,
+    ) -> Self {
+        self.available_worker_ranks = Some(available_worker_ranks);
+        self
+    }
+
+    #[inline]
+    fn allows_worker_rank(&self, worker: WorkerWithDpRank) -> bool {
+        self.available_worker_ranks
+            .is_none_or(|workers| workers.contains(&worker))
     }
 
     #[inline]
@@ -106,7 +123,13 @@ impl<'a> RoutingEligibility<'a> {
                 continue;
             }
 
-            if self.allows_worker(worker_id, config) {
+            if self.allows_worker(worker_id, config)
+                && (config.data_parallel_start_rank()
+                    ..config.data_parallel_start_rank() + config.data_parallel_size())
+                    .any(|dp_rank| {
+                        self.allows_worker_rank(WorkerWithDpRank::new(worker_id, dp_rank))
+                    })
+            {
                 return true;
             }
         }
@@ -121,7 +144,13 @@ impl<'a> RoutingEligibility<'a> {
         I: IntoIterator<Item = (WorkerId, &'w C)>,
     {
         for (worker_id, config) in workers {
-            if self.allows_worker_ignoring_overload(worker_id, config) {
+            if self.allows_worker_ignoring_overload(worker_id, config)
+                && (config.data_parallel_start_rank()
+                    ..config.data_parallel_start_rank() + config.data_parallel_size())
+                    .any(|dp_rank| {
+                        self.allows_worker_rank(WorkerWithDpRank::new(worker_id, dp_rank))
+                    })
+            {
                 return true;
             }
         }
@@ -156,6 +185,11 @@ impl<'a> RoutingEligibility<'a> {
                 worker_id: worker.worker_id,
             });
         }
+        if !self.allows_worker_rank(worker) {
+            return Err(WorkerEligibilityError::WorkerUnavailable {
+                worker_id: worker.worker_id,
+            });
+        }
 
         Ok(config)
     }
@@ -184,7 +218,8 @@ impl<'a> RoutingEligibility<'a> {
             let dp_start = config.data_parallel_start_rank();
             let dp_end = dp_start + config.data_parallel_size();
             for dp_rank in dp_start..dp_end {
-                if predicate(WorkerWithDpRank::new(worker_id, dp_rank), config) {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                if self.allows_worker_rank(worker) && predicate(worker, config) {
                     return true;
                 }
             }
@@ -469,6 +504,32 @@ mod tests {
                 WorkerWithDpRank::new(7, 4),
             ]
         );
+    }
+
+    #[test]
+    fn routing_eligibility_honors_available_dp_ranks() {
+        let workers = HashMap::from([(
+            7,
+            TestWorkerConfig {
+                dp_start: 2,
+                dp_size: 3,
+                ..Default::default()
+            },
+        )]);
+        let constraints = RoutingConstraints::default();
+        let available = HashSet::from([WorkerWithDpRank::new(7, 3)]);
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_available_worker_ranks(&available);
+        let mut ranks = Vec::new();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));
+
+        assert_eq!(ranks, vec![WorkerWithDpRank::new(7, 3)]);
+        assert!(eligibility.has_eligible_worker(workers.iter().map(|(&id, config)| (id, config))));
+        assert!(matches!(
+            eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 2)),
+            Err(WorkerEligibilityError::WorkerUnavailable { worker_id: 7 })
+        ));
     }
 
     #[test]

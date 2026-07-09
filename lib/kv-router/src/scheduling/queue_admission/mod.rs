@@ -31,71 +31,91 @@ impl AdmissionId {
     }
 }
 
-/// Live worker eligibility for one admitted request.
+/// Live worker availability for one request.
 ///
-/// The host owns routing constraints and worker state. Strategies may retain
-/// this handle when deferred work must be reconsidered against current state.
+/// The host combines request constraints and configured admission conditions.
+/// Strategies may retain this handle and sample current state when needed.
 #[derive(Clone)]
-pub struct WorkerEligibility {
-    snapshot: Arc<dyn Fn() -> WorkerEligibilitySnapshot + Send + Sync>,
+pub struct WorkerAvailability {
+    snapshot: Arc<dyn Fn() -> WorkerAvailabilitySnapshot + Send + Sync>,
 }
 
-impl WorkerEligibility {
-    pub fn new(snapshot: impl Fn() -> WorkerEligibilitySnapshot + Send + Sync + 'static) -> Self {
+impl WorkerAvailability {
+    pub fn new(snapshot: impl Fn() -> WorkerAvailabilitySnapshot + Send + Sync + 'static) -> Self {
         Self {
             snapshot: Arc::new(snapshot),
         }
     }
 
-    pub fn snapshot(&self) -> WorkerEligibilitySnapshot {
+    pub fn snapshot(&self) -> WorkerAvailabilitySnapshot {
         (self.snapshot)()
     }
 }
 
-/// One consistent view of the workers eligible for a request.
+/// One consistent view of where a request is legal and can dispatch now.
 #[derive(Clone)]
-pub struct WorkerEligibilitySnapshot {
-    structural: Arc<HashSet<WorkerWithDpRank>>,
+pub struct WorkerAvailabilitySnapshot {
+    eligible: Arc<HashSet<WorkerWithDpRank>>,
     available: Arc<HashSet<WorkerWithDpRank>>,
 }
 
-impl WorkerEligibilitySnapshot {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerAvailabilityState {
+    Ineligible,
+    Unavailable,
+    Available,
+}
+
+impl WorkerAvailabilitySnapshot {
     pub fn new(workers: impl IntoIterator<Item = WorkerWithDpRank>) -> Self {
         let workers: Arc<HashSet<_>> = Arc::new(workers.into_iter().collect());
         Self {
-            structural: Arc::clone(&workers),
+            eligible: Arc::clone(&workers),
             available: workers,
         }
     }
 
-    pub fn with_availability(
-        structural: HashSet<WorkerWithDpRank>,
+    pub fn from_sets(
+        eligible: HashSet<WorkerWithDpRank>,
         mut available: HashSet<WorkerWithDpRank>,
     ) -> Self {
-        available.retain(|worker| structural.contains(worker));
+        available.retain(|worker| eligible.contains(worker));
         Self {
-            structural: Arc::new(structural),
+            eligible: Arc::new(eligible),
             available: Arc::new(available),
         }
     }
 
-    /// Whether routing constraints permit this worker right now.
-    pub fn allows(&self, worker: WorkerWithDpRank) -> bool {
+    pub fn is_available(&self, worker: WorkerWithDpRank) -> bool {
         self.available.contains(&worker)
     }
 
-    /// Whether routing constraints permit this worker independent of
-    /// transient overload state.
-    pub fn structurally_allows(&self, worker: WorkerWithDpRank) -> bool {
-        self.structural.contains(&worker)
+    pub fn is_eligible(&self, worker: WorkerWithDpRank) -> bool {
+        self.eligible.contains(&worker)
     }
 
     pub fn has_available_worker(&self) -> bool {
         !self.available.is_empty()
     }
 
-    pub fn has_structural_worker(&self) -> bool {
-        !self.structural.is_empty()
+    pub fn has_eligible_worker(&self) -> bool {
+        !self.eligible.is_empty()
+    }
+
+    pub(crate) fn available_workers(&self) -> &HashSet<WorkerWithDpRank> {
+        &self.available
+    }
+
+    pub(crate) fn state(&self, placement: WorkerPlacement) -> WorkerAvailabilityState {
+        let (eligible, available) = match placement {
+            WorkerPlacement::Any => (self.has_eligible_worker(), self.has_available_worker()),
+            WorkerPlacement::Exact(worker) => (self.is_eligible(worker), self.is_available(worker)),
+        };
+        match (eligible, available) {
+            (false, _) => WorkerAvailabilityState::Ineligible,
+            (true, false) => WorkerAvailabilityState::Unavailable,
+            (true, true) => WorkerAvailabilityState::Available,
+        }
     }
 }
 
@@ -109,7 +129,7 @@ pub struct AdmissionRequest<'a> {
     id: AdmissionId,
     session_id: Option<&'a str>,
     context_tokens: usize,
-    worker_eligibility: WorkerEligibility,
+    worker_availability: WorkerAvailability,
 }
 
 impl<'a> AdmissionRequest<'a> {
@@ -117,13 +137,13 @@ impl<'a> AdmissionRequest<'a> {
         id: AdmissionId,
         session_id: Option<&'a str>,
         context_tokens: usize,
-        worker_eligibility: WorkerEligibility,
+        worker_availability: WorkerAvailability,
     ) -> Self {
         Self {
             id,
             session_id,
             context_tokens,
-            worker_eligibility,
+            worker_availability,
         }
     }
 
@@ -140,8 +160,8 @@ impl<'a> AdmissionRequest<'a> {
         self.context_tokens
     }
 
-    pub fn worker_eligibility(&self) -> &WorkerEligibility {
-        &self.worker_eligibility
+    pub fn worker_availability(&self) -> &WorkerAvailability {
+        &self.worker_availability
     }
 }
 
@@ -160,6 +180,7 @@ pub enum WorkerPlacement {
 pub enum AdmissionDecision {
     /// Continue through normal scheduling without a strategy lifecycle.
     Bypass,
+    /// Strategy state permits dispatch when the requested placement is available.
     Ready(WorkerPlacement),
     Defer,
 }
@@ -240,9 +261,9 @@ mod tests {
             assert_eq!(request.session_id(), Some("session"));
             assert_eq!(request.context_tokens(), 42);
             let worker = WorkerWithDpRank::new(3, 0);
-            let eligibility = request.worker_eligibility().snapshot();
-            assert!(eligibility.allows(worker));
-            assert!(eligibility.structurally_allows(worker));
+            let availability = request.worker_availability().snapshot();
+            assert!(availability.is_available(worker));
+            assert!(availability.is_eligible(worker));
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
     }
@@ -251,13 +272,14 @@ mod tests {
     fn strategy_contract_is_object_safe() {
         let mut strategy: Box<dyn PolicyClassAdmissionStrategy> = Box::new(ReadyStrategy);
         let worker = WorkerWithDpRank::new(3, 0);
-        let eligibility = WorkerEligibility::new(move || WorkerEligibilitySnapshot::new([worker]));
+        let availability =
+            WorkerAvailability::new(move || WorkerAvailabilitySnapshot::new([worker]));
         assert_eq!(
             strategy.admit(AdmissionRequest::new(
                 AdmissionId::new(7),
                 Some("session"),
                 42,
-                eligibility,
+                availability,
             )),
             AdmissionDecision::Ready(WorkerPlacement::Any)
         );
@@ -265,18 +287,40 @@ mod tests {
     }
 
     #[test]
-    fn worker_eligibility_distinguishes_structure_from_availability() {
+    fn worker_availability_distinguishes_eligibility_from_current_availability() {
         let available = WorkerWithDpRank::new(1, 0);
         let overloaded = WorkerWithDpRank::new(2, 0);
-        let snapshot = WorkerEligibilitySnapshot::with_availability(
+        let snapshot = WorkerAvailabilitySnapshot::from_sets(
             HashSet::from([available, overloaded]),
             HashSet::from([available]),
         );
 
-        assert!(snapshot.allows(available));
-        assert!(!snapshot.allows(overloaded));
-        assert!(snapshot.structurally_allows(overloaded));
+        assert!(snapshot.is_available(available));
+        assert!(!snapshot.is_available(overloaded));
+        assert!(snapshot.is_eligible(overloaded));
         assert!(snapshot.has_available_worker());
-        assert!(snapshot.has_structural_worker());
+        assert!(snapshot.has_eligible_worker());
+        assert_eq!(
+            snapshot.state(WorkerPlacement::Any),
+            WorkerAvailabilityState::Available
+        );
+        assert_eq!(
+            snapshot.state(WorkerPlacement::Exact(available)),
+            WorkerAvailabilityState::Available
+        );
+        assert_eq!(
+            snapshot.state(WorkerPlacement::Exact(overloaded)),
+            WorkerAvailabilityState::Unavailable
+        );
+
+        let missing = WorkerWithDpRank::new(3, 0);
+        assert_eq!(
+            snapshot.state(WorkerPlacement::Exact(missing)),
+            WorkerAvailabilityState::Ineligible
+        );
+        assert_eq!(
+            WorkerAvailabilitySnapshot::new([]).state(WorkerPlacement::Any),
+            WorkerAvailabilityState::Ineligible
+        );
     }
 }
