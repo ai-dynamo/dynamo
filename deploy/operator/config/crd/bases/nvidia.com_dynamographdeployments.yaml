@@ -1287,7 +1287,8 @@ spec:
                               The operator will marshal this to YAML and create a ConfigMap automatically.
                               Mutually exclusive with ConfigMapRef.
                               One of ConfigMapRef or Config must be specified (no default configuration).
-                              Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
+                              Supports the current GAIE schema and the deprecated saturation detector
+                              threshold fields retained for Dynamo API compatibility.
                             properties:
                               apiVersion:
                                 description: |-
@@ -1296,13 +1297,191 @@ spec:
                                   may reject unrecognized values.
                                   More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
                                 type: string
+                              dataLayer:
+                                description: DataLayer configures the DataLayer. It is required if the new DataLayer is enabled.
+                                properties:
+                                  sources:
+                                    description: Sources is the list of sources to define to the DataLayer
+                                    items:
+                                      description: DataLayerSource contains the configuration of a DataSource of the DataLayer feature
+                                      properties:
+                                        extractors:
+                                          description: |-
+                                            Extractors specifies the list of Plugin instances to be associated with
+                                            this Source. The entries are references to the names of entries of the Plugins
+                                            defined in the configuration's Plugins section
+                                          items:
+                                            description: DataLayerExtractor contains the configuration of an Extractor of the DataLayer feature
+                                            properties:
+                                              pluginRef:
+                                                description: |-
+                                                  PluginRef specifies a particular Plugin instance to be associated with
+                                                  this Extractor. The reference is to the name of an entry of the Plugins
+                                                  defined in the configuration's Plugins section
+                                                type: string
+                                            required:
+                                              - pluginRef
+                                            type: object
+                                          type: array
+                                        pluginRef:
+                                          description: |-
+                                            PluginRef specifies a particular Plugin instance to be associated with
+                                            this Source. The reference is to the name of an entry of the Plugins
+                                            defined in the configuration's Plugins section
+                                          type: string
+                                      required:
+                                        - extractors
+                                        - pluginRef
+                                      type: object
+                                    type: array
+                                required:
+                                  - sources
+                                type: object
                               featureGates:
                                 description: |-
                                   FeatureGates is a set of flags that enable various experimental features with the EPP.
-                                  If omitted non of these experimental features will be enabled.
+                                  If omitted none of these experimental features will be enabled.
                                 items:
                                   type: string
                                 type: array
+                              flowControl:
+                                description: |-
+                                  FlowControl configures the Flow Control layer.
+                                  This configuration is only respected if the "flowControl" FeatureGate is enabled.
+                                properties:
+                                  defaultPriorityBand:
+                                    description: |-
+                                      DefaultPriorityBand allows you to define a template for handling traffic with priority levels
+                                      that are not explicitly configured in `PriorityBands`.
+                                      This ensures that unforeseen traffic classes are still managed (e.g., given a default capacity
+                                      limit) rather than being rejected or treated arbitrarily.
+                                      If not specified, a system-default template is used to dynamically provision bands for new
+                                      priority levels. This template cascades to the standard `PriorityBandConfig` defaults.
+                                    properties:
+                                      fairnessPolicyRef:
+                                        description: |-
+                                          FairnessPolicyRef specifies the name of the policy that governs flow selection.
+                                          If omitted, the system default ("global-strict-fairness-policy") is used.
+                                        type: string
+                                      maxBytes:
+                                        anyOf:
+                                          - type: integer
+                                          - type: string
+                                        description: |-
+                                          MaxBytes is the maximum number of bytes allowed for this priority band.
+                                          Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
+                                          If omitted, the system default is used.
+                                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                        x-kubernetes-int-or-string: true
+                                      maxRequests:
+                                        anyOf:
+                                          - type: integer
+                                          - type: string
+                                        description: |-
+                                          MaxRequests is the maximum number of concurrent requests allowed for this priority band.
+                                          Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
+                                          If omitted, no request limit is enforced.
+                                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                        x-kubernetes-int-or-string: true
+                                      orderingPolicyRef:
+                                        description: |-
+                                          OrderingPolicyRef specifies the name of the policy that governs request selection within a flow.
+                                          If omitted, the system default ("fcfs-ordering-policy") is used.
+                                        type: string
+                                      priority:
+                                        description: |-
+                                          Priority is the integer priority level for this band.
+                                          Higher values indicate higher priority.
+                                        type: integer
+                                    required:
+                                      - priority
+                                    type: object
+                                  defaultRequestTTL:
+                                    description: |-
+                                      DefaultRequestTTL serves as a fallback timeout for requests that do not specify their own
+                                      deadline.
+                                      It ensures that requests do not hang indefinitely in the queue.
+                                      If 0 or omitted, it defaults to the client context deadline, meaning requests may wait
+                                      indefinitely unless cancelled by the client.
+                                    type: string
+                                  maxBytes:
+                                    anyOf:
+                                      - type: integer
+                                      - type: string
+                                    description: |-
+                                      MaxBytes defines the global maximum aggregate byte size of all active requests across all priority
+                                      levels. If this limit is exceeded, new requests will be rejected even if their specific
+                                      priority band has capacity.
+                                      Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
+                                      If omitted, no global byte limit is enforced.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                  maxRequests:
+                                    anyOf:
+                                      - type: integer
+                                      - type: string
+                                    description: |-
+                                      MaxRequests defines the global maximum number of concurrent requests across all priority
+                                      levels. If this limit is exceeded, new requests will be rejected even if their specific
+                                      priority band has capacity.
+                                      Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
+                                      If omitted, no global request limit is enforced.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                  priorityBands:
+                                    description: |-
+                                      PriorityBands allows you to explicitly define policies (like capacity limits) for specific
+                                      priority levels. Traffic matching these priorities will be handled according to these rules.
+                                      If a priority band is not specified, it uses specific defaults.
+                                    items:
+                                      description: PriorityBandConfig configures a single priority band.
+                                      properties:
+                                        fairnessPolicyRef:
+                                          description: |-
+                                            FairnessPolicyRef specifies the name of the policy that governs flow selection.
+                                            If omitted, the system default ("global-strict-fairness-policy") is used.
+                                          type: string
+                                        maxBytes:
+                                          anyOf:
+                                            - type: integer
+                                            - type: string
+                                          description: |-
+                                            MaxBytes is the maximum number of bytes allowed for this priority band.
+                                            Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
+                                            If omitted, the system default is used.
+                                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                          x-kubernetes-int-or-string: true
+                                        maxRequests:
+                                          anyOf:
+                                            - type: integer
+                                            - type: string
+                                          description: |-
+                                            MaxRequests is the maximum number of concurrent requests allowed for this priority band.
+                                            Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
+                                            If omitted, no request limit is enforced.
+                                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                          x-kubernetes-int-or-string: true
+                                        orderingPolicyRef:
+                                          description: |-
+                                            OrderingPolicyRef specifies the name of the policy that governs request selection within a flow.
+                                            If omitted, the system default ("fcfs-ordering-policy") is used.
+                                          type: string
+                                        priority:
+                                          description: |-
+                                            Priority is the integer priority level for this band.
+                                            Higher values indicate higher priority.
+                                          type: integer
+                                      required:
+                                        - priority
+                                      type: object
+                                    type: array
+                                  usageLimitPolicyPluginRef:
+                                    description: |-
+                                      UsageLimitPolicyPluginRef specifies the UsageLimitPolicy plugin to use for adaptive capacity management.
+                                      Must reference a named plugin instance defined in the top-level Plugins section.
+                                      If omitted, a default static policy (threshold=1.0, no gating) is used.
+                                    type: string
+                                type: object
                               kind:
                                 description: |-
                                   Kind is a string value representing the REST resource this object represents.
@@ -1311,6 +1490,21 @@ spec:
                                   In CamelCase.
                                   More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
                                 type: string
+                              parser:
+                                description: |-
+                                  Parser specifies the parsing logic used by the EPP to process protocol messages.
+                                  If unspecified, default parsing behavior will be applied.
+                                properties:
+                                  pluginRef:
+                                    description: |-
+                                      PluginRef specifies a particular Plugin instance to be associated with
+                                      this Parser. The reference is to the name of an entry of the Plugins
+                                      defined in the configuration's Plugins section
+                                      Default: openai-parser
+                                    type: string
+                                required:
+                                  - pluginRef
+                                type: object
                               plugins:
                                 description: Plugins is the list of plugins that will be instantiated.
                                 items:
@@ -1338,13 +1532,15 @@ spec:
                                 type: array
                               saturationDetector:
                                 description: |-
-                                  SaturationDetector when present specifies the configuration of the
-                                  Saturation detector. If not present, default values are used.
+                                  SaturationDetector specifies which saturation detector plugin to use for both Admission and
+                                  Flow Control. The deprecated threshold fields are normalized to a utilization-detector plugin.
+                                  If omitted, "utilization-detector" is used by default.
                                 properties:
                                   kvCacheUtilThreshold:
                                     description: |-
                                       KVCacheUtilThreshold defines the KV cache utilization (0.0 to 1.0) above
                                       which a pod is considered to have insufficient capacity.
+                                      Deprecated: configure a utilization-detector plugin and use pluginRef.
                                     type: number
                                   metricsStalenessThreshold:
                                     description: |-
@@ -1352,13 +1548,24 @@ spec:
                                       If a pod's metrics are older than this, it might be excluded from
                                       "good capacity" considerations or treated as having no capacity for
                                       safety.
+                                      Deprecated: configure a utilization-detector plugin and use pluginRef.
+                                    type: string
+                                  pluginRef:
+                                    description: |-
+                                      PluginRef specifies the name of the plugin instance to use for saturation detection.
+                                      The reference is to the name of an entry of the Plugins defined in the configuration's Plugins section.
+                                      If unspecified, "utilization-detector" is used by default.
                                     type: string
                                   queueDepthThreshold:
                                     description: |-
                                       QueueDepthThreshold defines the backend waiting queue size above which a
                                       pod is considered to have insufficient capacity for new requests.
+                                      Deprecated: configure a utilization-detector plugin and use pluginRef.
                                     type: integer
                                 type: object
+                                x-kubernetes-validations:
+                                  - message: pluginRef is mutually exclusive with the deprecated saturation detector threshold fields
+                                    rule: '!has(self.pluginRef) || !(has(self.queueDepthThreshold) || has(self.kvCacheUtilThreshold) || has(self.metricsStalenessThreshold))'
                               schedulingProfiles:
                                 description: |-
                                   SchedulingProfiles is the list of named SchedulingProfiles
@@ -1382,14 +1589,14 @@ spec:
                                         properties:
                                           pluginRef:
                                             description: |-
-                                              PluginRef specifies a partiular Plugin instance to be associated with
+                                              PluginRef specifies a particular Plugin instance to be associated with
                                               this SchedulingProfile. The reference is to the name of an
                                               entry of the Plugins defined in the configuration's Plugins
                                               section
                                             type: string
                                           weight:
-                                            description: Weight is the weight fo be used if this plugin is a Scorer.
-                                            type: integer
+                                            description: Weight is the weight to be used if this plugin is a Scorer.
+                                            type: number
                                         required:
                                           - pluginRef
                                         type: object
@@ -12204,13 +12411,191 @@ spec:
                                   may reject unrecognized values.
                                   More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
                                 type: string
+                              dataLayer:
+                                description: DataLayer configures the DataLayer. It is required if the new DataLayer is enabled.
+                                properties:
+                                  sources:
+                                    description: Sources is the list of sources to define to the DataLayer
+                                    items:
+                                      description: DataLayerSource contains the configuration of a DataSource of the DataLayer feature
+                                      properties:
+                                        extractors:
+                                          description: |-
+                                            Extractors specifies the list of Plugin instances to be associated with
+                                            this Source. The entries are references to the names of entries of the Plugins
+                                            defined in the configuration's Plugins section
+                                          items:
+                                            description: DataLayerExtractor contains the configuration of an Extractor of the DataLayer feature
+                                            properties:
+                                              pluginRef:
+                                                description: |-
+                                                  PluginRef specifies a particular Plugin instance to be associated with
+                                                  this Extractor. The reference is to the name of an entry of the Plugins
+                                                  defined in the configuration's Plugins section
+                                                type: string
+                                            required:
+                                              - pluginRef
+                                            type: object
+                                          type: array
+                                        pluginRef:
+                                          description: |-
+                                            PluginRef specifies a particular Plugin instance to be associated with
+                                            this Source. The reference is to the name of an entry of the Plugins
+                                            defined in the configuration's Plugins section
+                                          type: string
+                                      required:
+                                        - extractors
+                                        - pluginRef
+                                      type: object
+                                    type: array
+                                required:
+                                  - sources
+                                type: object
                               featureGates:
                                 description: |-
                                   FeatureGates is a set of flags that enable various experimental features with the EPP.
-                                  If omitted non of these experimental features will be enabled.
+                                  If omitted none of these experimental features will be enabled.
                                 items:
                                   type: string
                                 type: array
+                              flowControl:
+                                description: |-
+                                  FlowControl configures the Flow Control layer.
+                                  This configuration is only respected if the "flowControl" FeatureGate is enabled.
+                                properties:
+                                  defaultPriorityBand:
+                                    description: |-
+                                      DefaultPriorityBand allows you to define a template for handling traffic with priority levels
+                                      that are not explicitly configured in `PriorityBands`.
+                                      This ensures that unforeseen traffic classes are still managed (e.g., given a default capacity
+                                      limit) rather than being rejected or treated arbitrarily.
+                                      If not specified, a system-default template is used to dynamically provision bands for new
+                                      priority levels. This template cascades to the standard `PriorityBandConfig` defaults.
+                                    properties:
+                                      fairnessPolicyRef:
+                                        description: |-
+                                          FairnessPolicyRef specifies the name of the policy that governs flow selection.
+                                          If omitted, the system default ("global-strict-fairness-policy") is used.
+                                        type: string
+                                      maxBytes:
+                                        anyOf:
+                                          - type: integer
+                                          - type: string
+                                        description: |-
+                                          MaxBytes is the maximum number of bytes allowed for this priority band.
+                                          Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
+                                          If omitted, the system default is used.
+                                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                        x-kubernetes-int-or-string: true
+                                      maxRequests:
+                                        anyOf:
+                                          - type: integer
+                                          - type: string
+                                        description: |-
+                                          MaxRequests is the maximum number of concurrent requests allowed for this priority band.
+                                          Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
+                                          If omitted, no request limit is enforced.
+                                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                        x-kubernetes-int-or-string: true
+                                      orderingPolicyRef:
+                                        description: |-
+                                          OrderingPolicyRef specifies the name of the policy that governs request selection within a flow.
+                                          If omitted, the system default ("fcfs-ordering-policy") is used.
+                                        type: string
+                                      priority:
+                                        description: |-
+                                          Priority is the integer priority level for this band.
+                                          Higher values indicate higher priority.
+                                        type: integer
+                                    required:
+                                      - priority
+                                    type: object
+                                  defaultRequestTTL:
+                                    description: |-
+                                      DefaultRequestTTL serves as a fallback timeout for requests that do not specify their own
+                                      deadline.
+                                      It ensures that requests do not hang indefinitely in the queue.
+                                      If 0 or omitted, it defaults to the client context deadline, meaning requests may wait
+                                      indefinitely unless cancelled by the client.
+                                    type: string
+                                  maxBytes:
+                                    anyOf:
+                                      - type: integer
+                                      - type: string
+                                    description: |-
+                                      MaxBytes defines the global maximum aggregate byte size of all active requests across all priority
+                                      levels. If this limit is exceeded, new requests will be rejected even if their specific
+                                      priority band has capacity.
+                                      Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
+                                      If omitted, no global byte limit is enforced.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                  maxRequests:
+                                    anyOf:
+                                      - type: integer
+                                      - type: string
+                                    description: |-
+                                      MaxRequests defines the global maximum number of concurrent requests across all priority
+                                      levels. If this limit is exceeded, new requests will be rejected even if their specific
+                                      priority band has capacity.
+                                      Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
+                                      If omitted, no global request limit is enforced.
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                  priorityBands:
+                                    description: |-
+                                      PriorityBands allows you to explicitly define policies (like capacity limits) for specific
+                                      priority levels. Traffic matching these priorities will be handled according to these rules.
+                                      If a priority band is not specified, it uses specific defaults.
+                                    items:
+                                      description: PriorityBandConfig configures a single priority band.
+                                      properties:
+                                        fairnessPolicyRef:
+                                          description: |-
+                                            FairnessPolicyRef specifies the name of the policy that governs flow selection.
+                                            If omitted, the system default ("global-strict-fairness-policy") is used.
+                                          type: string
+                                        maxBytes:
+                                          anyOf:
+                                            - type: integer
+                                            - type: string
+                                          description: |-
+                                            MaxBytes is the maximum number of bytes allowed for this priority band.
+                                            Accepts standard Kubernetes resource quantities (e.g., "1Gi", "500M").
+                                            If omitted, the system default is used.
+                                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                          x-kubernetes-int-or-string: true
+                                        maxRequests:
+                                          anyOf:
+                                            - type: integer
+                                            - type: string
+                                          description: |-
+                                            MaxRequests is the maximum number of concurrent requests allowed for this priority band.
+                                            Accepts standard Kubernetes resource quantities (e.g., "100", "1k").
+                                            If omitted, no request limit is enforced.
+                                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                          x-kubernetes-int-or-string: true
+                                        orderingPolicyRef:
+                                          description: |-
+                                            OrderingPolicyRef specifies the name of the policy that governs request selection within a flow.
+                                            If omitted, the system default ("fcfs-ordering-policy") is used.
+                                          type: string
+                                        priority:
+                                          description: |-
+                                            Priority is the integer priority level for this band.
+                                            Higher values indicate higher priority.
+                                          type: integer
+                                      required:
+                                        - priority
+                                      type: object
+                                    type: array
+                                  usageLimitPolicyPluginRef:
+                                    description: |-
+                                      UsageLimitPolicyPluginRef specifies the UsageLimitPolicy plugin to use for adaptive capacity management.
+                                      Must reference a named plugin instance defined in the top-level Plugins section.
+                                      If omitted, a default static policy (threshold=1.0, no gating) is used.
+                                    type: string
+                                type: object
                               kind:
                                 description: |-
                                   Kind is a string value representing the REST resource this object represents.
@@ -12219,6 +12604,21 @@ spec:
                                   In CamelCase.
                                   More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
                                 type: string
+                              parser:
+                                description: |-
+                                  Parser specifies the parsing logic used by the EPP to process protocol messages.
+                                  If unspecified, default parsing behavior will be applied.
+                                properties:
+                                  pluginRef:
+                                    description: |-
+                                      PluginRef specifies a particular Plugin instance to be associated with
+                                      this Parser. The reference is to the name of an entry of the Plugins
+                                      defined in the configuration's Plugins section
+                                      Default: openai-parser
+                                    type: string
+                                required:
+                                  - pluginRef
+                                type: object
                               plugins:
                                 description: Plugins is the list of plugins that will be instantiated.
                                 items:
@@ -12246,13 +12646,15 @@ spec:
                                 type: array
                               saturationDetector:
                                 description: |-
-                                  SaturationDetector when present specifies the configuration of the
-                                  Saturation detector. If not present, default values are used.
+                                  SaturationDetector specifies which saturation detector plugin to use for both Admission and
+                                  Flow Control. The deprecated threshold fields are normalized to a utilization-detector plugin.
+                                  If omitted, "utilization-detector" is used by default.
                                 properties:
                                   kvCacheUtilThreshold:
                                     description: |-
                                       KVCacheUtilThreshold defines the KV cache utilization (0.0 to 1.0) above
                                       which a pod is considered to have insufficient capacity.
+                                      Deprecated: configure a utilization-detector plugin and use pluginRef.
                                     type: number
                                   metricsStalenessThreshold:
                                     description: |-
@@ -12260,13 +12662,24 @@ spec:
                                       If a pod's metrics are older than this, it might be excluded from
                                       "good capacity" considerations or treated as having no capacity for
                                       safety.
+                                      Deprecated: configure a utilization-detector plugin and use pluginRef.
+                                    type: string
+                                  pluginRef:
+                                    description: |-
+                                      PluginRef specifies the name of the plugin instance to use for saturation detection.
+                                      The reference is to the name of an entry of the Plugins defined in the configuration's Plugins section.
+                                      If unspecified, "utilization-detector" is used by default.
                                     type: string
                                   queueDepthThreshold:
                                     description: |-
                                       QueueDepthThreshold defines the backend waiting queue size above which a
                                       pod is considered to have insufficient capacity for new requests.
+                                      Deprecated: configure a utilization-detector plugin and use pluginRef.
                                     type: integer
                                 type: object
+                                x-kubernetes-validations:
+                                  - message: pluginRef is mutually exclusive with the deprecated saturation detector threshold fields
+                                    rule: '!has(self.pluginRef) || !(has(self.queueDepthThreshold) || has(self.kvCacheUtilThreshold) || has(self.metricsStalenessThreshold))'
                               schedulingProfiles:
                                 description: |-
                                   SchedulingProfiles is the list of named SchedulingProfiles
@@ -12290,14 +12703,14 @@ spec:
                                         properties:
                                           pluginRef:
                                             description: |-
-                                              PluginRef specifies a partiular Plugin instance to be associated with
+                                              PluginRef specifies a particular Plugin instance to be associated with
                                               this SchedulingProfile. The reference is to the name of an
                                               entry of the Plugins defined in the configuration's Plugins
                                               section
                                             type: string
                                           weight:
-                                            description: Weight is the weight fo be used if this plugin is a Scorer.
-                                            type: integer
+                                            description: Weight is the weight to be used if this plugin is a Scorer.
+                                            type: number
                                         required:
                                           - pluginRef
                                         type: object

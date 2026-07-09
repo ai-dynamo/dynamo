@@ -7,8 +7,10 @@ package epp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/eppconfig"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -22,7 +24,16 @@ const (
 	ConfigMapSuffix = "epp-config"
 	// ConfigKey is the key in the ConfigMap containing the EPP configuration
 	ConfigKey = "epp-config-dynamo.yaml"
+
+	utilizationDetectorPluginType      = "utilization-detector"
+	normalizedSaturationDetectorPlugin = "dynamo-saturation-detector"
 )
+
+type utilizationDetectorParameters struct {
+	QueueDepthThreshold       *int             `json:"queueDepthThreshold,omitempty"`
+	KVCacheUtilThreshold      *float64         `json:"kvCacheUtilThreshold,omitempty"`
+	MetricsStalenessThreshold *metav1.Duration `json:"metricsStalenessThreshold,omitempty"`
+}
 
 // GenerateConfigMap generates a ConfigMap for EPP configuration
 // Returns nil if ConfigMapRef is used (user provides their own ConfigMap)
@@ -75,19 +86,114 @@ func GetConfigMapName(dgdName string) string {
 }
 
 // marshalEndpointPickerConfig marshals EndpointPickerConfig to YAML with proper API metadata
-func marshalEndpointPickerConfig(config *apixv1alpha1.EndpointPickerConfig) (string, error) {
-	// Set the TypeMeta fields using upstream constants
-	config.TypeMeta = metav1.TypeMeta{
-		APIVersion: apixv1alpha1.SchemeGroupVersion.String(),
-		Kind:       "EndpointPickerConfig",
+func marshalEndpointPickerConfig(config *eppconfig.EndpointPickerConfig) (string, error) {
+	normalized, err := normalizeEndpointPickerConfig(config)
+	if err != nil {
+		return "", err
 	}
 
-	yamlBytes, err := yaml.Marshal(config)
+	yamlBytes, err := yaml.Marshal(normalized)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal EndpointPickerConfig to YAML: %w", err)
 	}
 
 	return string(yamlBytes), nil
+}
+
+// normalizeEndpointPickerConfig returns a canonical GAIE v1.5 configuration
+// without mutating the Dynamo API object.
+func normalizeEndpointPickerConfig(config *eppconfig.EndpointPickerConfig) (*apixv1alpha1.EndpointPickerConfig, error) {
+	normalized := (&apixv1alpha1.EndpointPickerConfig{
+		FeatureGates:       config.FeatureGates,
+		Plugins:            config.Plugins,
+		SchedulingProfiles: config.SchedulingProfiles,
+		DataLayer:          config.DataLayer,
+		FlowControl:        config.FlowControl,
+		Parser:             config.Parser,
+	}).DeepCopy()
+	normalized.TypeMeta = metav1.TypeMeta{
+		APIVersion: apixv1alpha1.GroupVersion.String(),
+		Kind:       "EndpointPickerConfig",
+	}
+
+	detector := config.SaturationDetector
+	if detector == nil {
+		return normalized, nil
+	}
+	usesDeprecatedFields := hasDeprecatedSaturationDetectorConfig(detector)
+	if detector.PluginRef != "" && usesDeprecatedFields {
+		return nil, fmt.Errorf("saturationDetector.pluginRef is mutually exclusive with the deprecated threshold fields")
+	}
+
+	// The current form passes through unchanged, including an empty reference
+	// that GAIE defaults to the built-in utilization detector.
+	if !usesDeprecatedFields {
+		normalized.SaturationDetector = &apixv1alpha1.SaturationDetectorConfig{PluginRef: detector.PluginRef}
+		return normalized, nil
+	}
+
+	parameters, err := normalizeDeprecatedSaturationDetectorConfig(detector)
+	if err != nil {
+		return nil, err
+	}
+	pluginName := availableSaturationDetectorPluginName(normalized.Plugins)
+	normalized.Plugins = append(normalized.Plugins, apixv1alpha1.PluginSpec{
+		Name:       pluginName,
+		Type:       utilizationDetectorPluginType,
+		Parameters: parameters,
+	})
+	normalized.SaturationDetector = &apixv1alpha1.SaturationDetectorConfig{PluginRef: pluginName}
+
+	return normalized, nil
+}
+
+func hasDeprecatedSaturationDetectorConfig(config *eppconfig.SaturationDetectorConfig) bool {
+	return config.QueueDepthThreshold != 0 ||
+		config.KVCacheUtilThreshold != 0 ||
+		config.MetricsStalenessThreshold.Duration != 0
+}
+
+func normalizeDeprecatedSaturationDetectorConfig(config *eppconfig.SaturationDetectorConfig) (json.RawMessage, error) {
+	parameters := utilizationDetectorParameters{}
+
+	// GAIE v1.2 replaced invalid values with defaults. Omitting them preserves
+	// that behavior because the v1.5 utilization detector applies the same defaults.
+	if config.QueueDepthThreshold > 0 {
+		parameters.QueueDepthThreshold = &config.QueueDepthThreshold
+	}
+	if config.KVCacheUtilThreshold > 0 && config.KVCacheUtilThreshold < 1 {
+		parameters.KVCacheUtilThreshold = &config.KVCacheUtilThreshold
+	}
+	if config.MetricsStalenessThreshold.Duration > 0 {
+		parameters.MetricsStalenessThreshold = &config.MetricsStalenessThreshold
+	}
+
+	raw, err := json.Marshal(parameters)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal deprecated saturation detector configuration: %w", err)
+	}
+	return raw, nil
+}
+
+func availableSaturationDetectorPluginName(plugins []apixv1alpha1.PluginSpec) string {
+	usedNames := make(map[string]struct{}, len(plugins))
+	for _, plugin := range plugins {
+		name := plugin.Name
+		if name == "" {
+			name = plugin.Type
+		}
+		usedNames[name] = struct{}{}
+	}
+	if _, exists := usedNames[normalizedSaturationDetectorPlugin]; !exists {
+		return normalizedSaturationDetectorPlugin
+	}
+
+	for suffix := 2; ; suffix++ {
+		name := fmt.Sprintf("%s-%d", normalizedSaturationDetectorPlugin, suffix)
+		if _, exists := usedNames[name]; !exists {
+			return name
+		}
+	}
 }
 
 // GetConfigMapVolumeMount returns the volume and volumeMount for EPP config

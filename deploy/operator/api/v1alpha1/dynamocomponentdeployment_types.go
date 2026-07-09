@@ -23,10 +23,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/eppconfig"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 const (
@@ -502,9 +502,10 @@ type EPPConfig struct {
 	// The operator will marshal this to YAML and create a ConfigMap automatically.
 	// Mutually exclusive with ConfigMapRef.
 	// One of ConfigMapRef or Config must be specified (no default configuration).
-	// Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
+	// Supports the current GAIE schema and the deprecated saturation detector
+	// threshold fields retained for Dynamo API compatibility.
 	// +optional
 	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
-	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
+	Config *eppconfig.EndpointPickerConfig `json:"config,omitempty"`
 }

@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/eppconfig"
 )
 
 type preservedSpecEnvelope[T any] struct {
@@ -71,7 +71,7 @@ func restorePreservedSpec[T any](raw string, apply func(*T, []preservedRawJSON))
 	return envelope.Spec, true
 }
 
-func preserveEPPPluginParameters(config *apixv1alpha1.EndpointPickerConfig, pathPrefix string, records *[]preservedRawJSON) {
+func preserveEPPPluginParameters(config *eppconfig.EndpointPickerConfig, pathPrefix string, records *[]preservedRawJSON) {
 	if config == nil {
 		return
 	}
@@ -92,7 +92,7 @@ func preserveEPPPluginParameters(config *apixv1alpha1.EndpointPickerConfig, path
 	}
 }
 
-func restoreEPPPluginParameters(config *apixv1alpha1.EndpointPickerConfig, pathPrefix string, records []preservedRawJSON) {
+func restoreEPPPluginParameters(config *eppconfig.EndpointPickerConfig, pathPrefix string, records []preservedRawJSON) {
 	if config == nil || len(records) == 0 {
 		return
 	}
