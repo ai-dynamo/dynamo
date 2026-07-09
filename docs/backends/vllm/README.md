@@ -80,8 +80,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 > ```
 >
 > Use a unique port for each worker process that shares a host or network
-> namespace. vLLM workers started with `--disaggregation-mode decode` do not
-> publish KV events. If workers will not publish events, start the frontend with
+> namespace. If workers will not publish events, start the frontend with
 > `--no-router-kv-events` for approximate cache prediction or `--load-aware` for
 > load-only routing.
 
