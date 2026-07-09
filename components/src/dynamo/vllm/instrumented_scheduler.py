@@ -780,7 +780,9 @@ class InstrumentedScheduler(AsyncScheduler):
             # Mirror vLLM's initial waiting-request branch in
             # _mamba_block_aligned_split. Hybrid align-mode prefills may round
             # an otherwise feasible chunk down to a cache-block boundary.
-            block_size = getattr(self.cache_config, "block_size", self.block_size)
+            block_size = (
+                getattr(self.cache_config, "block_size", None) or self.block_size
+            )
             last_cache_position = isl - isl % block_size
             if getattr(self.kv_cache_manager, "use_eagle", False):
                 last_cache_position = max(last_cache_position - block_size, 0)
@@ -1257,14 +1259,15 @@ class InstrumentedScheduler(AsyncScheduler):
             )
             return None
 
-        point = self._bench_pop_next("prefill")
-        if point is None:
+        next_point = self._bench_pop_next("prefill")
+        if next_point is None:
             if self._bench_config.mode == "agg":
                 self._bench_phase = _BenchPhase.DECODE_SWEEP
                 logger.info("Benchmark: entering DECODE_SWEEP")
             else:
                 self._bench_phase = _BenchPhase.DONE
             return None
+        point = next_point
 
         self._bench_current_fpms = []
         if point.kv_read_tokens > 0:
