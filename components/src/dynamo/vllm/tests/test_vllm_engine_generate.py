@@ -4,8 +4,9 @@
 import asyncio
 import base64
 import io
+import sys
 from dataclasses import replace
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -90,6 +91,26 @@ def test_sampling_params_preserve_native_fields_and_nested_types():
     assert params.output_kind is RequestOutputKind.DELTA
 
 
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("temperature", 1.0),
+        ("n", 1),
+        ("top_p", 1.0),
+        ("min_tokens", 0),
+        ("ignore_eos", False),
+        ("repetition_penalty", 1.0),
+        ("detokenize", True),
+    ],
+)
+def test_explicit_null_nonnullable_sampling_fields_use_vllm_defaults(field, expected):
+    request = _request({field: None})
+
+    params = build_sampling_params(request, default_sampling_params={})
+
+    assert getattr(params, field) == expected
+
+
 def test_omitted_max_tokens_uses_server_default_with_context_cap():
     request = _request({"temperature": 0.5})
     params = build_sampling_params(
@@ -97,6 +118,18 @@ def test_omitted_max_tokens_uses_server_default_with_context_cap():
         default_sampling_params={"max_tokens": 100},
         model_max_len=64,
     )
+    assert params.max_tokens == 61
+
+
+def test_omitted_max_tokens_uses_dynamic_context_default_without_config():
+    request = _request({"temperature": 0.5})
+
+    params = build_sampling_params(
+        request,
+        default_sampling_params={},
+        model_max_len=64,
+    )
+
     assert params.max_tokens == 61
 
 
@@ -108,6 +141,29 @@ def test_explicit_null_max_tokens_is_not_replaced_by_server_default():
         model_max_len=64,
     )
     assert params.max_tokens is None
+
+
+@pytest.mark.parametrize(
+    ("wire_value", "expected"),
+    [
+        (None, None),
+        (-1, None),
+        (0, 0),
+        (8, 8),
+    ],
+)
+def test_thinking_token_budget_uses_vllm_normalization(wire_value, expected):
+    request = _request({"thinking_token_budget": wire_value})
+
+    params = build_sampling_params(request, default_sampling_params={})
+
+    assert params.thinking_token_budget == expected
+
+
+def test_omitted_thinking_token_budget_remains_unset():
+    params = build_sampling_params(_request({}), default_sampling_params={})
+
+    assert params.thinking_token_budget is None
 
 
 def test_backend_extension_maps_are_combined_without_overwrite():
@@ -147,8 +203,10 @@ def test_framework_kv_metadata_merges_without_replacing_caller_fields():
 
 
 def test_text_prompt_preserves_exact_tokens_and_cache_salt():
-    prompt = build_prompt(_request({}, cache_salt="checkpoint-7"))
+    request = _request({}, cache_salt="checkpoint-7")
+    prompt = build_prompt(request)
     assert prompt["prompt_token_ids"] == [11, 22, 33]
+    assert prompt["prompt_token_ids"] is request["token_ids"]
     assert prompt["cache_salt"] == "checkpoint-7"
 
 
@@ -169,6 +227,25 @@ def test_multimodal_cache_hit_prompt_preserves_hashes_and_placeholders():
     assert prompt["mm_placeholders"]["image"][0].offset == 1
     assert prompt["mm_kwargs"]["image"] == [None]
     assert prompt["cache_salt"] == "checkpoint-mm"
+
+
+def test_multimodal_cache_miss_uses_scale_out_serde(monkeypatch: pytest.MonkeyPatch):
+    decoded_item = object()
+    module = ModuleType("vllm.entrypoints.scale_out.token_in_token_out.mm_serde")
+    module.decode_mm_kwargs_item = lambda value: decoded_item  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    request = _request(
+        {},
+        features={
+            "mm_hashes": {"image": ["hash-1"]},
+            "mm_placeholders": {"image": [{"offset": 1, "length": 1}]},
+            "kwargs_data": {"image": ["encoded-item"]},
+        },
+    )
+
+    prompt = build_prompt(request)
+
+    assert prompt["mm_kwargs"]["image"] == [decoded_item]
 
 
 def test_priority_is_native_for_engine_generate_and_legacy_for_chat():

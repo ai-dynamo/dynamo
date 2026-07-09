@@ -195,6 +195,11 @@ impl GenerateRequest {
         if self.stream_options.is_some() && !self.stream {
             return Err(invalid("`stream_options` requires `stream=true`"));
         }
+        if self.stream && self.sampling_params.prompt_logprobs.is_some() {
+            return Err(invalid(
+                "`sampling_params.prompt_logprobs` are not available when `stream=true`",
+            ));
+        }
         self.sampling_params.validate()?;
         if let Some(features) = &self.features {
             features.validate(self.token_ids.len())?;
@@ -275,7 +280,7 @@ pub struct GenerateSamplingParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_reading_prefix_cache: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub thinking_token_budget: Option<u32>,
+    pub thinking_token_budget: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repetition_detection: Option<RepetitionDetectionParams>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -328,6 +333,11 @@ impl GenerateSamplingParams {
         {
             return Err(invalid(
                 "`sampling_params.min_tokens` must not exceed `max_tokens`",
+            ));
+        }
+        if self.thinking_token_budget.is_some_and(|value| value < -1) {
+            return Err(invalid(
+                "`sampling_params.thinking_token_budget` must be non-negative or -1",
             ));
         }
         for (name, value) in [
@@ -739,6 +749,47 @@ mod tests {
     }
 
     #[test]
+    fn thinking_token_budget_accepts_unlimited_and_preserves_presence() {
+        for (wire_value, expected) in [
+            (Value::Null, None),
+            (serde_json::json!(-1), Some(-1)),
+            (serde_json::json!(0), Some(0)),
+            (serde_json::json!(8), Some(8)),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+                "token_ids": [1],
+                "sampling_params": {"thinking_token_budget": wire_value}
+            }))
+            .unwrap();
+            assert_eq!(request.sampling_params.thinking_token_budget, expected);
+            assert!(request.validate().is_ok());
+            assert!(request.is_sampling_param_provided("thinking_token_budget"));
+
+            let (_, envelope) = request.into_worker_parts().unwrap();
+            let worker_wire = serde_json::to_value(envelope).unwrap();
+            assert_eq!(
+                worker_wire["sampling_params"]["thinking_token_budget"],
+                wire_value
+            );
+        }
+
+        let omitted: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1],
+            "sampling_params": {}
+        }))
+        .unwrap();
+        assert_eq!(omitted.sampling_params.thinking_token_budget, None);
+        assert!(!omitted.is_sampling_param_provided("thinking_token_budget"));
+
+        let invalid: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1],
+            "sampling_params": {"thinking_token_budget": -2}
+        }))
+        .unwrap();
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
     fn worker_envelope_owns_non_token_fields_and_reinserts_explicit_nulls() {
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "request_id": "request-1",
@@ -794,6 +845,18 @@ mod tests {
 
         let mut request = full_request();
         request.sampling_params.logprobs = Some(1);
+        assert!(request.validate().is_err());
+
+        let mut request = full_request();
+        request.sampling_params.prompt_logprobs = Some(0);
+        assert!(request.validate().is_err());
+
+        let mut request = full_request();
+        request.sampling_params.prompt_logprobs = Some(1);
+        assert!(request.validate().is_err());
+
+        let mut request = full_request();
+        request.sampling_params.prompt_logprobs = Some(-1);
         assert!(request.validate().is_err());
 
         let mut request = full_request();

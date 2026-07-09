@@ -2937,7 +2937,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # branches without spelling out the full union.
         prompt: Any
         with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
-            if pre_rendered is not None:
+            if engine_request is not None:
+                prompt = engine_request.build_prompt()
+                embedding_sequence_length = None
+                error = None
+            elif pre_rendered is not None:
                 # pre_rendered is a MultiModalInput dict with "type": "multimodal".
                 # The engine's InputProcessor.process_inputs() will see the "type"
                 # key and skip the HF processor entirely.
@@ -2963,10 +2967,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if error is not None:
             yield error
             return
-
-        if engine_request is not None:
-            prompt = engine_request.build_prompt()
-            embedding_sequence_length = None
 
         _apply_nvext_cache_salt(request, prompt)
 
@@ -3316,23 +3316,25 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         multi_modal_data = prepared_input.multi_modal_data
         mm_processor_kwargs = prepared_input.mm_processor_kwargs
 
-        # Build prompt from request (handles both prompt_embeds and token_ids)
-        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request,
-            request_id,
-            multi_modal_data,
-            log_prefix="Prefill ",
-            mm_processor_kwargs=mm_processor_kwargs,
-        )
+        # Engine-native requests already contain the vLLM prompt representation.
+        # Only legacy requests need Dynamo's generic prompt construction.
+        if engine_request is not None:
+            prompt = engine_request.build_prompt()
+            embedding_sequence_length = None
+            error = None
+        else:
+            prompt, embedding_sequence_length, error = self._build_prompt_from_request(
+                request,
+                request_id,
+                multi_modal_data,
+                log_prefix="Prefill ",
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
         if error is not None:
             # Prefill errors need disaggregated_params field
             error["disaggregated_params"] = None
             yield error
             return
-
-        if engine_request is not None:
-            prompt = engine_request.build_prompt()
-            embedding_sequence_length = None
 
         _apply_nvext_cache_salt(request, prompt)
 

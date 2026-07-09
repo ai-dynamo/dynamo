@@ -1398,6 +1398,15 @@ impl InflightGuard {
         self.status = Status::Error;
         self.error_type = error_type;
     }
+
+    /// Record an engine-originated error and its admission-control rejection,
+    /// if applicable, through one canonical path.
+    pub(crate) fn mark_engine_error(&mut self, error_type: ErrorType, was_rejected: bool) {
+        if was_rejected {
+            self.metrics.inc_rejection(&self.model, self.endpoint);
+        }
+        self.mark_error(error_type);
+    }
 }
 
 impl Drop for InflightGuard {

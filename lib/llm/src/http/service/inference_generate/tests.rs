@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::discovery::WorkerSet;
+use crate::discovery::{UNKNOWN_METRIC_MODEL, WorkerSet};
 use crate::http::service::metrics::{RequestType, Status};
 use crate::model_card::ModelDeploymentCard;
 use crate::protocols::inference::generate::GenerateBackendMetadata;
 use crate::types::Annotated;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContext, ResponseStream};
+use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use futures::stream;
 use std::pin::Pin;
@@ -30,8 +31,18 @@ struct CaptureGenerateEngine {
 
 struct ErrorGenerateEngine;
 
+struct TypedErrorGenerateEngine(DynamoErrorType);
+
+struct TypedStreamErrorGenerateEngine(DynamoErrorType);
+
 struct PendingGenerateEngine {
     context: Arc<Mutex<Option<Arc<dyn AsyncEngineContext>>>>,
+}
+
+struct DistinctContextPendingEngine {
+    context: Arc<Mutex<Option<Arc<dyn AsyncEngineContext>>>>,
+    started: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
 }
 
 struct TerminalGenerateEngine(FinishReason);
@@ -127,6 +138,51 @@ impl AsyncEngine<SingleIn<GenerateRequest>, ManyOut<Annotated<LLMEngineOutput>>,
 
 #[async_trait::async_trait]
 impl AsyncEngine<SingleIn<GenerateRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for TypedErrorGenerateEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<GenerateRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        Err(Error::new(
+            DynamoError::builder()
+                .error_type(self.0)
+                .message("private typed engine failure")
+                .build(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncEngine<SingleIn<GenerateRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for TypedStreamErrorGenerateEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<GenerateRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let context = request.context();
+        let response = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(self.0)
+                    .message("private typed stream failure")
+                    .build(),
+            ),
+        };
+        Ok(ResponseStream::new(
+            Box::pin(stream::iter([response])),
+            context,
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncEngine<SingleIn<GenerateRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for PendingGenerateEngine
 {
     async fn generate(
@@ -136,6 +192,26 @@ impl AsyncEngine<SingleIn<GenerateRequest>, ManyOut<Annotated<LLMEngineOutput>>,
         let context = request.context();
         self.context.lock().unwrap().replace(context.clone());
         Ok(ResponseStream::new(Box::pin(stream::pending()), context))
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncEngine<SingleIn<GenerateRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for DistinctContextPendingEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<GenerateRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let engine_context = dynamo_runtime::pipeline::Context::new(()).context();
+        self.context.lock().unwrap().replace(engine_context.clone());
+        Ok(ResponseStream::new(
+            Box::pin(PendingResponse {
+                started: self.started.clone(),
+                _drop_flag: DropFlag(self.dropped.clone()),
+            }),
+            engine_context,
+        ))
     }
 }
 
@@ -273,6 +349,21 @@ fn assert_cancelled_metrics(state: &service_v2::State) {
             &RequestType::Unary,
             &Status::Error,
             &ErrorType::Cancelled,
+        ),
+        1
+    );
+}
+
+fn assert_engine_error_metrics(state: &service_v2::State, error_type: ErrorType) {
+    let metrics = state.metrics_clone();
+    assert_eq!(metrics.get_inflight_count("test-model"), 0);
+    assert_eq!(
+        metrics.get_request_counter(
+            "test-model",
+            &Endpoint::InferenceGenerate,
+            &RequestType::Unary,
+            &Status::Error,
+            &error_type,
         ),
         1
     );
@@ -479,6 +570,19 @@ async fn handler_returns_nested_vllm_errors_for_400_404_499_and_500() {
     .await;
     assert_nested_boundary_error(response, 400, "invalid_request_error").await;
 
+    let invalid_thinking_budget: GenerateRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [11],
+        "sampling_params": {"thinking_token_budget": -2}
+    }))
+    .unwrap();
+    let response = handler(
+        State(empty_service.state_clone()),
+        HeaderMap::new(),
+        Json(invalid_thinking_budget),
+    )
+    .await;
+    assert_nested_boundary_error(response, 400, "invalid_request_error").await;
+
     let response = handler(
         State(empty_service.state_clone()),
         HeaderMap::new(),
@@ -532,6 +636,85 @@ async fn request_kill_interrupts_pending_generate_and_stream_phases() {
         assert_eq!(result.0.as_u16(), 499);
         assert!(dropped.load(Ordering::SeqCst));
         assert_cancelled_metrics(state.as_ref());
+    }
+}
+
+#[tokio::test]
+async fn engine_context_kill_interrupts_pending_unary_stream() {
+    let engine_context = Arc::new(Mutex::new(None));
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let engine: crate::types::inference::generate::GenerateStreamingEngine =
+        Arc::new(DistinctContextPendingEngine {
+            context: engine_context.clone(),
+            started: started.clone(),
+            dropped: dropped.clone(),
+        });
+    let (task, request_context, mut connection_handle, state) = direct_unary(engine).await;
+    started.notified().await;
+    let engine_context = engine_context.lock().unwrap().as_ref().unwrap().clone();
+    assert!(!Arc::ptr_eq(&request_context, &engine_context));
+    engine_context.kill();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("unary generate did not stop after engine cancellation")
+        .expect("unary generate task panicked")
+        .expect_err("cancelled unary generate must return an error response");
+    connection_handle.disarm();
+    assert_eq!(result.0.as_u16(), 499);
+    assert!(!request_context.is_killed());
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_cancelled_metrics(state.as_ref());
+}
+
+#[tokio::test]
+async fn typed_engine_errors_use_canonical_http_metrics_and_rejection_count() {
+    let overload_status = crate::http::service::error::overload_status_code();
+    let overload_metric = crate::http::service::openai::classify_error_for_metrics(
+        overload_status,
+        "Service temporarily overloaded",
+    );
+    let cases = [
+        (
+            DynamoErrorType::ResourceExhausted,
+            overload_status.as_u16(),
+            overload_metric,
+            1,
+        ),
+        (
+            DynamoErrorType::Unavailable,
+            StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+            ErrorType::Unavailable,
+            0,
+        ),
+        (DynamoErrorType::Cancelled, 499, ErrorType::Cancelled, 0),
+        (
+            DynamoErrorType::Unknown,
+            StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            ErrorType::Internal,
+            0,
+        ),
+    ];
+
+    for (engine_error, expected_status, expected_metric, expected_rejections) in cases {
+        let engine: crate::types::inference::generate::GenerateStreamingEngine =
+            Arc::new(TypedErrorGenerateEngine(engine_error));
+        let (task, _context, mut connection_handle, state) = direct_unary(engine).await;
+        let response = task
+            .await
+            .expect("unary generate task panicked")
+            .expect_err("typed engine error must fail the request");
+        connection_handle.disarm();
+
+        assert_eq!(response.0.as_u16(), expected_status);
+        assert_engine_error_metrics(state.as_ref(), expected_metric);
+        assert_eq!(
+            state
+                .metrics_clone()
+                .get_rejection_count("test-model", Endpoint::InferenceGenerate),
+            expected_rejections
+        );
     }
 }
 
@@ -711,6 +894,190 @@ async fn streaming_http_boundary_emits_usage_and_done() {
 
     let captured = captured.lock().unwrap();
     assert!(captured.as_ref().unwrap().request.stream);
+}
+
+#[tokio::test]
+async fn streaming_engine_cancellation_emits_499_error_done_and_cancelled_metrics() {
+    let service = service_v2::HttpService::builder()
+        .enable_engine_apis(true)
+        .build()
+        .unwrap();
+    let engine_context = Arc::new(Mutex::new(None));
+    let mut worker_set = WorkerSet::new(
+        "test".to_string(),
+        "test-mdc".to_string(),
+        ModelDeploymentCard::default(),
+    );
+    worker_set.generate_engine = Some(Arc::new(PendingGenerateEngine {
+        context: engine_context.clone(),
+    }));
+    service
+        .model_manager()
+        .add_worker_set("test-model", "test", worker_set);
+    let mut request = request_for("test-model");
+    request.stream = true;
+
+    let response = handler(
+        State(service.state_clone()),
+        HeaderMap::new(),
+        Json(request),
+    )
+    .await;
+    let context = engine_context.lock().unwrap().as_ref().unwrap().clone();
+    context.kill();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(body.contains(r#""type":"request_cancelled""#));
+    assert!(body.contains(r#""code":499"#));
+    assert!(body.contains("Request cancelled"));
+    assert!(body.ends_with("data: [DONE]\n\n"));
+    assert_eq!(
+        service.state_clone().metrics_clone().get_request_counter(
+            "test-model",
+            &Endpoint::InferenceGenerate,
+            &RequestType::Stream,
+            &Status::Error,
+            &ErrorType::Cancelled,
+        ),
+        1
+    );
+}
+
+#[tokio::test]
+async fn streaming_cancelled_finish_reason_emits_499_error_and_done() {
+    let service =
+        service_with_generate_engine(Arc::new(TerminalGenerateEngine(FinishReason::Cancelled)));
+    let mut request = request_for("test-model");
+    request.stream = true;
+
+    let response = handler(
+        State(service.state_clone()),
+        HeaderMap::new(),
+        Json(request),
+    )
+    .await;
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(body.contains(r#""type":"request_cancelled""#));
+    assert!(body.contains(r#""code":499"#));
+    assert!(body.ends_with("data: [DONE]\n\n"));
+    assert_eq!(
+        service.state_clone().metrics_clone().get_request_counter(
+            "test-model",
+            &Endpoint::InferenceGenerate,
+            &RequestType::Stream,
+            &Status::Error,
+            &ErrorType::Cancelled,
+        ),
+        1
+    );
+}
+
+#[tokio::test]
+async fn streaming_typed_overload_uses_canonical_sse_metrics_and_rejection_count() {
+    let service = service_with_generate_engine(Arc::new(TypedStreamErrorGenerateEngine(
+        DynamoErrorType::ResourceExhausted,
+    )));
+    let mut request = request_for("test-model");
+    request.stream = true;
+
+    let response = handler(
+        State(service.state_clone()),
+        HeaderMap::new(),
+        Json(request),
+    )
+    .await;
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    let overload_status = crate::http::service::error::overload_status_code();
+    let overload_metric = crate::http::service::openai::classify_error_for_metrics(
+        overload_status,
+        "Service temporarily overloaded",
+    );
+
+    assert!(body.contains(r#""type":"service_unavailable""#));
+    assert!(body.contains(&format!(r#""code":{}"#, overload_status.as_u16())));
+    assert!(!body.contains("private typed stream failure"));
+    assert!(body.ends_with("data: [DONE]\n\n"));
+    assert_eq!(
+        service.state_clone().metrics_clone().get_request_counter(
+            "test-model",
+            &Endpoint::InferenceGenerate,
+            &RequestType::Stream,
+            &Status::Error,
+            &overload_metric,
+        ),
+        1
+    );
+    assert_eq!(
+        service
+            .state_clone()
+            .metrics_clone()
+            .get_rejection_count("test-model", Endpoint::InferenceGenerate),
+        1
+    );
+}
+
+#[tokio::test]
+async fn streaming_missing_model_uses_bounded_metric_label() {
+    let service = service_v2::HttpService::builder()
+        .enable_engine_apis(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let request = dynamo_runtime::pipeline::Context::new(request_for("attacker-model-label"));
+    let context = request.context();
+    let cancellation_labels = CancellationLabels {
+        model: UNKNOWN_METRIC_MODEL.to_string(),
+        endpoint: Endpoint::InferenceGenerate.to_string(),
+        request_type: "stream".to_string(),
+    };
+    let (mut connection_handle, stream_handle) =
+        create_connection_monitor(context, None, cancellation_labels).await;
+
+    let response = generate_streaming(
+        state.clone(),
+        request,
+        "test-request".to_string(),
+        "attacker-model-label".to_string(),
+        1,
+        false,
+        false,
+        false,
+        stream_handle,
+    )
+    .await
+    .expect_err("missing model must fail before producing an SSE response");
+    connection_handle.disarm();
+    assert_eq!(response.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        state.metrics_clone().get_request_counter(
+            UNKNOWN_METRIC_MODEL,
+            &Endpoint::InferenceGenerate,
+            &RequestType::Stream,
+            &Status::Error,
+            &ErrorType::NotFound,
+        ),
+        1
+    );
+    assert_eq!(
+        state.metrics_clone().get_request_counter(
+            "attacker-model-label",
+            &Endpoint::InferenceGenerate,
+            &RequestType::Stream,
+            &Status::Error,
+            &ErrorType::NotFound,
+        ),
+        0
+    );
 }
 
 #[tokio::test]

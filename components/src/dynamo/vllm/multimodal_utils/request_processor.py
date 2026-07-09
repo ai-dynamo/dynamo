@@ -269,8 +269,14 @@ class VllmMultimodalRequestProcessor:
             extra_args.get(key) is not None
             for key in ("mm_kwargs_shm", "mm_kwargs_nixl")
         )
+        generate_request = request.get("generate_request")
+        has_engine_features = isinstance(generate_request, dict) and isinstance(
+            generate_request.get("features"), dict
+        )
         if (
-            request.get("multi_modal_data") is not None or has_transfer
+            request.get("multi_modal_data") is not None
+            or has_transfer
+            or has_engine_features
         ) and not self.enable_multimodal:
             raise self._multimodal_disabled_error()
 

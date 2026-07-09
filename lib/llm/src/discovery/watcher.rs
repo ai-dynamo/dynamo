@@ -37,9 +37,7 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{EncoderRouter, PrefillRouter},
-    local_model::runtime_config::{
-        ENGINE_GENERATE_CAPABILITY, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-    },
+    local_model::runtime_config::{ENGINE_GENERATE_CAPABILITY, TokenizerBackend},
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -142,20 +140,12 @@ fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
 }
 
 fn supports_engine_generate(card: &ModelDeploymentCard) -> bool {
-    match card
-        .runtime_config
-        .runtime_data
-        .get(ENGINE_GENERATE_CAPABILITY)
-    {
-        Some(serde_json::Value::Bool(supported)) => *supported,
-        Some(_) => false,
-        None => matches!(
-            card.runtime_config
-                .runtime_data
-                .get(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
-            Some(serde_json::Value::Bool(true))
-        ),
-    }
+    matches!(
+        card.runtime_config
+            .runtime_data
+            .get(ENGINE_GENERATE_CAPABILITY),
+        Some(serde_json::Value::Bool(true))
+    )
 }
 
 const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
@@ -2045,9 +2035,9 @@ mod tests {
             .runtime_data
             .remove(ENGINE_GENERATE_CAPABILITY);
         card.runtime_config
-            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
+            .set_engine_specific("vllm_inference_v1_generate", true)
             .unwrap();
-        assert!(supports_engine_generate(&card));
+        assert!(!supports_engine_generate(&card));
     }
 
     #[test]

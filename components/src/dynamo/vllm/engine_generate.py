@@ -107,9 +107,7 @@ def build_prompt(request: Dict[str, Any]) -> Any:
 
 
 def _build_prompt(request: Dict[str, Any], generate_request: Dict[str, Any]) -> Any:
-    token_ids = list(
-        request.get("token_ids") or generate_request.get("token_ids") or []
-    )
+    token_ids = request.get("token_ids") or generate_request.get("token_ids") or []
     cache_salt = generate_request.get("cache_salt")
     features = generate_request.get("features")
     if not isinstance(features, dict):
@@ -133,7 +131,9 @@ def _build_prompt(request: Dict[str, Any], generate_request: Dict[str, Any]) -> 
         # This helper is only present in full vLLM serving installations. Keep
         # the import on the multimodal kwargs path so importing Dynamo's vLLM
         # handlers does not break lightweight tooling and unit-test collection.
-        from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
+        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+            decode_mm_kwargs_item,
+        )
 
         for modality, items in kwargs_data.items():
             mm_kwargs[modality] = [
@@ -212,6 +212,13 @@ def _build_sampling_params(
         if key in ("extra_args", "vllm_xargs") or key not in raw_params:
             continue
         value = raw_params[key]
+        # Rust preserves explicit nulls so fields with nullable semantics can
+        # reach the backend losslessly. At the vLLM boundary, however, most
+        # SamplingParams fields are non-nullable and null means "use the
+        # engine default". max_tokens is the one intentional exception: None
+        # means no per-request token limit and differs from vLLM's default.
+        if value is None and key != "max_tokens":
+            continue
         if key == "structured_outputs" and isinstance(value, dict):
             value = StructuredOutputsParams(
                 json=value.get("json"),

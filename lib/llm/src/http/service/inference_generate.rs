@@ -20,10 +20,11 @@ use tracing::Instrument;
 
 use super::disconnect::{create_connection_monitor, monitor_for_disconnects};
 use super::error::HttpError;
-use super::metrics::{CancellationLabels, Endpoint, ErrorType};
+use super::metrics::{CancellationLabels, Endpoint, ErrorType, InflightGuard};
 use super::openai::{
     ErrorMessage, ErrorResponse, check_model_serving_ready, check_ready, context_from_headers,
-    get_body_limit, get_or_create_request_id, smart_json_error_middleware,
+    extract_error_type_from_response, get_body_limit, get_or_create_request_id,
+    smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
 use crate::discovery::ModelManagerError;
@@ -248,8 +249,9 @@ async fn generate_streaming(
     continuous_usage: bool,
     stream_handle: super::disconnect::ConnectionHandle,
 ) -> Result<axum::response::Response, ErrorResponse> {
+    let metric_model = state.manager().metric_model_for(&model).to_string();
     let mut inflight = state.metrics_clone().create_inflight_guard(
-        &model,
+        &metric_model,
         Endpoint::InferenceGenerate,
         true,
         &request_id,
@@ -266,9 +268,7 @@ async fn generate_streaming(
             response
         })?;
     let stream = engine.generate(request).await.map_err(|error| {
-        let response = ErrorMessage::from_anyhow(error, "Failed to generate tokens");
-        inflight.mark_error(ErrorType::Internal);
-        response
+        engine_error_response(&mut inflight, error, "Failed to generate tokens")
     })?;
     let context = stream.context();
     let events = generate_event_stream(
@@ -295,9 +295,13 @@ fn generate_event_stream(
         tokio::pin!(stream);
         let mut failed = false;
         while let Some(mut annotated) = stream.next().await {
-            let result = if let Some(error) = annotated.error.take() {
-                Err(invalid_response(format!("backend generation failed: {error}")))
-            } else if annotated.event.as_deref() == Some("error") {
+            if let Some(error) = annotated.error.take() {
+                failed = true;
+                yield Err(axum::Error::new(error));
+                break;
+            }
+
+            let result = if annotated.event.as_deref() == Some("error") {
                 Err(invalid_response(
                     annotated
                         .comment
@@ -306,6 +310,11 @@ fn generate_event_stream(
                         .unwrap_or_else(|| "backend generation failed".to_string()),
                 ))
             } else if let Some(output) = annotated.data.take() {
+                if matches!(output.finish_reason.as_ref(), Some(FinishReason::Cancelled)) {
+                    failed = true;
+                    yield Err(cancelled_stream_error());
+                    break;
+                }
                 accumulator.push(output, continuous_usage)
             } else {
                 Ok(None)
@@ -350,6 +359,26 @@ fn stream_error(error: GenerateProtocolError) -> axum::Error {
     axum::Error::new(std::io::Error::other(error.to_string()))
 }
 
+fn cancelled_stream_error() -> axum::Error {
+    axum::Error::new(
+        dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::Cancelled)
+            .message("request was cancelled")
+            .build(),
+    )
+}
+
+fn engine_error_response(
+    inflight: &mut InflightGuard,
+    error: anyhow::Error,
+    fallback_message: &str,
+) -> ErrorResponse {
+    let was_rejected = super::metrics::request_was_rejected(error.as_ref());
+    let response = ErrorMessage::from_anyhow(error, fallback_message);
+    inflight.mark_engine_error(extract_error_type_from_response(&response), was_rejected);
+    response
+}
+
 async fn run_until_killed<T>(
     context: &dyn AsyncEngineContext,
     operation: impl std::future::Future<Output = T>,
@@ -362,6 +391,21 @@ async fn run_until_killed<T>(
         // Callers re-check both contexts before consuming the result.
         result = &mut operation => Some(result),
         _ = context.killed() => None,
+    }
+}
+
+async fn run_until_either_killed<T>(
+    request_context: &dyn AsyncEngineContext,
+    engine_context: &dyn AsyncEngineContext,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(operation);
+    tokio::select! {
+        biased;
+
+        result = &mut operation => Some(result),
+        _ = request_context.killed() => None,
+        _ = engine_context.killed() => None,
     }
 }
 
@@ -415,28 +459,29 @@ async fn generate_unary(
     let mut stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
-            let was_cancelled = request_context.is_killed()
-                || super::metrics::request_was_cancelled(error.as_ref());
-            inflight.mark_error(if was_cancelled {
-                ErrorType::Cancelled
-            } else {
-                ErrorType::Internal
-            });
-            if was_cancelled {
-                return Err(cancelled_error());
-            }
-            return Err(ErrorMessage::from_anyhow(
+            return Err(engine_error_response(
+                &mut inflight,
                 error,
                 "Failed to generate tokens",
             ));
         }
     };
     let engine_context = stream.context();
+    if request_context.is_killed() || engine_context.is_killed() {
+        inflight.mark_error(ErrorType::Cancelled);
+        return Err(cancelled_error());
+    }
     let mut accumulator =
         GenerateAccumulator::new(request_id, expected_choices as usize, require_logprobs);
 
     loop {
-        let next = match run_until_killed(request_context.as_ref(), stream.next()).await {
+        let next = match run_until_either_killed(
+            request_context.as_ref(),
+            engine_context.as_ref(),
+            stream.next(),
+        )
+        .await
+        {
             Some(next) => next,
             None => {
                 inflight.mark_error(ErrorType::Cancelled);
@@ -451,16 +496,8 @@ async fn generate_unary(
             break;
         };
         if let Some(error) = event.error.take() {
-            let was_cancelled = super::metrics::request_was_cancelled(&error);
-            inflight.mark_error(if was_cancelled {
-                ErrorType::Cancelled
-            } else {
-                ErrorType::Internal
-            });
-            if was_cancelled {
-                return Err(cancelled_error());
-            }
-            return Err(ErrorMessage::from_anyhow(
+            return Err(engine_error_response(
+                &mut inflight,
                 anyhow::Error::new(error),
                 "Token generation failed",
             ));

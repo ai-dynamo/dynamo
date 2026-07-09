@@ -7,7 +7,6 @@ import pytest
 
 from dynamo.vllm.capacity import (
     ENGINE_GENERATE_CAPABILITY,
-    LEGACY_VLLM_GENERATE_CAPABILITY,
     advertise_engine_generate_capability,
     get_metrics_model_name,
     get_spec_decode_runtime_data,
@@ -78,7 +77,7 @@ def test_spec_decode_runtime_data_ignores_invalid_nextn(speculative_config):
     assert get_spec_decode_runtime_data(config, vllm_config) is None
 
 
-def test_engine_generate_capability_is_advertised_for_new_and_old_frontends():
+def test_engine_generate_capability_advertises_only_implemented_protocol():
     class RuntimeConfig:
         def __init__(self):
             self.values = {}
@@ -89,7 +88,5 @@ def test_engine_generate_capability_is_advertised_for_new_and_old_frontends():
     runtime_config = RuntimeConfig()
     advertise_engine_generate_capability(runtime_config)
 
-    assert runtime_config.values == {
-        ENGINE_GENERATE_CAPABILITY: "true",
-        LEGACY_VLLM_GENERATE_CAPABILITY: "true",
-    }
+    assert runtime_config.values == {ENGINE_GENERATE_CAPABILITY: "true"}
+    assert "vllm_inference_v1_generate" not in runtime_config.values

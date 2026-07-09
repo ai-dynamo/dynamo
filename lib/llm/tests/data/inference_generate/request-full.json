@@ -23,7 +23,7 @@
     "max_tokens": 8,
     "min_tokens": 1,
     "logprobs": 2,
-    "prompt_logprobs": 1,
+    "prompt_logprobs": null,
     "logprob_token_ids": [7, 8],
     "flat_logprobs": false,
     "detokenize": true,

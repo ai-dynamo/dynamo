@@ -827,8 +827,42 @@ class TestDecodeWorkerMultimodalBranching:
             chunks.append(chunk)
 
         handler._multimodal_request_processor.extract_multimodal_data.assert_awaited_once()
+        handler._build_prompt_from_request.assert_called_once()
         assert len(chunks) == 1
         assert chunks[0]["status"] == "error"
+
+    async def test_engine_request_builds_only_engine_prompt_once(self):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        prepared_request = {"token_ids": [1, 2, 3]}
+        handler._multimodal_request_processor.prepare_input = AsyncMock(
+            return_value=PreparedMultimodalInput(
+                request=prepared_request,
+                multi_modal_data=None,
+                mm_processor_kwargs=None,
+            )
+        )
+        handler._build_prompt_from_request = MagicMock()
+        engine_request = MagicMock()
+        engine_request.build_prompt.return_value = {"prompt_token_ids": [1, 2, 3]}
+        engine_request.build_sampling_params.side_effect = RuntimeError(
+            "stop after prompt construction"
+        )
+
+        with patch.object(
+            mod.EngineGenerateRequest,
+            "from_request",
+            return_value=engine_request,
+        ):
+            with pytest.raises(RuntimeError, match="stop after prompt construction"):
+                async for _ in handler._generate_token_mode(
+                    {"token_ids": [1, 2, 3], "generate_request": {}},
+                    MagicMock(),
+                    "request-engine-decode",
+                ):
+                    pass
+
+        engine_request.build_prompt.assert_called_once_with()
+        handler._build_prompt_from_request.assert_not_called()
 
     @pytest.mark.parametrize(
         "mm_processor_kwargs",
@@ -899,6 +933,46 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
         log_prefix="Prefill ",
         mm_processor_kwargs=mm_processor_kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_prefill_engine_request_builds_only_engine_prompt_once():
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    prepared_request = {"token_ids": [1, 2, 3]}
+    processor = SimpleNamespace(
+        prepare_input=AsyncMock(
+            return_value=PreparedMultimodalInput(
+                request=prepared_request,
+                multi_modal_data=None,
+                mm_processor_kwargs=None,
+            )
+        )
+    )
+    handler._multimodal_request_processor = processor
+    handler._build_prompt_from_request = MagicMock()
+    handler.default_sampling_params = {}
+    handler.model_max_len = 4096
+    engine_request = MagicMock()
+    engine_request.build_prompt.return_value = {"prompt_token_ids": [1, 2, 3]}
+    engine_request.build_sampling_params.side_effect = RuntimeError(
+        "stop after prompt construction"
+    )
+
+    with patch.object(
+        mod.EngineGenerateRequest,
+        "from_request",
+        return_value=engine_request,
+    ):
+        with pytest.raises(RuntimeError, match="stop after prompt construction"):
+            async for _ in handler._generate_token_mode(
+                {"token_ids": [1, 2, 3], "generate_request": {}},
+                MagicMock(),
+                "request-engine-prefill",
+            ):
+                pass
+
+    engine_request.build_prompt.assert_called_once_with()
+    handler._build_prompt_from_request.assert_not_called()
 
 
 @pytest.mark.asyncio
