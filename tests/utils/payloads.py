@@ -632,8 +632,17 @@ class ClearKVBlocksPayload(ChatPayload):
                 f"{phase}: response carried no prompt-token usage evidence: "
                 f"{usage!r}"
             )
-        details = usage.get("prompt_tokens_details") or {}
-        return details.get("cached_tokens", 0) or 0
+        details = usage.get("prompt_tokens_details")
+        if not isinstance(details, dict) or "cached_tokens" not in details:
+            raise AssertionError(
+                f"{phase}: response did not report cached_tokens: {usage!r}"
+            )
+        cached_tokens = details["cached_tokens"]
+        if not isinstance(cached_tokens, int):
+            raise AssertionError(
+                f"{phase}: cached_tokens was not an integer: {cached_tokens!r}"
+            )
+        return cached_tokens
 
     def _warm_then_clear(self) -> None:
         if self._cleared:

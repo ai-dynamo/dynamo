@@ -438,6 +438,7 @@ class VllmLLMEngine(LLMEngine):
         # vLLM's KV transfer is internal to NixlConnector
         # (--kv-transfer-config). Dispatch only sets connector hints and
         # forwards the prefill→decode handoff payload.
+        prefill_prompt_tokens_details = None
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
@@ -460,6 +461,7 @@ class VllmLLMEngine(LLMEngine):
             sampling_params.min_tokens = 1
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             prefill_result = require_prefill_result(request, self.disaggregation_mode)
+            prefill_prompt_tokens_details = prefill_result.get("prompt_tokens_details")
             # `disaggregated_params` may be present-but-None (prefill error path
             # / _build_disaggregated_params returning None), so use `or {}` — a
             # .get default only applies when the key is absent. A None value then
@@ -592,15 +594,14 @@ class VllmLLMEngine(LLMEngine):
                     )
                     completion_tokens = sum(total_output_tokens_by_index.values())
                     num_cached_tokens = getattr(res, "num_cached_tokens", None)
+                    prompt_tokens_details = prefill_prompt_tokens_details
+                    if prompt_tokens_details is None and num_cached_tokens is not None:
+                        prompt_tokens_details = {"cached_tokens": num_cached_tokens}
                     out["completion_usage"] = {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens,
-                        "prompt_tokens_details": (
-                            {"cached_tokens": num_cached_tokens}
-                            if num_cached_tokens
-                            else None
-                        ),
+                        "prompt_tokens_details": prompt_tokens_details,
                     }
                     # Stamp the connector's transfer handle on the
                     # prefill terminal so PrefillRouter can forward it.
