@@ -16,6 +16,6 @@ def build_frontend_image_decoder_options(
     max_alloc: int = DEFAULT_FRONTEND_IMAGE_DECODER_MAX_ALLOC,
 ) -> dict[str, Any]:
     return {
-        "enable_libjpeg": env_bool(DYN_MM_ENABLE_LIBJPEG),
+        "enable_libjpeg": env_bool(DYN_MM_ENABLE_LIBJPEG, default=True),
         "limits": {"max_alloc": max_alloc},
     }

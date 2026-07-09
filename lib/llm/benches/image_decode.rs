@@ -13,14 +13,14 @@ use image::{ImageBuffer, Rgb, codecs::jpeg::JpegEncoder};
 use rayon::{ThreadPoolBuilder, prelude::*};
 
 const RUN_CONCURRENT_SWEEP_ENV: &str = "RUN_IMAGE_DECODE_SWEEP";
+const REQUIRE_LIBJPEG_TURBO_ENV: &str = "DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST";
 const CONCURRENT_DECODE_WIDTH: u32 = 3840;
 const CONCURRENT_DECODE_HEIGHT: u32 = 2160;
 const CONCURRENT_DECODE_BATCH_SIZE: usize = 100;
 const CONCURRENT_DECODE_LEVELS: [usize; 3] = [1, 8, 32];
 
 fn bench_jpeg_decode(c: &mut Criterion) {
-    if !libjpeg_turbo_available() {
-        eprintln!("skipping image_decode benchmark: libturbojpeg is not available");
+    if !libjpeg_turbo_available_or_skip("image_decode benchmark") {
         return;
     }
 
@@ -48,8 +48,7 @@ fn bench_jpeg_concurrent_decode(c: &mut Criterion) {
         );
         return;
     }
-    if !libjpeg_turbo_available() {
-        eprintln!("skipping concurrent image decode sweep: libturbojpeg is not available");
+    if !libjpeg_turbo_available_or_skip("concurrent image decode sweep") {
         return;
     }
 
@@ -94,6 +93,17 @@ fn bench_jpeg_concurrent_decode(c: &mut Criterion) {
     group.finish();
 }
 
+fn libjpeg_turbo_available_or_skip(benchmark: &str) -> bool {
+    if libjpeg_turbo_available() {
+        return true;
+    }
+    if std::env::var_os(REQUIRE_LIBJPEG_TURBO_ENV).is_some() {
+        panic!("libturbojpeg is required by {REQUIRE_LIBJPEG_TURBO_ENV} for the {benchmark}");
+    }
+    eprintln!("skipping {benchmark}: libturbojpeg is not available");
+    false
+}
+
 fn make_jpeg(width: u32, height: u32) -> Vec<u8> {
     let img = ImageBuffer::from_fn(width, height, |x, y| {
         Rgb([
@@ -115,11 +125,11 @@ fn image_decoder(config: serde_json::Value) -> ImageDecoder {
 
 fn image_decoders() -> [(&'static str, ImageDecoder); 2] {
     [
-        ("image_reader", image_decoder(serde_json::json!({}))),
         (
-            "libjpeg_turbo",
-            image_decoder(serde_json::json!({"enable_libjpeg": true})),
+            "image_reader",
+            image_decoder(serde_json::json!({"enable_libjpeg": false})),
         ),
+        ("libjpeg_turbo", image_decoder(serde_json::json!({}))),
     ]
 }
 

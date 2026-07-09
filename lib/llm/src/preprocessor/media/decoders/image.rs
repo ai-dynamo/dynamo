@@ -1,23 +1,32 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{io::Cursor, sync::Once};
+use std::sync::Once;
 
 use anyhow::Result;
-use image::{ColorType, GenericImageView, ImageFormat, ImageReader};
+use image::{ColorType, ImageFormat};
 use ndarray::Array3;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::super::common::EncodedMediaData;
-use super::super::jpeg_turbo;
 use super::super::rdma::DecodedMediaData;
 use super::{DecodedMediaMetadata, Decoder};
+use backends::{
+    BackendAvailability, BackendDecline, DecodedImage, ImageDecodeBackend, ImageDecodeOutcome,
+    ImageDecodeRequest, image_reader_backend, turbojpeg_backend,
+};
+
+mod backends;
 
 const DEFAULT_MAX_ALLOC: u64 = 128 * 1024 * 1024; // 128 MB
 // CI-only guard: an enabled JPEG test must exercise TurboJPEG, never its fallback.
 const REQUIRE_LIBJPEG_TURBO_TEST_ENV: &str = "DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST";
 static LIBJPEG_TURBO_UNAVAILABLE_WARNING: Once = Once::new();
+
+fn default_enable_libjpeg() -> bool {
+    true
+}
 
 /// Image decoder limits - can only be set via server config, not runtime kwargs.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -42,14 +51,47 @@ impl Default for ImageDecoderLimits {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+impl ImageDecoderLimits {
+    fn validate_output(&self, width: u32, height: u32, channels: usize) -> Result<usize> {
+        if self.max_image_width.is_some_and(|limit| width > limit)
+            || self.max_image_height.is_some_and(|limit| height > limit)
+        {
+            anyhow::bail!("Image dimensions exceed configured limits: {width}x{height}");
+        }
+
+        let nbytes = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|pixels| pixels.checked_mul(channels as u64))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Image allocation size overflow for dimensions: {width}x{height}")
+            })?;
+        if let Some(limit) = self.max_alloc
+            && nbytes > limit
+        {
+            anyhow::bail!("Image allocation {nbytes} bytes exceeds configured limit {limit} bytes");
+        }
+        usize::try_from(nbytes)
+            .map_err(|_| anyhow::anyhow!("Image allocation does not fit in usize: {nbytes} bytes"))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImageDecoder {
     #[serde(default)]
     pub(crate) limits: ImageDecoderLimits,
-    /// Enable libjpeg-turbo for JPEG inputs. Defaults to `false`.
-    #[serde(default)]
+    /// Enable libjpeg-turbo for JPEG inputs. Defaults to `true`.
+    #[serde(default = "default_enable_libjpeg")]
     pub(crate) enable_libjpeg: bool,
+}
+
+impl Default for ImageDecoder {
+    fn default() -> Self {
+        Self {
+            limits: ImageDecoderLimits::default(),
+            enable_libjpeg: default_enable_libjpeg(),
+        }
+    }
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -81,80 +123,79 @@ impl Decoder for ImageDecoder {
         let bytes = data.into_bytes()?;
         self.warn_if_libjpeg_unavailable();
 
-        if self.enable_libjpeg && jpeg_turbo::is_jpeg(&bytes) {
-            let jpeg = require_libjpeg_result(
-                jpeg_turbo::decode_jpeg(
-                    &bytes,
-                    self.limits.max_image_width,
-                    self.limits.max_image_height,
-                    self.limits.max_alloc,
-                )?,
-                std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some(),
-            )?;
-            if let Some(jpeg) = jpeg {
-                let color_type = match jpeg.channels {
-                    1 => ColorType::L8,
-                    3 => ColorType::Rgb8,
-                    other => anyhow::bail!("Unsupported TurboJPEG channel count {other}"),
-                };
-                let shape = (jpeg.height as usize, jpeg.width as usize, jpeg.channels);
-                let array = Array3::from_shape_vec(shape, jpeg.data)?;
-                let mut decoded: DecodedMediaData = array.try_into()?;
-                decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
-                    format: Some(ImageFormat::Jpeg),
-                    color_type,
-                    layout: ImageLayout::HWC,
-                }));
-                return Ok(decoded);
+        let format = image::guess_format(&bytes)?;
+        let request = ImageDecodeRequest {
+            bytes: &bytes,
+            format,
+            limits: &self.limits,
+        };
+        let turbojpeg = turbojpeg_backend();
+        let image_reader = image_reader_backend();
+        let image = if self.enable_libjpeg && turbojpeg.supports(format) {
+            match turbojpeg.try_decode(request)? {
+                ImageDecodeOutcome::Decoded(image) => image,
+                ImageDecodeOutcome::NotHandled(reason) => {
+                    ensure_fallback_allowed(
+                        turbojpeg.name(),
+                        reason,
+                        std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some(),
+                    )?;
+                    decode_required_backend(image_reader, request)?
+                }
             }
-        }
-
-        let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
-        let mut limits = image::Limits::no_limits();
-        limits.max_image_width = self.limits.max_image_width;
-        limits.max_image_height = self.limits.max_image_height;
-        limits.max_alloc = self.limits.max_alloc;
-        reader.limits(limits);
-
-        let format = reader.format();
-
-        let img = reader.decode()?;
-        let n_channels = img.color().channel_count();
-
-        let (data, color_type) = match n_channels {
-            1 => (img.to_luma8().into_raw(), ColorType::L8),
-            2 => (img.to_luma_alpha8().into_raw(), ColorType::La8),
-            3 => (img.to_rgb8().into_raw(), ColorType::Rgb8),
-            4 => (img.to_rgba8().into_raw(), ColorType::Rgba8),
-            other => anyhow::bail!("Unsupported channel count {other}"),
+        } else {
+            decode_required_backend(image_reader, request)?
         };
 
-        let (width, height) = img.dimensions();
-        let shape = (height as usize, width as usize, n_channels as usize);
-        let array = Array3::from_shape_vec(shape, data)?;
-        let mut decoded: DecodedMediaData = array.try_into()?;
-        decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
-            format,
-            color_type,
-            layout: ImageLayout::HWC,
-        }));
-        Ok(decoded)
+        decoded_image_to_media_data(image)
     }
 }
 
-fn require_libjpeg_result<T>(decoded: Option<T>, required: bool) -> Result<Option<T>> {
-    if required && decoded.is_none() {
+fn ensure_fallback_allowed(
+    backend: &str,
+    reason: BackendDecline,
+    backend_required: bool,
+) -> Result<()> {
+    if backend_required {
         anyhow::bail!(
-            "libjpeg-turbo was required by {REQUIRE_LIBJPEG_TURBO_TEST_ENV}, but the JPEG would \
-             have fallen back to image::ImageReader"
+            "{backend} was required by {REQUIRE_LIBJPEG_TURBO_TEST_ENV}, but the input would have \
+             fallen back to image::ImageReader: {reason}"
         );
     }
+    Ok(())
+}
+
+fn decode_required_backend(
+    backend: &dyn ImageDecodeBackend,
+    request: ImageDecodeRequest<'_>,
+) -> Result<DecodedImage> {
+    match backend.try_decode(request)? {
+        ImageDecodeOutcome::Decoded(image) => Ok(image),
+        ImageDecodeOutcome::NotHandled(reason) => {
+            anyhow::bail!("{} did not handle the input: {reason}", backend.name())
+        }
+    }
+}
+
+fn decoded_image_to_media_data(image: DecodedImage) -> Result<DecodedMediaData> {
+    let channels = image.pixel_format.channels();
+    let color_type = image.pixel_format.color_type();
+    let shape = (image.height as usize, image.width as usize, channels);
+    let array = Array3::from_shape_vec(shape, image.pixels)?;
+    let mut decoded: DecodedMediaData = array.try_into()?;
+    decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
+        format: Some(image.source_format),
+        color_type,
+        layout: ImageLayout::HWC,
+    }));
     Ok(decoded)
 }
 
 impl ImageDecoder {
     pub(crate) fn warn_if_libjpeg_unavailable(&self) {
-        if self.enable_libjpeg && !jpeg_turbo::available() {
+        if self.enable_libjpeg
+            && turbojpeg_backend().availability() == BackendAvailability::Unavailable
+        {
             LIBJPEG_TURBO_UNAVAILABLE_WARNING.call_once(|| {
                 if std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some() {
                     tracing::warn!(
@@ -177,6 +218,7 @@ impl ImageDecoder {
 mod tests {
     use super::super::super::rdma::DataType;
     use super::*;
+    use crate::preprocessor::media::jpeg_turbo;
     use image::{DynamicImage, ImageBuffer};
     use rstest::rstest;
     use std::io::Cursor;
@@ -376,28 +418,38 @@ mod tests {
     }
 
     #[test]
-    fn test_libjpeg_is_disabled_by_default() {
+    fn test_libjpeg_is_enabled_by_default() {
         let decoder = ImageDecoder::default();
-        assert!(!decoder.enable_libjpeg);
+        assert!(decoder.enable_libjpeg);
 
         let decoder: ImageDecoder = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(!decoder.enable_libjpeg);
-    }
-
-    #[test]
-    fn test_config_can_enable_libjpeg() {
-        let decoder: ImageDecoder =
-            serde_json::from_value(serde_json::json!({"enable_libjpeg": true})).unwrap();
         assert!(decoder.enable_libjpeg);
     }
 
     #[test]
-    fn test_required_libjpeg_rejects_fallback() {
-        let error = require_libjpeg_result::<()>(None, true).unwrap_err();
-        assert!(error.to_string().contains(REQUIRE_LIBJPEG_TURBO_TEST_ENV));
+    fn test_config_can_disable_libjpeg() {
+        let decoder: ImageDecoder =
+            serde_json::from_value(serde_json::json!({"enable_libjpeg": false})).unwrap();
+        assert!(!decoder.enable_libjpeg);
+    }
 
-        assert!(require_libjpeg_result::<()>(None, false).unwrap().is_none());
-        assert_eq!(require_libjpeg_result(Some(1_u8), true).unwrap(), Some(1));
+    #[test]
+    fn test_required_libjpeg_rejects_fallback() {
+        let error = ensure_fallback_allowed(
+            turbojpeg_backend().name(),
+            BackendDecline::DecodeFailed,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(REQUIRE_LIBJPEG_TURBO_TEST_ENV));
+        assert!(
+            ensure_fallback_allowed(
+                turbojpeg_backend().name(),
+                BackendDecline::DecodeFailed,
+                false,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
