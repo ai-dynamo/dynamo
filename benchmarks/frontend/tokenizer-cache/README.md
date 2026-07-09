@@ -44,7 +44,7 @@ Compare the two AIPerf summaries written under
 - Tokenizer cache: explicitly disabled with `DYN_TOKENIZER_CACHE=0`, or enabled
   with `DYN_TOKENIZER_CACHE=1` and a 1 GiB budget.
 - Mockers: four workers on every CPU except CPU 0, with a 1,000,000x speedup
-  ratio.
+  ratio and a 1,024-token KV-cache block size.
 - Discovery and transport: file discovery, TCP requests, and ZMQ events.
 - Model: `Qwen/Qwen3-0.6B`.
 - Workload: all 336 entries from

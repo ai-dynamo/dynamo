@@ -24,6 +24,7 @@ taskset -c "$OTHER_CORES" python -m dynamo.mocker \
     --model-path "$MODEL" \
     --num-workers 4 \
     --speedup-ratio 1000000 \
+    --block-size 1024 \
     --discovery-backend file \
     --request-plane tcp \
     --event-plane zmq &
