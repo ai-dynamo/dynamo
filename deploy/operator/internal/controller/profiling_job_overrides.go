@@ -369,9 +369,9 @@ func applyPodSpecOverrides(spec *corev1.PodSpec, overrides *corev1.PodSpec) {
 	spec.Volumes = mergeNamedSlice(spec.Volumes, overrides.Volumes, func(v corev1.Volume) string { return v.Name })
 	spec.InitContainers = mergeNamedSlice(spec.InitContainers, overrides.InitContainers, func(c corev1.Container) string { return c.Name })
 
-	if len(overrides.Containers) > 0 && len(spec.Containers) > 0 {
-		if profilerOverride := profilerContainerOverride(overrides.Containers); profilerOverride != nil {
-			applyContainerOverrides(&spec.Containers[0], profilerOverride)
+	if profilerOverride := profilerContainerOverride(overrides.Containers); profilerOverride != nil {
+		if idx := findContainerIndex(spec.Containers, ContainerNameProfiler); idx >= 0 {
+			applyContainerOverrides(&spec.Containers[idx], profilerOverride)
 		}
 	}
 	if outputCopierOverride := findContainerOverride(overrides.Containers, ContainerNameOutputCopier); outputCopierOverride != nil {
