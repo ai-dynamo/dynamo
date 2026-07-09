@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 
 import pytest
 
@@ -16,6 +17,23 @@ from .replay_utils import _write_trace_and_args
 # aiconfigurator.sdk.engine (Phase 1.5 compile_engine API). Skip if absent —
 # PyPI aiconfigurator releases predating PR #1200 don't ship it.
 pytest.importorskip("aiconfigurator.sdk.engine")
+
+# Some tests below run a full offline replay, which builds the AIC latency engine
+# entirely in Rust (create_aic_callback -> build_aic_engine). That path does NOT go
+# through the Python create_session seam these tests monkeypatch, and the real
+# engine build downloads the model's config.json from HuggingFace — unavailable in
+# the unit/pre_merge tier (no network, no perf DB; fake model paths 404). They were
+# skipped via importorskip until aiconfigurator 0.10.0 shipped sdk.engine; the bump
+# un-skips them and exposes the dead fake. Gate them until they're rewritten against
+# the Rust callback path. Track: https://github.com/ai-dynamo/dynamo/issues/11387.
+requires_aic_engine = pytest.mark.skipif(
+    not os.environ.get("DYNAMO_RUN_AIC_INTEGRATION"),
+    reason=(
+        "drives the Rust AIC engine build (build_aic_engine), which needs a real "
+        "model + perf DB and hits HuggingFace; set DYNAMO_RUN_AIC_INTEGRATION=1 to "
+        "run. Rewrite against the Rust callback path (see issue #11387)."
+    ),
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -66,6 +84,11 @@ def test_load_engine_args_estimates_aic_blocks(monkeypatch):
             "moe_tp_size": None,
             "moe_ep_size": None,
             "attention_dp_size": None,
+            "gemm_dtype": None,
+            "moe_dtype": None,
+            "fmha_dtype": None,
+            "kv_cache_dtype": None,
+            "comm_dtype": None,
         }
     ]
 
@@ -132,6 +155,7 @@ def test_resolve_aic_blocks_scales_engine_pool_by_attention_dp(monkeypatch):
     assert _resolve(None) == 1000  # unset -> per-rank unchanged
 
 
+@requires_aic_engine
 def test_programmatic_replay_estimates_unset_aic_blocks(monkeypatch):
     calls = []
 
@@ -197,6 +221,7 @@ def test_programmatic_replay_estimates_unset_aic_blocks(monkeypatch):
     ]
 
 
+@requires_aic_engine
 def test_planner_bridge_materializes_unset_aic_blocks(tmp_path, monkeypatch):
     calls = []
 

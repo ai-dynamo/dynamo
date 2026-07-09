@@ -6,7 +6,8 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-from aiconfigurator.sdk.task import TaskConfig, TaskRunner
+from aiconfigurator.cli.main import _execute_tasks
+from aiconfigurator.sdk.task_v2 import Task
 
 from .scoring import _pick_best_record
 from .search import optimize_dense_agg_with_replay, optimize_dense_disagg_with_replay
@@ -29,18 +30,32 @@ def compare_aic_and_replay_disagg(
             "requestCount and concurrency"
         )
 
-    aic_task = TaskConfig(
+    # v2 disagg Task forbids top-level worker fields; fan the shared worker spec
+    # out to both prefill_* and decode_* roles.
+    aic_task = Task(
         serving_mode="disagg",
-        model_path=spec.engine.model,
-        system_name=str(spec.hardware.gpuSku),
-        backend_name=spec.engine.backend.value,
+        prefill_model_path=spec.engine.model,
+        decode_model_path=spec.engine.model,
+        prefill_system_name=str(spec.hardware.gpuSku),
+        decode_system_name=str(spec.hardware.gpuSku),
+        prefill_backend_name=spec.engine.backend.value,
+        decode_backend_name=spec.engine.backend.value,
         total_gpus=spec.hardware.totalGpus,
         isl=spec.workload.isl,
         osl=spec.workload.osl,
         **spec.sla.aic_task_kwargs(),
     )
-    aic_result = TaskRunner().run(aic_task)
-    aic_df = aic_result.get("pareto_df", pd.DataFrame())
+    # v2 splits sweeping (Task.run → raw feasible candidates) from picking; route
+    # through the CLI helper to recover the Pareto frontier that the old
+    # TaskRunner().run(...)["pareto_df"] produced. _execute_tasks raises SystemExit
+    # when nothing is SLA-feasible — treat that as an empty frontier.
+    try:
+        _, _, pareto_fronts, _, _ = _execute_tasks({"disagg": aic_task}, mode="default")
+        aic_df = pareto_fronts.get("disagg")
+        if aic_df is None:
+            aic_df = pd.DataFrame()
+    except SystemExit:
+        aic_df = pd.DataFrame()
 
     replay_spec = spec.model_copy(
         update={"router": spec.router.model_copy(update={"mode": "round_robin"})}

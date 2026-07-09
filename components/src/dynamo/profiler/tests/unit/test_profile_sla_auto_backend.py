@@ -21,17 +21,17 @@ pytestmark = [
 
 def test_autoscale_sim_resolves_auto_to_default() -> None:
     """_run_autoscale_sim must resolve 'auto' to _DEFAULT_NAIVE_BACKEND before
-    constructing TaskConfig, since BackendName('auto') is not a valid enum value.
+    constructing the Task, since BackendName('auto') is not a valid enum value.
     """
     import inspect
 
     from dynamo.profiler.rapid import _run_autoscale_sim
 
     src = inspect.getsource(_run_autoscale_sim)
-    # The function must guard against "auto" before TaskConfig is constructed.
+    # The function must guard against "auto" before the Task is constructed.
     assert (
         'backend == "auto"' in src
-    ), "_run_autoscale_sim must resolve backend='auto' before constructing TaskConfig"
+    ), "_run_autoscale_sim must resolve backend='auto' before constructing the Task"
     assert (
         "_DEFAULT_NAIVE_BACKEND" in src
     ), "_run_autoscale_sim must fall back to _DEFAULT_NAIVE_BACKEND when backend='auto'"
