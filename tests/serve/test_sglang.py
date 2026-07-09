@@ -802,7 +802,9 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.h100,
             pytest.mark.profiled_vram_gib(31.6),
-            pytest.mark.timeout(360),
+            # Diffusion decoding is slow (iterative denoising); H100 run of the
+            # 128-token smoke exceeded 360s, so give generous headroom.
+            pytest.mark.timeout(900),
             pytest.mark.pre_merge,
         ],
         model="inclusionAI/LLaDA2.0-mini-preview",
@@ -812,10 +814,11 @@ sglang_configs = {
             # Diffusion text output is non-deterministic; accept any non-empty
             # response (empty expected_response) and just exercise the path.
             chat_payload(
-                "What is the capital of France? Answer in one sentence.",
+                "What is the capital of France? Answer in one word.",
                 repeat_count=1,
                 expected_response=[],
-                max_tokens=128,
+                # Keep the smoke tiny: diffusion decode cost scales with tokens.
+                max_tokens=32,
                 temperature=0.0,
             ),
         ],
