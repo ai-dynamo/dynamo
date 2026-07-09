@@ -112,7 +112,7 @@ func sortedV1Alpha1ServiceNames(
 
 // readGroveClusterTopology reads a topology by name. ctx and mgr must not be nil.
 func readGroveClusterTopology(ctx context.Context, mgr ctrl.Manager, name string) (*clusterTopologyInfo, error) {
-	clusterTopology := &grovev1alpha1.ClusterTopology{}
+	clusterTopology := &grovev1alpha1.ClusterTopologyBinding{}
 	if err := mgr.GetClient().Get(ctx, types.NamespacedName{Name: name}, clusterTopology); err != nil {
 		return nil, err
 	}
