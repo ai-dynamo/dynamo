@@ -23,17 +23,8 @@ from source → **wire up UCX + NIXL** → `ENTRYPOINT bash`.
 
 ### UCX + NIXL
 
-**What these are:** **NIXL** is NVIDIA's library for moving KV-cache data quickly between GPUs or
-nodes — Dynamo needs it for *disaggregated serving* (running prefill on one GPU and decode on
-another). **UCX** is the lower-level networking library NIXL is built on top of.
-
-**The key idea:** how each image gets NIXL/UCX depends on its **base image** (the `FROM …` layer it
-starts from). Two of our bases already ship NIXL/UCX; the third does not — so we handle them
-differently. Think of it like moving in:
-
-- The **vllm** and **sglang** bases are a *furnished apartment* — NIXL/UCX are already installed, so
-  we just point Dynamo at them.
-- The **trtllm** base is an *empty apartment* — we build and install NIXL/UCX ourselves.
+How UCX/NIXL are provided depends on the **base image**: two of the three bases already ship them,
+the trtllm base does not.
 
 | Image | Base ships NIXL/UCX? | What the Dockerfile does |
 |-------|----------------------|--------------------------|
