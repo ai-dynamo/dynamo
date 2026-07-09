@@ -179,47 +179,52 @@ async def test_chat_completion_success(http_server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "msg_to_code",
+    ("trigger", "status", "expected_message", "expected_type"),
     [
-        (MSG_CONTAINS_ERROR, 400),
-        (MSG_CONTAINS_STATUS_ERROR, 415),
-        (MSG_CONTAINS_INVALID_ARGUMENT, 400),
-        (MSG_CONTAINS_INTERNAL_ERROR, 500),
+        (MSG_CONTAINS_ERROR, 400, MSG_CONTAINS_ERROR, "Bad Request"),
+        (
+            MSG_CONTAINS_STATUS_ERROR,
+            415,
+            MSG_CONTAINS_STATUS_ERROR,
+            "Unsupported Media Type",
+        ),
+        (
+            MSG_CONTAINS_INVALID_ARGUMENT,
+            400,
+            f"ValueError: {MSG_CONTAINS_INVALID_ARGUMENT}",
+            "Bad Request",
+        ),
+        (
+            MSG_CONTAINS_INTERNAL_ERROR,
+            500,
+            "Internal server error",
+            "Internal Server Error",
+        ),
     ],
 )
 @pytest.mark.forked
-async def test_chat_completion_http_error(http_server, msg_to_code: tuple[str, int]):
+async def test_chat_completion_http_error(
+    http_server,
+    trigger: str,
+    status: int,
+    expected_message: str,
+    expected_type: str,
+):
     """Tests that backend exceptions map to the expected HTTP responses."""
     base_url, model_name = http_server
     url = f"{base_url}/v1/chat/completions"
     data = {
         "model": model_name,
-        "messages": [{"role": "user", "content": msg_to_code[0]}],
+        "messages": [{"role": "user", "content": trigger}],
     }
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=10)
     ) as session:
         async with session.post(url, json=data) as response:
-            assert response.status == msg_to_code[1]
+            assert response.status == status
             error_json = await response.json()
-            if msg_to_code[0] == MSG_CONTAINS_ERROR:
-                # 4xx HTTP protocol contract: backend message is forwarded
-                # to the client so callers can react to validation errors.
-                assert MSG_CONTAINS_ERROR in str(error_json)
-            elif msg_to_code[0] == MSG_CONTAINS_STATUS_ERROR:
-                # Same 4xx contract via the duck-typed `.status` path.
-                assert MSG_CONTAINS_STATUS_ERROR in str(error_json)
-            elif msg_to_code[0] == MSG_CONTAINS_INVALID_ARGUMENT:
-                # Python ValueError maps to typed Backend(InvalidArgument),
-                # including when raised before the async generator's first yield.
-                assert error_json["type"] == "Bad Request"
-                assert error_json["code"] == 400
-                assert MSG_CONTAINS_INVALID_ARGUMENT in error_json["message"]
-            elif msg_to_code[0] == MSG_CONTAINS_INTERNAL_ERROR:
-                # Unknown 5xx details remain server-side.
-                assert "simulated internal error" not in str(error_json).lower()
-                assert error_json == {
-                    "message": "Internal server error",
-                    "type": "Internal Server Error",
-                    "code": 500,
-                }
+            assert error_json == {
+                "message": expected_message,
+                "type": expected_type,
+                "code": status,
+            }
