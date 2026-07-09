@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
     if standalone {
         let selector_cfg = EppStandaloneConfig::from_env()?;
         tracing::info!(
-            pool_name = %selector_cfg.pool_name,
+            inference_pool_name = %selector_cfg.inference_pool_name,
             model_name = %selector_cfg.model_name,
             block_size = selector_cfg.block_size,
             "Parsed standalone selector configuration"
