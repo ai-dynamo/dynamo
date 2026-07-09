@@ -11,4 +11,4 @@ mod worker_query_state;
 mod worker_query_transport;
 
 pub(crate) use subscriber::start_subscriber;
-pub(crate) use worker_query_endpoint::start_worker_kv_query_endpoint;
+pub(crate) use worker_query_endpoint::{start_worker_kv_query_endpoint, worker_kv_query_endpoint};

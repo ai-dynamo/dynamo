@@ -866,6 +866,7 @@ pub(crate) struct KvEventPublisher {
     kv_block_size: usize,
     dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
+    local_indexer_endpoint: Option<Endpoint>,
 }
 
 impl KvEventPublisher {
@@ -878,13 +879,18 @@ impl KvEventPublisher {
     pub(crate) fn from_arc(
         inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
         dp_rank: DpRank,
+        event_loop: PyObject,
     ) -> Self {
         let kv_block_size = inner.kv_block_size() as usize;
+        let local_indexer_endpoint = inner
+            .local_indexer_query_endpoint()
+            .map(|inner| Endpoint { inner, event_loop });
         Self {
             inner,
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
+            local_indexer_endpoint,
         }
     }
 }
@@ -934,6 +940,8 @@ impl KvEventPublisher {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
+        let event_loop = endpoint.event_loop.clone();
+
         // Extract component from endpoint
         let component = endpoint.inner.component().clone();
 
@@ -949,12 +957,22 @@ impl KvEventPublisher {
             )
             .map_err(to_pyerr)?;
 
+        let local_indexer_endpoint = inner
+            .local_indexer_query_endpoint()
+            .map(|inner| Endpoint { inner, event_loop });
+
         Ok(Self {
             inner: inner.into(),
             kv_block_size,
             dp_rank,
             warning_count: Arc::new(AtomicU32::new(0)),
+            local_indexer_endpoint,
         })
+    }
+
+    #[getter]
+    fn local_indexer_endpoint(&self) -> Option<Endpoint> {
+        self.local_indexer_endpoint.clone()
     }
 
     #[allow(clippy::too_many_arguments)]

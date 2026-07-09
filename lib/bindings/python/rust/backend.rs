@@ -1328,7 +1328,7 @@ impl LLMEngine for PyLLMEngine {
             let list = bound.downcast::<pyo3::types::PyList>()?;
             let mut sources = Vec::with_capacity(list.len());
             for item in list.iter() {
-                sources.push(depythonize_kv_source(&item)?);
+                sources.push(depythonize_kv_source(&item, self.core.event_loop.clone())?);
             }
             Ok(sources)
         })
@@ -1523,7 +1523,10 @@ fn class_name(item: &Bound<'_, PyAny>) -> PyResult<String> {
     item.get_type().getattr("__name__")?.extract::<String>()
 }
 
-fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
+fn depythonize_kv_source(
+    item: &Bound<'_, PyAny>,
+    event_loop: Arc<PyObject>,
+) -> PyResult<RsKvEventSource> {
     let cls = class_name(item)?;
     let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
     match cls.as_str() {
@@ -1543,8 +1546,13 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
             // round-trip is needed here.
             let on_ready_obj: PyObject = item.getattr("on_ready")?.into();
             let on_ready: OnPublisherReady = Box::new(move |publisher| {
+                let event_loop = event_loop.clone();
                 Python::with_gil(|py| -> PyResult<()> {
-                    let py_pub = Py::new(py, PyKvEventPublisher::from_arc(publisher, dp_rank))?;
+                    let event_loop = event_loop.bind(py).clone().unbind();
+                    let py_pub = Py::new(
+                        py,
+                        PyKvEventPublisher::from_arc(publisher, dp_rank, event_loop),
+                    )?;
                     on_ready_obj.call1(py, (py_pub,))?;
                     Ok(())
                 })

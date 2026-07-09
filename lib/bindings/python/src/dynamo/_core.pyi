@@ -1089,6 +1089,13 @@ class KvEventPublisher:
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
         """
 
+    @property
+    def local_indexer_endpoint(self) -> Optional[Endpoint]:
+        """
+        Worker-local KV indexer query endpoint created by this publisher, if enabled.
+        """
+        ...
+
     def publish_stored(
         self,
         token_ids: List[int],
