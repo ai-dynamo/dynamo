@@ -14,7 +14,8 @@ use dynamo_kv_router::{
     },
     protocols::{DpRank, OverlapScores, WorkerId, WorkerWithDpRank},
 };
-use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
+use dynamo_runtime::component::Component;
+use tokio_util::sync::CancellationToken;
 
 use super::lookup::HashInput;
 
@@ -29,6 +30,7 @@ impl SideIndexer {
         component: &Component,
         kv_router_config: &KvRouterConfig,
         block_size: u32,
+        cancellation_token: CancellationToken,
     ) -> Option<Self> {
         let ttl_secs = kv_router_config.router_predicted_ttl_secs?;
         let prune_config = Some(PruneConfig {
@@ -51,7 +53,6 @@ impl SideIndexer {
             )));
         }
 
-        let cancellation_token = component.drt().primary_token();
         Some(Self::KvIndexer(KvIndexer::new_with_pruning(
             cancellation_token,
             block_size,
