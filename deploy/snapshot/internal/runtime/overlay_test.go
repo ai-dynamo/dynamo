@@ -330,6 +330,76 @@ func TestRootfsArtifactValidation(t *testing.T) {
 			want: "parse rootfs completion metadata",
 		},
 		{
+			name: "metadata symlink",
+			setup: func(t *testing.T, checkpoint string) {
+				t.Helper()
+				if err := os.Mkdir(
+					filepath.Join(checkpoint, rootfsDirectoryFilename),
+					0755,
+				); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(t.TempDir(), rootfsMetadataFilename)
+				writeTestJSON(t, target, rootfsMetadata{
+					Format:              rootfsDirectoryFormat,
+					Version:             rootfsDirectoryVersion,
+					DeletedFilesPresent: true,
+				})
+				if err := os.Symlink(
+					target,
+					filepath.Join(checkpoint, rootfsMetadataFilename),
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "open rootfs completion metadata",
+		},
+		{
+			name: "metadata fifo",
+			setup: func(t *testing.T, checkpoint string) {
+				t.Helper()
+				if err := os.Mkdir(
+					filepath.Join(checkpoint, rootfsDirectoryFilename),
+					0755,
+				); err != nil {
+					t.Fatal(err)
+				}
+				if err := unix.Mkfifo(
+					filepath.Join(checkpoint, rootfsMetadataFilename),
+					0600,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "is not valid completion metadata",
+		},
+		{
+			name: "metadata oversized",
+			setup: func(t *testing.T, checkpoint string) {
+				t.Helper()
+				if err := os.Mkdir(
+					filepath.Join(checkpoint, rootfsDirectoryFilename),
+					0755,
+				); err != nil {
+					t.Fatal(err)
+				}
+				file, err := os.Create(
+					filepath.Join(checkpoint, rootfsMetadataFilename),
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := file.Truncate(maxMetadataSize + 1); err != nil {
+					file.Close()
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "is not valid completion metadata",
+		},
+		{
 			name: "unsupported version",
 			setup: func(t *testing.T, checkpoint string) {
 				t.Helper()
@@ -372,6 +442,58 @@ func TestRootfsArtifactValidation(t *testing.T) {
 				t.Fatalf("ApplyRootfsDiff() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestApplyRootfsRestoreAnchorsCheckpointGeneration(t *testing.T) {
+	parent := t.TempDir()
+	checkpoint := filepath.Join(parent, "checkpoint")
+	replacement := filepath.Join(parent, "replacement")
+	if err := os.Mkdir(checkpoint, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(replacement, 0755); err != nil {
+		t.Fatal(err)
+	}
+	firstSource := t.TempDir()
+	writeTestFile(t, filepath.Join(firstSource, "generation-one"), nil)
+	writeTestFile(t, filepath.Join(firstSource, ".wh.old-one"), nil)
+	captureRootfsForTest(t, firstSource, checkpoint)
+	secondSource := t.TempDir()
+	writeTestFile(t, filepath.Join(secondSource, "generation-two"), []byte("two"))
+	writeTestFile(t, filepath.Join(secondSource, "generation-two-extra"), nil)
+	writeTestFile(t, filepath.Join(secondSource, ".wh.old-two"), nil)
+	writeTestFile(t, filepath.Join(secondSource, ".wh.old-two-extra"), nil)
+	captureRootfsForTest(t, secondSource, replacement)
+
+	target := t.TempDir()
+	writeTestFile(t, filepath.Join(target, "old-one"), nil)
+	writeTestFile(t, filepath.Join(target, "old-two"), nil)
+	writeTestFile(t, filepath.Join(target, "old-two-extra"), nil)
+	ctx := newReplaceCheckpointContext(checkpoint, replacement)
+	if err := ApplyRootfsRestore(ctx, checkpoint, target, 2, testr.New(t)); err != nil {
+		t.Fatalf("ApplyRootfsRestore: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "generation-one")); err != nil {
+		t.Fatalf("first-generation rootfs artifact was not applied: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "generation-two")); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
+		t.Fatalf("mixed in second-generation rootfs artifact: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "old-one")); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
+		t.Fatalf("first-generation deletion was not applied: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "old-two")); err != nil {
+		t.Fatalf("mixed in second-generation deletion: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "old-two-extra")); err != nil {
+		t.Fatalf("mixed in second-generation extra deletion: %v", err)
 	}
 }
 
@@ -626,6 +748,44 @@ func TestApplyRootfsRejectsDestinationSymlink(t *testing.T) {
 }
 
 func TestApplyDeletedFiles(t *testing.T) {
+	t.Run("pre-cancelled", func(t *testing.T) {
+		checkpoint := t.TempDir()
+		target := t.TempDir()
+		writeTestFile(t, filepath.Join(target, "keep"), nil)
+		writeDeletedFiles(t, checkpoint, []string{"keep"})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := ApplyDeletedFiles(ctx, checkpoint, target, testr.New(t))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ApplyDeletedFiles() error = %v, want context.Canceled", err)
+		}
+		if _, err := os.Stat(filepath.Join(target, "keep")); err != nil {
+			t.Fatalf("file was deleted after cancellation: %v", err)
+		}
+	})
+
+	t.Run("cancels during directory removal", func(t *testing.T) {
+		checkpoint := t.TempDir()
+		target := t.TempDir()
+		tree := filepath.Join(target, "old")
+		if err := os.Mkdir(tree, 0755); err != nil {
+			t.Fatal(err)
+		}
+		first := filepath.Join(tree, "a")
+		second := filepath.Join(tree, "b")
+		writeTestFile(t, first, nil)
+		writeTestFile(t, second, nil)
+		writeDeletedFiles(t, checkpoint, []string{"old"})
+		ctx := newCancelWhenRemovedContext(first)
+		err := ApplyDeletedFiles(ctx, checkpoint, target, testr.New(t))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ApplyDeletedFiles() error = %v, want context.Canceled", err)
+		}
+		if _, err := os.Stat(second); err != nil {
+			t.Fatalf("deletion continued after cancellation: %v", err)
+		}
+	})
+
 	t.Run("deletes without following symlink", func(t *testing.T) {
 		checkpoint := t.TempDir()
 		target := t.TempDir()
@@ -635,7 +795,12 @@ func TestApplyDeletedFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		writeDeletedFiles(t, checkpoint, []string{"link/secret"})
-		err := ApplyDeletedFiles(checkpoint, target, testr.New(t))
+		err := ApplyDeletedFiles(
+			context.Background(),
+			checkpoint,
+			target,
+			testr.New(t),
+		)
 		if err == nil {
 			t.Fatal("ApplyDeletedFiles followed an intermediate symlink")
 		}
@@ -649,7 +814,12 @@ func TestApplyDeletedFiles(t *testing.T) {
 		target := t.TempDir()
 		writeTestFile(t, filepath.Join(target, "keep"), nil)
 		writeDeletedFiles(t, checkpoint, []string{"keep", "../escape"})
-		if err := ApplyDeletedFiles(checkpoint, target, testr.New(t)); err == nil {
+		if err := ApplyDeletedFiles(
+			context.Background(),
+			checkpoint,
+			target,
+			testr.New(t),
+		); err == nil {
 			t.Fatal("ApplyDeletedFiles accepted path traversal")
 		}
 		if _, err := os.Stat(filepath.Join(target, "keep")); err != nil {
@@ -665,7 +835,12 @@ func TestApplyDeletedFiles(t *testing.T) {
 		}
 		writeTestFile(t, filepath.Join(target, "old", "nested", "file"), nil)
 		writeDeletedFiles(t, checkpoint, []string{"old"})
-		if err := ApplyDeletedFiles(checkpoint, target, testr.New(t)); err != nil {
+		if err := ApplyDeletedFiles(
+			context.Background(),
+			checkpoint,
+			target,
+			testr.New(t),
+		); err != nil {
 			t.Fatalf("ApplyDeletedFiles: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(target, "old")); !errors.Is(err, os.ErrNotExist) {
@@ -828,7 +1003,7 @@ func TestDeletedFilesLimits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := parseDeletedFiles(data); err == nil ||
+		if _, err := parseDeletedFiles(context.Background(), data); err == nil ||
 			!strings.Contains(err.Error(), "unsafe rootfs path") {
 			t.Fatalf("parseDeletedFiles() error = %v", err)
 		}
@@ -845,7 +1020,10 @@ func TestDeletedFilesLimits(t *testing.T) {
 			data.WriteString(`"a"`)
 		}
 		data.WriteByte(']')
-		if _, err := parseDeletedFiles([]byte(data.String())); err == nil ||
+		if _, err := parseDeletedFiles(
+			context.Background(),
+			[]byte(data.String()),
+		); err == nil ||
 			!strings.Contains(err.Error(), "more than") {
 			t.Fatalf("parseDeletedFiles() error = %v", err)
 		}
@@ -1087,6 +1265,63 @@ func newCancelWhenPathPrefixExistsContext(
 func (c *cancelWhenPathExistsContext) Err() error {
 	if c.exists() {
 		c.once.Do(c.cancel)
+	}
+	return c.Context.Err()
+}
+
+type replaceCheckpointContext struct {
+	context.Context
+	checkpoint  string
+	replacement string
+	once        sync.Once
+	err         error
+}
+
+func newReplaceCheckpointContext(
+	checkpoint string,
+	replacement string,
+) context.Context {
+	return &replaceCheckpointContext{
+		Context:     context.Background(),
+		checkpoint:  checkpoint,
+		replacement: replacement,
+	}
+}
+
+func (c *replaceCheckpointContext) Err() error {
+	c.once.Do(func() {
+		retired := c.checkpoint + ".retired"
+		if err := os.Rename(c.checkpoint, retired); err != nil {
+			c.err = err
+			return
+		}
+		c.err = os.Rename(c.replacement, c.checkpoint)
+	})
+	return c.err
+}
+
+type cancelWhenRemovedContext struct {
+	context.Context
+	cancel context.CancelFunc
+	path   string
+	seen   bool
+}
+
+func newCancelWhenRemovedContext(path string) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &cancelWhenRemovedContext{
+		Context: ctx,
+		cancel:  cancel,
+		path:    path,
+	}
+}
+
+func (c *cancelWhenRemovedContext) Err() error {
+	_, err := os.Lstat(c.path)
+	if err == nil {
+		c.seen = true
+	} else if c.seen && errors.Is(err, os.ErrNotExist) {
+		c.cancel()
 	}
 	return c.Context.Err()
 }

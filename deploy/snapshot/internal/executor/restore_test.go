@@ -39,6 +39,24 @@ func TestNSRestoreArgsIncludeRootFSWorkers(t *testing.T) {
 	}
 }
 
+func TestExecuteRestorePreCanceledStopsBeforeCRIU(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := executeRestore(
+		ctx,
+		nil,
+		&types.CheckpointManifest{},
+		RestoreOptions{
+			CheckpointPath: t.TempDir(),
+			RootFSWorkers:  1,
+		},
+		testr.New(t),
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("executeRestore() error = %v, want context.Canceled", err)
+	}
+}
+
 func (r *restoreFakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
 	r.resolvedID = id
 	return 123, &specs.Spec{}, nil

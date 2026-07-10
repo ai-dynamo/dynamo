@@ -187,22 +187,73 @@ func ApplyRootfsDiff(
 	workers int,
 	log logr.Logger,
 ) error {
+	checkpointFD, err := openRoot(checkpointPath, false)
+	if err != nil {
+		return fmt.Errorf("open checkpoint directory: %w", err)
+	}
+	defer unix.Close(checkpointFD)
+	rootfsFD, metadata, _, err := readRootfsRestoreArtifacts(ctx, checkpointFD)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(rootfsFD)
+	return applyRootfsDiff(ctx, rootfsFD, targetRoot, workers, metadata, log)
+}
+
+// ApplyRootfsRestore applies rootfs additions and deletions from one checkpoint
+// directory generation.
+func ApplyRootfsRestore(
+	ctx context.Context,
+	checkpointPath string,
+	targetRoot string,
+	workers int,
+	log logr.Logger,
+) error {
+	checkpointFD, err := openRoot(checkpointPath, false)
+	if err != nil {
+		return fmt.Errorf("open checkpoint directory: %w", err)
+	}
+	defer unix.Close(checkpointFD)
+	rootfsFD, metadata, deleted, err := readRootfsRestoreArtifacts(
+		ctx,
+		checkpointFD,
+	)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(rootfsFD)
+	if err := applyRootfsDiff(
+		ctx,
+		rootfsFD,
+		targetRoot,
+		workers,
+		metadata,
+		log,
+	); err != nil {
+		return fmt.Errorf("rootfs diff failed: %w", err)
+	}
+	if err := applyDeletedFiles(ctx, deleted, targetRoot, log); err != nil {
+		return fmt.Errorf("deleted files failed: %w", err)
+	}
+	return nil
+}
+
+func applyRootfsDiff(
+	ctx context.Context,
+	rootfsFD int,
+	targetRoot string,
+	workers int,
+	metadata rootfsMetadata,
+	log logr.Logger,
+) error {
 	effective, err := effectiveRootfsWorkers(workers)
 	if err != nil {
 		return err
 	}
-	metadata, err := readRootfsMetadata(checkpointPath)
-	if err != nil {
-		return err
-	}
-	if _, err := readDeletedFiles(checkpointPath, metadata.Deletions); err != nil {
-		return err
-	}
-	artifactPath := filepath.Join(checkpointPath, rootfsDirectoryFilename)
 	start := time.Now()
-	entries, stats, _, err := scanRootfs(
+	entries, stats, _, err := scanRootfsFD(
 		ctx,
-		artifactPath,
+		rootfsFD,
 		types.OverlaySettings{},
 		nil,
 		false,
@@ -219,9 +270,9 @@ func ApplyRootfsDiff(
 			stats.bytes,
 		)
 	}
-	if err := copyRootfs(
+	if err := copyRootfsFD(
 		ctx,
-		artifactPath,
+		rootfsFD,
 		targetRoot,
 		entries,
 		effective,
@@ -415,6 +466,26 @@ func scanRootfs(
 	return entries, stats, deleted, nil
 }
 
+func scanRootfsFD(
+	ctx context.Context,
+	rootFD int,
+	exclusions types.OverlaySettings,
+	bindMountDests []string,
+	skipWhiteouts bool,
+) ([]rootfsEntry, rootfsStats, []string, error) {
+	return scanRootfs(
+		ctx,
+		rootfsFDPath(rootFD),
+		exclusions,
+		bindMountDests,
+		skipWhiteouts,
+	)
+}
+
+func rootfsFDPath(fd int) string {
+	return fmt.Sprintf("/proc/self/fd/%d/.", fd)
+}
+
 func statxPath(entryPath string, stat *unix.Statx_t) error {
 	return unix.Statx(
 		unix.AT_FDCWD,
@@ -540,6 +611,24 @@ func copyRootfs(
 		return fmt.Errorf("open source root: %w", err)
 	}
 	defer unix.Close(sourceFD)
+	return copyRootfsFD(
+		ctx,
+		sourceFD,
+		targetRoot,
+		entries,
+		workers,
+		skipExisting,
+	)
+}
+
+func copyRootfsFD(
+	ctx context.Context,
+	sourceFD int,
+	targetRoot string,
+	entries []rootfsEntry,
+	workers int,
+	skipExisting bool,
+) error {
 	targetFD, err := openRoot(targetRoot, true)
 	if err != nil {
 		return fmt.Errorf("open target root: %w", err)
@@ -1024,64 +1113,99 @@ func writeAtomicFile(
 	return nil
 }
 
-func readRootfsMetadata(checkpointPath string) (rootfsMetadata, error) {
-	artifactPath := filepath.Join(checkpointPath, rootfsDirectoryFilename)
-	metadataPath := filepath.Join(checkpointPath, rootfsMetadataFilename)
-	artifactInfo, artifactErr := os.Lstat(artifactPath)
-	metadataInfo, metadataErr := os.Lstat(metadataPath)
-	artifactMissing := errors.Is(artifactErr, os.ErrNotExist)
-	metadataMissing := errors.Is(metadataErr, os.ErrNotExist)
+func readRootfsRestoreArtifacts(
+	ctx context.Context,
+	checkpointFD int,
+) (int, rootfsMetadata, []string, error) {
+	if err := ctx.Err(); err != nil {
+		return -1, rootfsMetadata{}, nil, err
+	}
+	rootfsFD, artifactErr := openBeneath(
+		checkpointFD,
+		rootfsDirectoryFilename,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NONBLOCK,
+	)
+	metadataFD, metadataErr := unix.Openat(
+		checkpointFD,
+		rootfsMetadataFilename,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK,
+		0,
+	)
+	artifactMissing := errors.Is(artifactErr, unix.ENOENT)
+	metadataMissing := errors.Is(metadataErr, unix.ENOENT)
 	if artifactMissing && metadataMissing {
-		return rootfsMetadata{}, fmt.Errorf(
+		return -1, rootfsMetadata{}, nil, fmt.Errorf(
 			"missing rootfs directory artifact %s and completion metadata %s; legacy tar checkpoints are unsupported",
 			rootfsDirectoryFilename,
 			rootfsMetadataFilename,
 		)
 	}
 	if artifactErr != nil && !artifactMissing {
-		return rootfsMetadata{}, fmt.Errorf(
+		if metadataErr == nil {
+			unix.Close(metadataFD)
+		}
+		return -1, rootfsMetadata{}, nil, fmt.Errorf(
 			"inspect rootfs directory artifact: %w",
 			artifactErr,
 		)
 	}
 	if metadataErr != nil && !metadataMissing {
-		return rootfsMetadata{}, fmt.Errorf(
-			"inspect rootfs completion metadata: %w",
+		if artifactErr == nil {
+			unix.Close(rootfsFD)
+		}
+		return -1, rootfsMetadata{}, nil, fmt.Errorf(
+			"open rootfs completion metadata: %w",
 			metadataErr,
 		)
 	}
 	if artifactMissing || metadataMissing {
-		return rootfsMetadata{}, fmt.Errorf(
+		if artifactErr == nil {
+			unix.Close(rootfsFD)
+		}
+		if metadataErr == nil {
+			unix.Close(metadataFD)
+		}
+		return -1, rootfsMetadata{}, nil, fmt.Errorf(
 			"incomplete rootfs directory artifact: %s and %s must both exist",
 			rootfsDirectoryFilename,
 			rootfsMetadataFilename,
 		)
 	}
-	if !artifactInfo.IsDir() {
-		return rootfsMetadata{}, fmt.Errorf(
-			"%s is not a directory",
-			rootfsDirectoryFilename,
-		)
+	metadata, err := readRootfsMetadataFD(ctx, metadataFD)
+	unix.Close(metadataFD)
+	if err != nil {
+		unix.Close(rootfsFD)
+		return -1, rootfsMetadata{}, nil, err
 	}
-	if !metadataInfo.Mode().IsRegular() || metadataInfo.Size() > maxMetadataSize {
-		return rootfsMetadata{}, fmt.Errorf(
-			"%s is not valid completion metadata",
-			rootfsMetadataFilename,
-		)
+	deleted, err := readDeletedFilesAt(ctx, checkpointFD, metadata.Deletions)
+	if err != nil {
+		unix.Close(rootfsFD)
+		return -1, rootfsMetadata{}, nil, err
 	}
-	metadataFD, err := unix.Open(
-		metadataPath,
-		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK,
-		0,
+	return rootfsFD, metadata, deleted, nil
+}
+
+func readRootfsMetadata(checkpointPath string) (rootfsMetadata, error) {
+	checkpointFD, err := openRoot(checkpointPath, false)
+	if err != nil {
+		return rootfsMetadata{}, fmt.Errorf("open checkpoint directory: %w", err)
+	}
+	defer unix.Close(checkpointFD)
+	rootfsFD, metadata, _, err := readRootfsRestoreArtifacts(
+		context.Background(),
+		checkpointFD,
 	)
 	if err != nil {
-		return rootfsMetadata{}, fmt.Errorf(
-			"open rootfs completion metadata: %w",
-			err,
-		)
+		return rootfsMetadata{}, err
 	}
-	file := os.NewFile(uintptr(metadataFD), metadataPath)
-	defer file.Close()
+	unix.Close(rootfsFD)
+	return metadata, nil
+}
+
+func readRootfsMetadataFD(
+	ctx context.Context,
+	metadataFD int,
+) (rootfsMetadata, error) {
 	var metadataStat unix.Stat_t
 	if err := unix.Fstat(metadataFD, &metadataStat); err != nil {
 		return rootfsMetadata{}, fmt.Errorf(
@@ -1097,21 +1221,18 @@ func readRootfsMetadata(checkpointPath string) (rootfsMetadata, error) {
 			rootfsMetadataFilename,
 		)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, maxMetadataSize+1))
+	data, err := readAllContext(ctx, fdReader(metadataFD), maxMetadataSize)
 	if err != nil {
 		return rootfsMetadata{}, fmt.Errorf(
 			"read rootfs completion metadata: %w",
 			err,
 		)
 	}
-	if len(data) > maxMetadataSize {
-		return rootfsMetadata{}, fmt.Errorf(
-			"rootfs completion metadata exceeds %d bytes",
-			maxMetadataSize,
-		)
-	}
 	var metadata rootfsMetadata
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := json.NewDecoder(contextReader{
+		ctx:    ctx,
+		reader: bytes.NewReader(data),
+	})
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&metadata); err != nil {
 		return rootfsMetadata{}, fmt.Errorf(
@@ -1121,6 +1242,9 @@ func readRootfsMetadata(checkpointPath string) (rootfsMetadata, error) {
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return rootfsMetadata{}, ctxErr
+		}
 		return rootfsMetadata{}, fmt.Errorf(
 			"parse rootfs completion metadata: trailing data",
 		)
@@ -1186,16 +1310,31 @@ func publishDeletedFiles(
 
 // ApplyDeletedFiles removes entries without following symlinks or mounts.
 func ApplyDeletedFiles(
+	ctx context.Context,
 	checkpointPath string,
 	targetRoot string,
 	log logr.Logger,
 ) error {
-	metadata, err := readRootfsMetadata(checkpointPath)
+	checkpointFD, err := openRoot(checkpointPath, false)
+	if err != nil {
+		return fmt.Errorf("open checkpoint directory: %w", err)
+	}
+	defer unix.Close(checkpointFD)
+	rootfsFD, _, deleted, err := readRootfsRestoreArtifacts(ctx, checkpointFD)
 	if err != nil {
 		return err
 	}
-	deleted, err := readDeletedFiles(checkpointPath, metadata.Deletions)
-	if err != nil {
+	unix.Close(rootfsFD)
+	return applyDeletedFiles(ctx, deleted, targetRoot, log)
+}
+
+func applyDeletedFiles(
+	ctx context.Context,
+	deleted []string,
+	targetRoot string,
+	log logr.Logger,
+) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	rootFD, err := openRoot(targetRoot, true)
@@ -1204,16 +1343,22 @@ func ApplyDeletedFiles(
 	}
 	defer unix.Close(rootFD)
 	for _, entryPath := range deleted {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := validateRelativePath(entryPath); err != nil {
 			return fmt.Errorf("invalid deleted file entry: %w", err)
 		}
-		if err := validateRemoval(rootFD, entryPath); err != nil {
+		if err := validateRemoval(ctx, rootFD, entryPath); err != nil {
 			return fmt.Errorf("validate deletion %s: %w", entryPath, err)
 		}
 	}
 	count := 0
 	for _, entryPath := range deleted {
-		removed, err := removeBeneath(rootFD, entryPath)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		removed, err := removeBeneath(ctx, rootFD, entryPath)
 		if err != nil {
 			return fmt.Errorf("delete %s: %w", entryPath, err)
 		}
@@ -1234,6 +1379,17 @@ func readDeletedFiles(
 		return nil, fmt.Errorf("open checkpoint directory: %w", err)
 	}
 	defer unix.Close(checkpointFD)
+	return readDeletedFilesAt(context.Background(), checkpointFD, expected)
+}
+
+func readDeletedFilesAt(
+	ctx context.Context,
+	checkpointFD int,
+	expected int64,
+) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	deletedFD, err := unix.Openat(
 		checkpointFD,
 		deletedFilesFilename,
@@ -1243,8 +1399,7 @@ func readDeletedFiles(
 	if err != nil {
 		return nil, fmt.Errorf("open deleted files metadata: %w", err)
 	}
-	file := os.NewFile(uintptr(deletedFD), deletedFilesFilename)
-	defer file.Close()
+	defer unix.Close(deletedFD)
 	var stat unix.Stat_t
 	if err := unix.Fstat(deletedFD, &stat); err != nil {
 		return nil, fmt.Errorf("stat deleted files metadata: %w", err)
@@ -1257,17 +1412,11 @@ func readDeletedFiles(
 			deletedFilesFilename,
 		)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, maxDeletedFilesSize+1))
+	data, err := readAllContext(ctx, fdReader(deletedFD), maxDeletedFilesSize)
 	if err != nil {
 		return nil, fmt.Errorf("read deleted files metadata: %w", err)
 	}
-	if len(data) > maxDeletedFilesSize {
-		return nil, fmt.Errorf(
-			"deleted files metadata exceeds %d bytes",
-			maxDeletedFilesSize,
-		)
-	}
-	deleted, err := parseDeletedFiles(data)
+	deleted, err := parseDeletedFiles(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -1281,8 +1430,57 @@ func readDeletedFiles(
 	return deleted, nil
 }
 
-func parseDeletedFiles(data []byte) ([]string, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+type fdReader int
+
+func (fd fdReader) Read(buffer []byte) (int, error) {
+	read, err := unix.Read(int(fd), buffer)
+	if read == 0 && err == nil {
+		return 0, io.EOF
+	}
+	return read, err
+}
+
+func (r contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buffer)
+}
+
+func readAllContext(
+	ctx context.Context,
+	reader io.Reader,
+	limit int64,
+) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(
+		contextReader{ctx: ctx, reader: reader},
+		limit+1,
+	))
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("metadata exceeds %d bytes", limit)
+	}
+	return data, nil
+}
+
+func parseDeletedFiles(ctx context.Context, data []byte) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(contextReader{
+		ctx:    ctx,
+		reader: bytes.NewReader(data),
+	})
 	token, err := decoder.Token()
 	if err != nil {
 		return nil, fmt.Errorf("parse deleted files: %w", err)
@@ -1292,6 +1490,9 @@ func parseDeletedFiles(data []byte) ([]string, error) {
 	}
 	deleted := make([]string, 0)
 	for decoder.More() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(deleted) >= maxDeletedFiles {
 			return nil, fmt.Errorf(
 				"parse deleted files: more than %d entries",
@@ -1307,17 +1508,30 @@ func parseDeletedFiles(data []byte) ([]string, error) {
 		}
 		deleted = append(deleted, entryPath)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, err := decoder.Token(); err != nil {
 		return nil, fmt.Errorf("parse deleted files: %w", err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, fmt.Errorf("parse deleted files: trailing data")
 	}
 	return deleted, nil
 }
 
-func validateRemoval(rootFD int, entryPath string) error {
+func validateRemoval(
+	ctx context.Context,
+	rootFD int,
+	entryPath string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	parentFD, name, err := openParent(rootFD, entryPath)
 	if errors.Is(err, unix.ENOENT) {
 		return nil
@@ -1326,10 +1540,17 @@ func validateRemoval(rootFD int, entryPath string) error {
 		return err
 	}
 	defer unix.Close(parentFD)
-	return walkDirectoryAt(parentFD, name, false)
+	return walkDirectoryAt(ctx, parentFD, name, false)
 }
 
-func removeBeneath(rootFD int, entryPath string) (bool, error) {
+func removeBeneath(
+	ctx context.Context,
+	rootFD int,
+	entryPath string,
+) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	parentFD, name, err := openParent(rootFD, entryPath)
 	if errors.Is(err, unix.ENOENT) {
 		return false, nil
@@ -1338,6 +1559,9 @@ func removeBeneath(rootFD int, entryPath string) (bool, error) {
 		return false, err
 	}
 	defer unix.Close(parentFD)
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	var stat unix.Stat_t
 	if err := unix.Fstatat(
 		parentFD,
@@ -1350,15 +1574,29 @@ func removeBeneath(rootFD int, entryPath string) (bool, error) {
 		return false, err
 	}
 	if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
-		if err := walkDirectoryAt(parentFD, name, true); err != nil {
+		if err := walkDirectoryAt(ctx, parentFD, name, true); err != nil {
+			return false, err
+		}
+		if err := ctx.Err(); err != nil {
 			return false, err
 		}
 		return true, unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
 	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	return true, unix.Unlinkat(parentFD, name, 0)
 }
 
-func walkDirectoryAt(parentFD int, name string, remove bool) error {
+func walkDirectoryAt(
+	ctx context.Context,
+	parentFD int,
+	name string,
+	remove bool,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var stat unix.Stat_t
 	if err := unix.Fstatat(
 		parentFD,
@@ -1379,20 +1617,36 @@ func walkDirectoryAt(parentFD int, name string, remove bool) error {
 	}
 	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
-	names, err := file.Readdirnames(-1)
-	if err != nil {
-		return err
+	names := make([]string, 0)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		batch, err := file.Readdirnames(256)
+		names = append(names, batch...)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
 	}
 	sort.Strings(names)
 	if !remove {
 		for _, child := range names {
-			if err := walkDirectoryAt(fd, child, false); err != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := walkDirectoryAt(ctx, fd, child, false); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 	for _, child := range names {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		var childStat unix.Stat_t
 		if err := unix.Fstatat(
 			fd,
@@ -1403,14 +1657,22 @@ func walkDirectoryAt(parentFD int, name string, remove bool) error {
 			return err
 		}
 		if childStat.Mode&unix.S_IFMT == unix.S_IFDIR {
-			if err := walkDirectoryAt(fd, child, true); err != nil {
+			if err := walkDirectoryAt(ctx, fd, child, true); err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
 				return err
 			}
 			if err := unix.Unlinkat(fd, child, unix.AT_REMOVEDIR); err != nil {
 				return err
 			}
-		} else if err := unix.Unlinkat(fd, child, 0); err != nil {
-			return err
+		} else {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := unix.Unlinkat(fd, child, 0); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

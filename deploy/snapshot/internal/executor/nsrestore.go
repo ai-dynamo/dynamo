@@ -102,18 +102,17 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 
 	// Apply rootfs diff inside the namespace (target root is /)
 	nsrestoreSetupStart := time.Now()
-	if err := snapshotruntime.ApplyRootfsDiff(
+	if err := snapshotruntime.ApplyRootfsRestore(
 		ctx,
 		opts.CheckpointPath,
 		"/",
 		opts.RootFSWorkers,
 		log,
 	); err != nil {
-		return nil, 0, fmt.Errorf("rootfs diff failed: %w", err)
+		return nil, 0, err
 	}
-
-	if err := snapshotruntime.ApplyDeletedFiles(opts.CheckpointPath, "/", log); err != nil {
-		return nil, 0, fmt.Errorf("deleted files failed: %w", err)
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
 	}
 
 	// Unmount placeholder's /dev/shm so CRIU can recreate tmpfs with checkpointed content
@@ -132,6 +131,9 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	}()
 
 	// CRIU restore
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	criuRestoreStart := time.Now()
 	restoredPID, err := criu.ExecuteRestore(criuOpts, m, opts.CheckpointPath, log)
 	if err != nil {
