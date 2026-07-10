@@ -1,0 +1,405 @@
+syntax = "proto3";
+package vllm;
+
+import "google/protobuf/struct.proto";
+
+
+service Generate {
+  // Generates text given a prompt
+  rpc Generate (GenerateRequest) returns (GenerateResponse) {}
+  // Generates text given a prompt, streaming the outputs
+  rpc GenerateStream (GenerateRequest) returns (stream GenerateResponse) {}
+
+  rpc GetEngineInfo (GetEngineInfoRequest) returns (EngineInfo) {}
+  rpc GetModelInfo (GetModelInfoRequest) returns (ModelInfo) {}
+  rpc Health (HealthRequest) returns (HealthResponse) {}
+  rpc Abort (AbortRequest) returns (AbortResponse) {}
+  rpc Drain (DrainRequest) returns (DrainResponse) {}
+
+  rpc LoadLora (LoadLoraRequest) returns (LoadLoraResponse) {}
+  rpc UnloadLora (UnloadLoraRequest) returns (UnloadLoraResponse) {}
+  rpc ListLoras (ListLorasRequest) returns (ListLorasResponse) {}
+
+  rpc GetKvConnectorInfo (GetKvConnectorInfoRequest) returns (KvConnectorInfo) {}
+  rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) {}
+}
+
+// ======================================================================================
+// Generate Request
+// ======================================================================================
+
+message GenerateRequest {
+  string request_id = 1;
+  string model = 2;
+
+  oneof prompt {
+    string text = 3;
+    TokenIds token_ids = 4;
+  }
+
+  // Temperature, defaults to model-specific default or 0
+  optional float temperature = 5;
+  // Parameters controlling random sampling, not applicable if temperature == 0
+  RandomSampling sampling = 6;
+  // Parameters for conditionally penalizing/boosting
+  // candidate tokens during decoding
+  DecodingParameters decoding = 7;
+  // Parameters controlling when generation should stop
+  StoppingCriteria stopping = 8;
+  // Flags to control what is returned in the response
+  ResponseOptions response = 9;
+  // Parameters controlling KV cache/distribution
+  KVCacheParameters kv = 10;
+
+  // Truncate prompt tokens; default (0) means no truncation
+  uint32 truncate_prompt_tokens = 11;
+
+  int32 priority = 12;
+
+  // Multimodal inputs aligned with placeholder markers in token_ids.
+  repeated MediaItem media = 13;
+  // Loaded LoRA name; empty selects the base model.
+  string lora_name = 14;
+  // Router-selected data-parallel rank.
+  optional uint32 data_parallel_rank = 15;
+}
+
+message RandomSampling {
+  uint32 num_sequences = 1;  // "n", default (0) means 1
+  uint32 top_k = 2;  // 0 means default
+  float top_p = 3;  // 0 means default
+  float min_p = 4;  // 0 means default
+  optional int64 seed = 5;
+}
+
+message DecodingParameters {
+  // Penalties
+  float presence_penalty = 1;  // Default (0.0) means no penalty
+  float frequency_penalty = 2;  // Default (0.0) means no penalty
+  float repetition_penalty = 3;  // Default (0.0) means no penalty
+  map<uint32, float> logit_bias = 4;
+  repeated uint32 allowed_token_ids = 5;
+
+  message StringChoices {
+    repeated string choices = 1;
+  }
+
+  // Control structured outputs
+  oneof structured_output {
+    string json = 6;
+    string regex = 7;
+    StringChoices choice = 8;
+    string grammar = 9;
+    bool json_object = 10;
+    string structural_tag = 11;
+  }
+}
+
+message StoppingCriteria {
+  // Default (0) is currently 20
+  uint32 max_new_tokens = 1;
+  // Default (0) means no minimum
+  uint32 min_new_tokens = 2;
+
+  repeated uint32 stop_token_ids = 3;
+  repeated string stop_strings = 4;
+  bool include_stop_strings = 5;
+
+  bool ignore_eos = 6;
+}
+
+message ResponseOptions {
+  // Prompt options
+  bool prompt_token_ids = 1;
+  bool prompt_logprobs = 2;
+  optional CandidateTokens prompt_candidates = 3;
+
+  // Output options; output_text defaults to true
+  optional bool output_text = 4;
+  bool output_token_ids = 5;
+  bool output_logprobs = 6;
+  optional CandidateTokens output_candidates = 7;
+}
+
+message KVCacheParameters {
+  bool bypass_prefix_cache = 1;
+  string cache_salt = 2;
+
+  // KV Connector transfer parameters
+  google.protobuf.Struct kv_transfer_params = 3;
+}
+
+// Controls which extra candidate tokens at each position should be returned
+message CandidateTokens {
+  oneof select {
+    uint32 top_n = 1;
+    TokenIds token_ids = 2;
+    bool all = 3;
+  }
+}
+
+// ======================================================================================
+// Generate Response
+// ======================================================================================
+
+message GenerateResponse {
+  // Only present in first response
+  optional PromptInfo prompt_info = 1;
+  SequenceOutput outputs = 2;
+}
+
+message SequenceOutput {
+  // Index of output sequence for num_sequences > 1.
+  uint32 index = 1;
+
+  string text = 2;
+  uint32 num_tokens = 3;  // Number of tokens in this chunk
+  repeated uint32 token_ids = 4;  // If requested
+  repeated float logprobs = 5;  // If requested
+  repeated uint32 ranks = 6;  // If logprobs were requested
+  repeated CandidateTokenInfo candidate_tokens = 7; // If requested
+
+  // Only present in final output for this sequence
+  optional FinishInfo finish_info = 8;
+}
+
+// Prompt info, returned in the first response
+message PromptInfo {
+  uint32 num_prompt_tokens = 1;
+  repeated uint32 token_ids = 2;  // If requested
+  repeated float logprobs = 3;  // If requested
+  repeated uint32 ranks = 4;  // If logprobs were requested
+  repeated CandidateTokenInfo candidate_tokens = 5;
+}
+
+// Finish info, returned in the final response
+message FinishInfo {
+  uint32 num_output_tokens = 1;
+
+  enum FinishReason {
+    NOT_FINISHED = 0;  // Possibly more tokens to be streamed
+    LENGTH = 1;  // Finished due to length constraint
+    STOP = 2;  // Stop string/token or EOS encountered
+    ABORTED = 3;  // Request aborted/cancelled
+  }
+
+  FinishReason finish_reason = 2;
+  // One of these will be set when finish_reason == STOP
+  oneof stop_reason {
+    uint32 stop_token_id = 3;
+    uint32 eos_token_id = 4;
+    string stop_string = 5;
+  }
+
+  google.protobuf.Struct kv_transfer_params = 6;
+  //uint64 seed = 7;
+}
+
+// Info for candidate tokens other than the input/sampled
+// token at a given position
+message CandidateTokenInfo {
+  message TokenInfo {
+    uint32 id = 1;
+    float logprob = 2;
+    uint32 rank = 3;
+    //    string text = 4;
+    //    bytes token_bytes = 5;
+  }
+  // Candidate token infos at this position
+  repeated TokenInfo tokens = 1;
+}
+
+// Token ids used for prompt
+message TokenIds {
+  repeated uint32 ids = 1;
+}
+
+// ======================================================================================
+// Media
+// ======================================================================================
+
+enum Modality {
+  MODALITY_UNSPECIFIED = 0;
+  MODALITY_IMAGE = 1;
+  MODALITY_VIDEO = 2;
+  MODALITY_AUDIO = 3;
+}
+
+message MediaItem {
+  Modality modality = 1;
+  oneof source {
+    string url = 2;
+    string data_uri = 3;
+    bytes raw_bytes = 4;
+  }
+  string mime_type = 5;
+  string uuid = 6;
+}
+
+// ======================================================================================
+// Discovery and lifecycle
+// ======================================================================================
+
+enum EngineRole {
+  ENGINE_ROLE_UNSPECIFIED = 0;
+  ENGINE_ROLE_AGGREGATED = 1;
+  ENGINE_ROLE_PREFILL = 2;
+  ENGINE_ROLE_DECODE = 3;
+}
+
+message GetEngineInfoRequest {}
+
+message EngineInfo {
+  string engine_name = 1;
+  string engine_version = 2;
+  string api_version = 3;
+  EngineRole role = 4;
+  string instance_id = 5;
+  repeated string supported_models = 6;
+  ParallelismInfo parallelism = 7;
+  KvConnectorInfo kv_connector = 8;
+}
+
+message ParallelismInfo {
+  uint32 tensor_parallel_size = 1;
+  uint32 pipeline_parallel_size = 2;
+  uint32 data_parallel_size = 3;
+  uint32 data_parallel_rank = 4;
+  uint32 data_parallel_start_rank = 5;
+}
+
+message GetModelInfoRequest {}
+
+message ModelInfo {
+  string model_id = 1;
+  string served_model_name = 2;
+  repeated string served_model_aliases = 3;
+  uint32 max_context_length = 4;
+  uint32 max_output_tokens = 5;
+  uint32 kv_block_size = 6;
+  uint64 total_kv_blocks = 7;
+  uint64 max_running_requests = 8;
+  uint64 max_batched_tokens = 9;
+  repeated string tokenizer_modes = 10;
+  uint32 max_loras = 11;
+
+  bool supports_text_input = 20;
+  bool supports_token_ids_input = 21;
+  bool supports_lora = 22;
+  bool supports_multimodal = 23;
+  string reasoning_parser = 24;
+  string tool_call_parser = 25;
+}
+
+message HealthRequest {
+  bool include_inference_probe = 1;
+  string model = 2;
+}
+
+message HealthResponse {
+  HealthState state = 1;
+  repeated HealthCheck checks = 2;
+}
+
+enum HealthState {
+  HEALTH_STATE_UNSPECIFIED = 0;
+  HEALTH_STATE_STARTING = 1;
+  HEALTH_STATE_READY = 2;
+  HEALTH_STATE_DEGRADED = 3;
+  HEALTH_STATE_DRAINING = 4;
+  HEALTH_STATE_NOT_READY = 5;
+}
+
+message HealthCheck {
+  string name = 1;
+  HealthState state = 2;
+  string message = 3;
+}
+
+message AbortRequest {
+  string request_id = 1;
+  bool abort_all = 2;
+}
+
+message AbortResponse {
+  AbortStatus status = 1;
+  string message = 2;
+}
+
+enum AbortStatus {
+  ABORT_STATUS_UNSPECIFIED = 0;
+  ABORT_STATUS_ABORTED = 1;
+  ABORT_STATUS_NOT_FOUND = 2;
+  ABORT_STATUS_ALREADY_FINISHED = 3;
+  ABORT_STATUS_UNSUPPORTED = 4;
+}
+
+message DrainRequest {}
+
+message DrainResponse {
+  DrainState state = 1;
+  uint32 in_flight_requests = 2;
+  string message = 3;
+}
+
+enum DrainState {
+  DRAIN_STATE_UNSPECIFIED = 0;
+  DRAIN_STATE_IN_PROGRESS = 1;
+  DRAIN_STATE_COMPLETE = 2;
+}
+
+// ======================================================================================
+// LoRA lifecycle
+// ======================================================================================
+
+message LoraAdapter {
+  int64 lora_id = 1;
+  string lora_name = 2;
+  string source_path = 3;
+}
+
+message LoadLoraRequest { LoraAdapter adapter = 1; }
+message LoadLoraResponse {
+  LoraAdapter adapter = 1;
+  bool already_loaded = 2;
+}
+message UnloadLoraRequest { string lora_name = 1; }
+message UnloadLoraResponse { LoraAdapter adapter = 1; }
+message ListLorasRequest {}
+message ListLorasResponse { repeated LoraAdapter adapters = 1; }
+
+// ======================================================================================
+// KV discovery
+// ======================================================================================
+
+message KvEndpoint {
+  string host = 1;
+  uint32 port = 2;
+  string protocol = 3;
+}
+
+message GetKvConnectorInfoRequest {}
+
+message KvConnectorInfo {
+  bool enabled = 1;
+  string transfer_backend = 2;
+  repeated KvEndpoint local_endpoints = 3;
+  repeated string supported_protocols = 4;
+  uint32 schema_version = 5;
+}
+
+message GetKvEventSourcesRequest {}
+message GetKvEventSourcesResponse { repeated KvEventSource sources = 1; }
+
+message KvEventSource {
+  string transport = 1;
+  KvEndpoint endpoint_addr = 2;
+  string topic = 3;
+  string replay_endpoint = 4;
+  uint32 data_parallel_rank = 5;
+  string encoding = 6;
+  uint32 schema_version = 7;
+  uint32 buffer_steps = 8;
+  uint32 hwm = 9;
+  uint32 max_queue_size = 10;
+}

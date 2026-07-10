@@ -64,6 +64,7 @@ fn setup_kv_publishers(
                     endpoint,
                     topic,
                     image_token_id,
+                    authoritative_dp_rank: Some(dp_rank),
                 }),
                 None,
             ),

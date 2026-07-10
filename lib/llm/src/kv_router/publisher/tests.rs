@@ -1065,6 +1065,7 @@ mod tests_startup_helpers {
                 endpoint.to_string(),
                 topic,
                 1,
+                None,
                 tx,
                 token,
                 4,
@@ -1278,7 +1279,7 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None)
+            start_zmq_listener(endpoint, topic, 1, None, tx, token, 4, next_event_id, None)
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -1339,6 +1340,115 @@ mod tests_startup_helpers {
         let dir = tempfile::tempdir().expect("failed to create temporary ZMQ directory");
         let endpoint = format!("ipc://{}", dir.path().join("events.sock").display());
         (dir, endpoint)
+    }
+
+    async fn dp_rank_after_listen(
+        wire_dp_rank: Option<i32>,
+        authoritative_dp_rank: Option<DpRank>,
+        worker_id: WorkerId,
+    ) -> DpRank {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let reserved_listener = reserve_open_port();
+        let endpoint = format!(
+            "tcp://127.0.0.1:{}",
+            reserved_listener
+                .local_addr()
+                .expect("failed to read reserved listener address")
+                .port()
+        );
+        drop(reserved_listener);
+        let token = dynamo_runtime::CancellationToken::new();
+        let next_event_id = Arc::new(AtomicU64::new(0));
+
+        let listener_handle = tokio::spawn({
+            let token = token.clone();
+            let endpoint = endpoint.clone();
+            start_zmq_listener(
+                endpoint,
+                String::new(),
+                worker_id,
+                authoritative_dp_rank,
+                tx,
+                token,
+                4,
+                next_event_id,
+                None,
+            )
+        });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let pub_socket = bind_pub_socket(&endpoint).await.unwrap();
+        let batch = KvEventBatch {
+            ts: 0.0,
+            events: vec![RawKvEvent::BlockStored {
+                block_hashes: vec![BlockHashValue::Unsigned(64)],
+                parent_block_hash: None,
+                token_ids: vec![4, 5, 6, 7],
+                block_size: 4,
+                medium: None,
+                lora_name: None,
+                block_mm_infos: None,
+                is_eagle: None,
+                group_idx: None,
+                kv_cache_spec_kind: None,
+                kv_cache_spec_sliding_window: None,
+            }],
+            data_parallel_rank: wire_dp_rank,
+        };
+        let payload = rmps::to_vec(&batch).unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut publish_interval = tokio::time::interval(Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        return event.expect("listener channel closed");
+                    }
+                    _ = publish_interval.tick() => {
+                        send_multipart(
+                            &pub_socket,
+                            vec![Vec::new(), 12u64.to_be_bytes().to_vec(), payload.clone()],
+                        )
+                        .await
+                        .expect("failed to send ZMQ test event");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for listener event");
+
+        token.cancel();
+        let _ = listener_handle.await;
+
+        let PlacementOwner::LocalWorker(worker) = event.placement.owner else {
+            panic!("expected LocalWorker placement owner");
+        };
+        worker.dp_rank
+    }
+
+    #[tokio::test]
+    async fn test_authoritative_dp_rank_overrides_collapsed_wire_rank() {
+        assert_eq!(dp_rank_after_listen(Some(0), Some(3), 1).await, 3);
+    }
+
+    #[tokio::test]
+    async fn test_wire_dp_rank_used_when_not_authoritative() {
+        assert_eq!(dp_rank_after_listen(Some(2), None, 1).await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_internal_dp_ranks_do_not_collapse() {
+        let mut ranks = Vec::new();
+        for rank in 0u32..4 {
+            ranks.push(dp_rank_after_listen(Some(0), Some(rank), 1).await);
+        }
+        ranks.sort_unstable();
+        assert_eq!(ranks, vec![0, 1, 2, 3]);
+    }
+
+    fn reserve_open_port() -> std::net::TcpListener {
+        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind probe listener")
     }
 
     //--------------------------------------------------------------------

@@ -44,17 +44,8 @@ const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
 const GRACE_PERIOD_ENV: &str = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS";
 
 /// Default drain budget: max time spent polling `is_quiescent` before cleanup.
-/// Capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
 const DEFAULT_DRAIN_TIMEOUT_S: f64 = 30.0;
 const DRAIN_TIMEOUT_ENV: &str = "DYN_PREFILL_DRAIN_TIMEOUT_S";
-/// Interval between `engine.is_quiescent()` polls during drain.
-const DRAIN_POLL_INTERVAL_S: f64 = 0.5;
-/// Cadence at which the drain loop emits a progress log.
-const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
-/// Budget reserved for `cleanup()` so the drain loop can't consume the whole
-/// graceful-shutdown deadline and trip the hard-exit that skips cleanup.
-const CLEANUP_RESERVE_S: f64 = 5.0;
-
 /// Operator override for the health-check canary, mirrors the Python helper
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
 const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
@@ -273,8 +264,22 @@ impl EngineKind {
         }
     }
 
+    async fn watch(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(engine) => engine.watch().await,
+            EngineKind::Raw(_) => std::future::pending::<Result<(), DynamoError>>().await,
+        }
+    }
+
+    pub(crate) async fn begin_drain(&self) -> Result<Option<bool>, DynamoError> {
+        match self {
+            EngineKind::Llm(engine) => engine.begin_drain().await,
+            EngineKind::Raw(_) => Ok(None),
+        }
+    }
+
     /// See [`LLMEngine::is_quiescent`].
-    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+    pub(crate) async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.is_quiescent().await,
             EngineKind::Raw(e) => e.is_quiescent().await,
@@ -490,7 +495,12 @@ impl Worker {
             tokio::pin!(inner_fut);
 
             tokio::select! {
-                result = &mut inner_fut => result,
+                result = &mut inner_fut => {
+                    if result.is_err() {
+                        shutdown_token.cancel();
+                    }
+                    result
+                },
                 _ = shutdown_token.cancelled() => {
                     let timeout = graceful_shutdown_timeout();
                     let grace = grace_period_secs();
@@ -520,8 +530,23 @@ impl Worker {
         let _ = signal_handle.await;
 
         // Final safety net: guarantee engine.cleanup() runs if start()
-        // succeeded. No-op if cleanup already ran via the orchestrator.
-        self.cleanup_once().await;
+        // succeeded. Errors before orchestration also cancel the shared token,
+        // so a stuck cleanup remains bounded by the shutdown timeout.
+        if shutdown_token.is_cancelled() {
+            let timeout = graceful_shutdown_timeout();
+            if tokio::time::timeout(timeout, self.cleanup_once())
+                .await
+                .is_err()
+            {
+                tracing::error!(
+                    "Final engine cleanup exceeded {}s; force-exiting with code 911",
+                    timeout.as_secs()
+                );
+                std::process::exit(911);
+            }
+        } else {
+            self.cleanup_once().await;
+        }
 
         outcome
     }
@@ -844,8 +869,8 @@ impl Worker {
                 model_type,
                 self.config.model_input,
                 None,
-                Some(worker_type),
-                needs,
+                Some(worker_type.clone()),
+                needs.clone(),
             )
             .await
             .map_err(|e| {
@@ -858,6 +883,29 @@ impl Worker {
 
         self.register_engine_controls(&endpoint).await?;
         self.register_engine_updates(&endpoint).await?;
+
+        if engine_config
+            .llm
+            .as_ref()
+            .is_some_and(|llm| llm.supports_lora)
+        {
+            let EngineKind::Llm(engine) = &self.engine else {
+                return Err(err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    "raw engines cannot advertise LoRA support",
+                ));
+            };
+            let controller = crate::lora::LoraController::new(
+                engine.clone(),
+                endpoint.clone(),
+                local_model.clone(),
+                model_type,
+                Some(worker_type),
+                needs,
+            )
+            .await?;
+            crate::lora::register_updates(&endpoint, controller);
+        }
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -963,7 +1011,13 @@ impl Worker {
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
 
-        tokio::select! {
+        let engine_watch = {
+            let engine = self.engine.clone();
+            async move { engine.watch().await }
+        };
+        tokio::pin!(engine_watch);
+
+        let shutdown_result = tokio::select! {
             biased;
             result = &mut serve_fut => {
                 match result {
@@ -974,22 +1028,47 @@ impl Worker {
                         tracing::info!(
                             "Endpoint completed gracefully; running shutdown orchestration"
                         );
+                        shutdown.cancel();
+                        None
                     }
-                    // Serve errored; cleanup_once in run() is the safety net.
+                    // Route serve failures through the same bounded
+                    // orchestration as signals and liveness failures.
                     Err(e) => {
-                        return Err(err(
+                        shutdown.cancel();
+                        Some(Err(err(
                             ErrorType::Backend(BackendError::Unknown),
                             format!("serve: {e}"),
-                        ));
+                        )))
                     }
                 }
             }
             _ = shutdown.cancelled() => {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
+                None
             }
-        }
+            result = &mut engine_watch => {
+                match result.as_ref() {
+                    Ok(()) => {
+                        tracing::warn!(
+                            "Engine liveness watcher requested shutdown; running graceful orchestration"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Engine liveness watcher failed; running graceful orchestration"
+                        );
+                    }
+                }
+                shutdown.cancel();
+                Some(result)
+            }
+        };
 
         self.orchestrator_steps(&endpoint).await;
+        if let Some(result) = shutdown_result {
+            result?;
+        }
         Ok(())
     }
 
@@ -1022,67 +1101,14 @@ impl Worker {
         self.cleanup_once().await;
     }
 
-    /// Hold a prefill worker open until its KV transfers finish, so cleanup
-    /// doesn't free GPU memory a decode peer is still pulling.
-    ///
-    /// Prefill-only: aggregated/decode workers return immediately. Otherwise
-    /// poll [`is_quiescent`](LLMEngine::is_quiescent) every
-    /// `DRAIN_POLL_INTERVAL_S`, exiting on `Some(true)` or when the budget
-    /// expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S` capped at
-    /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
     async fn drain_until_idle_or_deadline(&self) {
-        if !self.config.disaggregation_mode.is_prefill() {
-            return;
-        }
-        let configured = drain_timeout_secs();
-        let cap = (graceful_shutdown_timeout().as_secs_f64() - CLEANUP_RESERVE_S).max(0.0);
-        let budget = configured.min(cap);
-        let deadline = std::time::Instant::now() + Duration::from_secs_f64(budget);
-        let start = std::time::Instant::now();
-        let mut last_heartbeat = start;
-        let mut announced = false;
-        loop {
-            match self.engine.is_quiescent().await {
-                // Quiescent: in-flight transfers done, safe to exit drain.
-                Ok(Some(true)) => {
-                    if announced {
-                        tracing::info!(
-                            "drain: exited (quiescent, elapsed={:.1}s)",
-                            start.elapsed().as_secs_f64()
-                        );
-                    }
-                    return;
-                }
-                // Busy (Some(false)) or no introspection (None): keep polling.
-                Ok(Some(false)) | Ok(None) => {}
-                Err(e) => {
-                    tracing::debug!(error = %e, "is_quiescent raised; treating as not quiescent")
-                }
-            }
-            if !announced {
-                // First non-quiescent poll: announce once that we're waiting.
-                tracing::info!(
-                    "drain: waiting for prefill to quiesce; polling is_quiescent (timeout={:.1}s)",
-                    budget
-                );
-                announced = true;
-            }
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    "drain: timed out at {:.1}s; proceeding with cleanup",
-                    start.elapsed().as_secs_f64()
-                );
-                return;
-            }
-            if last_heartbeat.elapsed().as_secs_f64() >= DRAIN_HEARTBEAT_INTERVAL_S {
-                tracing::info!(
-                    "drain: heartbeat (elapsed={:.1}s)",
-                    start.elapsed().as_secs_f64()
-                );
-                last_heartbeat = std::time::Instant::now();
-            }
-            tokio::time::sleep(Duration::from_secs_f64(DRAIN_POLL_INTERVAL_S)).await;
-        }
+        crate::drain::until_idle(
+            &self.engine,
+            self.config.disaggregation_mode,
+            Duration::from_secs_f64(drain_timeout_secs()),
+            graceful_shutdown_timeout(),
+        )
+        .await;
     }
 }
 
@@ -1638,6 +1664,7 @@ async fn build_local_model(
         total_kv_blocks: llm.total_kv_blocks,
         max_num_seqs: llm.max_num_seqs,
         max_num_batched_tokens: llm.max_num_batched_tokens,
+        max_gpu_lora_count: llm.max_loras,
         data_parallel_size: llm.data_parallel_size.unwrap_or(1),
         data_parallel_start_rank: llm.data_parallel_start_rank.unwrap_or(0),
         tool_call_parser: config.tool_call_parser.clone(),
@@ -1931,6 +1958,7 @@ mod tests {
                 total_kv_blocks: Some(100),
                 max_num_seqs: Some(16),
                 max_num_batched_tokens: Some(8192),
+                max_loras: Some(8),
                 ..Default::default()
             }),
             ..EngineConfig::default()
@@ -1945,6 +1973,7 @@ mod tests {
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
         assert_eq!(runtime_config.max_num_seqs, Some(16));
         assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));
+        assert_eq!(runtime_config.max_gpu_lora_count, Some(8));
         assert_eq!(runtime_config.tool_call_parser.as_deref(), Some("kimi_k2"));
         assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
         assert!(!runtime_config.exclude_tools_when_tool_choice_none);
@@ -2393,8 +2422,7 @@ mod tests {
         Worker::new(engine, WorkerConfig::default())
     }
 
-    /// Prefill worker — the drain loop only runs for prefill (the framework
-    /// skips aggregated/decode), so drain-ordering tests must use this.
+    /// Prefill worker used to cover the legacy `None` quiescence fallback.
     fn worker_with_prefill(engine: Arc<dyn LLMEngine>) -> Worker {
         Worker::new(
             engine,
@@ -2498,6 +2526,7 @@ mod tests {
     /// into a shared log so tests can assert on sequencing.
     struct OrderingMockEngine {
         log: Arc<StdMutex<Vec<&'static str>>>,
+        begin_drain_should_fail: bool,
         is_quiescent_should_fail: bool,
     }
 
@@ -2506,7 +2535,18 @@ mod tests {
             let log = Arc::new(StdMutex::new(Vec::new()));
             let eng = Arc::new(Self {
                 log: log.clone(),
+                begin_drain_should_fail: false,
                 is_quiescent_should_fail,
+            });
+            (eng, log)
+        }
+
+        fn with_begin_drain_failure() -> (Arc<Self>, Arc<StdMutex<Vec<&'static str>>>) {
+            let log = Arc::new(StdMutex::new(Vec::new()));
+            let eng = Arc::new(Self {
+                log: log.clone(),
+                begin_drain_should_fail: true,
+                is_quiescent_should_fail: false,
             });
             (eng, log)
         }
@@ -2531,6 +2571,18 @@ mod tests {
             DynamoError,
         > {
             unreachable!("not used in orchestrator tests")
+        }
+
+        async fn begin_drain(&self) -> Result<Option<bool>, DynamoError> {
+            self.log.lock().unwrap().push("begin_drain");
+            if self.begin_drain_should_fail {
+                Err(err(
+                    ErrorType::Backend(BackendError::Unknown),
+                    "synthetic begin_drain failure",
+                ))
+            } else {
+                Ok(Some(false))
+            }
         }
 
         async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
@@ -2564,8 +2616,8 @@ mod tests {
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
             recorded,
-            vec!["start", "is_quiescent", "cleanup"],
-            "is_quiescent (drain) must run before cleanup"
+            vec!["start", "begin_drain", "is_quiescent", "cleanup"],
+            "admission must stop and quiescence must be checked before cleanup"
         );
     }
 
@@ -2581,7 +2633,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let saved = std::env::var(DRAIN_TIMEOUT_ENV).ok();
         // SAFETY: tests in this mod serialize env access via ENV_LOCK.
-        unsafe { std::env::set_var(DRAIN_TIMEOUT_ENV, "0") };
+        unsafe { std::env::set_var(DRAIN_TIMEOUT_ENV, "0.02") };
 
         let (engine, log) = OrderingMockEngine::new(true); // is_quiescent fails
         let mut worker = worker_with_prefill(engine);
@@ -2591,7 +2643,7 @@ mod tests {
 
         // is_quiescent ran at least once (and errored), then cleanup ran.
         let recorded = log.lock().unwrap().clone();
-        assert!(recorded.starts_with(&["start", "is_quiescent"]));
+        assert!(recorded.starts_with(&["start", "begin_drain", "is_quiescent"]));
         assert_eq!(recorded.last().copied(), Some("cleanup"));
         assert_eq!(worker.state, LifecycleState::Stopped);
 
@@ -2605,11 +2657,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_steps_skip_drain_for_non_prefill() {
-        // Drain is prefill-only: an aggregated (or decode) worker must go
-        // straight to cleanup without ever polling is_quiescent, regardless of
-        // what the engine would report. Guards the mode-gate invariant that
-        // makes the `Ok(None)` default safe (only prefill workers drain).
+    async fn shutdown_steps_poll_sidecar_quiescence_for_non_prefill() {
+        // Sidecars return explicit in-progress state, so every role waits for
+        // active generation to finish before cleanup.
         let (engine, log) = OrderingMockEngine::new(false);
         let mut worker = worker_with(engine); // WorkerConfig::default() => Aggregated
         worker.start_engine(0).await.unwrap();
@@ -2619,8 +2669,23 @@ mod tests {
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
             recorded,
-            vec!["start", "cleanup"],
-            "non-prefill workers must not poll is_quiescent (no drain)"
+            vec!["start", "begin_drain", "is_quiescent", "cleanup"],
+            "non-prefill sidecars must wait for active requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_steps_poll_after_begin_drain_failure() {
+        let (engine, log) = OrderingMockEngine::with_begin_drain_failure();
+        let mut worker = worker_with(engine); // aggregated
+        worker.start_engine(0).await.unwrap();
+
+        worker.run_engine_shutdown_steps_with_grace(0.0).await;
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["start", "begin_drain", "is_quiescent", "cleanup"],
+            "a failed admission-stop RPC must not skip quiescence polling"
         );
     }
 
@@ -2835,7 +2900,10 @@ mod tests {
         );
 
         let recorded = log.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["start", "is_quiescent", "cleanup"]);
+        assert_eq!(
+            recorded,
+            vec!["start", "begin_drain", "is_quiescent", "cleanup"]
+        );
     }
 
     // -------------------------------------------------------------------

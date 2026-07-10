@@ -141,3 +141,14 @@ impl PartialEq<str> for Slug {
         self.0 == other
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Slug;
+
+    #[test]
+    fn unique_slugs_distinguish_lossy_collisions() {
+        assert_ne!(Slug::slugify_unique("Foo"), Slug::slugify_unique("foo"));
+        assert_ne!(Slug::slugify_unique("org/a"), Slug::slugify_unique("org_a"));
+    }
+}

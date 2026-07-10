@@ -79,6 +79,16 @@ pub enum KvEventSourceConfig {
         /// vLLM BlockStored events to the canonical pad_value scheme. `None`
         /// for text-only / non-MM deployments (normalization is a no-op).
         image_token_id: Option<u32>,
+        /// Rank this socket is *bound* to, when the subscriber knows it
+        /// authoritatively (one ZMQ publisher per dp_rank). When `Some`, the
+        /// listener keys events by this value instead of the per-batch
+        /// `data_parallel_rank` on the wire. Use this when the source binding
+        /// is the source of truth and the engine's wire `data_parallel_rank`
+        /// is unreliable (e.g. an internal-DP engine that publishes one socket
+        /// per rank but stamps a constant wire rank). Leave `None` for
+        /// multiplexed sources (e.g. a shared consolidator port) where the
+        /// wire `data_parallel_rank` is the only way to tell ranks apart.
+        authoritative_dp_rank: Option<DpRank>,
     },
 }
 
@@ -103,6 +113,7 @@ impl KvEventSource {
                 endpoint,
                 topic,
                 image_token_id,
+                authoritative_dp_rank,
             } => {
                 let zmq_handle = component
                     .drt()
@@ -112,6 +123,7 @@ impl KvEventSource {
                         endpoint,
                         topic,
                         worker_id,
+                        authoritative_dp_rank,
                         tx,
                         cancellation_token.clone(),
                         kv_block_size,
