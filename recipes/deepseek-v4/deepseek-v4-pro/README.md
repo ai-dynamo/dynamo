@@ -10,7 +10,7 @@ Serving recipes for **DeepSeek-V4-Pro** on Dynamo — a MoE model (1.6T total / 
 - **Agentic (vLLM)** — the benchmarked, workload-tuned picks (B200 & H200, AGG + disaggregated); numbers in [Performance](#performance).
 - **Day-0** — the original single-node / cross-tray aggregated + disaggregated recipes (B200/GB200, vLLM + SGLang).
 
-**Reasoning modes.** Pro exposes three effort levels via `chat_template_kwargs`: `{}` (non-think), `{"thinking":true,"reasoning_effort":"high"}`, and `{"thinking":true,"reasoning_effort":"max"}` (Think Max needs `--max-model-len >= 393216`).
+**Reasoning modes.** The deployed Pro recipes emit `reasoning_content` by default; reasoning effort is selected via `chat_template_kwargs` — `{"thinking":true,"reasoning_effort":"high"}` or `{"thinking":true,"reasoning_effort":"max"}` (Think Max needs `--max-model-len >= 393216`).
 
 Shared operational details — [workloads](../README.md#optimization-targets), [per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated) (disaggregated GDR), and [known limitations](../README.md#known-limitations) — live in the [top-level DeepSeek-V4 README](../README.md).
 
@@ -136,13 +136,18 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "deepseek-ai/DeepSeek-V4-Pro",
     "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 100
+    "max_tokens": 512
   }'
 ```
 
+Pro emits chain-of-thought into `message.reasoning_content` and the final answer into
+`message.content`. With too small a `max_tokens` the budget can be spent on reasoning before any
+`content` is emitted (`content: null`, `finish_reason: "length"`) — that's expected, not a failure;
+raise `max_tokens` (or see [Verifying Reasoning](#verifying-reasoning)).
+
 ### Verifying Reasoning
 
-Pro defaults to non-think, so pass `chat_template_kwargs.thinking` to elicit reasoning (same model, same `--dyn-reasoning-parser deepseek_v4`):
+Pro emits `reasoning_content` by default; this example passes `chat_template_kwargs` to request high effort explicitly (same model, same `--dyn-reasoning-parser deepseek_v4`):
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \

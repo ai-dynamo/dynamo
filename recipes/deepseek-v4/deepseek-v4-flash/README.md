@@ -137,9 +137,14 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "deepseek-ai/DeepSeek-V4-Flash",
     "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 100
+    "max_tokens": 512
   }'
 ```
+
+Flash reasons by default, so the chain-of-thought fills `message.reasoning_content` and the final
+answer lands in `message.content`. With too small a `max_tokens` the budget is spent on reasoning
+before any `content` is emitted (`content: null`, `finish_reason: "length"`) — that's expected, not a
+failure; raise `max_tokens` (or see [Verifying Reasoning](#verifying-reasoning)).
 
 ### Verifying Reasoning
 
