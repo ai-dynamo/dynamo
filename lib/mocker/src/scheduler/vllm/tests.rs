@@ -3192,6 +3192,8 @@ mod offload {
             .enable_chunked_prefill(true)
             .enable_prefix_caching(true)
             .speedup_ratio(0.0)
+            .aic_nextn(Some(1))
+            .aic_nextn_accept_rates(Some("1".to_string()))
             .build()
             .unwrap();
         let mut core = VllmCore::new(args);

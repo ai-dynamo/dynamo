@@ -1196,7 +1196,7 @@ impl VllmCore {
         &mut self,
         uuid: Uuid,
         now_ms: f64,
-        prefill_cost: &PrefillCost,
+        g1_cached_tokens: usize,
     ) -> SwapInAdmissionAttempt {
         use crate::kv_manager::kvbm_backend::BatchSwapInOutcome;
         if !self.kv_manager.has_offload_engine() {
@@ -1210,13 +1210,16 @@ impl VllmCore {
         if !matches!(request.status, RequestStatus::Waiting) {
             return SwapInAdmissionAttempt::NoHit;
         }
+        // Lower-tier lookup starts after the physical G1 prefix. MTP may
+        // recompute the final matched block, but that changes compute
+        // accounting rather than which blocks are resident in G1.
         let block_size = request.sequence.block_size();
-        let skip_blocks = prefill_cost.cached_tokens / block_size;
+        let skip_blocks = g1_cached_tokens / block_size;
         let plhs = request.sequence.positional_lineage_hashes();
         tracing::trace!(
             %uuid,
             now_ms,
-            cached_tokens = prefill_cost.cached_tokens,
+            cached_tokens = g1_cached_tokens,
             skip_blocks,
             plhs_len = plhs.len(),
             "kvbm-offload: swap-in admission probe"
@@ -1403,26 +1406,32 @@ impl VllmCore {
                                 cached_tokens: request.sequence.num_input_tokens(),
                                 active_cached_tokens: request.sequence.num_input_tokens(),
                             },
+                            g1_cached_tokens: request.sequence.num_input_tokens(),
                         },
                         AdmissionStage::PendingDestinationHead => break,
                         AdmissionStage::FreshKv => {
                             let is_fresh = request.status == RequestStatus::Waiting;
                             policy::decide_waiting_admission(
-                                scheduling_policy,
+                                policy::WaitingAdmissionConfig {
+                                    policy: scheduling_policy,
+                                    num_gpu_blocks: self.args.num_gpu_blocks,
+                                    block_size: self.args.block_size,
+                                    mtp_enabled: self.args.aic_nextn.is_some(),
+                                },
                                 &request.sequence,
                                 is_fresh,
                                 running_seqs,
-                                self.args.num_gpu_blocks,
-                                self.args.block_size,
                                 &self.kv_manager,
-                                self.args.aic_nextn.is_some(),
                             )
                         }
                     }
                 }
             };
-            let prefill_cost = match decision {
-                AdmissionDecision::Admit { prefill_cost } => prefill_cost,
+            let (prefill_cost, _g1_cached_tokens) = match decision {
+                AdmissionDecision::Admit {
+                    prefill_cost,
+                    g1_cached_tokens,
+                } => (prefill_cost, g1_cached_tokens),
                 AdmissionDecision::Wait => {
                     break;
                 }
@@ -1445,7 +1454,7 @@ impl VllmCore {
                 }
             };
             #[cfg(feature = "kvbm-offload")]
-            match self.try_park_for_swap_in(uuid, now_ms, &prefill_cost) {
+            match self.try_park_for_swap_in(uuid, now_ms, _g1_cached_tokens) {
                 SwapInAdmissionAttempt::Parked => continue,
                 SwapInAdmissionAttempt::BlockedOnG1Offload => break,
                 SwapInAdmissionAttempt::NoHit => {}

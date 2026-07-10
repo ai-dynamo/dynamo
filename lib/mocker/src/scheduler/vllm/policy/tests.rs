@@ -9,14 +9,17 @@
 use uuid::Uuid;
 
 use crate::common::protocols::{
-    DirectRequest, EngineType, KvEventPublishers, MockEngineArgs, SchedulingPolicy,
+    DirectRequest, EngineType, KvEventPublishers, MockEngineArgs, PrefillCost, SchedulingPolicy,
 };
 use crate::common::sequence::ActiveSequence;
 use crate::kv_manager::KvManager;
 use crate::kv_manager::kvbm_backend::G1Acquire;
 use crate::scheduler::vllm::{RequestStatus, VllmCore};
 
-use super::{AdmissionDecision, decide_waiting_admission, should_reject_for_model_len};
+use super::{
+    AdmissionDecision, WaitingAdmissionConfig, apply_mtp_prefix_recompute,
+    decide_waiting_admission, should_reject_for_model_len,
+};
 
 mod vllm {
     use super::*;
@@ -26,19 +29,62 @@ mod vllm {
     }
 
     #[test]
+    fn mtp_recomputes_exactly_one_cached_prefix_block() {
+        let adjusted = apply_mtp_prefix_recompute(
+            SchedulingPolicy::Vllm,
+            4,
+            true,
+            PrefillCost {
+                new_blocks: 1,
+                new_tokens: 4,
+                cached_tokens: 8,
+                active_cached_tokens: 8,
+            },
+        );
+
+        assert_eq!(adjusted.cached_tokens, 4);
+        assert_eq!(adjusted.active_cached_tokens, 4);
+        assert_eq!(adjusted.new_tokens, 8);
+        assert_eq!(adjusted.new_blocks, 2);
+    }
+
+    #[test]
+    fn mtp_recompute_does_not_change_trtllm_accounting() {
+        let original = PrefillCost {
+            new_blocks: 1,
+            new_tokens: 4,
+            cached_tokens: 8,
+            active_cached_tokens: 8,
+        };
+        let adjusted = apply_mtp_prefix_recompute(
+            SchedulingPolicy::TrtllmGuaranteedNoEvict,
+            4,
+            true,
+            original.clone(),
+        );
+
+        assert_eq!(adjusted.new_blocks, original.new_blocks);
+        assert_eq!(adjusted.new_tokens, original.new_tokens);
+        assert_eq!(adjusted.cached_tokens, original.cached_tokens);
+        assert_eq!(adjusted.active_cached_tokens, original.active_cached_tokens);
+    }
+
+    #[test]
     fn admits_when_current_sequence_fits_without_reserving_future_output() {
         let manager = kv_manager(4);
         let sequence = ActiveSequence::new((0..8).collect(), 32, Some(4), false, false);
 
         let decision = decide_waiting_admission(
-            SchedulingPolicy::Vllm,
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 4,
+                block_size: 4,
+                mtp_enabled: false,
+            },
             &sequence,
             true,
             std::iter::empty(),
-            4,
-            4,
             &manager,
-            false,
         );
 
         assert!(matches!(decision, AdmissionDecision::Admit { .. }));
@@ -53,14 +99,16 @@ mod vllm {
         let sequence = ActiveSequence::new((0..8).collect(), 32, Some(4), false, false);
 
         let decision = decide_waiting_admission(
-            SchedulingPolicy::Vllm,
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 4,
+                block_size: 4,
+                mtp_enabled: false,
+            },
             &sequence,
             true,
             std::iter::empty(),
-            4,
-            4,
             &manager,
-            false,
         );
 
         assert!(matches!(decision, AdmissionDecision::Wait));
@@ -72,14 +120,16 @@ mod vllm {
         let sequence = ActiveSequence::new((0..20).collect(), 1, Some(4), false, false);
 
         let decision = decide_waiting_admission(
-            SchedulingPolicy::Vllm,
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 4,
+                block_size: 4,
+                mtp_enabled: false,
+            },
             &sequence,
             true,
             std::iter::empty(),
-            4,
-            4,
             &manager,
-            false,
         );
 
         assert!(matches!(decision, AdmissionDecision::Reject));
@@ -240,17 +290,43 @@ mod vllm {
         let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, false);
 
         let decision = decide_waiting_admission(
-            SchedulingPolicy::Vllm,
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 3,
+                block_size: 4,
+                mtp_enabled: false,
+            },
             &sequence,
             true,
             std::iter::empty(),
-            3,
-            4,
             &manager,
-            false,
         );
 
         assert!(matches!(decision, AdmissionDecision::Admit { .. }));
+    }
+
+    #[test]
+    fn mtp_recompute_requires_one_additional_available_block() {
+        let mut manager = kv_manager(3);
+        let mut holder = ActiveSequence::new((0..8).collect(), 1, Some(4), true, false);
+        let signal = holder.take_creation_signal().unwrap();
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(2)));
+        let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, false);
+
+        let decision = decide_waiting_admission(
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 3,
+                block_size: 4,
+                mtp_enabled: true,
+            },
+            &sequence,
+            true,
+            std::iter::empty(),
+            &manager,
+        );
+
+        assert!(matches!(decision, AdmissionDecision::Wait));
     }
 
     #[test]
@@ -268,14 +344,16 @@ mod vllm {
         let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, false);
 
         let decision = decide_waiting_admission(
-            SchedulingPolicy::Vllm,
+            WaitingAdmissionConfig {
+                policy: SchedulingPolicy::Vllm,
+                num_gpu_blocks: 3,
+                block_size: 4,
+                mtp_enabled: false,
+            },
             &sequence,
             true,
             std::iter::empty(),
-            3,
-            4,
             &manager,
-            false,
         );
 
         assert!(matches!(decision, AdmissionDecision::Wait));

@@ -9,9 +9,20 @@ use crate::kv_manager::KvManager;
 
 #[derive(Debug)]
 pub(super) enum AdmissionDecision {
-    Admit { prefill_cost: PrefillCost },
+    Admit {
+        prefill_cost: PrefillCost,
+        g1_cached_tokens: usize,
+    },
     Wait,
     Reject,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WaitingAdmissionConfig {
+    pub(super) policy: SchedulingPolicy,
+    pub(super) num_gpu_blocks: usize,
+    pub(super) block_size: usize,
+    pub(super) mtp_enabled: bool,
 }
 
 pub(super) fn should_reject_for_model_len(
@@ -73,15 +84,19 @@ pub(super) fn apply_mtp_prefix_recompute(
 /// `GUARANTEED_NO_EVICT` reserves the request through its maximum completion
 /// and accounts for the completion reservations of running requests.
 pub(super) fn decide_waiting_admission<'a>(
-    policy: SchedulingPolicy,
+    config: WaitingAdmissionConfig,
     sequence: &ActiveSequence,
     is_fresh: bool,
     running: impl Iterator<Item = &'a ActiveSequence>,
-    num_gpu_blocks: usize,
-    block_size: usize,
     kv_manager: &KvManager,
-    mtp_enabled: bool,
 ) -> AdmissionDecision {
+    let WaitingAdmissionConfig {
+        policy,
+        num_gpu_blocks,
+        block_size,
+        mtp_enabled,
+    } = config;
+
     if is_fresh {
         match policy {
             SchedulingPolicy::Vllm => {
@@ -99,12 +114,10 @@ pub(super) fn decide_waiting_admission<'a>(
         }
     }
 
-    let prefill_cost = apply_mtp_prefix_recompute(
-        policy,
-        block_size,
-        mtp_enabled,
-        kv_manager.get_prefill_cost(sequence),
-    );
+    let raw_prefill_cost = kv_manager.get_prefill_cost(sequence);
+    let g1_cached_tokens = raw_prefill_cost.cached_tokens;
+    let prefill_cost =
+        apply_mtp_prefix_recompute(policy, block_size, mtp_enabled, raw_prefill_cost);
     let available = match policy {
         SchedulingPolicy::Vllm => num_gpu_blocks.saturating_sub(kv_manager.num_active_blocks()),
         SchedulingPolicy::TrtllmGuaranteedNoEvict => {
@@ -123,7 +136,10 @@ pub(super) fn decide_waiting_admission<'a>(
     if needed > available {
         AdmissionDecision::Wait
     } else {
-        AdmissionDecision::Admit { prefill_cost }
+        AdmissionDecision::Admit {
+            prefill_cost,
+            g1_cached_tokens,
+        }
     }
 }
 
