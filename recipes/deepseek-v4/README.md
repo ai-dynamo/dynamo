@@ -42,29 +42,46 @@ than ~86k tokens are rejected, so the H200 Pro variants cannot serve the longest
 | Workload | Median ISL | Median OSL | KV reuse | User output tok/s |
 |---|---:|---:|---:|---:|
 | Agentic (coding / tool use) | 64k | 400 | 90% | ≥ 50 |
+| Custom (decode-heavy synthetic) | 10k | 1k | 10% | ≥ 50 |
 
 Benchmarks replay [Mooncake-format](https://github.com/kvcache-ai/Mooncake) traces — see [`perf/README.md`](perf/README.md).
 
 ## Performance results
 
-Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), full agentic trace, default temperature.
-
+Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature.
 Variant keys match the [Configurations](#configurations) table (`${MODEL}/vllm/${MODE}-${SKU}-agentic`).
 
-| Variant (`vllm/…`) | Workload | Concurrency | User tok/s | System tok/s/GPU |
-|---|---|---:|---:|---:|
-| `deepseek-v4-pro/vllm/agg-b200-agentic` | Agentic | 13 | 51.3 | 72.8 |
-| `deepseek-v4-pro/vllm/disagg-b200-agentic` | Agentic | 28 | 51.3 | 77.3 |
-| `deepseek-v4-pro/vllm/agg-h200-agentic` | Agentic | 8 | 53.2 | 45.9 |
-| `deepseek-v4-pro/vllm/disagg-h200-agentic` | Agentic | 32 | 50.5 | 43.9 |
-| `deepseek-v4-flash/vllm/agg-b200-agentic` | Agentic | 38 | 50.6 | 362.1 |
-| `deepseek-v4-flash/vllm/disagg-b200-agentic` | Agentic | 320 | 50.0 | 388.3 |
-| `deepseek-v4-flash/vllm/agg-h200-agentic` | Agentic | 16 | 50.7 | 145.4 |
-| `deepseek-v4-flash/vllm/disagg-h200-agentic` | Agentic | 128 | 51.8 | 201.9 |
+### Agentic workload
+
+| Variant (`vllm/…`) | Concurrency | User tok/s | System tok/s/GPU |
+|---|---:|---:|---:|
+| `deepseek-v4-pro/vllm/agg-b200-agentic` | 13 | 51.3 | 72.8 |
+| `deepseek-v4-pro/vllm/disagg-b200-agentic` | 28 | 51.3 | 77.3 |
+| `deepseek-v4-pro/vllm/agg-h200-agentic` | 8 | 53.2 | 45.9 |
+| `deepseek-v4-pro/vllm/disagg-h200-agentic` | 32 | 50.5 | 43.9 |
+| `deepseek-v4-flash/vllm/agg-b200-agentic` | 38 | 50.6 | 362.1 |
+| `deepseek-v4-flash/vllm/disagg-b200-agentic` | 320 | 50.0 | 388.3 |
+| `deepseek-v4-flash/vllm/agg-h200-agentic` | 16 | 50.7 | 145.4 |
+| `deepseek-v4-flash/vllm/disagg-h200-agentic` | 128 | 51.8 | 201.9 |
 
 **AGG figures are single-replica floor-picks** (best tok/s/GPU at user_p50 ≥ 50). AGG scales by deploying
 independent replicas; KV-routed *multi*-replica AGG does **not** improve per-GPU throughput — see
 [Known limitations](#known-limitations).
+
+### Custom workload
+
+Flash only (Pro not characterized on this workload).
+
+| Variant (`vllm/…`) | Concurrency | User tok/s | System tok/s/GPU |
+|---|---:|---:|---:|
+| `deepseek-v4-flash/vllm/agg-b200-agentic` | 64 | 50.1 | 741.6 |
+| `deepseek-v4-flash/vllm/disagg-b200-agentic` | 128 | 51.9 | 738.2 ¹ |
+| `deepseek-v4-flash/vllm/agg-h200-agentic` | 16 | 58.9 | 222.0 |
+| `deepseek-v4-flash/vllm/disagg-h200-agentic` | 416 | 51.8 | 513.6 |
+
+¹ Measured at the **1P1D** prefill:decode ratio, which is optimal for this decode-heavy workload. The shipped
+`disagg-b200-agentic` deploy.yaml is **4P2D** (tuned for the agentic target; → 577 tok/s/GPU on this workload) —
+the two differ only in the prefill:decode replica count, not in serving config.
 
 ## Prerequisites
 
