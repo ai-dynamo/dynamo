@@ -1,5 +1,6 @@
 # Dynamo + TensorRT-LLM for Vera Rubin. Builds for BOTH arm64 (VR200, sbsa) and
-# amd64 (x86_64); pass --platform + the matching BASE / TRTLLM_WHEEL_URL build-args.
+# amd64 (x86_64); pass --platform + the matching BASE build-arg and stage the
+# arch-matching TRT-LLM wheel into container/rubin/.trtllm-wheel/ first.
 #
 # Build approach (per Ishan Dhanani's bringup guidance): install Dynamo FROM SOURCE
 # inside the Rubin framework image instead of using render.py — the render.py trtllm
@@ -8,17 +9,17 @@
 # prebuilt trtllm wheel first, then build Dynamo on top.
 #
 # Build on a NATIVE host of the target arch (emulation is slow for the Rust/maturin
-# build). BASE and TRTLLM_WHEEL_URL are arch-specific — there is no combined
-# multi-arch pytorch-rubin tag, so select the manifest matching the target arch:
-#   arm64: pytorch-rubin-py3-sbsa-...   + RubinBringup-...-VR200-CUDA13.4.tar.gz
-#   amd64: pytorch-rubin-py3-x86_64-... + TensorRT-LLM.tar.gz
+# build). BASE and the wheel are arch-specific — there is no combined multi-arch
+# pytorch-rubin tag, so select the manifest matching the target arch:
+#   arm64: pytorch-rubin-py3-sbsa-...   + a linux_aarch64 tensorrt_llm wheel
+#   amd64: pytorch-rubin-py3-x86_64-... + a linux_x86_64 tensorrt_llm wheel
 # e.g. on an arm64 host (computelab-armbuild-1):
-#   docker build --platform linux/arm64 \
+#   mkdir -p container/rubin/.trtllm-wheel && cp tensorrt_llm-*aarch64.whl container/rubin/.trtllm-wheel/
+#   DOCKER_BUILDKIT=1 docker build --platform linux/arm64 \
 #     --build-arg BASE=urm.nvidia.com/sw-tensorrt-docker/tensorrt-llm:pytorch-rubin-py3-sbsa-ubuntu24.04-trt10.15.1.29-20260512 \
-#     --build-arg TRTLLM_WHEEL_URL=https://urm.nvidia.com/artifactory/sw-tensorrt-generic/llm-artifacts/LLM/feat-rubin-bringup/L0_PostMerge/24/RubinBringup-TensorRT-LLM-VR200-CUDA13.4.tar.gz \
-#     -t <registry>/<you>-trtllm-rubin:<tag> -f Dockerfile.trtllm .
-# The dynamo-ci pipeline resolves the latest build's BASE + wheel automatically
-# (scripts/resolve_rubin_trtllm_base.sh) and passes them per arch.
+#     -t <registry>/<you>-trtllm-rubin:<tag> -f container/rubin/Dockerfile.trtllm .
+# The dynamo-ci pipeline resolves the latest BASE and downloads the newest curated
+# wheel (scripts/resolve_rubin_trtllm_base.sh + `jf rt download`) into that dir per arch.
 # Validated arm64 image: nvcr.io/nvidian/dynamo-dev/tzulingk-trtllm-rubin:sbsa-fromsrc-main-7c8b4b19
 
 # This needs to be the pytorch container which trtllm is building against. We need to track this somehow.
@@ -29,15 +30,20 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # (1) Prebuilt TRT-LLM wheel for the target arch. Installed WITH deps (base lacks
 #     trtllm's pure-python deps); the rubin-tuned torch/tensorrt are unpinned/satisfied
-#     so pip leaves them untouched. The tarball carries a single arch-matching wheel,
-#     so the glob resolves unambiguously. The default below is only a fallback for
-#     manual arm64 builds — dynamo-ci overrides it per arch with the latest build.
-ARG TRTLLM_WHEEL_URL=https://urm.nvidia.com/artifactory/sw-tensorrt-generic/llm-artifacts/LLM/feat-rubin-bringup/L0_PostMerge/24/RubinBringup-TensorRT-LLM-VR200-CUDA13.4.tar.gz
-RUN cd /tmp \
- && curl -fSL --retry 3 -o t.tgz "${TRTLLM_WHEEL_URL}" \
- && tar xzf t.tgz --wildcards 'TensorRT-LLM/tensorrt_llm-*.whl' \
- && pip install --break-system-packages --no-cache-dir TensorRT-LLM/tensorrt_llm-*.whl \
- && rm -rf t.tgz TensorRT-LLM
+#     so pip leaves them untouched.
+#
+#     The wheel is staged into the build context at container/rubin/.trtllm-wheel/
+#     BEFORE the build. dynamo-ci downloads it there with `jf` from the private
+#     sw-dynamo-dev-generic-local Artifactory repo (newest upload.timestamp) so the
+#     Artifactory credentials stay on the runner. We bind-mount that directory and
+#     pip-install the wheel — it is never COPYed, so nothing wheel-related lands in
+#     the image layers. Requires BuildKit (DOCKER_BUILDKIT=1).
+#
+#     Manual build: stage an arch-matching wheel there first, e.g.
+#       mkdir -p container/rubin/.trtllm-wheel \
+#         && cp tensorrt_llm-*.whl container/rubin/.trtllm-wheel/
+RUN --mount=type=bind,source=container/rubin/.trtllm-wheel,target=/tmp/trtllm-wheel \
+    pip install --break-system-packages --no-cache-dir /tmp/trtllm-wheel/*.whl
 
 # (2) nats + etcd. TARGETARCH is set automatically by buildkit from --platform
 #     (amd64|arm64) and matches the nats/etcd release asset suffixes directly.
