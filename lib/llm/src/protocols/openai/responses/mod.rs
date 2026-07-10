@@ -60,9 +60,36 @@ pub struct NvCreateResponse {
     #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::responses::CreateResponse,
 
+    /// Prompt caching controls for GPT-5.6+.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_options: Option<PromptCacheOptions>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
+}
+
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheMode {
+    #[default]
+    Implicit,
+    Explicit,
+}
+
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptCacheTtl {
+    #[default]
+    #[serde(rename = "30m")]
+    Minutes30,
+}
+
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PromptCacheOptions {
+    #[serde(default)]
+    pub mode: PromptCacheMode,
+    #[serde(default)]
+    pub ttl: PromptCacheTtl,
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -1176,6 +1203,7 @@ mod tests {
 
     fn make_response_with_input(text: &str) -> NvCreateResponse {
         NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Text(text.into()),
                 model: Some("test-model".into()),
@@ -1190,6 +1218,41 @@ mod tests {
                 ..Default::default()
             }),
         }
+    }
+
+    #[test]
+    fn prompt_cache_options_accepts_latest_contract() {
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "input": "hello",
+            "prompt_cache_options": {}
+        }))
+        .unwrap();
+
+        assert_eq!(
+            request.prompt_cache_options,
+            Some(PromptCacheOptions::default())
+        );
+
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "input": "hello",
+            "prompt_cache_options": {"mode": "implicit", "ttl": "30m"}
+        }))
+        .unwrap();
+        assert_eq!(
+            request.prompt_cache_options,
+            Some(PromptCacheOptions::default())
+        );
+    }
+
+    #[test]
+    fn prompt_cache_options_rejects_legacy_ttl() {
+        let error = serde_json::from_value::<NvCreateResponse>(serde_json::json!({
+            "input": "hello",
+            "prompt_cache_options": {"ttl": "24h"}
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown variant `24h`"));
     }
 
     #[test]
@@ -1268,6 +1331,7 @@ mod tests {
     #[test]
     fn test_instructions_prepended_as_system_message() {
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Text("hello".into()),
                 model: Some("test-model".into()),
@@ -1297,6 +1361,7 @@ mod tests {
         // Codex CLI sends `instructions` + a `developer`-role input item.
         // Both convert to System messages; backends like Qwen reject more than one.
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 instructions: Some("You are a coding agent.".into()),
                 input: InputParam::Items(vec![
@@ -1357,6 +1422,7 @@ mod tests {
     #[test]
     fn test_input_items_multi_turn() {
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -1418,6 +1484,7 @@ mod tests {
     #[test]
     fn test_input_items_with_image() {
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![InputItem::Item(Item::Message(MessageItem::Input(
                     InputMessage {
@@ -1463,6 +1530,7 @@ mod tests {
     #[test]
     fn test_easy_message_user_multimodal_preserves_images() {
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![InputItem::EasyMessage(EasyInputMessage {
                     role: ResponseRole::User,
@@ -1520,6 +1588,7 @@ mod tests {
     #[test]
     fn test_easy_message_user_text_only_stays_text() {
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![InputItem::EasyMessage(EasyInputMessage {
                     role: ResponseRole::User,
@@ -1548,6 +1617,7 @@ mod tests {
     #[test]
     fn test_easy_message_system_contentlist_collapses_to_text() {
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::EasyMessage(EasyInputMessage {
@@ -1584,6 +1654,7 @@ mod tests {
     #[test]
     fn test_easy_message_assistant_contentlist_collapses_to_text() {
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::EasyMessage(EasyInputMessage {
@@ -1617,6 +1688,7 @@ mod tests {
     #[test]
     fn test_function_call_input_items() {
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -1665,6 +1737,7 @@ mod tests {
         // and `tool_calls`, otherwise chat templates that require a tool message to
         // immediately follow its assistant tool_call (e.g. MiniMax) will reject the input.
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -1747,6 +1820,7 @@ mod tests {
         };
 
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::EasyMessage(EasyInputMessage {
@@ -1801,6 +1875,7 @@ mod tests {
         // breaks strict-alternation chat templates and distorts the context
         // the model sees.
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -1868,6 +1943,7 @@ mod tests {
         };
 
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::EasyMessage(EasyInputMessage {
@@ -1909,6 +1985,7 @@ mod tests {
         // `content: ""` for pure-tool-call turns. Turn-boundary cases (empty
         // OutputMessage with no tool_calls) still emit `Some(Text(""))`.
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -1965,6 +2042,7 @@ mod tests {
         };
 
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -2034,6 +2112,7 @@ mod tests {
         };
 
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -2113,6 +2192,7 @@ mod tests {
         // Must yield 3 chat messages: user, assistant(content + tool_calls),
         // tool. Any other shape breaks the chat template's tool-call pairing.
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -2182,6 +2262,7 @@ mod tests {
         // coalescer's accumulator is order-agnostic — both orderings must
         // produce the same merged assistant message.
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -2247,6 +2328,7 @@ mod tests {
         // adjacent Item::FunctionCall items. They must coalesce into a single
         // assistant message carrying all tool_calls.
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -2316,6 +2398,7 @@ mod tests {
         // model loses visibility into what it previously refused.
         use dynamo_protocols::types::responses::RefusalContent;
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Items(vec![
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
@@ -2366,6 +2449,7 @@ mod tests {
     #[test]
     fn test_tools_conversion() {
         let req = NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: InputParam::Text("hello".into()),
                 model: Some("test-model".into()),

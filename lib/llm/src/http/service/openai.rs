@@ -61,7 +61,10 @@ use crate::protocols::openai::{
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
-    responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
+    responses::{
+        NvCreateResponse, NvResponse, PromptCacheMode, PromptCacheOptions, ResponseParams,
+        chat_completion_to_response,
+    },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -2259,13 +2262,12 @@ async fn responses(
         // from the request becomes a one-line change here.
         presence_penalty: None,
         frequency_penalty: None,
-        // Metadata echoed back on the response. prompt_cache_retention is also
-        // normalized into a backend KV hint below; the other fields remain
-        // pass-through only.
+        // Metadata echoed back on the response.
         prompt_cache_key: request.inner.prompt_cache_key.clone(),
         prompt_cache_retention: request.inner.prompt_cache_retention,
         safety_identifier: request.inner.safety_identifier.clone(),
     };
+    let prompt_cache_options = request.prompt_cache_options;
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
 
@@ -2303,10 +2305,7 @@ async fn responses(
         });
 
     let mut request = context.map(|mut _req| chat_request);
-    if let Some(ttl_seconds) = response_params
-        .prompt_cache_retention
-        .map(prompt_cache_retention_ttl_seconds)
-    {
+    if let Some(ttl_seconds) = prompt_cache_options_ttl_seconds(prompt_cache_options.as_ref()) {
         request.insert(KV_RETENTION_TTL_CONTEXT_KEY, ttl_seconds);
     }
     if response_params.max_output_tokens.is_none() {
@@ -2483,14 +2482,10 @@ async fn responses(
     }
 }
 
-fn prompt_cache_retention_ttl_seconds(
-    retention: dynamo_protocols::types::responses::PromptCacheRetention,
-) -> u32 {
-    use dynamo_protocols::types::responses::PromptCacheRetention;
-    match retention {
-        PromptCacheRetention::InMemory => 600,
-        PromptCacheRetention::Hours24 => 86_400,
-    }
+fn prompt_cache_options_ttl_seconds(options: Option<&PromptCacheOptions>) -> Option<u32> {
+    options
+        .is_some_and(|options| options.mode == PromptCacheMode::Implicit)
+        .then_some(30 * 60)
 }
 
 /// Checks for unsupported fields in the request.
@@ -2537,11 +2532,19 @@ pub fn validate_response_unsupported_fields(
     // honored. Fail loud until real enforcement lands.
     //
     // Metadata fields are accepted and echoed back on the response. Codex
-    // sends `prompt_cache_key` on every request, so it remains pass-through;
-    // `prompt_cache_retention` is additionally normalized into a KV hint.
+    // sends `prompt_cache_key` on every request, so it remains pass-through.
     if inner.max_tool_calls.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
+        ));
+    }
+    if request
+        .prompt_cache_options
+        .is_some_and(|options| options.mode == PromptCacheMode::Explicit)
+    {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string()
+                + "`prompt_cache_options.mode: \"explicit\"` is not supported.",
         ));
     }
     None
@@ -3584,6 +3587,7 @@ mod tests {
 
     fn make_base_request() -> NvCreateResponse {
         NvCreateResponse {
+            prompt_cache_options: None,
             inner: CreateResponse {
                 input: Input::Text("hello".into()),
                 model: Some("test-model".into()),
@@ -3996,9 +4000,7 @@ mod tests {
         }
     }
 
-    /// Metadata fields are accepted at the validation layer and echoed back.
-    /// `prompt_cache_retention` additionally becomes a KV hint; the cache key
-    /// and safety identifier remain pass-through only.
+    /// Legacy metadata remains pass-through only. It does not produce a KV hint.
     #[test]
     fn test_validate_unsupported_fields_accepts_passthrough_metadata() {
         #[allow(clippy::type_complexity)]
@@ -4032,17 +4034,42 @@ mod tests {
     }
 
     #[test]
-    fn prompt_cache_retention_maps_to_bounded_ttls() {
-        use dynamo_protocols::types::responses::PromptCacheRetention;
+    fn prompt_cache_options_maps_implicit_mode_only() {
+        assert_eq!(prompt_cache_options_ttl_seconds(None), None);
+        assert_eq!(
+            prompt_cache_options_ttl_seconds(Some(&PromptCacheOptions::default())),
+            Some(1_800)
+        );
+        assert_eq!(
+            prompt_cache_options_ttl_seconds(Some(&PromptCacheOptions {
+                mode: PromptCacheMode::Explicit,
+                ..Default::default()
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_prompt_cache_retention_does_not_map_to_kv_hint() {
+        let mut request = make_base_request();
+        request.inner.prompt_cache_retention =
+            Some(dynamo_protocols::types::responses::PromptCacheRetention::Hours24);
 
         assert_eq!(
-            prompt_cache_retention_ttl_seconds(PromptCacheRetention::InMemory),
-            600
+            prompt_cache_options_ttl_seconds(request.prompt_cache_options.as_ref()),
+            None
         );
-        assert_eq!(
-            prompt_cache_retention_ttl_seconds(PromptCacheRetention::Hours24),
-            86_400
-        );
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_rejects_explicit_prompt_cache_mode() {
+        let mut request = make_base_request();
+        request.prompt_cache_options = Some(PromptCacheOptions {
+            mode: PromptCacheMode::Explicit,
+            ..Default::default()
+        });
+
+        assert!(validate_response_unsupported_fields(&request).is_some());
     }
 
     #[test]
