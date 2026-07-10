@@ -482,7 +482,7 @@ jobs:
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
-        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'frontend' }}
+        if: ${{ !inputs.compliance_only && !inputs.build_only && inputs.target != 'dev' && inputs.target != 'frontend' }}
         shell: bash
         run: |
           PUSH_ARGS=""

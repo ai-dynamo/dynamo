@@ -3,6 +3,9 @@
 
 name: Build On Demand
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
@@ -12,6 +15,10 @@ on:
         default: false
       build_vllm_placeholder:
         description: 'Build and push the experimental vLLM snapshot placeholder'
+        type: boolean
+        default: false
+      build_snapshot_agent:
+        description: 'Build and push the matching snapshot agent'
         type: boolean
         default: false
       vllm_git_url:
@@ -57,6 +64,22 @@ on:
         description: 'CRIU ref used for the snapshot placeholder'
         type: string
         default: 'criu-dev'
+      snapshot_criu_sha:
+        description: 'Exact CRIU commit used for snapshot images'
+        type: string
+        default: '3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001'
+      snapshot_cuda_checkpoint_repo:
+        description: 'cuda-checkpoint repository used for snapshot images'
+        type: string
+        default: 'https://github.com/NVIDIA/cuda-checkpoint.git'
+      snapshot_cuda_checkpoint_ref:
+        description: 'cuda-checkpoint ref used for snapshot images'
+        type: string
+        default: 'main'
+      snapshot_cuda_checkpoint_sha:
+        description: 'Exact cuda-checkpoint commit used for snapshot images'
+        type: string
+        default: '00d5cce84c628088d6caa203fc4af40c1538b6f7'
       build_sglang:
         description: 'Build and push sglang image, tagged with branch name'
         type: boolean
@@ -105,19 +128,21 @@ jobs:
       framework: vllm
       target: runtime
       cuda_version: '["13.0"]'
-      platform: ${{ inputs.vllm_install_mode == 'python-overlay' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+      platform: ${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: ${{ inputs.vllm_install_mode == 'python-overlay' && 90 || 60 }}
+      build_timeout_minutes: ${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 90 || 60 }}
+      build_only: true
+      image_tag_suffix: ${{ format('-run-{0}-{1}', github.run_id, github.run_attempt) }}
       extra_build_args: |
-        BASELINE_SBOM_FILE=${{ inputs.vllm_install_mode == 'python-overlay' && 'vllm-openai@5bda7078' || 'cuda@2ab6381d' }}
+        BASELINE_SBOM_FILE=${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 'vllm-openai@5bda7078' || 'cuda@2ab6381d' }}
         FLASHINFER_GIT_URL=${{ inputs.flashinfer_git_url }}
         FLASHINFER_GIT_REF=${{ inputs.flashinfer_git_ref }}
         FLASHINFER_GIT_SHA=${{ inputs.flashinfer_git_sha }}
         VLLM_GIT_URL=${{ inputs.vllm_git_url }}
         VLLM_GIT_REF=${{ inputs.vllm_git_ref }}
         VLLM_GIT_SHA=${{ inputs.vllm_git_sha }}
-        VLLM_INSTALL_MODE=${{ inputs.vllm_install_mode }}
-        VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_install_mode == 'python-overlay' && inputs.vllm_runtime_base_image || 'vllm/vllm-openai:v0.24.0-ubuntu2404' }}
+        VLLM_INSTALL_MODE=${{ inputs.build_vllm_placeholder && 'python-overlay' || inputs.vllm_install_mode }}
+        VLLM_RUNTIME_BASE_IMAGE=${{ inputs.build_vllm_placeholder && 'vllm/vllm-openai@sha256:5bda7078b1bb17f74d369e3ded63115a77d5ea5eeb9eab6ca9a52d108f9a262d' || (inputs.vllm_install_mode == 'python-overlay' && inputs.vllm_runtime_base_image || 'vllm/vllm-openai:v0.24.0-ubuntu2404') }}
     secrets: inherit
 
   sglang-build:
@@ -157,6 +182,7 @@ jobs:
       cuda_version: '["13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
+      image_tag_suffix: ${{ format('-run-{0}-{1}', github.run_id, github.run_attempt) }}
     secrets: inherit
 
   sglang-copy-to-acr:
@@ -185,6 +211,40 @@ jobs:
   # SNAPSHOT (build-only)
   # ============================================================================
 
+  snapshot-agent:
+    name: Snapshot Agent
+    needs: [init]
+    if: inputs.build_snapshot_agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: agent
+          image_tag: ${{ github.sha }}-snapshot-agent-run-${{ github.run_id }}-${{ github.run_attempt }}
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-snapshot-agent
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent-run-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-snapshot-agent
+          extra_build_args: |
+            CRIU_REPO=${{ inputs.snapshot_criu_repo }}
+            CRIU_REF=${{ inputs.snapshot_criu_ref }}
+            CRIU_SHA=${{ inputs.snapshot_criu_sha }}
+            CUDA_CHECKPOINT_REPO=${{ inputs.snapshot_cuda_checkpoint_repo }}
+            CUDA_CHECKPOINT_REF=${{ inputs.snapshot_cuda_checkpoint_ref }}
+            CUDA_CHECKPOINT_SHA=${{ inputs.snapshot_cuda_checkpoint_sha }}
+
   snapshot-placeholder-vllm:
     name: vLLM Snapshot Placeholder
     needs: [init, vllm-copy-to-acr]
@@ -200,7 +260,7 @@ jobs:
         with:
           component: snapshot
           target: placeholder
-          image_tag: ${{ github.sha }}-vllm-placeholder
+          image_tag: ${{ github.sha }}-vllm-placeholder-run-${{ github.run_id }}-${{ github.run_attempt }}
           builder_name: ${{ needs.init.outputs.builder_name }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -209,12 +269,17 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder-run-${{ github.run_id }}-${{ github.run_attempt }}
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder
           extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-run-${{ github.run_id }}-${{ github.run_attempt }}
+            BASE_IMAGE_USER=dynamo
             CRIU_REPO=${{ inputs.snapshot_criu_repo }}
             CRIU_REF=${{ inputs.snapshot_criu_ref }}
+            CRIU_SHA=${{ inputs.snapshot_criu_sha }}
+            CUDA_CHECKPOINT_REPO=${{ inputs.snapshot_cuda_checkpoint_repo }}
+            CUDA_CHECKPOINT_REF=${{ inputs.snapshot_cuda_checkpoint_ref }}
+            CUDA_CHECKPOINT_SHA=${{ inputs.snapshot_cuda_checkpoint_sha }}
 
   # ============================================================================
   # OPERATOR (build-only)
@@ -286,7 +351,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, snapshot-placeholder-vllm, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, snapshot-agent, snapshot-placeholder-vllm, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

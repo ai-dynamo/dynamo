@@ -16,17 +16,18 @@
 # =============================================================================
 ARG DOCKER_PROXY
 ARG GO_VERSION=1.26.3
-# Default to upstream CRIU development branch. Custom forks can override both
-# args at build time, for example:
-#   --build-arg CRIU_REPO=<git-remote-url>
-#   --build-arg CRIU_REF=<fork-branch-or-sha>
-ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
+ARG CRIU_REPO=https://github.com/galletas1712/criu.git
 ARG CRIU_REF=criu-dev
+ARG CRIU_SHA=3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
+ARG CUDA_CHECKPOINT_REPO=https://github.com/NVIDIA/cuda-checkpoint.git
+ARG CUDA_CHECKPOINT_REF=main
+ARG CUDA_CHECKPOINT_SHA=00d5cce84c628088d6caa203fc4af40c1538b6f7
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 # For placeholder target only - this default allows agent builds to succeed,
 # but placeholder builds MUST override it with --build-arg BASE_IMAGE=<image>
 ARG BASE_IMAGE=placeholder-requires-base-image-arg
+ARG BASE_IMAGE_USER=root
 
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
@@ -100,6 +101,10 @@ FROM ubuntu:24.04 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
+ARG CRIU_SHA
+ARG CUDA_CHECKPOINT_REPO
+ARG CUDA_CHECKPOINT_REF
+ARG CUDA_CHECKPOINT_SHA
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -124,9 +129,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN git init /tmp/criu \
     && cd /tmp/criu \
-    && git remote add origin ${CRIU_REPO} \
-    && git fetch --depth 1 origin ${CRIU_REF} \
-    && git checkout FETCH_HEAD \
+    && git remote add origin "${CRIU_REPO}" \
+    && test "$(git ls-remote --exit-code origin "${CRIU_REF}" | awk 'NR == 1 { print $1 } END { if (NR != 1) exit 1 }')" = "${CRIU_SHA}" \
+    && git fetch --depth 1 origin "${CRIU_SHA}" \
+    && git checkout --detach "${CRIU_SHA}" \
+    && test "$(git rev-parse HEAD)" = "${CRIU_SHA}" \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
@@ -137,7 +144,22 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
       -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
       /tmp/snapshot_inet_remap.c
 
-RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
+RUN git init /tmp/cuda-checkpoint \
+    && cd /tmp/cuda-checkpoint \
+    && git remote add origin "${CUDA_CHECKPOINT_REPO}" \
+    && test "$(git ls-remote --exit-code origin "${CUDA_CHECKPOINT_REF}" | awk 'NR == 1 { print $1 } END { if (NR != 1) exit 1 }')" = "${CUDA_CHECKPOINT_SHA}" \
+    && git fetch --depth 1 origin "${CUDA_CHECKPOINT_SHA}" \
+    && git checkout --detach "${CUDA_CHECKPOINT_SHA}" \
+    && test "$(git rev-parse HEAD)" = "${CUDA_CHECKPOINT_SHA}"
+
+RUN printf '%s\n' \
+      "criu_source_url=${CRIU_REPO}" \
+      "criu_source_ref=${CRIU_REF}" \
+      "criu_source_sha=${CRIU_SHA}" \
+      "cuda_checkpoint_source_url=${CUDA_CHECKPOINT_REPO}" \
+      "cuda_checkpoint_source_ref=${CUDA_CHECKPOINT_REF}" \
+      "cuda_checkpoint_source_sha=${CUDA_CHECKPOINT_SHA}" \
+      > /restore-tool-source-provenance.txt
 
 # =============================================================================
 # Stage: Agent - Final snapshot-agent image
@@ -172,6 +194,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy CRIU from builder
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
+COPY --from=criu-builder /restore-tool-source-provenance.txt /opt/dynamo/restore-tool-source-provenance.txt
 RUN criu --version
 
 # Copy CUDA checkpoint binaries
@@ -202,6 +225,7 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 FROM ${BASE_IMAGE} AS placeholder
 
 ARG BASE_IMAGE
+ARG BASE_IMAGE_USER
 ARG TARGETARCH=amd64
 ENV ORIGINAL_BASE_IMAGE=${BASE_IMAGE}
 
@@ -232,6 +256,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy CRIU from builder (needed by nsrestore running inside these namespaces)
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
+COPY --from=criu-builder /restore-tool-source-provenance.txt /opt/dynamo/restore-tool-source-provenance.txt
 RUN criu --version && echo "CRIU installed successfully"
 
 # Copy CUDA checkpoint binaries
@@ -246,3 +271,5 @@ RUN chmod +x /usr/local/bin/nsrestore
 
 # Create directories
 RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
+
+USER ${BASE_IMAGE_USER}

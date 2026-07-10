@@ -184,6 +184,22 @@ def verify_flashinfer(source: dict[str, str]) -> None:
         raise RuntimeError("FlashInfer durable source provenance is incorrect")
 
 
+def verify_nvrtc(source: dict[str, str]) -> None:
+    installed_version = subprocess.run(
+        ["dpkg-query", "-W", "-f=${Version}", "cuda-nvrtc-dev-13-0"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    if (
+        not installed_version
+        or source.get("nvrtc_package_version") != installed_version
+    ):
+        raise RuntimeError("NVRTC package provenance is missing or incorrect")
+    if not Path("/usr/local/cuda/include/nvrtc.h").is_file():
+        raise RuntimeError("NVRTC development headers are missing")
+
+
 def verify_gms_backend_in_fresh_process() -> None:
     program = r"""
 from types import SimpleNamespace
@@ -244,6 +260,7 @@ def validate() -> None:
         raise RuntimeError(f"Unexpected source provenance: {mismatches}")
     verify_overlay_files(Path(current["vllm"]["package"]))
     verify_flashinfer(source)
+    verify_nvrtc(source)
     assert_no_shim()
     verify_gms_backend_in_fresh_process()
 

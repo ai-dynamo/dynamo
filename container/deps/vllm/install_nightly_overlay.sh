@@ -150,6 +150,11 @@ apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates cuda-nvrtc-dev-13-0 git
 rm -rf /var/lib/apt/lists/*
+nvrtc_package_version="$(
+    dpkg-query -W -f='${Version}' cuda-nvrtc-dev-13-0
+)"
+[[ -n "${nvrtc_package_version}" ]] ||
+    die "cuda-nvrtc-dev-13-0 package version is empty"
 
 clone_source \
     "${VLLM_GIT_URL:-}" \
@@ -204,4 +209,5 @@ flashinfer_source_url=${EXPECTED_FLASHINFER_URL}
 flashinfer_source_ref=${EXPECTED_FLASHINFER_REF}
 flashinfer_source_sha=${EXPECTED_FLASHINFER_SHA}
 flashinfer_source_version=${flashinfer_source_version}
+nvrtc_package_version=${nvrtc_package_version}
 EOF

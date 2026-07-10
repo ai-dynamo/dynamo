@@ -5,9 +5,15 @@
 IMG ?= nvcr.io/nvidian/dynamo-dev/snapshot-agent:latest
 PLACEHOLDER_IMG ?= nvcr.io/nvidian/dynamo-dev/dynamo-vllm-placeholder:latest
 # PLACEHOLDER_BASE_IMG must be provided when building placeholder (no default)
-# Optional CRIU source override for snapshot image builds. If unset, the
-# Dockerfile defaults are used.
-CRIU_BUILD_ARGS = $(if $(CRIU_REPO),--build-arg CRIU_REPO=$(CRIU_REPO),) $(if $(CRIU_REF),--build-arg CRIU_REF=$(CRIU_REF),)
+# Optional source overrides for snapshot image builds. A custom source requires
+# a matching URL, named ref, and exact SHA.
+RESTORE_TOOL_BUILD_ARGS = \
+	$(if $(CRIU_REPO),--build-arg CRIU_REPO=$(CRIU_REPO),) \
+	$(if $(CRIU_REF),--build-arg CRIU_REF=$(CRIU_REF),) \
+	$(if $(CRIU_SHA),--build-arg CRIU_SHA=$(CRIU_SHA),) \
+	$(if $(CUDA_CHECKPOINT_REPO),--build-arg CUDA_CHECKPOINT_REPO=$(CUDA_CHECKPOINT_REPO),) \
+	$(if $(CUDA_CHECKPOINT_REF),--build-arg CUDA_CHECKPOINT_REF=$(CUDA_CHECKPOINT_REF),) \
+	$(if $(CUDA_CHECKPOINT_SHA),--build-arg CUDA_CHECKPOINT_SHA=$(CUDA_CHECKPOINT_SHA),)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -67,7 +73,7 @@ build: fmt vet ## Build snapshot-agent binary.
 .PHONY: docker-build-agent
 docker-build-agent: ## Build snapshot-agent docker image (linux/amd64 only).
 	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target agent \
-		$(CRIU_BUILD_ARGS) \
+		$(RESTORE_TOOL_BUILD_ARGS) \
 		-t ${IMG} .
 
 .PHONY: docker-build-placeholder
@@ -82,7 +88,7 @@ endif
 	fi; \
 	if [ -z "$$BASE_IMAGE_USER" ]; then BASE_IMAGE_USER=root; fi; \
 	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target placeholder \
-		$(CRIU_BUILD_ARGS) \
+		$(RESTORE_TOOL_BUILD_ARGS) \
 		--build-arg BASE_IMAGE=${PLACEHOLDER_BASE_IMG} \
 		--build-arg BASE_IMAGE_USER=$$BASE_IMAGE_USER \
 		-t ${PLACEHOLDER_IMG} .

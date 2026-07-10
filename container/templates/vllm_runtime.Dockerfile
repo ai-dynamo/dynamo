@@ -305,7 +305,9 @@ RUN set -eux; \
         auto) ;; \
         python-overlay) python3 /usr/local/lib/validate_nightly_overlay.py validate ;; \
         *) echo "Unsupported VLLM_INSTALL_MODE: ${VLLM_INSTALL_MODE}" >&2; exit 1 ;; \
-    esac
+    esac; \
+    rm -f /usr/local/bin/install_nightly_overlay \
+        /usr/local/lib/validate_nightly_overlay.py
 {% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest

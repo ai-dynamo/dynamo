@@ -102,7 +102,7 @@
     "layer_prefix_check_skipped": "(optional) true if the engineer opted out at capture time",
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
-  "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
+  "format": "CycloneDX JSON using each captured artifact's declared specVersion, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
   "generated_at": "2026-07-10T01:36:16+00:00",
   "schema_version": 2
 }
