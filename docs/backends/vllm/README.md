@@ -76,6 +76,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 > ```bash
 > python -m dynamo.vllm \
 >   --model Qwen/Qwen3-0.6B \
+>   --enable-prefix-caching \
 >   --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
 > ```
 >
