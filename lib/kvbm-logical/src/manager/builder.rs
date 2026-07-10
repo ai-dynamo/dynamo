@@ -10,6 +10,7 @@ use crate::metrics::{BlockPoolMetrics, MetricsAggregator, short_type_name};
 use crate::tinylfu::TinyLFUTracker;
 
 use crate::{
+    MAX_LOGICAL_BLOCK_SIZE_TOKENS,
     blocks::BlockMetadata,
     pools::{
         BlockDuplicationPolicy, BlockStore, InactiveIndex,
@@ -120,7 +121,8 @@ pub struct BlockManagerConfigBuilder<T: BlockMetadata> {
     /// Number of blocks in the pool
     block_count: Option<usize>,
 
-    /// Size of each block in tokens (must be power of 2, 1-1024)
+    /// Size of each block in tokens (must be a power of 2 no larger than
+    /// [`MAX_LOGICAL_BLOCK_SIZE_TOKENS`])
     /// Default: 16
     block_size: Option<usize>,
 
@@ -177,15 +179,16 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
     /// Set the block size (number of tokens per block).
     ///
     /// # Requirements
-    /// - Must be >= 1 and <= 1024
+    /// - Must be between 1 and [`MAX_LOGICAL_BLOCK_SIZE_TOKENS`] (inclusive)
     /// - Must be a power of 2
     ///
     /// # Panics
     /// Panics if the block size doesn't meet requirements.
     pub fn block_size(mut self, size: usize) -> Self {
         assert!(
-            (1..=1024).contains(&size),
-            "block_size must be between 1 and 1024, got {}",
+            (1..=MAX_LOGICAL_BLOCK_SIZE_TOKENS).contains(&size),
+            "block_size must be between 1 and {}, got {}",
+            MAX_LOGICAL_BLOCK_SIZE_TOKENS,
             size
         );
         assert!(
@@ -331,10 +334,12 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
 
         // Validate block_size
         let block_size = self.block_size.unwrap_or(16);
-        if !block_size.is_power_of_two() || !(1..=1024).contains(&block_size) {
+        if !block_size.is_power_of_two()
+            || !(1..=MAX_LOGICAL_BLOCK_SIZE_TOKENS).contains(&block_size)
+        {
             return Err(format!(
-                "Invalid block_size {}: must be a power of 2 between 1 and 1024",
-                block_size
+                "Invalid block_size {}: must be a power of 2 between 1 and {}",
+                block_size, MAX_LOGICAL_BLOCK_SIZE_TOKENS
             ));
         }
 

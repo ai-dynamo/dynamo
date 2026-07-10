@@ -60,6 +60,25 @@ fn make_args() -> MockEngineArgs {
         .unwrap()
 }
 
+#[test]
+fn supports_4096_token_kv_cache_blocks() {
+    let args = MockEngineArgs::builder()
+        .block_size(4096)
+        .num_gpu_blocks(3488)
+        .max_num_batched_tokens(Some(4096))
+        .max_num_seqs(Some(1))
+        .enable_chunked_prefill(true)
+        .enable_prefix_caching(true)
+        .speedup_ratio(0.0)
+        .build()
+        .unwrap();
+
+    let core = VllmCore::new(args);
+
+    assert_eq!(core.kv_manager.block_size(), 4096);
+    assert_eq!(core.kv_manager.max_capacity(), 3488);
+}
+
 fn router_args() -> MockEngineArgs {
     MockEngineArgs::builder()
         .block_size(4)

@@ -6,6 +6,8 @@
 //! This module provides constants and utilities for consistent testing across
 //! all v2 block manager components.
 
+use crate::MAX_LOGICAL_BLOCK_SIZE_TOKENS;
+
 /// Default block size for testing (4 tokens)
 ///
 /// Most tests use 4-token sequences like [100, 101, 102, 103].
@@ -18,9 +20,9 @@ pub const DEFAULT_TEST_BLOCK_COUNT: usize = 10;
 
 /// Common test block sizes for parameterized testing
 ///
-/// These cover the full range of valid block sizes from 1 to 1024,
+/// These cover the full range of valid block sizes from 1 to 4096,
 /// all being powers of 2 as required by the validation.
-pub const TEST_BLOCK_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+pub const TEST_BLOCK_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
 
 /// Small set of block sizes for focused testing
 pub const COMMON_TEST_BLOCK_SIZES: &[usize] = &[1, 4, 16, 64];
@@ -41,7 +43,7 @@ pub mod constants {
     pub const LARGE: usize = 64;
 
     /// Maximum block size
-    pub const MAX: usize = 1024;
+    pub const MAX: usize = crate::MAX_LOGICAL_BLOCK_SIZE_TOKENS;
 }
 
 /// Validate that a block size is suitable for testing
@@ -50,9 +52,10 @@ pub mod constants {
 /// * `size` - The block size to validate
 ///
 /// # Returns
-/// `true` if the size is a power of 2 between 1 and 1024 (inclusive)
+/// `true` if the size is a power of 2 between 1 and
+/// [`MAX_LOGICAL_BLOCK_SIZE_TOKENS`] (inclusive)
 pub fn validate_test_block_size(size: usize) -> bool {
-    size.is_power_of_two() && (1..=1024).contains(&size)
+    size.is_power_of_two() && (1..=MAX_LOGICAL_BLOCK_SIZE_TOKENS).contains(&size)
 }
 
 /// Generate a sequence of tokens for testing with the given block size
@@ -109,13 +112,13 @@ mod tests {
         assert!(validate_test_block_size(1));
         assert!(validate_test_block_size(4));
         assert!(validate_test_block_size(16));
-        assert!(validate_test_block_size(1024));
+        assert!(validate_test_block_size(4096));
 
         // Invalid sizes
         assert!(!validate_test_block_size(0));
         assert!(!validate_test_block_size(3)); // Not power of 2
         assert!(!validate_test_block_size(5)); // Not power of 2
-        assert!(!validate_test_block_size(2048)); // Too large
+        assert!(!validate_test_block_size(8192)); // Too large
     }
 
     #[test]

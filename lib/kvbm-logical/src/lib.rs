@@ -48,6 +48,9 @@ pub use sequence::{
 pub type BlockId = usize;
 pub type SequenceHash = dynamo_tokens::PositionalLineageHash;
 
+/// Largest logical KV-cache block supported by the block manager, in tokens.
+pub const MAX_LOGICAL_BLOCK_SIZE_TOKENS: usize = 4096;
+
 /// Stable, process-unique identifier for a `BlockManager`'s underlying
 /// `BlockStore`.
 ///
