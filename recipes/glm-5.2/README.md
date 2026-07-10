@@ -104,4 +104,5 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 ## Limitations
 
 - B200 recipes support up to 500K context lengths, and H200 recipes up to 250K. The full 1M context length is not supported out of the box.
+- Structured decoding requires reasoning to be disabled (`"chat_template_kwargs": {"enable_thinking": false}`) for the output to be populated in the `content` field instead of the `reasoning_content` field.
 
