@@ -249,7 +249,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         );
 
         if was_suspended {
-            self.defer_request(session_id, id, now, false);
+            self.defer_request(session_id, id, now, true);
             return AdmissionDecision::Defer;
         }
 
@@ -837,7 +837,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             footprint,
             since: last_activity,
         };
-        program.assigned_worker = None;
         self.paused.insert(session_id.to_owned());
     }
 
@@ -1383,10 +1382,12 @@ mod tests {
         assert!(strategy.programs["small"].is_idle_resident());
         assert!(reconcile_now(&mut strategy).is_empty());
         assert!(strategy.programs["small"].is_suspended());
+        assert_eq!(strategy.programs["small"].assigned_worker, Some(worker(1)));
         assert_eq!(
             strategy.admit(request(3, Some("small"), 110)),
             AdmissionDecision::Defer
         );
+        assert_eq!(strategy.programs["small"].assigned_worker, Some(worker(1)));
 
         *current.lock().unwrap() = capacities(&[(1, 600)]);
         assert_eq!(
