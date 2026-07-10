@@ -24,6 +24,12 @@ python tests/serve/tito_parity/run_pd_three_way.py \
   --model Qwen/Qwen3.5-35B-A3B-FP8 \
   --suite full
 
+# One mixed-reward VLM cohort, replayed unchanged through native vLLM,
+# Dynamo aggregated, and Dynamo P/D.
+python tests/serve/tito_parity/run_seeded_rl_parity.py \
+  --model Qwen/Qwen3-VL-4B-Instruct \
+  --seed-base 144
+
 # Scrape and verify Generate frontend metrics in each Dynamo topology.
 python tests/serve/tito_parity/verify_generate_metrics.py \
   --model Qwen/Qwen3.5-2B \
@@ -64,6 +70,19 @@ The `full` suite runs the two-request smoke stage first, followed by two
 sequential repetitions of nine longer text/VLM cases. This is the exact-parity
 gate: the current Qwen hybrid kernels can change greedy tokens when batch
 composition changes, even within upstream vLLM itself.
+
+`run_seeded_rl_parity.py` reproduces task 7 from `color-codeword-v1` and gives
+the 16 rollouts distinct, fixed sampling seeds. Native vLLM's render endpoint
+produces every multimodal token/feature request once; those exact request bodies
+are then replayed through Dynamo aggregated and Dynamo P/D. The runner requires
+a mixed correct/incorrect reward vector, exact tokens and stable metadata, and
+logprob equality within a narrow numerical tolerance. Request IDs and the known
+Python-null/Rust-populated completion-logprob `bytes` representation are
+normalized. It requests zero alternative logprobs, which still returns each
+sampled token's logprob and avoids a known Python/Rust formatter difference in
+the number of alternatives returned for a non-top-1 sampled token. Each replay
+also verifies that the render result contains the VLM feature tensors, hashes,
+and placeholders, and that the server remains healthy after the request wave.
 
 Pass `--max-concurrency 4` to append an exact concurrent-batching stress stage.
 That mode intentionally reports any upstream/Dynamo drift instead of weakening
