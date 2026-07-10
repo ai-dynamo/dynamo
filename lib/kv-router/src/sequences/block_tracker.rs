@@ -59,6 +59,16 @@ impl BlockTracker {
     /// Each [`SequenceHash`] must identify exactly one prefix ancestry and
     /// depth. As with the KV indexer, this tracker trusts callers to maintain
     /// that invariant and does not validate the hash recurrence in production.
+    ///
+    /// # Collision scope
+    ///
+    /// `SequenceHash` is a probabilistic 64-bit identifier, so collisions are
+    /// possible but very unlikely. A collision matters here only when both
+    /// blocks are live in the same `WorkerWithDpRank` tracker: each worker and
+    /// DP rank owns a separate `BlockTracker` and hash index. Assuming uniform
+    /// hashes, an active set of `n` blocks has collision probability of roughly
+    /// `n * (n - 1) / 2^65`. Replica sync may reproduce the same collision for
+    /// that worker on peer routers, but cannot alias arena nodes across workers.
     pub(super) fn acquire_prompt(
         &mut self,
         sequence: &[SequenceHash],
