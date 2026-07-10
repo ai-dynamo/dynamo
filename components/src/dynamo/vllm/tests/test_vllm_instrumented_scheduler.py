@@ -938,7 +938,7 @@ def _grid_stub_with_kv_capacity(num_gpu_blocks: int, block_size: int):
     ``_bench_generate_decode_grid`` reads."""
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_grid = []
-    stub._bench_config = SimpleNamespace()
+    stub._bench_config = BenchmarkConfig()
     stub.cache_config = SimpleNamespace(
         num_gpu_blocks=num_gpu_blocks,
         enable_prefix_caching=True,
@@ -1328,6 +1328,25 @@ def test_decode_benchmark_rejects_speculative_decoding(tmp_path):
         InstrumentedScheduler._bench_init(stub, vllm_config)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("prefill_max_new_token_samples", 1, "must be at least 2"),
+        ("prefill_max_kv_read_token_samples", 1, "must be at least 2"),
+        ("decode_max_kv_read_token_samples", 1, "must be at least 2"),
+        ("decode_max_batch_size_samples", 1, "must be at least 2"),
+        ("prefix_max_batch_size_samples", 0, "must be positive"),
+    ],
+)
+def test_benchmark_rejects_invalid_sampling_limits(tmp_path, field, value, message):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    config = {"output_path": str(tmp_path / "out.json"), field: value}
+    vllm_config = SimpleNamespace(additional_config={"benchmark": config})
+
+    with pytest.raises(ValueError, match=message):
+        InstrumentedScheduler._bench_init(stub, vllm_config)
+
+
 def _prefill_grid_stub(
     *,
     block_size: int = 8,
@@ -1335,7 +1354,7 @@ def _prefill_grid_stub(
 ):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_grid = []
-    stub._bench_config = SimpleNamespace()
+    stub._bench_config = BenchmarkConfig()
     stub.max_num_scheduled_tokens = 40
     stub.max_num_running_reqs = 8
     stub.max_model_len = 128
@@ -1360,6 +1379,20 @@ def test_cudagraph_axis_keeps_all_boundaries_and_geometric_tail():
         16,
         32,
     ]
+
+
+def test_uniform_axis_limit_retains_endpoints_and_evenly_removes_middle():
+    values = list(range(10))
+
+    assert instrumented_scheduler_module._uniformly_limit_axis(values, 4) == [
+        0,
+        3,
+        6,
+        9,
+    ]
+    assert instrumented_scheduler_module._uniformly_limit_axis(values, 10) == values
+    with pytest.raises(ValueError, match="at least 2"):
+        instrumented_scheduler_module._uniformly_limit_axis(values, 1)
 
 
 def test_cudagraph_axis_appends_exact_non_power_of_two_limit():
@@ -1434,6 +1467,36 @@ def test_prefill_grid_uses_total_tokens_and_piecewise_boundaries():
     assert engine_limit.sample_reasons == ["eager_tail", "engine_limit"]
 
 
+def test_prefill_grid_uniformly_limits_new_tokens_batch_and_kv_axes():
+    stub = _prefill_grid_stub(num_gpu_blocks=512)
+    stub.max_num_scheduled_tokens = 40
+    stub._bench_prefill_capture_sizes = list(range(1, 41))
+    stub._bench_config.prefill_max_new_token_samples = 4
+    stub._bench_config.prefill_max_kv_read_token_samples = 3
+    stub._bench_config.prefix_max_batch_size_samples = 1
+
+    InstrumentedScheduler._bench_generate_prefill_grid(stub)
+
+    assert sorted({point.total_prefill_tokens for point in stub._bench_grid}) == [
+        1,
+        14,
+        27,
+        40,
+    ]
+    assert {point.batch_size for point in stub._bench_grid} == {1}
+    for total_tokens in (1, 14, 27, 40):
+        points = [
+            point.total_kv_read_tokens
+            for point in stub._bench_grid
+            if point.total_prefill_tokens == total_tokens
+        ]
+        assert len(points) <= 3
+        assert points[0] == 0
+        assert points[-1] == InstrumentedScheduler._bench_max_prefill_kv_read_tokens(
+            stub, total_tokens, 1
+        )
+
+
 def test_agg_grid_contains_piecewise_prefill_then_full_decode_points():
     stub = _prefill_grid_stub()
     stub._bench_grid = deque()
@@ -1484,6 +1547,18 @@ def test_prefill_kv_read_ladder_is_total_block_aligned():
         assert max(per_request) - min(per_request) <= stub._bench_hash_block_size
 
 
+def test_prefill_kv_read_ladder_is_uniformly_limited_with_endpoints():
+    stub = _prefill_grid_stub(block_size=8)
+    stub._bench_config.prefill_max_kv_read_token_samples = 4
+
+    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 16, 3) == [
+        0,
+        32,
+        128,
+        360,
+    ]
+
+
 def test_decode_kv_read_ladder_keeps_every_power_of_two_and_exact_maximum():
     stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
 
@@ -1499,6 +1574,27 @@ def test_decode_kv_read_ladder_keeps_every_power_of_two_and_exact_maximum():
     ]
 
 
+def test_decode_grid_uniformly_limits_batch_and_kv_axes():
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
+    stub._bench_decode_capture_sizes = list(range(1, 64))
+    stub._bench_config.decode_max_batch_size_samples = 4
+    stub._bench_config.decode_max_kv_read_token_samples = 3
+
+    InstrumentedScheduler._bench_generate_decode_grid(stub)
+
+    assert sorted({point.batch_size for point in stub._bench_grid}) == [1, 22, 42, 63]
+    for batch_size in (1, 22, 42, 63):
+        sampled = [
+            point.total_kv_read_tokens
+            for point in stub._bench_grid
+            if point.batch_size == batch_size
+        ]
+        full_axis = InstrumentedScheduler._bench_decode_kv_read_points(stub, batch_size)
+        assert len(sampled) <= 3
+        assert sampled[0] == full_axis[0]
+        assert sampled[-1] == full_axis[-1]
+
+
 def test_prefill_kv_read_ladder_falls_back_to_miss_when_cache_is_disabled():
     stub = _prefill_grid_stub(block_size=8)
     stub.cache_config.enable_prefix_caching = False
@@ -1506,12 +1602,15 @@ def test_prefill_kv_read_ladder_falls_back_to_miss_when_cache_is_disabled():
     assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 16, 3) == [0]
 
 
-def test_prefill_batch_axis_uses_powers_of_two_plus_legal_maximum():
+def test_prefill_batch_axis_keeps_first_configured_number_of_samples():
     stub = _prefill_grid_stub(
         block_size=8,
         num_gpu_blocks=8,
     )
 
+    assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, 10) == [1, 2, 4]
+
+    stub._bench_config.prefix_max_batch_size_samples = 4
     assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, 10) == [
         1,
         2,
@@ -1539,7 +1638,7 @@ def test_prefill_batch_grid_uses_live_free_block_count_after_manager_reservation
     )
 
     # The live pool, rather than configured capacity, determines the legal max.
-    assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, 10) == [1, 2, 4, 7]
+    assert InstrumentedScheduler._bench_prefill_batch_sizes(stub, 10) == [1, 2, 4]
 
 
 def test_prefill_kv_read_grid_accounts_for_eagle_cache_block_drop():

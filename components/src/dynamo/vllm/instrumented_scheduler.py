@@ -143,6 +143,11 @@ class BenchmarkConfig:
     warmup_iterations: int = 5
     output_path: str = "/tmp/benchmark_results.json"
     timeout: int = 300
+    prefill_max_new_token_samples: int = 32
+    prefill_max_kv_read_token_samples: int = 8
+    decode_max_kv_read_token_samples: int = 128
+    decode_max_batch_size_samples: int = 128
+    prefix_max_batch_size_samples: int = 3
 
 
 class _BenchPhase(enum.Enum):
@@ -223,6 +228,21 @@ def _powers_of_two_up_to(limit: int) -> list[int]:
         values.append(value)
         value *= 2
     return values
+
+
+def _uniformly_limit_axis(values: Sequence[int], max_samples: int) -> list[int]:
+    """Uniformly select at most ``max_samples``, retaining both endpoints."""
+    if max_samples < 2:
+        raise ValueError("uniform axis sample limits must be at least 2")
+    if len(values) <= max_samples:
+        return list(values)
+
+    last_index = len(values) - 1
+    intervals = max_samples - 1
+    return [
+        values[(sample * last_index + intervals // 2) // intervals]
+        for sample in range(max_samples)
+    ]
 
 
 def _cudagraph_axis_points(
@@ -1172,7 +1192,15 @@ class InstrumentedScheduler(AsyncScheduler):
         cfg = bench_cfg if isinstance(bench_cfg, dict) else {}
         # additional_config values arrive as strings from JSON; coerce to
         # the types that BenchmarkConfig expects.
-        _INT_FIELDS = {"warmup_iterations", "timeout"}
+        _INT_FIELDS = {
+            "warmup_iterations",
+            "timeout",
+            "prefill_max_new_token_samples",
+            "prefill_max_kv_read_token_samples",
+            "decode_max_kv_read_token_samples",
+            "decode_max_batch_size_samples",
+            "prefix_max_batch_size_samples",
+        }
         for k in _INT_FIELDS:
             if k in cfg and not isinstance(cfg[k], int):
                 cfg[k] = int(cfg[k])
@@ -1182,6 +1210,25 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         if self._bench_config.timeout <= 0:
             raise ValueError("benchmark timeout must be positive")
+        uniform_sample_limits = {
+            "prefill_max_new_token_samples": (
+                self._bench_config.prefill_max_new_token_samples
+            ),
+            "prefill_max_kv_read_token_samples": (
+                self._bench_config.prefill_max_kv_read_token_samples
+            ),
+            "decode_max_kv_read_token_samples": (
+                self._bench_config.decode_max_kv_read_token_samples
+            ),
+            "decode_max_batch_size_samples": (
+                self._bench_config.decode_max_batch_size_samples
+            ),
+        }
+        for name, value in uniform_sample_limits.items():
+            if value < 2:
+                raise ValueError(f"benchmark {name} must be at least 2")
+        if self._bench_config.prefix_max_batch_size_samples < 1:
+            raise ValueError("benchmark prefix_max_batch_size_samples must be positive")
         self._bench_config.output_path = os.environ.get(
             ENV_FPM_BENCHMARK_OUTPUT_PATH,
             self._bench_config.output_path,
@@ -1378,6 +1425,10 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_prefill_capture_sizes,
             max_tokens,
         )
+        total_prefill_tokens = _uniformly_limit_axis(
+            total_prefill_tokens,
+            self._bench_config.prefill_max_new_token_samples,
+        )
         for total_tokens in total_prefill_tokens:
             for batch_size in self._bench_prefill_batch_sizes(total_tokens):
                 for total_kv_read_tokens in self._bench_prefill_kv_read_points(
@@ -1434,7 +1485,7 @@ class InstrumentedScheduler(AsyncScheduler):
             value for value in _powers_of_two_up_to(max_batch) if value in legal_set
         ]
         presets.append(max_batch)
-        return sorted(set(presets))
+        return sorted(set(presets))[: self._bench_config.prefix_max_batch_size_samples]
 
     @staticmethod
     def _bench_cudagraph_metadata(
@@ -1677,7 +1728,11 @@ class InstrumentedScheduler(AsyncScheduler):
             value for value in _powers_of_two_up_to(max_blocks) if value >= batch_size
         )
         block_presets.append(max_blocks)
-        return [blocks * hash_block_size for blocks in sorted(set(block_presets))]
+        points = [blocks * hash_block_size for blocks in sorted(set(block_presets))]
+        return _uniformly_limit_axis(
+            points,
+            self._bench_config.prefill_max_kv_read_token_samples,
+        )
 
     def _bench_max_prefill_kv_read_tokens(
         self, total_prefill_tokens: int, batch_size: int
@@ -1775,6 +1830,10 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_decode_capture_sizes,
             feasible_max_batch,
         )
+        batch_sizes = _uniformly_limit_axis(
+            batch_sizes,
+            self._bench_config.decode_max_batch_size_samples,
+        )
         for batch_size in batch_sizes:
             (
                 capture_size,
@@ -1785,7 +1844,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_decode_capture_sizes,
                 feasible_max_batch,
             )
-            for total_kv_read_tokens in self._bench_decode_kv_read_points(batch_size):
+            kv_read_points = _uniformly_limit_axis(
+                self._bench_decode_kv_read_points(batch_size),
+                self._bench_config.decode_max_kv_read_token_samples,
+            )
+            for total_kv_read_tokens in kv_read_points:
                 if not self._bench_decode_point_feasible(
                     batch_size, total_kv_read_tokens
                 ):

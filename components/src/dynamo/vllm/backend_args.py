@@ -228,8 +228,74 @@ class DynamoVllmArgGroup(ArgGroup):
                 "decode total-KV/batch-size points. CUDA graph axes include every "
                 "{capture size, capture size + 1} boundary and continue "
                 "geometrically to the engine limit. KV-read axes use complete "
-                "power-of-two block ladders plus their exact feasible maxima. "
-                "The resolved grid is deterministic and is never downsampled."
+                "power-of-two block ladders plus their exact feasible maxima, "
+                "then apply the configured per-axis sample limits."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--prefill-max-new-token-samples",
+            env_var="DYN_PREFILL_MAX_NEW_TOKEN_SAMPLES",
+            default=32,
+            type=int,
+            help=(
+                "Maximum number of iteration-total prefill new-token samples. "
+                "If the CUDA-graph-aware axis has more points, points are selected "
+                "uniformly across the sorted axis while always retaining its "
+                "minimum and maximum (default: 32; must be at least 2)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--prefill-max-kv-read-token-samples",
+            env_var="DYN_PREFILL_MAX_KV_READ_TOKEN_SAMPLES",
+            default=8,
+            type=int,
+            help=(
+                "Maximum number of iteration-total prefill KV-read-token samples "
+                "for each (new tokens, batch size) pair. If the block-aligned "
+                "KV ladder has more points, points are selected uniformly while "
+                "always retaining zero and the feasible maximum "
+                "(default: 8; must be at least 2)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--decode-max-kv-read-token-samples",
+            env_var="DYN_DECODE_MAX_KV_READ_TOKEN_SAMPLES",
+            default=128,
+            type=int,
+            help=(
+                "Maximum number of iteration-total decode KV-read-token samples "
+                "for each batch size. If the KV ladder has more points, points "
+                "are selected uniformly while always retaining its minimum and "
+                "feasible maximum (default: 128; must be at least 2)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--decode-max-batch-size-samples",
+            env_var="DYN_DECODE_MAX_BATCH_SIZE_SAMPLES",
+            default=128,
+            type=int,
+            help=(
+                "Maximum number of decode batch-size samples. If the "
+                "CUDA-graph-aware axis has more points, points are selected "
+                "uniformly while always retaining the minimum and feasible "
+                "maximum (default: 128; must be at least 2)."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--prefix-max-batch-size-samples",
+            env_var="DYN_PREFIX_MAX_BATCH_SIZE_SAMPLES",
+            default=3,
+            type=int,
+            help=(
+                "Maximum number of prefill request-batch-size samples for each "
+                "new-token point. Keeps the first N values from the sorted "
+                "power-of-two-plus-legal-maximum axis, so the default 3 selects "
+                "[1, 2, 4] when all three are legal (default: 3; must be positive)."
             ),
         )
         add_argument(
@@ -306,6 +372,11 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_warmup_iterations: int = 5
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 300
+    prefill_max_new_token_samples: int = 32
+    prefill_max_kv_read_token_samples: int = 8
+    decode_max_kv_read_token_samples: int = 128
+    decode_max_batch_size_samples: int = 128
+    prefix_max_batch_size_samples: int = 3
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""

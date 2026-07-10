@@ -949,7 +949,50 @@ class TestBenchmarkConfig:
             "warmup_iterations": "2",
             "output_path": str(output),
             "timeout": 300,
+            "prefill_max_new_token_samples": 32,
+            "prefill_max_kv_read_token_samples": 8,
+            "decode_max_kv_read_token_samples": 128,
+            "decode_max_batch_size_samples": 128,
+            "prefix_max_batch_size_samples": 3,
         }
+
+    def test_benchmark_sampling_controls_reach_scheduler_config(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            "--prefill-max-new-token-samples",
+            "12",
+            "--prefill-max-kv-read-token-samples",
+            "6",
+            "--decode-max-kv-read-token-samples",
+            "24",
+            "--decode-max-batch-size-samples",
+            "20",
+            "--prefix-max-batch-size-samples",
+            "2",
+        )
+
+        config = parse_args()
+
+        assert (
+            config._benchmark_additional_config["prefill_max_new_token_samples"] == "12"
+        )
+        assert (
+            config._benchmark_additional_config["prefill_max_kv_read_token_samples"]
+            == "6"
+        )
+        assert (
+            config._benchmark_additional_config["decode_max_kv_read_token_samples"]
+            == "24"
+        )
+        assert (
+            config._benchmark_additional_config["decode_max_batch_size_samples"] == "20"
+        )
+        assert (
+            config._benchmark_additional_config["prefix_max_batch_size_samples"] == "2"
+        )
 
     def test_prefill_without_prefix_caching_is_allowed(self, mock_vllm_cli):
         mock_vllm_cli(
