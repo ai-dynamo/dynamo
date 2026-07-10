@@ -49,6 +49,11 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 trtllm =[
     "uvloop",
     "tensorrt-llm==1.3.0rc20",
+    # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
+    # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
+    # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
+    # import (DYN-3348). Matches sympy 1.14's own cap; drop once TRT-LLM bounds mpmath.
+    "mpmath<1.4",
 ]
 
 vllm = [
