@@ -98,10 +98,16 @@ pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
         return Err("SGLang gRPC endpoint must not be empty".to_string());
     }
     if let Some(rest) = trimmed.strip_prefix("grpc://") {
+        if rest.is_empty() {
+            return Err("SGLang gRPC endpoint host must not be empty".to_string());
+        }
         Ok(format!("http://{rest}"))
     } else if trimmed.starts_with("grpcs://") || trimmed.starts_with("https://") {
         Err("TLS endpoints are not supported by the SGLang sidecar".to_string())
-    } else if trimmed.starts_with("http://") {
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        if rest.is_empty() {
+            return Err("SGLang gRPC endpoint host must not be empty".to_string());
+        }
         Ok(trimmed.to_string())
     } else if trimmed.contains("://") {
         Err(format!(
@@ -128,5 +134,11 @@ mod tests {
         );
         assert!(normalize_endpoint("grpcs://host:8").is_err());
         assert!(normalize_endpoint(" https://host:9 ").is_err());
+    }
+
+    #[test]
+    fn rejects_endpoints_without_hosts() {
+        assert!(normalize_endpoint("http://").is_err());
+        assert!(normalize_endpoint("grpc://").is_err());
     }
 }

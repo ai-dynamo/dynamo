@@ -36,9 +36,11 @@ pub async fn connect(
     cfg: &TransportConfig,
     deadline: Instant,
 ) -> Result<Client, DynamoError> {
+    let endpoint = Endpoint::from_shared(uri.to_string())
+        .map_err(|err| invalid_arg(format!("invalid SGLang gRPC endpoint `{uri}`: {err}")))?;
     let mut last_err;
     loop {
-        match try_connect_once(uri, cfg, deadline).await {
+        match try_connect_once(&endpoint, cfg, deadline).await {
             Ok(client) => return Ok(client),
             Err(err) => {
                 last_err = err;
@@ -55,7 +57,7 @@ pub async fn connect(
 }
 
 async fn try_connect_once(
-    uri: &str,
+    endpoint: &Endpoint,
     cfg: &TransportConfig,
     deadline: Instant,
 ) -> Result<Client, String> {
@@ -63,8 +65,8 @@ async fn try_connect_once(
     if remaining.is_zero() {
         return Err("startup deadline elapsed".to_string());
     }
-    let endpoint = Endpoint::from_shared(uri.to_string())
-        .map_err(|e| format!("invalid endpoint `{uri}`: {e}"))?
+    let endpoint = endpoint
+        .clone()
         .connect_timeout(cfg.connect_timeout.min(remaining));
     let channel = timeout_at(deadline, endpoint.connect())
         .await
@@ -307,12 +309,14 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
 mod tests {
     use std::time::Duration;
 
+    use dynamo_backend_common::{BackendError, ErrorType};
     use serde_json::json;
     use tokio::net::TcpListener;
-    use tokio::time::Instant;
+    use tokio::time::{Instant, timeout};
     use tonic::transport::Endpoint;
 
-    use super::{client_from_channel, discover, json_u32, json_u64, parse_discovery};
+    use super::{client_from_channel, connect, discover, json_u32, json_u64, parse_discovery};
+    use crate::args::TransportConfig;
     use crate::proto as pb;
 
     #[test]
@@ -358,5 +362,29 @@ mod tests {
 
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn malformed_endpoint_fails_before_retrying() {
+        let transport = TransportConfig {
+            poll_interval: Duration::from_secs(5),
+            deadline: Duration::from_secs(30),
+            ..TransportConfig::default()
+        };
+        let result = timeout(
+            Duration::from_secs(1),
+            connect("http://", &transport, Instant::now() + transport.deadline),
+        )
+        .await
+        .expect("invalid endpoint should not enter the retry loop");
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("invalid endpoint unexpectedly connected"),
+        };
+
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
     }
 }
