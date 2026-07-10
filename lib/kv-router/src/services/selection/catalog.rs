@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use parking_lot::RwLock;
 
-use crate::protocols::WorkerId;
+use crate::protocols::{WorkerId, WorkerWithDpRank};
 
 use super::error::SelectionError;
 use super::types::{
@@ -137,6 +137,23 @@ impl WorkerCatalog {
         if record.lifecycle != WorkerLifecycle::Schedulable
             || record.model_name != key.model_name
             || record.routing_group != key.routing_group
+        {
+            return None;
+        }
+        record.endpoint.clone()
+    }
+
+    pub(super) fn schedulable_worker_endpoint(
+        &self,
+        worker: WorkerWithDpRank,
+        key: &SelectionKey,
+    ) -> Option<String> {
+        let workers = self.workers.read();
+        let record = workers.get(&worker.worker_id)?;
+        if record.lifecycle != WorkerLifecycle::Schedulable
+            || record.model_name != key.model_name
+            || record.routing_group != key.routing_group
+            || !record.dp_ranks().any(|rank| rank == worker.dp_rank)
         {
             return None;
         }

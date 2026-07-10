@@ -78,6 +78,19 @@ async fn post_with_policy_class(
         .unwrap()
 }
 
+async fn patch(app: Router, uri: &str, body: &str) -> Response {
+    app.oneshot(
+        Request::builder()
+            .method("PATCH")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
 async fn register_worker(app: Router, max_tokens: Option<u64>) -> Response {
     register_worker_id(app, 1, max_tokens).await
 }
@@ -865,6 +878,62 @@ async fn failed_cached_booking_is_retryable() {
     assert_eq!(
         register_worker(app.clone(), None).await.status(),
         StatusCode::CREATED
+    );
+    let retried = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(retried.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn cached_reservation_rejects_stale_dp_rank() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    // `select` caches (worker 1, dp_rank 0).
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"req-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // Move the worker's DP range so the cached rank 0 is no longer valid.
+    assert!(
+        patch(
+            app.clone(),
+            "/workers/1",
+            r#"{"data_parallel_start_rank":1,"data_parallel_size":1}"#,
+        )
+        .await
+        .status()
+        .is_success()
+    );
+    // The stale rank is rejected, not silently booked against a recreated rank.
+    let stale = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+
+    // Restoring the rank re-arms the pending selection: the same replay books.
+    assert!(
+        patch(
+            app.clone(),
+            "/workers/1",
+            r#"{"data_parallel_start_rank":0,"data_parallel_size":1}"#,
+        )
+        .await
+        .status()
+        .is_success()
     );
     let retried = post(
         app,

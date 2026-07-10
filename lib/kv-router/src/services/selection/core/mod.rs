@@ -862,7 +862,17 @@ impl SelectionCore {
         pending: &PendingSelection,
     ) -> Result<(Arc<SelectionEntry>, String, PrefillLoadHint), SelectionError> {
         let entry = self.ready_entry(&pending.key)?;
-        let endpoint = self.schedulable_endpoint(pending.worker.worker_id, &pending.key)?;
+        // Validate the full cached worker/rank against current topology so a
+        // rank a PATCH removed during the window is rejected (and re-armed).
+        let endpoint = self
+            .catalog
+            .schedulable_worker_endpoint(pending.worker, &pending.key)
+            .ok_or_else(|| {
+                SelectionError::NotFound(format!(
+                    "schedulable worker {} (dp_rank {}) not found for {}",
+                    pending.worker.worker_id, pending.worker.dp_rank, pending.key
+                ))
+            })?;
         let prefill_load_hint = prefill_load_hint_from_effective_tokens(
             pending.isl_tokens,
             pending.effective_prefill_tokens,
@@ -948,9 +958,11 @@ impl SelectionCore {
             lora_name,
         } = booking;
 
+        // Strict booking: never lazily recreate a worker/rank removed since the
+        // reservation was resolved.
         entry
             .scheduler
-            .add_request(SequenceRequest {
+            .add_request_if_registered(SequenceRequest {
                 request_id: reservation_id.clone(),
                 token_sequence: Some(sequence_hashes),
                 track_prefill_tokens,
