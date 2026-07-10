@@ -207,7 +207,7 @@ def test_get_worker_runtime_namespace_falls_back_to_v2_hash(
     assert namespace == "base-ns-v2abc"
 
 
-def test_get_worker_runtime_namespace_falls_back_to_v2_when_v1_is_legacy(
+def test_get_worker_runtime_namespace_uses_legacy_v1_before_v2(
     kubernetes_connector, mock_kube_api
 ):
     mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
@@ -220,7 +220,7 @@ def test_get_worker_runtime_namespace_falls_back_to_v2_when_v1_is_legacy(
 
     namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
 
-    assert namespace == "base-ns-v2abc"
+    assert namespace == "base-ns-legacy"
 
 
 def test_get_worker_runtime_namespace_falls_back_to_base_for_grove(
@@ -267,7 +267,7 @@ def test_get_worker_runtime_namespace_legacy_hash(kubernetes_connector, mock_kub
 
     namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
 
-    assert namespace == "base-ns"
+    assert namespace == "base-ns-legacy"
 
 
 def test_get_worker_runtime_namespace_missing_status_with_hash_is_indeterminate(

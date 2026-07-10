@@ -126,13 +126,9 @@ class KubernetesConnector(PlannerConnector):
     def _get_current_worker_hash(self, deployment: dict) -> Optional[str]:
         annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
         worker_hash = annotations.get(CURRENT_WORKER_HASH_ANNOTATION)
-        if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
-            # v2 is only used when the original hash is missing or legacy.
-            worker_hash = annotations.get(CURRENT_WORKER_HASH_V2_ANNOTATION)
-        if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
-            # legacy marks deployments that do not use a suffixed namespace.
-            return None
-        return worker_hash
+        if worker_hash:
+            return worker_hash
+        return annotations.get(CURRENT_WORKER_HASH_V2_ANNOTATION)
 
     def _is_worker_component(self, component_name: str, component: dict) -> bool:
         component_type = get_component_type(component)
