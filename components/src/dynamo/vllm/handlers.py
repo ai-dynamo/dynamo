@@ -1892,6 +1892,68 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         mx_config = request.get("mx_config") or {}
 
+        if os.environ.get("DYN_MX_NATIVE_WEIGHT_TRANSFER") == "1":
+            from vllm.distributed.weight_transfer.base import (
+                WeightTransferUpdateRequest,
+            )
+
+            update_info = {
+                "version": int(version),
+                "min_version": int(version),
+                "timeout_seconds": float(mx_config.get("timeout_seconds", 300.0)),
+                "moe_expert_filter": bool(
+                    mx_config.get("moe_expert_filter", False)
+                ),
+                "expert_placement": mx_config.get(
+                    "expert_placement",
+                    "linear",
+                ),
+            }
+            for key in (
+                "ep_world_size",
+                "ep_rank",
+                "num_experts",
+                "buffer_loc",
+                "use_arena",
+                "verify_gt_path",
+            ):
+                if key in mx_config:
+                    update_info[key] = mx_config[key]
+
+            try:
+                await self.engine_client.start_weight_update(
+                    is_checkpoint_format=True
+                )
+                await self.engine_client.update_weights(
+                    WeightTransferUpdateRequest(update_info=update_info)
+                )
+                await self.engine_client.finish_weight_update()
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[mx] native weight update failed: %s", exc)
+                try:
+                    await self.engine_client.finish_weight_update()
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "[mx] native finish after failure also failed",
+                        exc_info=True,
+                    )
+                yield {
+                    "status": "error",
+                    "version": int(version),
+                    "workers_ok": 0,
+                    "workers_total": 1,
+                    "message": f"native weight update failed: {exc}",
+                }
+                return
+
+            yield {
+                "status": "ok",
+                "version": int(version),
+                "workers_ok": 1,
+                "workers_total": 1,
+            }
+            return
+
         try:
             results = await self.engine_client.collective_rpc(
                 "update_weights_via_mx",

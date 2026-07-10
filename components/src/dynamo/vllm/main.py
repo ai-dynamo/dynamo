@@ -583,24 +583,34 @@ def setup_vllm_engine(
                 "Install with: pip install modelexpress"
             ) from e
 
-    # ModelExpress v2 mid-training weight refit. Opted into via env var
-    # DYN_MX_REFIT_ENABLED=1 (set by nrl-k8s when the trainer uses
-    # cluster.weight_sync.method=mx). Injects MxRefitWorkerExtension into
-    # vLLM's Worker base classes so its methods become callable via
-    # AsyncLLM.collective_rpc — see components/src/dynamo/vllm/mx_refit/.
+    # ModelExpress v2 mid-training weight refit. The native path asks vLLM to
+    # construct the registered ``mx`` WeightTransferEngine during engine init.
+    # Keep the bespoke worker extension only as an explicit rollback while the
+    # native path is being rolled out.
     if os.environ.get("DYN_MX_REFIT_ENABLED") == "1":
-        existing_ext = getattr(engine_args, "worker_extension_cls", None)
-        mx_ext = "dynamo.vllm.mx_refit.extension.MxRefitWorkerExtension"
-        if existing_ext and existing_ext != mx_ext:
-            logger.warning(
-                "[mx-refit] worker_extension_cls already set to %r; "
-                "overriding to %r. Stacking extensions is not supported.",
-                existing_ext,
-                mx_ext,
+        native_mx = os.environ.get("DYN_MX_NATIVE_WEIGHT_TRANSFER") == "1"
+        if native_mx:
+            from modelexpress import register_modelexpress_loaders
+            from vllm.config import WeightTransferConfig
+
+            register_modelexpress_loaders()
+            engine_args.weight_transfer_config = WeightTransferConfig(backend="mx")
+            logger.info(
+                "[mx-refit] native WeightTransferEngine enabled; backend=mx"
             )
-        engine_args.worker_extension_cls = mx_ext
-        logger.info("[mx-refit] enabled; worker_extension_cls=%s", mx_ext)
-        _maybe_init_mx_refit_fp8(engine_args)
+        else:
+            existing_ext = getattr(engine_args, "worker_extension_cls", None)
+            mx_ext = "dynamo.vllm.mx_refit.extension.MxRefitWorkerExtension"
+            if existing_ext and existing_ext != mx_ext:
+                logger.warning(
+                    "[mx-refit] worker_extension_cls already set to %r; "
+                    "overriding to %r. Stacking extensions is not supported.",
+                    existing_ext,
+                    mx_ext,
+                )
+            engine_args.worker_extension_cls = mx_ext
+            logger.info("[mx-refit] legacy worker extension enabled: %s", mx_ext)
+            _maybe_init_mx_refit_fp8(engine_args)
 
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (

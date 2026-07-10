@@ -469,6 +469,32 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+
+        if (
+            mx_refit_enabled
+            and os.environ.get("DYN_MX_NATIVE_WEIGHT_TRANSFER") == "1"
+        ):
+            from vllm.distributed.weight_transfer.base import (
+                WeightTransferInitRequest,
+            )
+
+            await engine_client.init_weight_transfer_engine(
+                WeightTransferInitRequest(
+                    init_info={
+                        "mx_server_url": (
+                            config.model_express_url
+                            or os.environ.get(
+                                "MODEL_EXPRESS_URL",
+                                "modelexpress-server:8001",
+                            )
+                        ),
+                        "model_name": config.served_model_name or config.model,
+                        "same_rank_only": False,
+                        "tree_scale_out": False,
+                    }
+                )
+            )
+            logger.info("[mx-refit] native mx transfer engine initialized")
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
