@@ -10,6 +10,9 @@ use crate::protocols::ExternalSequenceBlockHash;
 /// Extra-args key for router-generated backend hints.
 pub const ROUTER_HINT_EXTRA_ARGS_KEY: &str = "router_hint";
 
+/// Worker runtime_data key. Boolean true means the worker can consume router_hint extra args.
+pub const ROUTER_HINT_RUNTIME_CAPABILITY_KEY: &str = "router_hint";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RouterHint {
     pub request_id: String,
