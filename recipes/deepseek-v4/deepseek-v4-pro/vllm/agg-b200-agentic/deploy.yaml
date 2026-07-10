@@ -58,7 +58,7 @@ spec:
           - name: HF_HOME
             value: /model-cache
           - name: HF_HUB_CACHE
-            value: /model-cache
+            value: /model-cache/hub
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE

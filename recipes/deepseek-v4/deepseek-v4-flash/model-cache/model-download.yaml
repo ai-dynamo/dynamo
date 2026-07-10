@@ -24,23 +24,25 @@ spec:
           env:
             - name: HF_HOME
               value: /model-store
-            # Uses up to 64 GB RAM for XET buffers; set "0" on low-memory nodes (8 GB cap): https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
+            # Default "0" = portable: XET buffers cap ~8 GB so the Job schedules on standard CPU nodes.
+            # For faster downloads on nodes with >=64Gi allocatable RAM, set "1" AND raise the memory
+            # request/limit below to "64Gi": https://huggingface.co/docs/hub/en/xet/using-xet-storage#download-buffers
             - name: HF_XET_HIGH_PERFORMANCE
-              value: "1"
+              value: "0"
           args:
             - |
               set -eux
-              pip install --no-cache-dir huggingface_hub==1.11.0
+              pip install --no-cache-dir huggingface_hub==1.11.0 click==8.1.8
               # Remove the download that does not apply to your SKU:
-              hf download nvidia/DeepSeek-V4-Flash-NVFP4   # B200 recipes (NVFP4)
-              hf download deepseek-ai/DeepSeek-V4-Flash     # H200 recipes (public)
+              hf download --max-workers 4 nvidia/DeepSeek-V4-Flash-NVFP4   # B200 recipes (NVFP4)
+              hf download --max-workers 4 deepseek-ai/DeepSeek-V4-Flash     # H200 recipes (public)
           resources:
             requests:
               cpu: "2"
-              memory: "64Gi"
+              memory: "8Gi"
             limits:
               cpu: "8"
-              memory: "64Gi"
+              memory: "16Gi"
           volumeMounts:
             - name: model-cache
               mountPath: /model-store
