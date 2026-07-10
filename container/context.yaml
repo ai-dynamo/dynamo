@@ -124,7 +124,7 @@ sglang:
   # The upstream CUDA runtime carries nixl-cu13 1.3.0. Its EFA LIBFABRIC
   # plugin can deadlock when FI_MORE batching races the progress thread.
   # Runtime EFA images rebuild only that plugin from the exact wheel source
-  # plus the f29 backport; other images use their existing NIXL trees unchanged.
+  # plus the EFA FI_MORE fix; other images keep their existing NIXL trees.
   # Remove this overlay once the SGLang base image ships a fixed NIXL release.
   efa_nixl_patch:
     nixl_version: "1.3.0"

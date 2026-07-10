@@ -14,7 +14,7 @@ readonly REQUIRED_CORE_RELS=(
 )
 
 die() {
-    echo "nixl-f29: $*" >&2
+    echo "nixl-efa-fi-more: $*" >&2
     exit 1
 }
 
@@ -160,7 +160,7 @@ case "$TARGETARCH" in
     *) die "unsupported TARGETARCH ${TARGETARCH}" ;;
 esac
 
-readonly TMP_ROOT="$(mktemp -d /tmp/nixl-f29.XXXXXX)"
+readonly TMP_ROOT="$(mktemp -d /tmp/nixl-efa-fi-more.XXXXXX)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 readonly SOURCE_ROOT="${TMP_ROOT}/nixl"
 
@@ -177,7 +177,8 @@ dist = importlib.metadata.distribution("nixl-cu13")
 expected_version = os.environ["EXPECTED_VERSION"]
 if dist.version != expected_version:
     raise SystemExit(
-        f"nixl-f29: expected nixl-cu13=={expected_version}, found {dist.version}"
+        "nixl-efa-fi-more: expected "
+        f"nixl-cu13=={expected_version}, found {dist.version}"
     )
 
 expected = [os.environ["EXPECTED_ACTIVE_REL"], os.environ["EXPECTED_COMPAT_REL"]]
@@ -187,13 +188,13 @@ actual_plugins = sorted(
 )
 if actual_plugins != sorted(expected):
     raise SystemExit(
-        "nixl-f29: unexpected nixl-cu13 LIBFABRIC layout: "
+        "nixl-efa-fi-more: unexpected nixl-cu13 LIBFABRIC layout: "
         + repr(actual_plugins)
     )
 for name in expected:
     path = Path(dist.locate_file(files[name]))
     if not path.is_file():
-        raise SystemExit(f"nixl-f29: wheel file is missing: {path}")
+        raise SystemExit(f"nixl-efa-fi-more: wheel file is missing: {path}")
     print(path)
 PY
 )
@@ -212,10 +213,14 @@ dist = importlib.metadata.distribution("nixl-cu13")
 files = {str(item): item for item in (dist.files or ())}
 for name in os.environ["EXPECTED_RELS"].split(":"):
     if name not in files:
-        raise SystemExit(f"nixl-f29: required core wheel file is missing: {name}")
+        raise SystemExit(
+            f"nixl-efa-fi-more: required core wheel file is missing: {name}"
+        )
     path = Path(dist.locate_file(files[name]))
     if not path.is_file():
-        raise SystemExit(f"nixl-f29: required core library is missing: {path}")
+        raise SystemExit(
+            f"nixl-efa-fi-more: required core library is missing: {path}"
+        )
     print(path)
 PY
 )
@@ -235,7 +240,7 @@ git -C "$SOURCE_ROOT" apply --index --whitespace=error-all "$PATCH_FILE"
 git -C "$SOURCE_ROOT" diff --cached --check
 mapfile -t CHANGED_FILES < <(git -C "$SOURCE_ROOT" diff --cached --name-only)
 [[ "${#CHANGED_FILES[@]}" -eq 1 && "${CHANGED_FILES[0]}" == "$SOURCE_FILE" ]] || \
-    die "f29 patch changed files other than ${SOURCE_FILE}"
+    die "EFA FI_MORE patch changed files other than ${SOURCE_FILE}"
 [[ "$(git -C "$SOURCE_ROOT" write-tree)" == "$SGLANG_EFA_NIXL_PATCHED_TREE" ]] || \
     die "patched NIXL tree does not match ${SGLANG_EFA_NIXL_PATCH_REF}"
 [[ "$(sha256 "${SOURCE_ROOT}/${SOURCE_FILE}")" == "$SGLANG_EFA_NIXL_PATCHED_SOURCE_SHA256" ]] || \
@@ -298,7 +303,7 @@ PY
 done
 
 readonly PROVENANCE="${OUT_ROOT}/provenance"
-cp "$PATCH_FILE" "${PROVENANCE}/f29b589b.patch"
+cp "$PATCH_FILE" "${PROVENANCE}/disable_efa_fi_more.patch"
 cp "${SOURCE_ROOT}/LICENSE" "${PROVENANCE}/NIXL-LICENSE"
 printf '%s\n' "$SGLANG_EFA_NIXL_BASE_REF" > "${PROVENANCE}/BASE_COMMIT"
 printf '%s\n' "$SGLANG_EFA_NIXL_BASE_TREE" > "${PROVENANCE}/BASE_TREE"
@@ -323,5 +328,5 @@ sha256sum "${CORE_PATHS[@]}" > "${PROVENANCE}/NIXL_CORE_SHA256SUMS"
 
 sha256sum -c "${PROVENANCE}/NIXL_CORE_SHA256SUMS"
 sha256sum -c "${PROVENANCE}/SHA256SUMS"
-echo "nixl-f29: built and validated ${TARGETARCH} SGLang EFA plugins"
+echo "nixl-efa-fi-more: built and validated ${TARGETARCH} SGLang EFA plugins"
 cat "${PROVENANCE}/SHA256SUMS"
