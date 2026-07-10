@@ -115,6 +115,30 @@ def test_config_use_kv_events_derived_from_publish_events(monkeypatch):
     assert config_off.use_kv_events is False
 
 
+def test_config_enable_metrics_derivation(monkeypatch):
+    """enable_metrics is on for either --publish-kv-events or --publish-metrics."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
+
+    # Default: neither KV events nor metrics.
+    config_default = parse_args([])
+    assert config_default.publish_metrics is False
+    assert config_default.use_kv_events is False
+    assert config_default.enable_metrics is False
+
+    # Metrics only: metrics enabled, KV events still off.
+    config_metrics = parse_args(["--publish-metrics"])
+    assert config_metrics.publish_metrics is True
+    assert config_metrics.use_kv_events is False
+    assert config_metrics.enable_metrics is True
+
+    # KV events imply metrics.
+    config_kv = parse_args(["--publish-kv-events"])
+    assert config_kv.use_kv_events is True
+    assert config_kv.enable_metrics is True
+
+
 @pytest.mark.asyncio
 async def test_init_llm_worker_rejects_invalid_kv_cache_config_override(monkeypatch):
     monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)

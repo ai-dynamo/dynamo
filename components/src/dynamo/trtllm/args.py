@@ -31,6 +31,7 @@ VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
 class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
     component: str
     use_kv_events: bool
+    enable_metrics: bool
     connector: list[str]  # Redeclare for mypy (inherited from DynamoRuntimeConfig)
 
     def validate(self) -> None:
@@ -38,6 +39,10 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
         DynamoTrtllmConfig.validate(self)
         # Derive use_kv_events from publish_events_and_metrics
         self.use_kv_events = self.publish_events_and_metrics
+        # Metrics initialization is enabled either explicitly via
+        # --publish-metrics / DYN_TRTLLM_PUBLISH_METRICS, or implicitly by
+        # KV-event publishing (which also feeds the metrics collectors).
+        self.enable_metrics = self.publish_events_and_metrics or self.publish_metrics
 
         # fix the connector as trtllm accepts only one connector and it should be in VALID_TRTLLM_CONNECTORS
         # while the runtime args accepts a list of connectors

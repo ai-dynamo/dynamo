@@ -165,6 +165,19 @@ class DynamoTrtllmArgGroup(ArgGroup):
             # DeprecationWarning fires in args.py:parse_args.
             obsolete_flag="--publish-events-and-metrics",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--publish-metrics",
+            env_var="DYN_TRTLLM_PUBLISH_METRICS",
+            default=False,
+            help=(
+                "If set, initialize the `trtllm_*` vendor metrics and the "
+                "`AdditionalMetricsCollector` (perf stats, abort/request-type "
+                "tracking) without publishing KV cache events. Implied by "
+                "`--publish-kv-events`; use this to enable metrics alone."
+            ),
+            dest="publish_metrics",
+        )
         add_argument(
             g,
             flag_name="--load-format",
@@ -449,6 +462,7 @@ class DynamoTrtllmConfig(ConfigBase):
     extra_engine_args: str
     override_engine_args: str
     publish_events_and_metrics: bool
+    publish_metrics: bool
     load_format: str
     model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None

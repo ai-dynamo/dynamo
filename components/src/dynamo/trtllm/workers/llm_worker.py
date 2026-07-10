@@ -256,11 +256,11 @@ async def init_llm_worker(
         "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
-        "return_perf_metrics": config.publish_events_and_metrics,
+        "return_perf_metrics": config.enable_metrics,
         # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
         # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
         # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
-        "enable_iter_perf_stats": config.publish_events_and_metrics,
+        "enable_iter_perf_stats": config.enable_metrics,
         "kv_connector_config": kv_connector_config,
     }
 
@@ -586,7 +586,7 @@ async def init_llm_worker(
         # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
         metrics_collector = None
         additional_metrics = None
-        if config.publish_events_and_metrics:
+        if config.enable_metrics:
             try:
                 model_name_for_metrics = config.served_model_name or config.model
                 metrics_collector = MetricsCollector(
@@ -730,9 +730,11 @@ async def init_llm_worker(
             disaggregation_mode=config.disaggregation_mode,
         ).to_dict()
 
-        if config.publish_events_and_metrics:
-            # Initialize and pass in the publisher to the request handler to
-            # publish events and metrics.
+        if config.enable_metrics:
+            # Run the publisher whenever metrics are enabled. Its stats thread
+            # drives component gauges, `trtllm_*` vendor metrics, and FPM. KV
+            # cache event publishing is gated separately on `use_kv_events`
+            # (metrics-only mode via --publish-metrics leaves it off).
             # Use model as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [
@@ -747,9 +749,10 @@ async def init_llm_worker(
             ]
 
             # Create worker-side publisher for consolidated events if consolidator is enabled
-            # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
+            # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id.
+            # KV-event specific: skipped in metrics-only mode.
             consolidator_publisher = None
-            if consolidator_output_endpoint:
+            if config.use_kv_events and consolidator_output_endpoint:
                 # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
                 consolidator_publisher = KvEventPublisher(
                     endpoint=endpoint,
@@ -772,9 +775,10 @@ async def init_llm_worker(
                 component_gauges=component_gauges,
                 additional_metrics=additional_metrics,
                 event_buffer_max_size=event_buffer_max_size,
-                zmq_endpoint=trtllm_zmq_bind_endpoint,
+                zmq_endpoint=trtllm_zmq_bind_endpoint if config.use_kv_events else None,
                 enable_local_indexer=config.enable_local_indexer,
                 metrics_collector=metrics_collector,
+                publish_kv_events=config.use_kv_events,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)

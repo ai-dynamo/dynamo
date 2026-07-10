@@ -386,6 +386,7 @@ class Publisher:
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
         metrics_collector: Any = None,
+        publish_kv_events: bool = True,
     ) -> None:
         self.endpoint = endpoint
         self.engine = engine
@@ -395,6 +396,10 @@ class Publisher:
         self.metrics_labels = metrics_labels
         self.component_gauges = component_gauges
         self.additional_metrics = additional_metrics
+        # When False, only the stats/metrics thread runs; KV cache events are
+        # not published to the router (metrics-only mode). The engine stats
+        # thread still feeds component gauges, `trtllm_*` metrics, and FPM.
+        self.publish_kv_events = publish_kv_events
         if self.additional_metrics is not None:
             self.additional_metrics.set_kv_event_buffer_capacity(event_buffer_max_size)
         self.enable_local_indexer = enable_local_indexer
@@ -482,6 +487,18 @@ class Publisher:
                 f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
             )
             self.fpm_publisher = None
+
+        # Metrics-only mode: skip KV cache event publishing entirely. The
+        # stats thread above still drives all metrics (component gauges,
+        # trtllm_* vendor metrics, FPM); only the router-facing KV event
+        # stream is suppressed.
+        if not self.publish_kv_events:
+            logging.info(
+                "KV cache event publishing disabled (metrics-only mode); "
+                "stats/metrics publishing remains active."
+            )
+            self.kv_event_publishers = None
+            return
 
         # Setup the kv cache events publisher
         # Publisher selection based on consolidator configuration:
@@ -1064,6 +1081,7 @@ async def get_publisher(
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
     metrics_collector: Any = None,
+    publish_kv_events: bool = True,
 ) -> AsyncGenerator[Publisher, None]:
     publisher = Publisher(
         endpoint,
@@ -1077,6 +1095,7 @@ async def get_publisher(
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
         metrics_collector=metrics_collector,
+        publish_kv_events=publish_kv_events,
     )
     try:
         publisher.initialize()
