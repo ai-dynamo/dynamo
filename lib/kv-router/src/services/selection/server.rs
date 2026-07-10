@@ -26,7 +26,7 @@ use super::types::{
 #[derive(Debug, Deserialize)]
 struct FilterQuery {
     model_name: Option<String>,
-    tenant_id: Option<String>,
+    routing_group: Option<String>,
 }
 
 pub struct AppState {
@@ -81,11 +81,10 @@ async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<FilterQuery>,
 ) -> Response {
-    Json(
-        state
-            .service
-            .list_workers(params.model_name.as_deref(), params.tenant_id.as_deref()),
-    )
+    Json(state.service.list_workers(
+        params.model_name.as_deref(),
+        params.routing_group.as_deref(),
+    ))
     .into_response()
 }
 
@@ -193,11 +192,10 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn loads(State(state): State<Arc<AppState>>, Query(params): Query<FilterQuery>) -> Response {
-    Json(
-        state
-            .service
-            .loads(params.model_name.as_deref(), params.tenant_id.as_deref()),
-    )
+    Json(state.service.loads(
+        params.model_name.as_deref(),
+        params.routing_group.as_deref(),
+    ))
     .into_response()
 }
 
