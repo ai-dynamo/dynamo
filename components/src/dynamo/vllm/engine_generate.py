@@ -26,6 +26,26 @@ from .response_adapters import (
     serialize_vllm_routed_experts,
 )
 
+_NULLABLE_SAMPLING_PARAMS = frozenset(
+    {
+        "seed",
+        "stop",
+        "stop_token_ids",
+        "max_tokens",
+        "logprobs",
+        "prompt_logprobs",
+        "logprob_token_ids",
+        "structured_outputs",
+        "logit_bias",
+        "allowed_token_ids",
+        "bad_words",
+        "skip_reading_prefix_cache",
+        "thinking_token_budget",
+        "repetition_detection",
+        "extra_args",
+    }
+)
+
 
 @dataclass(frozen=True)
 class EngineGenerateRequest:
@@ -46,12 +66,14 @@ class EngineGenerateRequest:
         self,
         default_sampling_params: Dict[str, Any],
         model_max_len: int | None,
+        max_num_seqs: int | None = None,
     ) -> SamplingParams:
         return _build_sampling_params(
             self.request,
             self.generate_request,
             default_sampling_params,
             model_max_len,
+            max_num_seqs,
         )
 
     def priority(self, routing: Dict[str, Any]) -> int:
@@ -157,6 +179,7 @@ def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
     model_max_len: int | None,
+    max_num_seqs: int | None = None,
 ) -> SamplingParams:
     generate_request = payload(request)
     if generate_request is None:
@@ -166,6 +189,7 @@ def build_sampling_params(
         generate_request,
         default_sampling_params,
         model_max_len,
+        max_num_seqs,
     )
 
 
@@ -174,6 +198,7 @@ def _build_sampling_params(
     generate_request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
     model_max_len: int | None,
+    max_num_seqs: int | None,
 ) -> SamplingParams:
     raw_params = generate_request.get("sampling_params") or {}
     if not isinstance(raw_params, dict):
@@ -212,12 +237,14 @@ def _build_sampling_params(
         if key in ("extra_args", "vllm_xargs") or key not in raw_params:
             continue
         value = raw_params[key]
-        # Rust preserves explicit nulls so fields with nullable semantics can
-        # reach the backend losslessly. At the vLLM boundary, however, most
-        # SamplingParams fields are non-nullable and null means "use the
-        # engine default". max_tokens is the one intentional exception: None
-        # means no per-request token limit and differs from vLLM's default.
-        if value is None and key != "max_tokens":
+        if not hasattr(base, key):
+            # Match vLLM's Pydantic/msgspec boundary, which ignores unknown
+            # sampling keys so newer clients remain forward-compatible.
+            continue
+        if value is None:
+            if key not in _NULLABLE_SAMPLING_PARAMS:
+                raise ValueError(f"sampling_params.{key} must not be null")
+            kwargs[key] = None
             continue
         if key == "structured_outputs" and isinstance(value, dict):
             value = StructuredOutputsParams(
@@ -237,13 +264,18 @@ def _build_sampling_params(
             value = RepetitionDetectionParams(**value)
         elif key == "logit_bias" and isinstance(value, dict):
             value = {int(token_id): bias for token_id, bias in value.items()}
-        if not hasattr(base, key):
-            raise ValueError(f"unsupported sampling parameter for this vLLM: {key}")
         kwargs[key] = value
 
     if extensions:
         kwargs["extra_args"] = extensions
+    elif "extra_args" in provided_fields and raw_params.get("extra_args") is None:
+        kwargs["extra_args"] = None
     sampling_params = SamplingParams(**kwargs)
+    if max_num_seqs is not None and sampling_params.n > max_num_seqs:
+        raise ValueError(
+            "sampling_params.n must be at most the server's max_num_seqs "
+            f"({max_num_seqs}), got {sampling_params.n}."
+        )
 
     if "max_tokens" not in provided_fields and model_max_len is not None:
         input_length = len(request.get("token_ids") or [])

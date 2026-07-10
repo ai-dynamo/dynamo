@@ -14,6 +14,8 @@ from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
+    _engine_generate_endpoint_path,
+    _engine_generate_prefill_endpoint_path,
     _wait_and_load_benchmark,
 )
 
@@ -44,6 +46,23 @@ def _make_config(**overrides) -> Mock:
     }
     defaults.update(overrides)
     return Mock(**defaults)
+
+
+def test_engine_generate_uses_versioned_per_instance_endpoint() -> None:
+    config = _make_config(namespace="rollout", component="backend")
+
+    assert (
+        _engine_generate_endpoint_path(config) == "rollout.backend.engine_generate_v1"
+    )
+
+
+def test_engine_generate_prefill_uses_independent_versioned_endpoint() -> None:
+    config = _make_config(namespace="rollout", component="prefill")
+
+    assert (
+        _engine_generate_prefill_endpoint_path(config)
+        == "rollout.prefill.engine_generate_prefill_v1"
+    )
 
 
 @pytest.mark.asyncio
@@ -282,9 +301,10 @@ class TestPrefillRegistrationContract:
 
         # embedding_cache_manager=None skips register_embedding_cache_metrics.
         mock_handler = Mock(embedding_cache_manager=None)
+        handler_factory = Mock(return_value=mock_handler)
         monkeypatch.setattr(
             "dynamo.vllm.worker_factory.PrefillWorkerHandler",
-            Mock(return_value=mock_handler),
+            handler_factory,
         )
 
         async def _noop(*_args, **_kwargs) -> None:
@@ -327,3 +347,14 @@ class TestPrefillRegistrationContract:
         if route_to_encoder:
             expected_needs_set.append(WorkerType.Encode)
         assert captured["needs"] == [expected_needs_set]
+
+        versioned_prefill_endpoint = next(
+            call.args[0]
+            for call in runtime.endpoint.call_args_list
+            if call.args[0].endswith(".engine_generate_prefill_v1")
+        )
+        assert versioned_prefill_endpoint == "dyn.prefill.engine_generate_prefill_v1"
+        handler_kwargs = handler_factory.call_args.kwargs
+        assert handler_kwargs["additional_generate_endpoints"] == (
+            runtime.endpoint.return_value,
+        )

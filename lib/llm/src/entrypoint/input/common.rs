@@ -313,6 +313,65 @@ pub async fn build_preprocessed_routing(
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
+    build_preprocessed_routing_inner(
+        client,
+        model_manager,
+        router_mode,
+        worker_monitor,
+        chooser,
+        prefill_chooser,
+        encoder_chooser,
+        enable_multimodal_cache_indexer,
+        session_affinity_ttl_secs,
+        true,
+    )
+    .await
+}
+
+/// Build a dynamic route before a compatible worker exists.
+///
+/// Used only by versioned protocol endpoints: an empty route returns
+/// unavailable, then becomes live when a capable worker advertises that exact
+/// endpoint. It must not be used with a shared backwards-compatible endpoint.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_preprocessed_routing_allow_empty(
+    client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
+    router_mode: RouterMode,
+    worker_monitor: Option<KvWorkerMonitor>,
+    chooser: Option<Arc<KvRouter>>,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
+    enable_multimodal_cache_indexer: bool,
+    session_affinity_ttl_secs: Option<u64>,
+) -> anyhow::Result<PreprocessedRouting> {
+    build_preprocessed_routing_inner(
+        client,
+        model_manager,
+        router_mode,
+        worker_monitor,
+        chooser,
+        prefill_chooser,
+        None,
+        enable_multimodal_cache_indexer,
+        session_affinity_ttl_secs,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_preprocessed_routing_inner(
+    client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
+    router_mode: RouterMode,
+    worker_monitor: Option<KvWorkerMonitor>,
+    chooser: Option<Arc<KvRouter>>,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
+    encoder_chooser: Option<Arc<EncoderRouter>>,
+    enable_multimodal_cache_indexer: bool,
+    session_affinity_ttl_secs: Option<u64>,
+    wait_for_initial_workers: bool,
+) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
@@ -322,10 +381,11 @@ pub async fn build_preprocessed_routing(
         session_affinity_ttl_secs.is_some(),
     )?;
 
-    let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
-
-    wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
+    if wait_for_initial_workers {
+        let min_initial_workers = min_initial_workers_from_env()?;
+        wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
+    }
 
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
         && matches!(router_mode, RouterMode::DeviceAwareWeighted)
@@ -641,7 +701,7 @@ mod tests {
             "token_ids": [11, 22, 33],
             "sampling_params": {
                 "max_tokens": 17,
-                "temperature": null
+                "seed": null
             },
             "priority": -4,
             "future_extension": {"enabled": true}
@@ -657,7 +717,7 @@ mod tests {
         assert_eq!(serialized["token_ids"], serde_json::json!([11, 22, 33]));
         assert!(serialized["generate_request"].get("token_ids").is_none());
         assert_eq!(
-            serialized["generate_request"]["sampling_params"]["temperature"],
+            serialized["generate_request"]["sampling_params"]["seed"],
             serde_json::Value::Null
         );
         let routing = preprocessed.routing.unwrap();

@@ -10,12 +10,18 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Keep these values in sync with dynamo-llm's runtime_config capability keys.
-ENGINE_GENERATE_CAPABILITY = "engine_generate"
+ENGINE_GENERATE_PROTOCOL_VERSION_KEY = "engine_generate_protocol_version"
+ENGINE_GENERATE_PROTOCOL_VERSION = 1
+ENGINE_GENERATE_ENDPOINT = "engine_generate_v1"
+ENGINE_GENERATE_PREFILL_ENDPOINT = "engine_generate_prefill_v1"
 
 
 def advertise_engine_generate_capability(runtime_config: Any) -> None:
     """Advertise support for the engine-native Generate wire contract."""
-    runtime_config.set_engine_specific(ENGINE_GENERATE_CAPABILITY, "true")
+    runtime_config.set_engine_specific(
+        ENGINE_GENERATE_PROTOCOL_VERSION_KEY,
+        str(ENGINE_GENERATE_PROTOCOL_VERSION),
+    )
 
 
 def per_rank_kv_blocks(

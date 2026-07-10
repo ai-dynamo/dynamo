@@ -27,7 +27,11 @@ from dynamo.runtime import DistributedRuntime
 
 from .args import Config
 from .cache_info import configure_kv_event_block_size
-from .capacity import per_rank_kv_blocks
+from .capacity import (
+    ENGINE_GENERATE_ENDPOINT,
+    ENGINE_GENERATE_PREFILL_ENDPOINT,
+    per_rank_kv_blocks,
+)
 from .constants import DisaggregationMode
 from .handlers import (
     BaseWorkerHandler,
@@ -52,6 +56,14 @@ logger = logging.getLogger(__name__)
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
+
+
+def _engine_generate_endpoint_path(config: Config) -> str:
+    return f"{config.namespace}.{config.component}.{ENGINE_GENERATE_ENDPOINT}"
+
+
+def _engine_generate_prefill_endpoint_path(config: Config) -> str:
+    return f"{config.namespace}.{config.component}.{ENGINE_GENERATE_PREFILL_ENDPOINT}"
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
@@ -407,6 +419,11 @@ class WorkerFactory:
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
+        engine_generate_endpoint = (
+            runtime.endpoint(_engine_generate_endpoint_path(config))
+            if not config.use_vllm_tokenizer
+            else None
+        )
         clear_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.clear_kv_blocks"
         )
@@ -420,6 +437,8 @@ class WorkerFactory:
             generate_endpoint,
             clear_endpoint,
         ]
+        if engine_generate_endpoint is not None:
+            shutdown_endpoints.append(engine_generate_endpoint)
         if rl_endpoint is not None:
             shutdown_endpoints.append(rl_endpoint)
 
@@ -500,6 +519,11 @@ class WorkerFactory:
             model_config=getattr(vllm_config, "model_config", None),
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
+            additional_generate_endpoints=(
+                (engine_generate_endpoint,)
+                if engine_generate_endpoint is not None
+                else ()
+            ),
             use_vllm_tokenizer=config.use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
@@ -644,6 +668,19 @@ class WorkerFactory:
                     metrics_labels=model_metrics_labels,
                 ),
             ]
+            if engine_generate_endpoint is not None:
+                # Engine-native Generate has a versioned request-plane endpoint.
+                # Old and text-mode workers never register this alias, so a
+                # rolling frontend cannot route the nested v1 wire contract to
+                # an incompatible legacy handler.
+                serve_tasks.append(
+                    engine_generate_endpoint.serve_endpoint(
+                        handler.generate,  # type: ignore
+                        graceful_shutdown=True,
+                        metrics_labels=model_metrics_labels,
+                        health_check_payload=health_check_payload,
+                    )
+                )
 
             if rl_endpoint is not None:
                 serve_tasks.append(
@@ -695,6 +732,9 @@ class WorkerFactory:
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
+        engine_generate_prefill_endpoint = runtime.endpoint(
+            _engine_generate_prefill_endpoint_path(config)
+        )
         clear_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.clear_kv_blocks"
         )
@@ -742,6 +782,7 @@ class WorkerFactory:
             model_config=getattr(vllm_config, "model_config", None),
             enable_multimodal=config.enable_multimodal,
             generate_endpoint=generate_endpoint,
+            additional_generate_endpoints=(engine_generate_prefill_endpoint,),
             use_vllm_tokenizer=config.use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
@@ -808,7 +849,12 @@ class WorkerFactory:
         perf_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.get_perf_metrics"
         )
-        shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
+        shutdown_endpoints[:] = [
+            generate_endpoint,
+            engine_generate_prefill_endpoint,
+            clear_endpoint,
+            perf_endpoint,
+        ]
         if rl_endpoint is not None:
             shutdown_endpoints.append(rl_endpoint)
 
@@ -869,6 +915,12 @@ class WorkerFactory:
                 perf_endpoint.serve_endpoint(
                     handler.get_perf_metrics,
                     metrics_labels=prefill_metrics_labels,
+                ),
+                engine_generate_prefill_endpoint.serve_endpoint(
+                    handler.generate,  # type: ignore
+                    graceful_shutdown=True,
+                    metrics_labels=prefill_metrics_labels,
+                    health_check_payload=health_check_payload,
                 ),
             ]
             if rl_endpoint is not None:

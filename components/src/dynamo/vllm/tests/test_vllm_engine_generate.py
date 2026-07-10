@@ -17,6 +17,7 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 
+from dynamo.vllm import engine_generate
 from dynamo.vllm.engine_generate import (
     EngineGenerateRequest,
     build_prompt,
@@ -92,23 +93,71 @@ def test_sampling_params_preserve_native_fields_and_nested_types():
 
 
 @pytest.mark.parametrize(
-    ("field", "expected"),
+    "field",
     [
-        ("temperature", 1.0),
-        ("n", 1),
-        ("top_p", 1.0),
-        ("min_tokens", 0),
-        ("ignore_eos", False),
-        ("repetition_penalty", 1.0),
-        ("detokenize", True),
+        "temperature",
+        "n",
+        "top_p",
+        "min_tokens",
+        "ignore_eos",
+        "repetition_penalty",
+        "detokenize",
     ],
 )
-def test_explicit_null_nonnullable_sampling_fields_use_vllm_defaults(field, expected):
+def test_explicit_null_nonnullable_sampling_fields_are_rejected(field):
     request = _request({field: None})
+
+    with pytest.raises(ValueError, match=rf"sampling_params\.{field} must not be null"):
+        build_sampling_params(request, default_sampling_params={})
+
+
+@pytest.mark.parametrize("value", [None, 17, {"future": True}])
+def test_unknown_sampling_fields_are_ignored_for_forward_compatibility(value):
+    request = _request({"future_sampling_field": value, "temperature": 0.25})
 
     params = build_sampling_params(request, default_sampling_params={})
 
-    assert getattr(params, field) == expected
+    assert params.temperature == 0.25
+    assert not hasattr(params, "future_sampling_field")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "seed",
+        "stop",
+        "stop_token_ids",
+        "max_tokens",
+        "logprobs",
+        "prompt_logprobs",
+        "logprob_token_ids",
+        "structured_outputs",
+        "logit_bias",
+        "allowed_token_ids",
+        "bad_words",
+        "skip_reading_prefix_cache",
+        "thinking_token_budget",
+        "repetition_detection",
+        "extra_args",
+    ],
+)
+def test_explicit_null_nullable_sampling_fields_are_preserved(
+    field, monkeypatch: pytest.MonkeyPatch
+):
+    real_sampling_params = SamplingParams
+    captured_kwargs = {}
+
+    def capture_sampling_params(**kwargs):
+        captured_kwargs.update(kwargs)
+        return real_sampling_params(**kwargs)
+
+    monkeypatch.setattr(engine_generate, "SamplingParams", capture_sampling_params)
+    request = _request({field: None})
+
+    build_sampling_params(request, default_sampling_params={})
+
+    assert field in captured_kwargs
+    assert captured_kwargs[field] is None
 
 
 def test_omitted_max_tokens_uses_server_default_with_context_cap():
@@ -269,6 +318,21 @@ def test_request_adapter_owns_engine_prompt_sampling_and_priority():
     assert adapter.priority({"priority": 4}) == -4
 
 
+def test_request_adapter_enforces_target_scheduler_max_num_seqs():
+    adapter = EngineGenerateRequest.from_request(_request({"n": 3}))
+
+    assert adapter is not None
+    with pytest.raises(
+        ValueError,
+        match=r"sampling_params\.n must be at most the server's max_num_seqs \(2\), got 3",
+    ):
+        adapter.build_sampling_params({}, model_max_len=64, max_num_seqs=2)
+
+    accepted = EngineGenerateRequest.from_request(_request({"n": 2}))
+    assert accepted is not None
+    assert accepted.build_sampling_params({}, model_max_len=64, max_num_seqs=2).n == 2
+
+
 def test_request_adapter_ignores_legacy_requests():
     assert EngineGenerateRequest.from_request({"token_ids": [11, 22, 33]}) is None
 
@@ -389,3 +453,49 @@ def test_engine_generate_worker_emits_usage_on_every_delta():
     assert chunks[1]["token_ids"] == []
     assert chunks[1]["finish_reason"] == "length"
     assert chunks[1]["completion_usage"]["completion_tokens"] == 1
+
+
+def test_engine_generate_worker_preserves_missing_logprob_rows():
+    responses = [
+        SimpleNamespace(
+            outputs=[
+                SimpleNamespace(
+                    index=0,
+                    token_ids=[41],
+                    finish_reason="length",
+                    stop_reason=None,
+                    logprobs=[None],
+                    routed_experts=None,
+                )
+            ],
+            prompt_token_ids=[11, 22, 33],
+            prompt_logprobs=None,
+            num_cached_tokens=0,
+            kv_transfer_params=None,
+        )
+    ]
+    handler = SimpleNamespace(
+        engine_client=_FakeEngineClient(responses),
+        _extract_logprobs=BaseWorkerHandler._extract_logprobs,
+        _log_with_lora_context=lambda *args, **kwargs: None,
+    )
+
+    async def collect_chunks():
+        chunks = []
+        async for chunk in BaseWorkerHandler.generate_tokens(
+            handler,
+            prompt={"prompt_token_ids": [11, 22, 33]},
+            sampling_params=SamplingParams(logprobs=1, max_tokens=1),
+            request_id="request-1",
+            response_adapter=EngineGenerateRequest.from_request(
+                _request({"logprobs": 1})
+            ).response_adapter(),
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(collect_chunks())
+
+    assert chunks[0]["token_ids"] == [41]
+    assert chunks[0]["log_probs"] == [-9999.0]
+    assert chunks[0]["top_logprobs"] == [[]]

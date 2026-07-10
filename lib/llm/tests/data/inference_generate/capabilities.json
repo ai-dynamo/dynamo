@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
-  "vllm_reference_commit": "91df0fad4dc98a67c7659d9dbd915245d5c43d96",
+  "vllm_reference_commit": "e656ea6f12c91fa2623154454fbdae5511b468c1",
+  "vllm_reference_profile": "python_tito",
   "route": "/inference/v1/generate",
   "request": {
     "top_level": [
@@ -20,7 +21,10 @@
     ]
   },
   "response": {
-    "unary": ["request_id", "choices", "prompt_logprobs", "kv_transfer_params"],
+    "unary": [
+      "request_id", "model", "created", "choices", "usage",
+      "prompt_logprobs", "kv_transfer_params"
+    ],
     "choice": ["index", "logprobs", "finish_reason", "token_ids", "routed_experts"],
     "stream": ["request_id", "choices", "usage"]
   }

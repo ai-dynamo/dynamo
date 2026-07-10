@@ -41,6 +41,8 @@ impl PrefillRouter {
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
+            routing_endpoint_name: None,
+            passthrough_when_unavailable: true,
             is_eagle: false,
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
         })
@@ -60,6 +62,74 @@ impl PrefillRouter {
         is_eagle: bool,
         worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
     ) -> Arc<Self> {
+        Self::new_inner(
+            activation_rx,
+            model_manager,
+            router_mode,
+            kv_cache_block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            session_affinity_ttl_secs,
+            model_name,
+            namespace,
+            is_eagle,
+            worker_monitor,
+            None,
+            true,
+        )
+    }
+
+    /// Create a fail-closed prefill router whose request candidates come from
+    /// a versioned alias while runtime metadata comes from the activated
+    /// primary endpoint.
+    #[expect(clippy::too_many_arguments)]
+    pub fn new_for_endpoint_name(
+        activation_rx: oneshot::Receiver<Endpoint>,
+        model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        session_affinity_ttl_secs: Option<u64>,
+        model_name: String,
+        namespace: String,
+        is_eagle: bool,
+        worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+        routing_endpoint_name: String,
+    ) -> Arc<Self> {
+        Self::new_inner(
+            activation_rx,
+            model_manager,
+            router_mode,
+            kv_cache_block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            session_affinity_ttl_secs,
+            model_name,
+            namespace,
+            is_eagle,
+            worker_monitor,
+            Some(routing_endpoint_name),
+            false,
+        )
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn new_inner(
+        activation_rx: oneshot::Receiver<Endpoint>,
+        model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        session_affinity_ttl_secs: Option<u64>,
+        model_name: String,
+        namespace: String,
+        is_eagle: bool,
+        worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+        routing_endpoint_name: Option<String>,
+        passthrough_when_unavailable: bool,
+    ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
@@ -73,6 +143,8 @@ impl PrefillRouter {
             prefill_load_estimator,
             model_name,
             namespace,
+            routing_endpoint_name,
+            passthrough_when_unavailable,
             is_eagle,
             lifecycle: std::sync::atomic::AtomicU8::new(PrefillLifecycleState::Pending as u8),
         });
@@ -110,7 +182,7 @@ impl PrefillRouter {
     /// Activate the prefill router with the provided endpoint
     async fn activate(
         &self,
-        endpoint: Endpoint,
+        config_endpoint: Endpoint,
         model_manager: Arc<ModelManager>,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
@@ -122,20 +194,27 @@ impl PrefillRouter {
             "Activating prefill router"
         );
 
+        let endpoint = self
+            .routing_endpoint_name
+            .as_ref()
+            .map(|name| config_endpoint.component().endpoint(name))
+            .unwrap_or_else(|| config_endpoint.clone());
+
         // Store endpoint metadata for bootstrap and topology preparation.
         let _ = self.endpoint_id.set(endpoint.id());
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
         // This must be done before creating the router so bootstrap info is available
         model_manager
-            .get_or_create_runtime_config_watcher(&endpoint)
+            .get_or_create_runtime_config_watcher_for(&endpoint, &config_endpoint)
             .await?;
 
         let inner_router = if self.router_mode.is_kv_routing() {
             // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = model_manager
-                .kv_chooser_for(
+                .kv_chooser_for_with_runtime_config_endpoint(
                     &endpoint,
+                    &config_endpoint,
                     kv_cache_block_size,
                     kv_router_config,
                     prefill_load_estimator,
@@ -321,6 +400,11 @@ impl PrefillRouter {
     /// Whether the inner router has initialized, even if workers are unavailable.
     pub fn is_activated(&self) -> bool {
         self.prefill_router.get().is_some()
+    }
+
+    /// Whether this router is initialized and currently usable.
+    pub fn is_available(&self) -> bool {
+        self.lifecycle_state() == PrefillLifecycleState::Active
     }
 
     pub(super) fn lifecycle_state(&self) -> PrefillLifecycleState {

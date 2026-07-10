@@ -37,7 +37,10 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{EncoderRouter, PrefillRouter},
-    local_model::runtime_config::{ENGINE_GENERATE_CAPABILITY, TokenizerBackend},
+    local_model::runtime_config::{
+        ENGINE_GENERATE_ENDPOINT, ENGINE_GENERATE_PREFILL_ENDPOINT,
+        ENGINE_GENERATE_PROTOCOL_VERSION, ENGINE_GENERATE_PROTOCOL_VERSION_KEY, TokenizerBackend,
+    },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -143,8 +146,9 @@ fn supports_engine_generate(card: &ModelDeploymentCard) -> bool {
     matches!(
         card.runtime_config
             .runtime_data
-            .get(ENGINE_GENERATE_CAPABILITY),
-        Some(serde_json::Value::Bool(true))
+            .get(ENGINE_GENERATE_PROTOCOL_VERSION_KEY),
+        Some(serde_json::Value::Number(version))
+            if version.as_u64() == Some(ENGINE_GENERATE_PROTOCOL_VERSION)
     )
 }
 
@@ -159,8 +163,33 @@ fn supports_encoder_result_handoff(card: &ModelDeploymentCard) -> bool {
     )
 }
 
-// Generate's opaque request state is not yet verified for migration replay.
-const GENERATE_MIGRATION_LIMIT: u32 = 0;
+const fn generate_migration_limit(_configured_limit: u32) -> u32 {
+    // Generate keeps stop conditions, sampling state, and the original token
+    // payload in a nested request. Generic migration only advances the outer
+    // preprocessed request, so retrying would replay tokens with the original
+    // max_tokens and could over-generate. Keep retries disabled until Generate
+    // has a protocol-aware migration state adapter.
+    0
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EngineGenerateRoutingPlan {
+    router_mode: RouterMode,
+    session_affinity_ttl_secs: Option<u64>,
+    requires_versioned_prefill: bool,
+}
+
+fn engine_generate_routing_plan(
+    card: &ModelDeploymentCard,
+    router_config: &RouterConfig,
+) -> EngineGenerateRoutingPlan {
+    EngineGenerateRoutingPlan {
+        router_mode: router_config.router_mode,
+        session_affinity_ttl_secs: router_config.session_affinity_ttl_secs,
+        requires_versioned_prefill: effective_worker_type(card.worker_type, card.model_type)
+            == WorkerType::Decode,
+    }
+}
 /// Resolve the effective [`WorkerType`] for a card during the
 /// cross-version rollout.
 ///
@@ -1180,6 +1209,7 @@ impl ModelWatcher {
                     "Checksum mismatch for worker in namespace {namespace}"
                 ));
             }
+            self.maybe_activate_engine_generate_prefill(mcid, card)?;
             self.manager
                 .save_model_card(&mcid.to_path(), card.clone())?;
             tracing::debug!(
@@ -1326,6 +1356,7 @@ impl ModelWatcher {
             return Ok(true);
         }
 
+        self.maybe_activate_engine_generate_prefill(mcid, card)?;
         self.manager
             .save_model_card(&mcid.to_path(), card.clone())?;
         tracing::debug!(
@@ -1334,6 +1365,28 @@ impl ModelWatcher {
             "Worker joined existing WorkerSet, skipping pipeline build"
         );
         Ok(false)
+    }
+
+    fn maybe_activate_engine_generate_prefill(
+        &self,
+        mcid: &ModelCardInstanceId,
+        card: &ModelDeploymentCard,
+    ) -> anyhow::Result<()> {
+        if effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
+            || !supports_engine_generate(card)
+        {
+            return Ok(());
+        }
+
+        let component = self
+            .drt
+            .namespace(&mcid.namespace)?
+            .component(&mcid.component)?;
+        self.manager.activate_engine_generate_prefill_router(
+            card.name(),
+            &mcid.namespace,
+            component.endpoint(&mcid.endpoint),
+        )
     }
 
     /// Build a complete WorkerSet with all engines for this (model, namespace)
@@ -1465,6 +1518,7 @@ impl ModelWatcher {
                 );
                 return Ok(());
             };
+            self.maybe_activate_engine_generate_prefill(mcid, card)?;
 
             tracing::info!(
                 model_name = card.name(),
@@ -1503,7 +1557,13 @@ impl ModelWatcher {
             // opt-in token-native generate pipeline will exist.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
-            let needs_generate_pipeline = self.enable_engine_apis && supports_engine_generate(card);
+            // Build the API pipeline even if the first card belongs to an old
+            // worker. Its backend targets a separate versioned endpoint that
+            // only compatible workers serve, so old instances are never
+            // eligible and the empty route safely reports unavailable until a
+            // v1 worker appears.
+            let needs_generate_pipeline = self.enable_engine_apis;
+            let generate_plan = engine_generate_routing_plan(card, router_config);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
@@ -1554,6 +1614,50 @@ impl ModelWatcher {
                 None
             };
 
+            // Build a parallel decode route over the versioned endpoint. The
+            // alias client is the candidate filter; primary endpoint metadata
+            // supplies DP ranges, topology, and KV scheduling configuration.
+            let generate_endpoint =
+                needs_generate_pipeline.then(|| component.endpoint(ENGINE_GENERATE_ENDPOINT));
+            let generate_kv_chooser =
+                if needs_generate_pipeline && generate_plan.router_mode == RouterMode::KV {
+                    let versioned_endpoint = generate_endpoint.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("Generate KV routing requires a versioned endpoint")
+                    })?;
+                    let mut kv_config = router_config.kv_router_config.clone();
+                    // The model card is registered before the worker begins serving
+                    // its alias, so construction must not wait for the first alias.
+                    kv_config.skip_initial_worker_wait = true;
+                    Some(
+                        self.manager
+                            .kv_chooser_for_with_runtime_config_endpoint(
+                                versioned_endpoint,
+                                &endpoint,
+                                card.kv_cache_block_size,
+                                Some(kv_config),
+                                self.prefill_load_estimator.clone(),
+                                WORKER_TYPE_DECODE,
+                                Some(card.display_name.clone()),
+                                card.runtime_config.enable_eagle,
+                            )
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+            let generate_client = if let Some(versioned_endpoint) = generate_endpoint.as_ref() {
+                Some(if let Some(chooser) = generate_kv_chooser.as_ref() {
+                    chooser.client().clone()
+                } else {
+                    versioned_endpoint.client().await?
+                })
+            } else {
+                None
+            };
+            let generate_worker_monitor = generate_client.as_ref().map(|client| {
+                KvWorkerMonitor::new(client.clone(), router_config.load_threshold_config.clone())
+            });
+
             // Create prefill chooser once if we're building pipelines
             // Both chat and completions will share the same prefill chooser instance
             let model_name = card.name().to_string();
@@ -1599,6 +1703,38 @@ impl ModelWatcher {
                 None
             };
 
+            let engine_generate_prefill_router = if needs_generate_pipeline
+                && generate_plan.requires_versioned_prefill
+            {
+                let rx = self
+                    .manager
+                    .register_engine_generate_prefill_router(&model_name, &namespace)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "engine Generate prefill router already registered for {model_name}:{namespace}"
+                        )
+                    })?;
+                let mut prefill_config = router_config.kv_router_config.clone();
+                prefill_config.router_track_active_blocks = false;
+                prefill_config.skip_initial_worker_wait = true;
+                Some(PrefillRouter::new_for_endpoint_name(
+                    rx,
+                    self.manager.clone(),
+                    generate_plan.router_mode,
+                    card.kv_cache_block_size,
+                    Some(prefill_config),
+                    self.prefill_load_estimator.clone(),
+                    generate_plan.session_affinity_ttl_secs,
+                    model_name.clone(),
+                    namespace.clone(),
+                    false,
+                    generate_worker_monitor.clone(),
+                    ENGINE_GENERATE_PREFILL_ENDPOINT.to_string(),
+                ))
+            } else {
+                None
+            };
+
             // Store KV router, worker monitor, and prefill router on the WorkerSet.
             // The prefill router is stored so the watcher can deactivate/reactivate it
             // when prefill workers die or rejoin.
@@ -1606,6 +1742,8 @@ impl ModelWatcher {
             worker_set.worker_monitor = worker_monitor.clone();
             worker_set.prefill_router = prefill_chooser.clone();
             worker_set.encoder_router = encoder_chooser.clone();
+            worker_set.engine_generate_worker_monitor = generate_worker_monitor.clone();
+            worker_set.engine_generate_prefill_router = engine_generate_prefill_router.clone();
 
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
@@ -1627,17 +1765,49 @@ impl ModelWatcher {
                 None
             };
 
+            let generate_routing = if needs_generate_pipeline {
+                if !supports_engine_generate(card) {
+                    tracing::info!(
+                        model_name = card.name(),
+                        endpoint = ENGINE_GENERATE_ENDPOINT,
+                        "Prebuilding engine Generate route for a future protocol-compatible worker"
+                    );
+                }
+                let generate_client = generate_client.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Generate pipeline requires a versioned client")
+                })?;
+                Some(
+                    entrypoint::build_preprocessed_routing_allow_empty(
+                        generate_client,
+                        self.manager.clone(),
+                        generate_plan.router_mode,
+                        generate_worker_monitor.clone(),
+                        generate_kv_chooser.clone(),
+                        engine_generate_prefill_router.clone(),
+                        false,
+                        generate_plan.session_affinity_ttl_secs,
+                    )
+                    .await
+                    .context("build versioned Generate routing")?,
+                )
+            } else {
+                None
+            };
+
             if needs_generate_pipeline {
-                // Token-native generation needs no tokenizer or chat processor
-                // and shares the normal model manager, KV router, and P/D path.
-                let routing = preprocessed_routing.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("generate pipeline requires preprocessed routing")
+                // Token-native generation needs no tokenizer or chat processor.
+                // The versioned backend endpoint is the per-instance capability
+                // filter during rolling upgrades. P/D uses an independently
+                // versioned prefill route, so neither leg can reach an old
+                // worker during a mixed rollout.
+                let routing = generate_routing.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("generate pipeline requires versioned routing")
                 })?;
                 worker_set.generate_engine = Some(
                     routing
                         .build_generate_pipeline(
                             card,
-                            self.migration_limit,
+                            generate_migration_limit(self.migration_limit),
                             self.migration_max_seq_len,
                             self.metrics.clone(),
                         )
@@ -2016,28 +2186,74 @@ mod tests {
     use crate::model_card::ModelDeploymentCard;
 
     #[test]
-    fn engine_generate_requires_explicit_worker_capability() {
+    fn engine_generate_requires_exact_worker_protocol_version() {
         let mut card = ModelDeploymentCard::with_name_only("model");
         card.model_type = ModelType::Chat | ModelType::Completions;
         assert!(!supports_engine_generate(&card));
 
         card.runtime_config
-            .set_engine_specific(ENGINE_GENERATE_CAPABILITY, true)
+            .set_engine_specific(
+                ENGINE_GENERATE_PROTOCOL_VERSION_KEY,
+                ENGINE_GENERATE_PROTOCOL_VERSION,
+            )
             .unwrap();
         assert!(supports_engine_generate(&card));
 
         card.runtime_config
-            .set_engine_specific(ENGINE_GENERATE_CAPABILITY, false)
+            .set_engine_specific(ENGINE_GENERATE_PROTOCOL_VERSION_KEY, 2_u64)
             .unwrap();
         assert!(!supports_engine_generate(&card));
 
         card.runtime_config
             .runtime_data
-            .remove(ENGINE_GENERATE_CAPABILITY);
+            .remove(ENGINE_GENERATE_PROTOCOL_VERSION_KEY);
         card.runtime_config
-            .set_engine_specific("vllm_inference_v1_generate", true)
+            .set_engine_specific("engine_generate", true)
             .unwrap();
         assert!(!supports_engine_generate(&card));
+    }
+
+    #[test]
+    fn engine_generate_disables_generic_request_migration() {
+        assert_eq!(generate_migration_limit(0), 0);
+        assert_eq!(generate_migration_limit(7), 0);
+    }
+
+    #[test]
+    fn engine_generate_preserves_every_configured_router_mode_and_affinity() {
+        let card = ModelDeploymentCard::with_name_only("model");
+        for router_mode in [
+            RouterMode::KV,
+            RouterMode::Direct,
+            RouterMode::Random,
+            RouterMode::RoundRobin,
+            RouterMode::PowerOfTwoChoices,
+            RouterMode::LeastLoaded,
+            RouterMode::DeviceAwareWeighted,
+        ] {
+            let config = RouterConfig {
+                router_mode,
+                session_affinity_ttl_secs: Some(91),
+                ..Default::default()
+            };
+
+            let plan = engine_generate_routing_plan(&card, &config);
+
+            assert_eq!(plan.router_mode, router_mode);
+            assert_eq!(plan.session_affinity_ttl_secs, Some(91));
+        }
+    }
+
+    #[test]
+    fn engine_generate_requires_versioned_prefill_only_for_decode_role() {
+        let config = RouterConfig::default();
+        let mut decode = ModelDeploymentCard::with_name_only("model");
+        decode.worker_type = Some(WorkerType::Decode);
+        let mut aggregated = decode.clone();
+        aggregated.worker_type = Some(WorkerType::Aggregated);
+
+        assert!(engine_generate_routing_plan(&decode, &config).requires_versioned_prefill);
+        assert!(!engine_generate_routing_plan(&aggregated, &config).requires_versioned_prefill);
     }
 
     #[test]

@@ -6,7 +6,9 @@
 //! - Connect it to an Input
 
 pub mod input;
-pub use input::{PreprocessedRouting, build_preprocessed_routing};
+pub use input::{
+    PreprocessedRouting, build_preprocessed_routing, build_preprocessed_routing_allow_empty,
+};
 
 use std::future::Future;
 use std::pin::Pin;

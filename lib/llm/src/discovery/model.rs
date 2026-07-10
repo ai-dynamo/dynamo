@@ -583,8 +583,12 @@ impl Model {
     }
 
     pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
-        self.select_worker_set_with(|ws| ws.generate_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+        self.select_worker_set_with(|ws| {
+            ws.has_available_generate_engine()
+                .then(|| ws.generate_engine.clone())
+                .flatten()
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -625,8 +629,57 @@ impl Model {
                     result = Some(monitor.load_threshold_config());
                 }
             }
+            if let Some(ref monitor) = entry.value().engine_generate_worker_monitor {
+                if let Some(cfg) = config {
+                    monitor.set_load_threshold_config(cfg);
+                }
+                if result.is_none() {
+                    result = Some(monitor.load_threshold_config());
+                }
+            }
         }
         result
+    }
+
+    pub(crate) fn reactivate_prefill_routers_for_namespace(
+        &self,
+        namespace: &str,
+        engine_generate: bool,
+    ) -> bool {
+        let mut reactivated = false;
+        for entry in self.worker_sets.iter() {
+            let worker_set = entry.value();
+            if worker_set.namespace() != namespace {
+                continue;
+            }
+            let router = if engine_generate {
+                worker_set.engine_generate_prefill_router.as_ref()
+            } else {
+                worker_set.prefill_router.as_ref()
+            };
+            if let Some(router) = router
+                && router.is_deactivated()
+            {
+                router.reactivate();
+                reactivated = true;
+            }
+        }
+        reactivated
+    }
+
+    pub(crate) fn deactivate_prefill_routers_for_namespace(&self, namespace: &str) {
+        for entry in self.worker_sets.iter() {
+            let worker_set = entry.value();
+            if worker_set.namespace() != namespace {
+                continue;
+            }
+            if let Some(router) = &worker_set.prefill_router {
+                router.deactivate();
+            }
+            if let Some(router) = &worker_set.engine_generate_prefill_router {
+                router.deactivate();
+            }
+        }
     }
 
     /// Total worker count across all WorkerSets.

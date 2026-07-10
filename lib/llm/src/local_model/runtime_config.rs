@@ -47,10 +47,13 @@ pub enum StructuralTagScope {
 
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
 
-/// Worker-advertised support for the engine-native Generate request contract.
-/// Frontends must gate the route-to-worker pipeline on this capability during
-/// rolling upgrades so a request never lands on a worker that cannot decode it.
-pub const ENGINE_GENERATE_CAPABILITY: &str = "engine_generate";
+/// Exact engine-native Generate wire protocol served by this worker.
+pub const ENGINE_GENERATE_PROTOCOL_VERSION_KEY: &str = "engine_generate_protocol_version";
+pub const ENGINE_GENERATE_PROTOCOL_VERSION: u64 = 1;
+/// Separate request-plane endpoint isolates capable workers during rolling upgrades.
+pub const ENGINE_GENERATE_ENDPOINT: &str = "engine_generate_v1";
+/// Separate prefill request-plane endpoint isolates capable P/D prefill workers.
+pub const ENGINE_GENERATE_PREFILL_ENDPOINT: &str = "engine_generate_prefill_v1";
 
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

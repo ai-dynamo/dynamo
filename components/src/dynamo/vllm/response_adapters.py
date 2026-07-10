@@ -150,12 +150,17 @@ class GenerationResponseContext:
 
 
 class ResponseAdapter(Protocol):
-    def adapt(self, output: Dict[str, Any], context: GenerationResponseContext) -> None:
-        ...
+    preserve_missing_logprob_rows: bool
+
+    def adapt(
+        self, output: Dict[str, Any], context: GenerationResponseContext
+    ) -> None: ...
 
 
 class LegacyResponseAdapter:
     """Adapt the common token stream to Dynamo's legacy internal protocol."""
+
+    preserve_missing_logprob_rows = False
 
     def adapt(
         self,
@@ -187,6 +192,8 @@ class LegacyResponseAdapter:
 
 class EngineGenerateResponseAdapter:
     """Adapt the common token stream to vLLM's engine-generate contract."""
+
+    preserve_missing_logprob_rows = True
 
     def adapt(
         self,

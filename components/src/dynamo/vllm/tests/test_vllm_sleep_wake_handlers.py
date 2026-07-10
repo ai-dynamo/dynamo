@@ -82,6 +82,97 @@ async def test_sleep_and_wake_are_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_sleep_and_wake_manage_versioned_generate_alias():
+    handler = _make_handler()
+    versioned_endpoint = SimpleNamespace(
+        unregister_endpoint_instance=AsyncMock(),
+        register_endpoint_instance=AsyncMock(),
+    )
+    handler.additional_generate_endpoints = (versioned_endpoint,)
+
+    assert (await handler.sleep({"level": 1}))["status"] == "ok"
+    assert (await handler.wake_up({}))["status"] == "ok"
+
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    versioned_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    versioned_endpoint.register_endpoint_instance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sleep_alias_unregister_failure_rolls_back_every_endpoint():
+    handler = _make_handler()
+    versioned_endpoint = SimpleNamespace(
+        unregister_endpoint_instance=AsyncMock(
+            side_effect=RuntimeError("alias discovery unavailable")
+        ),
+        register_endpoint_instance=AsyncMock(),
+    )
+    handler.additional_generate_endpoints = (versioned_endpoint,)
+
+    result = await handler.sleep({"level": 1})
+
+    assert result["status"] == "error"
+    handler.engine_client.pause_generation.assert_not_awaited()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    # Converging to the published state must reconcile every endpoint, including
+    # the endpoint whose unregister call failed with an unknown remote outcome.
+    versioned_endpoint.register_endpoint_instance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_sleep_rollback_publication_recovers_via_wake_while_awake():
+    handler = _make_handler()
+    handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
+    versioned_endpoint = SimpleNamespace(
+        unregister_endpoint_instance=AsyncMock(),
+        register_endpoint_instance=AsyncMock(
+            side_effect=[RuntimeError("alias register failed"), None]
+        ),
+    )
+    handler.additional_generate_endpoints = (versioned_endpoint,)
+
+    sleep_result = await handler.sleep({"level": 1})
+    assert sleep_result["status"] == "error"
+    assert handler._pause_controller.is_paused is False
+
+    # The engine is already awake, but endpoint publication still needs repair.
+    wake_result = await handler.wake_up({})
+
+    assert wake_result["status"] == "ok"
+    assert versioned_endpoint.register_endpoint_instance.await_count == 2
+    handler.engine_client.wake_up.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wake_alias_registration_failure_fails_closed_then_recovers():
+    handler = _make_handler()
+    versioned_endpoint = SimpleNamespace(
+        unregister_endpoint_instance=AsyncMock(),
+        register_endpoint_instance=AsyncMock(
+            side_effect=[RuntimeError("alias register failed"), None]
+        ),
+    )
+    handler.additional_generate_endpoints = (versioned_endpoint,)
+    assert (await handler.sleep({"level": 1}))["status"] == "ok"
+
+    first_wake = await handler.wake_up({})
+
+    assert first_wake["status"] == "error"
+    # A partial publish is compensated by unpublishing the complete endpoint
+    # set, leaving the awake engine safely unreachable until a retry converges.
+    assert handler.generate_endpoint.unregister_endpoint_instance.await_count == 2
+    assert versioned_endpoint.unregister_endpoint_instance.await_count == 2
+    assert handler._pause_controller.is_paused is False
+
+    second_wake = await handler.wake_up({})
+
+    assert second_wake["status"] == "ok"
+    assert handler.generate_endpoint.register_endpoint_instance.await_count == 2
+    assert versioned_endpoint.register_endpoint_instance.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_pause_without_level_uses_vllm_default_sleep():
     engine_client = SimpleNamespace(
         pause_generation=AsyncMock(),
@@ -180,4 +271,12 @@ async def test_wake_up_returns_error_for_register_failure():
     assert result["status"] == "error"
     handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
-    assert handler._pause_controller.is_paused is True
+    # Native wake already completed; only publication remains pending.
+    assert handler._pause_controller.is_paused is False
+
+    handler.generate_endpoint.register_endpoint_instance = AsyncMock()
+    retry = await handler.wake_up({})
+
+    assert retry["status"] == "ok"
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    handler.engine_client.wake_up.assert_awaited_once_with()

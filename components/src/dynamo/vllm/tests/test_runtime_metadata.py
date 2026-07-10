@@ -6,7 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.vllm.capacity import (
-    ENGINE_GENERATE_CAPABILITY,
+    ENGINE_GENERATE_ENDPOINT,
+    ENGINE_GENERATE_PROTOCOL_VERSION,
+    ENGINE_GENERATE_PROTOCOL_VERSION_KEY,
     advertise_engine_generate_capability,
     get_metrics_model_name,
     get_spec_decode_runtime_data,
@@ -88,5 +90,8 @@ def test_engine_generate_capability_advertises_only_implemented_protocol():
     runtime_config = RuntimeConfig()
     advertise_engine_generate_capability(runtime_config)
 
-    assert runtime_config.values == {ENGINE_GENERATE_CAPABILITY: "true"}
-    assert "vllm_inference_v1_generate" not in runtime_config.values
+    assert runtime_config.values == {
+        ENGINE_GENERATE_PROTOCOL_VERSION_KEY: str(ENGINE_GENERATE_PROTOCOL_VERSION)
+    }
+    assert ENGINE_GENERATE_ENDPOINT == "engine_generate_v1"
+    assert "engine_generate" not in runtime_config.values

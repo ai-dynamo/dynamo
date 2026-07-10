@@ -68,9 +68,7 @@ def _make_config(
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
     )
-    config.engine_args.create_model_config.return_value.get_diff_sampling_param.return_value = (
-        {}
-    )
+    config.engine_args.create_model_config.return_value.get_diff_sampling_param.return_value = {}
     return config
 
 
@@ -833,6 +831,11 @@ class TestDecodeWorkerMultimodalBranching:
 
     async def test_engine_request_builds_only_engine_prompt_once(self):
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        handler.engine_client = SimpleNamespace(
+            vllm_config=SimpleNamespace(
+                scheduler_config=SimpleNamespace(max_num_seqs=256)
+            )
+        )
         prepared_request = {"token_ids": [1, 2, 3]}
         handler._multimodal_request_processor.prepare_input = AsyncMock(
             return_value=PreparedMultimodalInput(
@@ -860,6 +863,7 @@ class TestDecodeWorkerMultimodalBranching:
                     "request-engine-decode",
                 ):
                     pass
+        engine_request.build_sampling_params.assert_called_once_with({}, 4096, 256)
 
         engine_request.build_prompt.assert_called_once_with()
         handler._build_prompt_from_request.assert_not_called()
@@ -952,6 +956,9 @@ async def test_prefill_engine_request_builds_only_engine_prompt_once():
     handler._build_prompt_from_request = MagicMock()
     handler.default_sampling_params = {}
     handler.model_max_len = 4096
+    handler.engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=256))
+    )
     engine_request = MagicMock()
     engine_request.build_prompt.return_value = {"prompt_token_ids": [1, 2, 3]}
     engine_request.build_sampling_params.side_effect = RuntimeError(
@@ -970,6 +977,7 @@ async def test_prefill_engine_request_builds_only_engine_prompt_once():
                 "request-engine-prefill",
             ):
                 pass
+    engine_request.build_sampling_params.assert_called_once_with({}, 4096, 256)
 
     engine_request.build_prompt.assert_called_once_with()
     handler._build_prompt_from_request.assert_not_called()

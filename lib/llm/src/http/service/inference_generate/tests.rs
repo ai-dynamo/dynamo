@@ -333,7 +333,7 @@ async fn direct_unary(
         "test-request".to_string(),
         "test-model".to_string(),
         1,
-        false,
+        None,
         stream_handle,
     ));
     (task, context, connection_handle, state)
@@ -371,7 +371,7 @@ fn assert_engine_error_metrics(state: &service_v2::State, error_type: ErrorType)
 
 #[test]
 fn unary_accumulator_preserves_choice_order_and_alignment() {
-    let mut accumulator = GenerateAccumulator::new("request-1".into(), 2, true);
+    let mut accumulator = GenerateAccumulator::new("request-1".into(), 2, Some(1));
     accumulator.push(output(1, 21, false)).unwrap();
     accumulator.push(output(0, 11, true)).unwrap();
     accumulator.push(output(1, 22, true)).unwrap();
@@ -392,19 +392,36 @@ fn unary_accumulator_preserves_choice_order_and_alignment() {
 }
 
 #[test]
+fn unary_accumulator_preserves_backend_completion_usage() {
+    let mut accumulator = GenerateAccumulator::new("request-1".into(), 1, None);
+    let mut terminal = output(0, 11, true);
+    terminal.completion_usage = Some(CompletionUsage {
+        prompt_tokens: 3,
+        completion_tokens: 1,
+        total_tokens: 4,
+        prompt_tokens_details: None,
+        completion_tokens_details: None,
+    });
+    accumulator.push(terminal).unwrap();
+
+    let response = accumulator.finish().unwrap();
+
+    assert_eq!(response.usage.unwrap().total_tokens, 4);
+}
+
+#[test]
 fn unary_accumulator_rejects_missing_requested_logprobs() {
-    let mut accumulator = GenerateAccumulator::new("request-1".into(), 1, true);
+    let mut accumulator = GenerateAccumulator::new("request-1".into(), 1, Some(1));
     let mut broken = output(0, 11, true);
     broken.log_probs = None;
     assert!(accumulator.push(broken).is_err());
 }
 
 #[test]
-fn token_logprob_preserves_backend_bytes_and_selected_candidate() {
+fn token_logprob_matches_target_vllm_token_id_shape_and_requested_cap() {
     let selected_bytes = vec![0xf0, 0x9f, 0x98, 0x80];
     let token = build_token_logprob(
         42,
-        -0.125,
         &[
             TopLogprob {
                 rank: 1,
@@ -421,51 +438,141 @@ fn token_logprob_preserves_backend_bytes_and_selected_candidate() {
                 bytes: Some(selected_bytes.clone()),
             },
         ],
-    );
-
-    assert_eq!(token.token, "😀");
-    assert_eq!(token.bytes, Some(selected_bytes.clone()));
-    assert_eq!(
-        token
-            .top_logprobs
-            .iter()
-            .filter(|candidate| candidate.token == "😀")
-            .count(),
-        1
-    );
-    assert_eq!(token.top_logprobs[1].bytes, Some(selected_bytes));
-}
-
-#[test]
-fn token_logprob_adds_missing_selected_token_and_clamps_non_finite_values() {
-    let token = build_token_logprob(
-        42,
-        f64::NEG_INFINITY,
-        &[TopLogprob {
-            rank: 1,
-            token_id: 7,
-            token: Some("other".to_string()),
-            logprob: f64::NAN,
-            bytes: Some(b"other".to_vec()),
-        }],
+        1,
     );
 
     assert_eq!(token.token, "token_id:42");
-    assert_eq!(token.bytes, Some(b"token_id:42".to_vec()));
-    assert_eq!(token.logprob, -9999.0);
-    assert!(
-        token
-            .top_logprobs
-            .iter()
-            .all(|candidate| candidate.logprob.is_finite())
+    assert_eq!(token.logprob, -0.125);
+    assert_eq!(token.bytes, None);
+    assert_eq!(token.top_logprobs.len(), 1);
+    assert_eq!(token.top_logprobs[0].token, "token_id:7");
+    assert_eq!(token.top_logprobs[0].bytes, None);
+}
+
+#[test]
+fn token_logprob_does_not_leak_decoded_or_uncapped_candidates() {
+    let token = build_token_logprob(
+        42,
+        &[
+            TopLogprob {
+                rank: 1,
+                token_id: 42,
+                token: Some("decoded-selected".to_string()),
+                logprob: f64::NEG_INFINITY,
+                bytes: Some(b"decoded-selected".to_vec()),
+            },
+            TopLogprob {
+                rank: 2,
+                token_id: 7,
+                token: Some("decoded-seven".to_string()),
+                logprob: f64::NAN,
+                bytes: Some(b"decoded-seven".to_vec()),
+            },
+            TopLogprob {
+                rank: 3,
+                token_id: 8,
+                token: Some("decoded-eight".to_string()),
+                logprob: -0.5,
+                bytes: Some(b"decoded-eight".to_vec()),
+            },
+        ],
+        2,
     );
-    let selected = token
-        .top_logprobs
-        .iter()
-        .find(|candidate| candidate.token == "token_id:42")
-        .expect("selected token must be represented in top_logprobs");
-    assert_eq!(selected.logprob, -9999.0);
-    assert_eq!(selected.bytes, Some(b"token_id:42".to_vec()));
+
+    assert_eq!(token.token, "token_id:42");
+    assert_eq!(token.bytes, None);
+    assert_eq!(token.logprob, -9999.0);
+    assert_eq!(token.top_logprobs.len(), 2);
+    assert_eq!(token.top_logprobs[0].token, "token_id:42");
+    assert_eq!(token.top_logprobs[1].token, "token_id:7");
+    assert!(token.top_logprobs.iter().all(|candidate| {
+        candidate.bytes.is_none()
+            && candidate.logprob.is_finite()
+            && !candidate.token.contains("decoded")
+    }));
+}
+
+#[test]
+fn token_logprob_omits_unrelated_candidates_when_sampled_token_is_missing() {
+    let token = build_token_logprob(
+        42,
+        &[TopLogprob {
+            rank: 1,
+            token_id: 7,
+            token: Some("decoded-seven".to_string()),
+            logprob: -0.25,
+            bytes: Some(b"decoded-seven".to_vec()),
+        }],
+        1,
+    );
+
+    assert_eq!(token.token, "token_id:42");
+    assert_eq!(token.logprob, -9999.0);
+    assert_eq!(token.bytes, None);
+    assert!(token.top_logprobs.is_empty());
+}
+
+#[test]
+fn unary_and_stream_accumulators_share_target_vllm_logprob_shape() {
+    let mut backend_output = output(0, 42, true);
+    backend_output.log_probs = Some(vec![-0.125]);
+    backend_output.top_logprobs = Some(vec![vec![
+        TopLogprob {
+            rank: 1,
+            token_id: 42,
+            token: Some("decoded-selected".to_string()),
+            logprob: -0.125,
+            bytes: Some(b"decoded-selected".to_vec()),
+        },
+        TopLogprob {
+            rank: 2,
+            token_id: 7,
+            token: Some("decoded-seven".to_string()),
+            logprob: -0.25,
+            bytes: Some(b"decoded-seven".to_vec()),
+        },
+        TopLogprob {
+            rank: 3,
+            token_id: 8,
+            token: Some("decoded-eight".to_string()),
+            logprob: -0.5,
+            bytes: Some(b"decoded-eight".to_vec()),
+        },
+    ]]);
+
+    let mut unary = GenerateAccumulator::new("request-1".into(), 1, Some(2));
+    unary.push(backend_output.clone()).unwrap();
+    let unary = unary.finish().unwrap();
+    let unary_logprob = &unary.choices[0]
+        .logprobs
+        .as_ref()
+        .unwrap()
+        .content
+        .as_ref()
+        .unwrap()[0];
+
+    let mut stream = GenerateStreamAccumulator::new("request-1".into(), 1, Some(2));
+    let stream = stream.push(backend_output, false).unwrap().unwrap();
+    let stream_logprob = &stream.choices[0]
+        .logprobs
+        .as_ref()
+        .unwrap()
+        .content
+        .as_ref()
+        .unwrap()[0];
+
+    for logprob in [unary_logprob, stream_logprob] {
+        assert_eq!(logprob.token, "token_id:42");
+        assert_eq!(logprob.bytes, None);
+        assert_eq!(logprob.top_logprobs.len(), 2);
+        assert_eq!(logprob.top_logprobs[1].token, "token_id:7");
+        assert!(
+            logprob
+                .top_logprobs
+                .iter()
+                .all(|candidate| candidate.bytes.is_none())
+        );
+    }
 }
 
 #[test]
@@ -569,6 +676,25 @@ async fn handler_returns_nested_vllm_errors_for_400_404_499_and_500() {
     )
     .await;
     assert_nested_boundary_error(response, 400, "invalid_request_error").await;
+
+    let invalid_explicit_null: GenerateRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [11],
+        "sampling_params": {"temperature": null}
+    }))
+    .unwrap();
+    let response = handler(
+        State(empty_service.state_clone()),
+        HeaderMap::new(),
+        Json(invalid_explicit_null),
+    )
+    .await;
+    let body = assert_nested_boundary_error(response, 400, "invalid_request_error").await;
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sampling_params.temperature")
+    );
 
     let invalid_thinking_budget: GenerateRequest = serde_json::from_value(serde_json::json!({
         "token_ids": [11],
@@ -719,6 +845,25 @@ async fn typed_engine_errors_use_canonical_http_metrics_and_rejection_count() {
 }
 
 #[tokio::test]
+async fn worker_sampling_validation_errors_return_http_400() {
+    for engine_error in [
+        DynamoErrorType::InvalidArgument,
+        DynamoErrorType::Backend(dynamo_runtime::error::BackendError::InvalidArgument),
+    ] {
+        let engine: crate::types::inference::generate::GenerateStreamingEngine =
+            Arc::new(TypedErrorGenerateEngine(engine_error));
+        let (task, _context, mut connection_handle, _state) = direct_unary(engine).await;
+        let response = task
+            .await
+            .expect("unary generate task panicked")
+            .expect_err("sampling validation must fail the request");
+        connection_handle.disarm();
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
 async fn cancelled_finish_reason_returns_499_and_cancelled_metrics() {
     let engine: crate::types::inference::generate::GenerateStreamingEngine =
         Arc::new(TerminalGenerateEngine(FinishReason::Cancelled));
@@ -735,7 +880,7 @@ async fn cancelled_finish_reason_returns_499_and_cancelled_metrics() {
 
 #[test]
 fn stream_accumulator_emits_delta_finish_only_and_usage_chunks() {
-    let mut accumulator = GenerateStreamAccumulator::new("request-1".into(), 1, true);
+    let mut accumulator = GenerateStreamAccumulator::new("request-1".into(), 1, Some(1));
     let mut delta = output(0, 11, false);
     delta.completion_usage = Some(CompletionUsage {
         prompt_tokens: 3,
@@ -744,8 +889,16 @@ fn stream_accumulator_emits_delta_finish_only_and_usage_chunks() {
         prompt_tokens_details: None,
         completion_tokens_details: None,
     });
+    delta.generate_metadata = Some(GenerateBackendMetadata {
+        routed_experts: Some("routed-delta".to_string()),
+        ..Default::default()
+    });
     let delta = accumulator.push(delta, true).unwrap().unwrap();
     assert_eq!(delta.choices[0].token_ids, vec![11]);
+    assert_eq!(
+        delta.choices[0].routed_experts.as_deref(),
+        Some("routed-delta")
+    );
     assert_eq!(delta.usage.as_ref().unwrap().total_tokens, 4);
 
     let terminal = LLMEngineOutput {
@@ -771,8 +924,63 @@ fn stream_accumulator_emits_delta_finish_only_and_usage_chunks() {
 }
 
 #[test]
+fn continuous_stream_usage_is_per_choice_and_final_usage_is_aggregate() {
+    let usage = || CompletionUsage {
+        prompt_tokens: 3,
+        completion_tokens: 0,
+        total_tokens: 3,
+        prompt_tokens_details: None,
+        completion_tokens_details: None,
+    };
+    let mut accumulator = GenerateStreamAccumulator::new("request-1".into(), 2, None);
+
+    let mut first = output(0, 11, false);
+    first.completion_usage = Some(usage());
+    assert_eq!(
+        accumulator
+            .push(first, true)
+            .unwrap()
+            .unwrap()
+            .usage
+            .unwrap()
+            .completion_tokens,
+        1
+    );
+
+    let mut first_terminal = output(0, 12, true);
+    first_terminal.completion_usage = Some(usage());
+    assert_eq!(
+        accumulator
+            .push(first_terminal, true)
+            .unwrap()
+            .unwrap()
+            .usage
+            .unwrap()
+            .completion_tokens,
+        2
+    );
+
+    let mut second_terminal = output(1, 21, true);
+    second_terminal.completion_usage = Some(usage());
+    assert_eq!(
+        accumulator
+            .push(second_terminal, true)
+            .unwrap()
+            .unwrap()
+            .usage
+            .unwrap()
+            .completion_tokens,
+        1
+    );
+
+    let final_chunk = accumulator.finish(true).unwrap().unwrap();
+    assert!(final_chunk.choices.is_empty());
+    assert_eq!(final_chunk.usage.unwrap().completion_tokens, 3);
+}
+
+#[test]
 fn stream_accumulator_rejects_missing_terminal_choice() {
-    let mut accumulator = GenerateStreamAccumulator::new("request-1".into(), 1, false);
+    let mut accumulator = GenerateStreamAccumulator::new("request-1".into(), 1, None);
     accumulator.push(output(0, 11, false), false).unwrap();
     assert!(accumulator.finish(false).is_err());
 }
@@ -827,12 +1035,29 @@ async fn unary_http_boundary_preserves_token_native_request_and_private_context(
     }))
     .unwrap();
 
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let response = handler(State(service.state_clone()), headers, Json(request)).await;
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let response: GenerateResponse = serde_json::from_slice(&body).unwrap();
     assert_eq!(response.request_id, "header-request");
+    assert_eq!(response.model.as_deref(), Some("test-model"));
+    assert!(
+        response
+            .created
+            .is_some_and(|created| (before..=after).contains(&created))
+    );
+    assert_eq!(response.usage.as_ref().unwrap().prompt_tokens, 3);
+    assert_eq!(response.usage.as_ref().unwrap().completion_tokens, 1);
+    assert_eq!(response.usage.as_ref().unwrap().total_tokens, 4);
     assert_eq!(response.choices[0].token_ids, vec![99]);
 
     let captured = captured.lock().unwrap();
@@ -1049,7 +1274,7 @@ async fn streaming_missing_model_uses_bounded_metric_label() {
         "test-request".to_string(),
         "attacker-model-label".to_string(),
         1,
-        false,
+        None,
         false,
         false,
         stream_handle,

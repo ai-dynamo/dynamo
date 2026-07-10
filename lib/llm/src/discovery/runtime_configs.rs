@@ -16,22 +16,44 @@ use dynamo_kv_router::protocols::WorkerId;
 /// Type alias for the runtime config watch receiver.
 pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>;
 
+fn join_available_runtime_configs(
+    instance_ids: &HashSet<WorkerId>,
+    configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+) -> HashMap<WorkerId, ModelRuntimeConfig> {
+    instance_ids
+        .iter()
+        .filter_map(|id| configs.get(id).map(|config| (*id, config.clone())))
+        .collect()
+}
+
 /// Join instance availability and config discovery into a single watch.
 ///
 /// Only includes workers that have BOTH an instance registration AND a runtime config.
 /// Spawns a background task that recomputes the joined state whenever either source changes.
 /// The returned `watch::Receiver` always contains the latest joined snapshot.
 pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<RuntimeConfigWatch> {
-    let component = endpoint.component();
+    runtime_config_watch_for(endpoint, endpoint).await
+}
+
+/// Join availability from a request-plane endpoint with model metadata from a
+/// possibly different endpoint. Versioned protocol aliases publish no model
+/// card of their own, so their eligible workers are exactly:
+///
+/// `alias endpoint instances ∩ primary endpoint runtime configs`.
+pub async fn runtime_config_watch_for(
+    availability_endpoint: &Endpoint,
+    config_endpoint: &Endpoint,
+) -> anyhow::Result<RuntimeConfigWatch> {
+    let component = availability_endpoint.component();
     let cancel_token = component.drt().primary_token();
 
     // Source 1: instance availability (watches DiscoveryQuery::Endpoint)
-    let client = endpoint.client().await?;
+    let client = availability_endpoint.client().await?;
     let mut instance_ids_rx = client.instance_avail_watcher();
 
     // Source 2: runtime configs from discovery (watches DiscoveryQuery::EndpointModels)
     let discovery = component.drt().discovery();
-    let eid = endpoint.id();
+    let eid = config_endpoint.id();
     let stream = discovery
         .list_and_watch(
             DiscoveryQuery::EndpointModels {
@@ -63,10 +85,7 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
                 .collect();
             let configs = configs_rx.borrow_and_update().clone();
 
-            let ready: HashMap<WorkerId, ModelRuntimeConfig> = instances
-                .into_iter()
-                .filter_map(|id| configs.get(&id).map(|cfg| (id, cfg.clone())))
-                .collect();
+            let ready = join_available_runtime_configs(&instances, &configs);
 
             // Only send if the joined result actually changed, to avoid waking
             // downstream consumers (wait_for, changed) on no-op recomputations.
@@ -82,4 +101,27 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
     });
 
     Ok(rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versioned_availability_intersects_primary_runtime_configs() {
+        let versioned_instances = HashSet::from([22, 33]);
+        let primary_configs = HashMap::from([
+            (11, ModelRuntimeConfig::new()),
+            (22, ModelRuntimeConfig::new()),
+            (33, ModelRuntimeConfig::new()),
+        ]);
+
+        let joined = join_available_runtime_configs(&versioned_instances, &primary_configs);
+
+        assert_eq!(
+            joined.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([22, 33])
+        );
+        assert!(!joined.contains_key(&11));
+    }
 }

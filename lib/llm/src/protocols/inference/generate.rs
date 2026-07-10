@@ -200,6 +200,8 @@ impl GenerateRequest {
                 "`sampling_params.prompt_logprobs` are not available when `stream=true`",
             ));
         }
+        self.sampling_params
+            .validate_explicit_nulls(&self.provided_sampling_fields)?;
         self.sampling_params.validate()?;
         if let Some(features) = &self.features {
             features.validate(self.token_ids.len())?;
@@ -294,6 +296,49 @@ pub struct GenerateSamplingParams {
 }
 
 impl GenerateSamplingParams {
+    fn validate_explicit_nulls(
+        &self,
+        provided_fields: &BTreeSet<String>,
+    ) -> Result<(), GenerateProtocolError> {
+        // Keep this list aligned with the non-nullable annotations on the
+        // target vLLM SamplingParams type. The fields remain Option<T> here
+        // only so Dynamo can distinguish omission from an explicit JSON null.
+        for (name, is_null) in [
+            ("n", self.n.is_none()),
+            ("presence_penalty", self.presence_penalty.is_none()),
+            ("frequency_penalty", self.frequency_penalty.is_none()),
+            ("repetition_penalty", self.repetition_penalty.is_none()),
+            ("temperature", self.temperature.is_none()),
+            ("top_p", self.top_p.is_none()),
+            ("top_k", self.top_k.is_none()),
+            ("min_p", self.min_p.is_none()),
+            ("ignore_eos", self.ignore_eos.is_none()),
+            ("min_tokens", self.min_tokens.is_none()),
+            ("flat_logprobs", self.flat_logprobs.is_none()),
+            ("detokenize", self.detokenize.is_none()),
+            ("skip_special_tokens", self.skip_special_tokens.is_none()),
+            (
+                "spaces_between_special_tokens",
+                self.spaces_between_special_tokens.is_none(),
+            ),
+            (
+                "include_stop_str_in_output",
+                self.include_stop_str_in_output.is_none(),
+            ),
+            (
+                "routed_experts_prompt_start",
+                self.routed_experts_prompt_start.is_none(),
+            ),
+        ] {
+            if is_null && provided_fields.contains(name) {
+                return Err(invalid(format!(
+                    "`sampling_params.{name}` must not be null"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), GenerateProtocolError> {
         if self.n == Some(0) {
             return Err(invalid("`sampling_params.n` must be greater than zero"));
@@ -544,22 +589,20 @@ pub struct PlaceholderRangeInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerateResponse {
     pub request_id: String,
+    pub model: Option<String>,
+    pub created: Option<u64>,
     pub choices: Vec<GenerateResponseChoice>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<CompletionUsage>,
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_transfer_params: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerateResponseChoice {
     pub index: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<GenerateChoiceLogprobs>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub routed_experts: Option<String>,
 }
 
@@ -567,26 +610,22 @@ pub struct GenerateResponseChoice {
 pub struct GenerateStreamResponse {
     pub request_id: String,
     pub choices: Vec<GenerateStreamResponseChoice>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<CompletionUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerateStreamResponseChoice {
     pub index: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<GenerateChoiceLogprobs>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
+    pub routed_experts: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerateLogprob {
     pub logprob: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rank: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub decoded_token: Option<String>,
 }
 
@@ -749,6 +788,73 @@ mod tests {
     }
 
     #[test]
+    fn explicit_null_matches_target_vllm_sampling_param_nullability() {
+        let request_with_null = |field: &str| {
+            let mut sampling_params = Map::new();
+            sampling_params.insert(field.to_string(), Value::Null);
+            serde_json::from_value::<GenerateRequest>(serde_json::json!({
+                "token_ids": [1],
+                "sampling_params": sampling_params
+            }))
+            .unwrap()
+        };
+        let non_nullable = [
+            "n",
+            "presence_penalty",
+            "frequency_penalty",
+            "repetition_penalty",
+            "temperature",
+            "top_p",
+            "top_k",
+            "min_p",
+            "ignore_eos",
+            "min_tokens",
+            "flat_logprobs",
+            "detokenize",
+            "skip_special_tokens",
+            "spaces_between_special_tokens",
+            "include_stop_str_in_output",
+            "routed_experts_prompt_start",
+        ];
+        for field in non_nullable {
+            let request = request_with_null(field);
+            let error = request
+                .validate()
+                .expect_err("target vLLM rejects null for non-nullable fields");
+            let message = error.to_string();
+            assert!(message.contains(field), "unexpected error: {message}");
+            assert!(
+                message.contains("must not be null"),
+                "unexpected error: {message}"
+            );
+        }
+
+        let nullable = [
+            "seed",
+            "stop",
+            "stop_token_ids",
+            "max_tokens",
+            "logprobs",
+            "prompt_logprobs",
+            "logprob_token_ids",
+            "structured_outputs",
+            "logit_bias",
+            "allowed_token_ids",
+            "bad_words",
+            "skip_reading_prefix_cache",
+            "thinking_token_budget",
+            "repetition_detection",
+            "extra_args",
+        ];
+        for field in nullable {
+            let request = request_with_null(field);
+            request
+                .validate()
+                .unwrap_or_else(|error| panic!("target vLLM permits `{field}=null`: {error}"));
+        }
+    }
+
+    #[test]
     fn thinking_token_budget_accepts_unlimited_and_preserves_presence() {
         for (wire_value, expected) in [
             (Value::Null, None),
@@ -885,7 +991,9 @@ mod tests {
         .unwrap();
         assert_eq!(response.choices.len(), 2);
         assert_eq!(response.choices[0].token_ids, vec![55, 56]);
-        assert!(!serde_json::to_value(&response).unwrap()["usage"].is_object());
+        assert_eq!(response.model.as_deref(), Some("Qwen/Qwen3-0.6B"));
+        assert_eq!(response.created, Some(1_752_000_000));
+        assert_eq!(response.usage.as_ref().unwrap().total_tokens, 7);
 
         let stream: GenerateStreamResponse = serde_json::from_str(include_str!(
             "../../../tests/data/inference_generate/response-stream.json"
@@ -897,5 +1005,72 @@ mod tests {
             serde_json::json!({"index": 0, "finish_reason": "stop"}),
         );
         assert!(missing_token_ids.is_err());
+    }
+
+    #[test]
+    fn unary_response_serializes_optional_fields_as_explicit_null() {
+        let response = GenerateResponse {
+            request_id: "request-1".to_string(),
+            model: None,
+            created: None,
+            choices: vec![GenerateResponseChoice {
+                index: 0,
+                logprobs: None,
+                finish_reason: None,
+                token_ids: vec![],
+                routed_experts: None,
+            }],
+            usage: None,
+            prompt_logprobs: None,
+            kv_transfer_params: None,
+        };
+
+        let value = serde_json::to_value(response).unwrap();
+        for field in [
+            "model",
+            "created",
+            "usage",
+            "prompt_logprobs",
+            "kv_transfer_params",
+        ] {
+            assert_eq!(value[field], Value::Null, "missing unary field {field}");
+        }
+        for field in ["logprobs", "finish_reason", "routed_experts"] {
+            assert_eq!(
+                value["choices"][0][field],
+                Value::Null,
+                "missing unary choice field {field}"
+            );
+        }
+
+        let stream = serde_json::to_value(GenerateStreamResponse {
+            request_id: "request-1".to_string(),
+            choices: vec![GenerateStreamResponseChoice {
+                index: 0,
+                logprobs: None,
+                finish_reason: None,
+                token_ids: vec![1],
+                routed_experts: None,
+            }],
+            usage: None,
+        })
+        .unwrap();
+        assert_eq!(stream["usage"], Value::Null);
+        for field in ["logprobs", "finish_reason", "routed_experts"] {
+            assert_eq!(
+                stream["choices"][0][field],
+                Value::Null,
+                "missing stream choice field {field}"
+            );
+        }
+
+        let prompt_logprob = serde_json::to_value(GenerateLogprob {
+            logprob: -0.25,
+            rank: None,
+            decoded_token: None,
+        })
+        .unwrap();
+        assert_eq!(prompt_logprob["rank"], Value::Null);
+        assert_eq!(prompt_logprob["decoded_token"], Value::Null);
     }
 }

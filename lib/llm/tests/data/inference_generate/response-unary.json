@@ -1,15 +1,26 @@
 {
   "request_id": "generate-fixture",
+  "model": "Qwen/Qwen3-0.6B",
+  "created": 1752000000,
   "choices": [
     {
       "index": 0,
       "token_ids": [55, 56],
       "logprobs": {
         "content": [
-          {"token": "token_id:55", "logprob": -0.1, "bytes": null, "top_logprobs": []},
-          {"token": "token_id:56", "logprob": -0.2, "bytes": null, "top_logprobs": []}
-        ],
-        "refusal": null
+          {
+            "token": "token_id:55",
+            "logprob": -0.1,
+            "bytes": null,
+            "top_logprobs": [{"token": "token_id:55", "logprob": -0.1, "bytes": null}]
+          },
+          {
+            "token": "token_id:56",
+            "logprob": -0.2,
+            "bytes": null,
+            "top_logprobs": [{"token": "token_id:56", "logprob": -0.2, "bytes": null}]
+          }
+        ]
       },
       "finish_reason": "stop",
       "routed_experts": "k05VTVBZAQA="
@@ -17,12 +28,20 @@
     {
       "index": 1,
       "token_ids": [57],
-      "finish_reason": "length"
+      "logprobs": null,
+      "finish_reason": "length",
+      "routed_experts": null
     }
   ],
   "prompt_logprobs": [
     null,
     {"11": {"logprob": -0.01, "rank": 1, "decoded_token": "token_id:11"}}
   ],
+  "usage": {
+    "prompt_tokens": 4,
+    "completion_tokens": 3,
+    "total_tokens": 7,
+    "prompt_tokens_details": null
+  },
   "kv_transfer_params": {"transfer_id": "fixture"}
 }

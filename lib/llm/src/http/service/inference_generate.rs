@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
@@ -72,7 +73,7 @@ async fn handle_generate(
 
     let request_id = resolve_request_id(&headers, request.request_id.as_deref());
     request.request_id = Some(request_id.clone());
-    let require_logprobs = request.sampling_params.logprobs.is_some();
+    let requested_logprobs = request.sampling_params.logprobs;
     let expected_choices = request.sampling_params.n.unwrap_or(1);
     let streaming = request.stream;
     let include_usage = request
@@ -107,7 +108,7 @@ async fn handle_generate(
             request_id,
             model,
             expected_choices,
-            require_logprobs,
+            requested_logprobs,
             include_usage,
             continuous_usage,
             stream_handle,
@@ -124,7 +125,7 @@ async fn handle_generate(
             request_id,
             model,
             expected_choices,
-            require_logprobs,
+            requested_logprobs,
             stream_handle,
         )
         .in_current_span(),
@@ -244,7 +245,7 @@ async fn generate_streaming(
     request_id: String,
     model: String,
     expected_choices: u32,
-    require_logprobs: bool,
+    requested_logprobs: Option<i32>,
     include_usage: bool,
     continuous_usage: bool,
     stream_handle: super::disconnect::ConnectionHandle,
@@ -273,7 +274,7 @@ async fn generate_streaming(
     let context = stream.context();
     let events = generate_event_stream(
         stream,
-        GenerateStreamAccumulator::new(request_id, expected_choices as usize, require_logprobs),
+        GenerateStreamAccumulator::new(request_id, expected_choices as usize, requested_logprobs),
         include_usage,
         continuous_usage,
     );
@@ -423,9 +424,13 @@ async fn generate_unary(
     request_id: String,
     model: String,
     expected_choices: u32,
-    require_logprobs: bool,
+    requested_logprobs: Option<i32>,
     _stream_handle: super::disconnect::ConnectionHandle,
 ) -> Result<GenerateResponse, ErrorResponse> {
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after the Unix epoch")
+        .as_secs();
     let request_context = request.context();
     let mut inflight = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
@@ -472,7 +477,7 @@ async fn generate_unary(
         return Err(cancelled_error());
     }
     let mut accumulator =
-        GenerateAccumulator::new(request_id, expected_choices as usize, require_logprobs);
+        GenerateAccumulator::new(request_id, expected_choices as usize, requested_logprobs);
 
     loop {
         let next = match run_until_either_killed(
@@ -530,10 +535,12 @@ async fn generate_unary(
         inflight.mark_error(ErrorType::Cancelled);
         return Err(cancelled_error());
     }
-    let response = accumulator.finish().map_err(|error| {
+    let mut response = accumulator.finish().map_err(|error| {
         inflight.mark_error(ErrorType::Internal);
         protocol_error(error)
     })?;
+    response.model = Some(model);
+    response.created = Some(created);
     inflight.mark_ok();
     Ok(response)
 }
@@ -559,7 +566,7 @@ fn data_parallel_rank_from_headers(headers: &HeaderMap) -> Option<u32> {
 struct GenerateStreamAccumulator {
     request_id: String,
     expected_choices: usize,
-    require_logprobs: bool,
+    requested_logprobs: Option<i32>,
     seen_choices: BTreeSet<u32>,
     terminal_choices: BTreeSet<u32>,
     completion_tokens: BTreeMap<u32, usize>,
@@ -567,11 +574,11 @@ struct GenerateStreamAccumulator {
 }
 
 impl GenerateStreamAccumulator {
-    fn new(request_id: String, expected_choices: usize, require_logprobs: bool) -> Self {
+    fn new(request_id: String, expected_choices: usize, requested_logprobs: Option<i32>) -> Self {
         Self {
             request_id,
             expected_choices,
-            require_logprobs,
+            requested_logprobs,
             seen_choices: BTreeSet::new(),
             terminal_choices: BTreeSet::new(),
             completion_tokens: BTreeMap::new(),
@@ -598,8 +605,13 @@ impl GenerateStreamAccumulator {
         }
         self.seen_choices.insert(index);
 
+        let routed_experts = output
+            .generate_metadata
+            .and_then(|metadata| metadata.routed_experts);
         let token_ids = output.token_ids;
-        let logprobs = if self.require_logprobs && !token_ids.is_empty() {
+        let logprobs = if let Some(requested_logprobs) = self.requested_logprobs
+            && !token_ids.is_empty()
+        {
             let selected = output.log_probs.as_ref().ok_or_else(|| {
                 invalid_response(format!(
                     "choice {index} omitted requested completion logprobs"
@@ -617,10 +629,9 @@ impl GenerateStreamAccumulator {
                 content: Some(
                     token_ids
                         .iter()
-                        .zip(selected)
                         .zip(candidates)
-                        .map(|((token_id, logprob), top)| {
-                            build_token_logprob(*token_id, *logprob, top)
+                        .map(|(token_id, top)| {
+                            build_token_logprob(*token_id, top, requested_logprobs)
                         })
                         .collect(),
                 ),
@@ -643,7 +654,7 @@ impl GenerateStreamAccumulator {
             return Ok(None);
         }
         let usage = continuous_usage
-            .then(|| self.normalized_usage())
+            .then(|| self.normalized_usage(Some(index)))
             .transpose()?
             .flatten();
         Ok(Some(GenerateStreamResponse {
@@ -653,6 +664,7 @@ impl GenerateStreamAccumulator {
                 logprobs,
                 finish_reason,
                 token_ids,
+                routed_experts,
             }],
             usage,
         }))
@@ -675,7 +687,7 @@ impl GenerateStreamAccumulator {
         if !include_usage {
             return Ok(None);
         }
-        let usage = self.normalized_usage()?.ok_or_else(|| {
+        let usage = self.normalized_usage(None)?.ok_or_else(|| {
             invalid_response("backend omitted usage requested for the final stream chunk")
         })?;
         Ok(Some(GenerateStreamResponse {
@@ -685,11 +697,22 @@ impl GenerateStreamAccumulator {
         }))
     }
 
-    fn normalized_usage(&self) -> Result<Option<CompletionUsage>, GenerateProtocolError> {
+    fn normalized_usage(
+        &self,
+        choice_index: Option<u32>,
+    ) -> Result<Option<CompletionUsage>, GenerateProtocolError> {
         let Some(mut usage) = self.latest_usage.clone() else {
             return Ok(None);
         };
-        let completion_tokens = self.completion_tokens.values().sum::<usize>();
+        let completion_tokens = choice_index.map_or_else(
+            || self.completion_tokens.values().sum::<usize>(),
+            |index| {
+                self.completion_tokens
+                    .get(&index)
+                    .copied()
+                    .unwrap_or_default()
+            },
+        );
         usage.completion_tokens = u32::try_from(completion_tokens)
             .map_err(|_| invalid_response("completion token count exceeds u32"))?;
         usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
@@ -730,8 +753,9 @@ struct GenerateAccumulator {
         >,
     >,
     kv_transfer_params: Option<serde_json::Value>,
+    latest_usage: Option<CompletionUsage>,
     expected_choices: usize,
-    require_logprobs: bool,
+    requested_logprobs: Option<i32>,
 }
 
 #[derive(Default)]
@@ -743,14 +767,15 @@ struct ChoiceAccumulator {
 }
 
 impl GenerateAccumulator {
-    fn new(request_id: String, expected_choices: usize, require_logprobs: bool) -> Self {
+    fn new(request_id: String, expected_choices: usize, requested_logprobs: Option<i32>) -> Self {
         Self {
             request_id,
             choices: BTreeMap::new(),
             prompt_logprobs: None,
             kv_transfer_params: None,
+            latest_usage: None,
             expected_choices,
-            require_logprobs,
+            requested_logprobs,
         }
     }
 
@@ -769,7 +794,9 @@ impl GenerateAccumulator {
             )));
         }
 
-        if self.require_logprobs && !output.token_ids.is_empty() {
+        if let Some(requested_logprobs) = self.requested_logprobs
+            && !output.token_ids.is_empty()
+        {
             let selected = output.log_probs.as_ref().ok_or_else(|| {
                 invalid_response(format!(
                     "choice {index} omitted requested completion logprobs"
@@ -785,14 +812,16 @@ impl GenerateAccumulator {
                     "choice {index} token/logprob counts are not aligned"
                 )));
             }
-            for ((token_id, logprob), top) in output.token_ids.iter().zip(selected).zip(candidates)
-            {
+            for (token_id, top) in output.token_ids.iter().zip(candidates) {
                 choice
                     .logprobs
-                    .push(build_token_logprob(*token_id, *logprob, top));
+                    .push(build_token_logprob(*token_id, top, requested_logprobs));
             }
         }
         choice.token_ids.extend(output.token_ids);
+        if let Some(usage) = output.completion_usage {
+            self.latest_usage = Some(usage);
+        }
 
         if let Some(metadata) = output.generate_metadata {
             if let Some(mut prompt_logprobs) = metadata.prompt_logprobs {
@@ -829,6 +858,20 @@ impl GenerateAccumulator {
                 self.choices.len()
             )));
         }
+        let completion_tokens = self
+            .choices
+            .values()
+            .map(|choice| choice.token_ids.len())
+            .sum::<usize>();
+        let usage = self
+            .latest_usage
+            .map(|mut usage| {
+                usage.completion_tokens = u32::try_from(completion_tokens)
+                    .map_err(|_| invalid_response("completion token count exceeds u32"))?;
+                usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
+                Ok(usage)
+            })
+            .transpose()?;
         let choices = self
             .choices
             .into_iter()
@@ -836,14 +879,16 @@ impl GenerateAccumulator {
                 let finish_reason = choice.finish_reason.ok_or_else(|| {
                     invalid_response(format!("choice {index} has no terminal finish reason"))
                 })?;
-                if self.require_logprobs && choice.logprobs.len() != choice.token_ids.len() {
+                if self.requested_logprobs.is_some()
+                    && choice.logprobs.len() != choice.token_ids.len()
+                {
                     return Err(invalid_response(format!(
                         "choice {index} accumulated token/logprob counts are not aligned"
                     )));
                 }
                 Ok(GenerateResponseChoice {
                     index,
-                    logprobs: self.require_logprobs.then_some(GenerateChoiceLogprobs {
+                    logprobs: self.requested_logprobs.map(|_| GenerateChoiceLogprobs {
                         content: Some(choice.logprobs),
                         refusal: None,
                     }),
@@ -855,7 +900,10 @@ impl GenerateAccumulator {
             .collect::<Result<Vec<_>, GenerateProtocolError>>()?;
         Ok(GenerateResponse {
             request_id: self.request_id,
+            model: None,
+            created: None,
             choices,
+            usage,
             prompt_logprobs: self.prompt_logprobs,
             kv_transfer_params: self.kv_transfer_params,
         })
@@ -871,47 +919,38 @@ fn clamp_vllm_logprob(logprob: f64) -> f32 {
     }
 }
 
-fn token_bytes(token: &str, backend_bytes: Option<&Vec<u8>>) -> Option<Vec<u8>> {
-    backend_bytes
-        .cloned()
-        .or_else(|| (!token.is_empty()).then(|| token.as_bytes().to_vec()))
-}
-
-fn build_token_logprob(token_id: u32, selected: f64, top: &[TopLogprob]) -> GenerateTokenLogprob {
+fn build_token_logprob(
+    token_id: u32,
+    top: &[TopLogprob],
+    requested_logprobs: i32,
+) -> GenerateTokenLogprob {
     let selected_candidate = top.iter().find(|candidate| candidate.token_id == token_id);
-    let token = selected_candidate
-        .and_then(|candidate| candidate.token.clone())
-        .unwrap_or_else(|| format!("token_id:{token_id}"));
-    let bytes = token_bytes(
-        &token,
-        selected_candidate.and_then(|candidate| candidate.bytes.as_ref()),
-    );
-    let selected = clamp_vllm_logprob(selected);
-    let mut top_logprobs = top
+    let token = format!("token_id:{token_id}");
+    let Some(selected_candidate) = selected_candidate else {
+        // Match vLLM's TITO renderer: if the sampled token is absent from the
+        // candidate map, emit only the sampled token with sentinel probability.
+        // Candidates for other token IDs are not valid substitutes.
+        return GenerateTokenLogprob {
+            token,
+            logprob: -9999.0,
+            bytes: None,
+            top_logprobs: Vec::new(),
+        };
+    };
+    let logprob = clamp_vllm_logprob(selected_candidate.logprob);
+    let top_logprobs = top
         .iter()
-        .map(|candidate| {
-            let token = candidate
-                .token
-                .clone()
-                .unwrap_or_else(|| format!("token_id:{}", candidate.token_id));
-            GenerateTopLogprob {
-                bytes: token_bytes(&token, candidate.bytes.as_ref()),
-                token,
-                logprob: clamp_vllm_logprob(candidate.logprob),
-            }
+        .take(usize::try_from(requested_logprobs.max(1)).expect("positive i32 fits usize"))
+        .map(|candidate| GenerateTopLogprob {
+            bytes: None,
+            token: format!("token_id:{}", candidate.token_id),
+            logprob: clamp_vllm_logprob(candidate.logprob),
         })
         .collect::<Vec<_>>();
-    if selected_candidate.is_none() {
-        top_logprobs.push(GenerateTopLogprob {
-            token: token.clone(),
-            logprob: selected,
-            bytes: bytes.clone(),
-        });
-    }
     GenerateTokenLogprob {
         token,
-        logprob: selected,
-        bytes,
+        logprob,
+        bytes: None,
         top_logprobs,
     }
 }

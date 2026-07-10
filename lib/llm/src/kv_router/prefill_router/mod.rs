@@ -134,6 +134,13 @@ pub struct PrefillRouter {
     model_name: String,
     /// Namespace (used for logging / lifecycle messages).
     namespace: String,
+    /// Optional request-plane alias. Model metadata still comes from the
+    /// activated primary endpoint, while routing is restricted to instances
+    /// serving this exact alias.
+    routing_endpoint_name: Option<String>,
+    /// Normal prefill routing may fall back to aggregated service before a
+    /// prefill peer appears. A versioned P/D contract must fail closed instead.
+    passthrough_when_unavailable: bool,
     is_eagle: bool,
     /// Initialization and worker availability state.
     lifecycle: AtomicU8,
@@ -173,6 +180,9 @@ impl
         // deactivated (all prefill workers died), route directly to the backend. Model admission
         // remains gated by the registered worker topology before the request reaches this stage.
         if self.lifecycle_state() != PrefillLifecycleState::Active {
+            if !self.passthrough_when_unavailable {
+                return Err(anyhow::anyhow!(PrefillError::NotActivated));
+            }
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -549,6 +559,29 @@ mod tests {
         assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Pending);
         assert!(!router.is_activated());
         assert!(!router.is_deactivated());
+    }
+
+    #[tokio::test]
+    async fn versioned_prefill_is_fail_closed_before_activation() {
+        let (activation_tx, activation_rx) = tokio::sync::oneshot::channel();
+        let router = PrefillRouter::new_for_endpoint_name(
+            activation_rx,
+            Arc::new(crate::discovery::ModelManager::new()),
+            RouterMode::RoundRobin,
+            16,
+            Some(dynamo_kv_router::config::KvRouterConfig::default()),
+            None,
+            Some(30),
+            "model".to_string(),
+            "namespace".to_string(),
+            false,
+            None,
+            "engine_generate_prefill_v1".to_string(),
+        );
+
+        assert!(!router.passthrough_when_unavailable);
+        assert!(!router.is_available());
+        drop(activation_tx);
     }
 
     #[test]

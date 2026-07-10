@@ -55,6 +55,9 @@ pub struct WorkerSet {
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
 
+    /// Load monitor scoped to workers serving the versioned Generate alias.
+    pub(crate) engine_generate_worker_monitor: Option<KvWorkerMonitor>,
+
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
     pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
@@ -62,6 +65,10 @@ pub struct WorkerSet {
     /// Optional multimodal encoder hop. Stored for discovery-driven
     /// deactivation/reactivation when Encode workers leave or rejoin.
     pub(crate) encoder_router: Option<Arc<EncoderRouter>>,
+
+    /// Fail-closed prefill router scoped to the versioned Generate prefill
+    /// alias. Present only for disaggregated decode WorkerSets.
+    pub(crate) engine_generate_prefill_router: Option<Arc<PrefillRouter>>,
 
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
@@ -85,8 +92,10 @@ impl WorkerSet {
             generate_engine: None,
             kv_router: None,
             worker_monitor: None,
+            engine_generate_worker_monitor: None,
             prefill_router: None,
             encoder_router: None,
+            engine_generate_prefill_router: None,
             instance_count_rx: None,
         }
     }
@@ -137,6 +146,17 @@ impl WorkerSet {
 
     pub fn has_generate_engine(&self) -> bool {
         self.generate_engine.is_some()
+    }
+
+    /// A P/D Generate engine is available only after a protocol-compatible
+    /// prefill endpoint activates. Aggregated engines have no such router and
+    /// are immediately available.
+    pub fn has_available_generate_engine(&self) -> bool {
+        self.generate_engine.is_some()
+            && self
+                .engine_generate_prefill_router
+                .as_ref()
+                .is_none_or(|router| router.is_available())
     }
 
     /// Whether this set has any decode engine (chat or completions)
@@ -365,6 +385,26 @@ mod tests {
             Arc::new(crate::engines::EchoBidirectionalEngine),
             "realtime"
         );
+    }
+
+    #[test]
+    fn versioned_prefill_must_activate_before_generate_is_available() {
+        let mut ws = make_worker_set("ns1", "abc123");
+        ws.generate_engine = Some(StubEngine::<
+            crate::protocols::inference::generate::GenerateRequest,
+            crate::protocols::common::llm_backend::LLMEngineOutput,
+        >::new());
+        let router = PrefillRouter::disabled(
+            Arc::new(crate::discovery::ModelManager::new()),
+            dynamo_runtime::pipeline::RouterMode::Random,
+            None,
+        );
+        ws.engine_generate_prefill_router = Some(router.clone());
+
+        assert!(!ws.has_available_generate_engine());
+
+        router.mark_active_for_test();
+        assert!(ws.has_available_generate_engine());
     }
 
     #[test]
