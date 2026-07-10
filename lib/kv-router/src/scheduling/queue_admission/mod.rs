@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustc_hash::FxHashSet;
 use serde::Deserialize;
 use serde_yaml::Mapping;
 
@@ -48,13 +48,13 @@ impl WorkerEligibility {
 /// One consistent view of the workers eligible for a request.
 #[derive(Clone)]
 pub struct WorkerEligibilitySnapshot {
-    structural: Arc<HashSet<WorkerWithDpRank>>,
-    available: Arc<HashSet<WorkerWithDpRank>>,
+    structural: Arc<FxHashSet<WorkerWithDpRank>>,
+    available: Arc<FxHashSet<WorkerWithDpRank>>,
 }
 
 impl WorkerEligibilitySnapshot {
     pub fn new(workers: impl IntoIterator<Item = WorkerWithDpRank>) -> Self {
-        let workers: Arc<HashSet<_>> = Arc::new(workers.into_iter().collect());
+        let workers: Arc<FxHashSet<_>> = Arc::new(workers.into_iter().collect());
         Self {
             structural: Arc::clone(&workers),
             available: workers,
@@ -62,8 +62,8 @@ impl WorkerEligibilitySnapshot {
     }
 
     pub fn with_availability(
-        structural: HashSet<WorkerWithDpRank>,
-        mut available: HashSet<WorkerWithDpRank>,
+        structural: FxHashSet<WorkerWithDpRank>,
+        mut available: FxHashSet<WorkerWithDpRank>,
     ) -> Self {
         available.retain(|worker| structural.contains(worker));
         Self {
@@ -261,8 +261,8 @@ mod tests {
         let available = WorkerWithDpRank::new(1, 0);
         let overloaded = WorkerWithDpRank::new(2, 0);
         let snapshot = WorkerEligibilitySnapshot::with_availability(
-            HashSet::from([available, overloaded]),
-            HashSet::from([available]),
+            FxHashSet::from_iter([available, overloaded]),
+            FxHashSet::from_iter([available]),
         );
 
         assert!(snapshot.allows(available));
