@@ -112,6 +112,7 @@ where
             worker_type,
             monitor_worker_configs,
         )
+        .expect("synthetic policy profile does not require admission strategies")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -129,7 +130,7 @@ where
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
-    ) -> Self {
+    ) -> Result<Self, KvSchedulerError> {
         Self::new_with_policy_profile_and_admission_strategies(
             slots,
             workers_with_configs,
@@ -164,7 +165,21 @@ where
         worker_type: &'static str,
         monitor_worker_configs: bool,
         admission_strategies: PolicyClassAdmissionStrategies,
-    ) -> Self {
+    ) -> Result<Self, KvSchedulerError> {
+        let queue = Arc::new(
+            SchedulerQueue::new_with_policy_profile_and_admission_strategies(
+                Arc::clone(&slots),
+                workers_with_configs.clone(),
+                profile,
+                block_size,
+                selector,
+                prefill_load_estimator,
+                overlap_scores_refresh,
+                overloaded_worker_provider,
+                admission_strategies,
+            )?,
+        );
+
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
             let mut monitor_rx = workers_with_configs.clone();
@@ -202,19 +217,6 @@ where
             });
         }
 
-        let queue = Arc::new(
-            SchedulerQueue::new_with_policy_profile_and_admission_strategies(
-                Arc::clone(&slots),
-                workers_with_configs,
-                profile,
-                block_size,
-                selector,
-                prefill_load_estimator,
-                overlap_scores_refresh,
-                overloaded_worker_provider,
-                admission_strategies,
-            ),
-        );
         let (queue_updates, _) = watch::channel(());
         let queue_remote_updates = Arc::clone(&queue);
         let queue_periodic_updates = Arc::clone(&queue);
@@ -260,13 +262,13 @@ where
             }
         });
 
-        Self {
+        Ok(Self {
             slots,
             queue,
             queue_updates,
             track_prefill_tokens_default,
             worker_type,
-        }
+        })
     }
 
     pub async fn schedule_request(
@@ -629,7 +631,7 @@ where
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
-    ) -> Self {
+    ) -> Result<Self, KvSchedulerError> {
         Self::new_with_policy_profile(
             slots,
             workers_with_configs,
@@ -1489,7 +1491,8 @@ mod tests {
             "test",
             false,
             strategies,
-        );
+        )
+        .unwrap();
         scheduler
             .schedule_request(request(ScheduleMode::Tracked {
                 request_id: "req-1".to_owned(),
@@ -1545,7 +1548,8 @@ mod tests {
                 "test",
                 false,
                 strategies,
-            ),
+            )
+            .unwrap(),
         );
         let scheduling = {
             let scheduler = Arc::clone(&scheduler);

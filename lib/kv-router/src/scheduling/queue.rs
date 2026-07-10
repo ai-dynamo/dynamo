@@ -211,6 +211,7 @@ impl<
             overlap_scores_refresh,
             overloaded_worker_provider,
         )
+        .expect("synthetic policy profile does not require admission strategies")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -223,7 +224,7 @@ impl<
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-    ) -> Self {
+    ) -> Result<Self, KvSchedulerError> {
         Self::new_with_policy_profile_and_admission_strategies(
             slots,
             workers_with_configs,
@@ -248,7 +249,7 @@ impl<
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         admission_strategies: PolicyClassAdmissionStrategies,
-    ) -> Self {
+    ) -> Result<Self, KvSchedulerError> {
         Self::new_with_policy_profile_and_capacity(
             slots,
             workers_with_configs,
@@ -275,8 +276,9 @@ impl<
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         admission_strategies: PolicyClassAdmissionStrategies,
         admission_channel_capacity: usize,
-    ) -> Self {
+    ) -> Result<Self, KvSchedulerError> {
         let admission_enabled = !admission_strategies.is_empty();
+        let admission = PolicyClassAdmissionController::new(&profile, admission_strategies)?;
         let queueing_enabled = profile
             .classes()
             .iter()
@@ -323,7 +325,7 @@ impl<
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
         let actor = SchedulerQueueActor {
             pending: PolicyQueue::new(profile.clone()),
-            admission: PolicyClassAdmissionController::new(&profile, admission_strategies),
+            admission,
             tracked_admissions: HashMap::new(),
             profile,
             pending_count: Arc::clone(&pending_count),
@@ -340,7 +342,7 @@ impl<
             overloaded_worker_provider,
         };
         tokio::spawn(actor.run(admission_rx));
-        Self {
+        Ok(Self {
             admission_tx,
             pending_count,
             pending_isl_tokens,
@@ -351,7 +353,7 @@ impl<
             admission_enabled,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             _marker: PhantomData,
-        }
+        })
     }
 }
 
@@ -1702,16 +1704,19 @@ mod tests {
             })
             .collect();
         let (cfg_tx, cfg_rx) = watch::channel(configs);
-        let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
-            Arc::clone(&slots),
-            cfg_rx,
-            profile,
-            block_size,
-            DefaultWorkerSelector::new(None, "test"),
-            None,
-            None,
-            None,
-        ));
+        let queue = Arc::new(
+            SchedulerQueue::new_with_policy_profile(
+                Arc::clone(&slots),
+                cfg_rx,
+                profile,
+                block_size,
+                DefaultWorkerSelector::new(None, "test"),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
         (queue, slots, cfg_tx)
     }
 
@@ -1911,18 +1916,21 @@ mod tests {
         }
         let (_cfg_tx, cfg_rx) = watch::channel(configs);
 
-        let queue = Arc::new(SchedulerQueue::new_with_policy_profile_and_capacity(
-            Arc::clone(&slots),
-            cfg_rx,
-            PolicyProfile::synthetic(threshold_frac, crate::config::RouterQueuePolicy::Fcfs),
-            block_size,
-            DefaultWorkerSelector::new(None, "test"),
-            None,
-            Some(refresher),
-            None,
-            PolicyClassAdmissionStrategies::new(),
-            admission_channel_capacity,
-        ));
+        let queue = Arc::new(
+            SchedulerQueue::new_with_policy_profile_and_capacity(
+                Arc::clone(&slots),
+                cfg_rx,
+                PolicyProfile::synthetic(threshold_frac, crate::config::RouterQueuePolicy::Fcfs),
+                block_size,
+                DefaultWorkerSelector::new(None, "test"),
+                None,
+                Some(refresher),
+                None,
+                PolicyClassAdmissionStrategies::new(),
+                admission_channel_capacity,
+            )
+            .unwrap(),
+        );
 
         (queue, slots)
     }
@@ -2090,7 +2098,8 @@ policy_classes:
                 None,
                 None,
                 strategies,
-            ),
+            )
+            .unwrap(),
         );
         (queue, slots)
     }
