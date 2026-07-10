@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -201,6 +202,7 @@ func TestCopyRootfsCancellationLoops(t *testing.T) {
 			types.OverlaySettings{},
 			nil,
 			false,
+			rejectAllRootfsXattrs,
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -234,6 +236,7 @@ func TestCopyRootfsCancellationLoops(t *testing.T) {
 			types.OverlaySettings{},
 			nil,
 			false,
+			rejectAllRootfsXattrs,
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -555,7 +558,153 @@ func TestCaptureRootfsExclusionsAndBindDestinations(t *testing.T) {
 	}
 }
 
-func TestCaptureRootfsToleratesSourceRootXattrs(t *testing.T) {
+func TestSourceOverlayXattrPolicy(t *testing.T) {
+	allowed := []string{
+		"trusted.overlay.impure",
+		"trusted.overlay.uuid",
+		"trusted.overlay.origin",
+		"trusted.overlay.opaque",
+		"trusted.overlay.other",
+	}
+	for _, name := range allowed {
+		t.Run("allows/"+name, func(t *testing.T) {
+			if !isSourceOverlayXattr(name) {
+				t.Fatalf("isSourceOverlayXattr(%q) = false", name)
+			}
+			got, err := parseRootfsXattrs(
+				append([]byte(name), 0),
+				allowSourceOverlayXattrs,
+			)
+			if err != nil {
+				t.Fatalf("parseRootfsXattrs(%q): %v", name, err)
+			}
+			if len(got) != 1 || got[0] != name {
+				t.Fatalf("parseRootfsXattrs(%q) = %q", name, got)
+			}
+		})
+	}
+
+	rejected := []string{
+		"user.test",
+		"user.overlay.opaque",
+		"security.capability",
+		"security.selinux",
+		"system.posix_acl_access",
+		"system.posix_acl_default",
+		"trusted.other",
+		"trusted.overlay",
+		"trusted.overlay.",
+		"trusted.overlayx.origin",
+		".trusted.overlay.origin",
+		"",
+		"trusted.overlay.origin\x00suffix",
+	}
+	for _, name := range rejected {
+		t.Run("rejects/"+name, func(t *testing.T) {
+			if isSourceOverlayXattr(name) {
+				t.Fatalf("isSourceOverlayXattr(%q) = true", name)
+			}
+			if _, err := parseRootfsXattrs(
+				append([]byte(name), 0),
+				allowSourceOverlayXattrs,
+			); err == nil {
+				t.Fatalf("parseRootfsXattrs(%q) succeeded", name)
+			}
+		})
+	}
+}
+
+func TestParseRootfsXattrsRejectsMalformedAndLimits(t *testing.T) {
+	valid := append([]byte("trusted.overlay.origin"), 0)
+	tests := []struct {
+		name   string
+		list   []byte
+		policy rootfsXattrPolicy
+		want   string
+	}{
+		{
+			name:   "stored overlay",
+			list:   valid,
+			policy: rejectAllRootfsXattrs,
+			want:   "not allowed",
+		},
+		{
+			name:   "empty name",
+			list:   []byte{0},
+			policy: allowSourceOverlayXattrs,
+			want:   "empty",
+		},
+		{
+			name:   "empty trailing name",
+			list:   append(append([]byte(nil), valid...), 0),
+			policy: allowSourceOverlayXattrs,
+			want:   "empty",
+		},
+		{
+			name:   "unterminated name",
+			list:   []byte("trusted.overlay.origin"),
+			policy: allowSourceOverlayXattrs,
+			want:   "unterminated",
+		},
+		{
+			name: "unterminated trailing name",
+			list: append(
+				append([]byte(nil), valid...),
+				"trusted.overlay.uuid"...,
+			),
+			policy: allowSourceOverlayXattrs,
+			want:   "unterminated",
+		},
+		{
+			name:   "list size",
+			list:   make([]byte, maxXattrListBytes+1),
+			policy: allowSourceOverlayXattrs,
+			want:   "maximum",
+		},
+		{
+			name: "name length",
+			list: append(
+				[]byte(overlayXattrPrefix+
+					strings.Repeat(
+						"x",
+						maxXattrNameLength-len(overlayXattrPrefix)+1,
+					)),
+				0,
+			),
+			policy: allowSourceOverlayXattrs,
+			want:   "name is",
+		},
+		{
+			name: "name count",
+			list: bytes.Repeat(
+				[]byte("trusted.overlay.x\x00"),
+				maxXattrNames+1,
+			),
+			policy: allowSourceOverlayXattrs,
+			want:   "more than",
+		},
+		{
+			name:   "invalid policy",
+			list:   valid,
+			policy: rootfsXattrPolicy(255),
+			want:   "invalid",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseRootfsXattrs(test.list, test.policy)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf(
+					"parseRootfsXattrs() error = %v, want %q",
+					err,
+					test.want,
+				)
+			}
+		})
+	}
+}
+
+func TestCaptureRootfsRejectsSourceRootXattrs(t *testing.T) {
 	source := t.TempDir()
 	writeTestFile(t, filepath.Join(source, "file"), []byte("data"))
 	if err := unix.Setxattr(source, "user.test", []byte("x"), 0); err != nil {
@@ -564,7 +713,7 @@ func TestCaptureRootfsToleratesSourceRootXattrs(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	if _, err := CaptureRootfsDiff(
+	_, err := CaptureRootfsDiff(
 		context.Background(),
 		source,
 		t.TempDir(),
@@ -572,8 +721,54 @@ func TestCaptureRootfsToleratesSourceRootXattrs(t *testing.T) {
 		nil,
 		1,
 		testr.New(t),
-	); err != nil {
-		t.Fatalf("CaptureRootfsDiff: %v", err)
+	)
+	if err == nil || !strings.Contains(err.Error(), "unsupported xattrs on .") {
+		t.Fatalf("CaptureRootfsDiff() error = %v", err)
+	}
+}
+
+func TestApplyRootfsRejectsStoredArtifactUserXattrs(t *testing.T) {
+	for _, entry := range []string{"", "file"} {
+		name := entry
+		if name == "" {
+			name = "root"
+		}
+		t.Run(name, func(t *testing.T) {
+			source := t.TempDir()
+			checkpoint := t.TempDir()
+			writeTestFile(t, filepath.Join(source, "file"), []byte("data"))
+			captureRootfsForTest(t, source, checkpoint)
+			artifactEntry := filepath.Join(
+				checkpoint,
+				rootfsDirectoryFilename,
+				entry,
+			)
+			if err := unix.Setxattr(
+				artifactEntry,
+				"user.test",
+				[]byte("x"),
+				0,
+			); err != nil {
+				if errors.Is(err, unix.ENOTSUP) {
+					t.Skipf("filesystem xattrs unavailable: %v", err)
+				}
+				t.Fatal(err)
+			}
+			err := ApplyRootfsDiff(
+				context.Background(),
+				checkpoint,
+				t.TempDir(),
+				1,
+				testr.New(t),
+			)
+			want := "unsupported xattrs on " + name
+			if name == "root" {
+				want = "unsupported xattrs on ."
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("ApplyRootfsDiff() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -1163,6 +1358,7 @@ func TestScanRootfsRejectsMountBoundary(t *testing.T) {
 		types.OverlaySettings{},
 		exclusions,
 		false,
+		rejectAllRootfsXattrs,
 	)
 	if err == nil || !strings.Contains(err.Error(), "mount boundary") {
 		t.Fatalf("scanRootfs() error = %v, want mount boundary", err)

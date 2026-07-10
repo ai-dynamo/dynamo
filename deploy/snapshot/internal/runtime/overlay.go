@@ -32,6 +32,18 @@ const (
 	maxRootfsPathLength     = 4096
 	maxDeletedFiles         = 1_000_000
 	maxRootfsEntries        = 1_000_000
+	maxXattrListBytes       = 64 << 10
+	maxXattrNames           = 1024
+	maxXattrNameLength      = 255
+	maxXattrListAttempts    = 3
+	overlayXattrPrefix      = "trusted.overlay."
+)
+
+type rootfsXattrPolicy uint8
+
+const (
+	rejectAllRootfsXattrs rootfsXattrPolicy = iota
+	allowSourceOverlayXattrs
 )
 
 type rootfsMetadata struct {
@@ -49,8 +61,9 @@ type rootfsExclusion struct {
 }
 
 type rootfsStats struct {
-	entries int64
-	bytes   int64
+	entries             int64
+	bytes               int64
+	ignoredOverlayAttrs map[string]int
 }
 
 type rootfsEntry struct {
@@ -112,6 +125,7 @@ func CaptureRootfsDiff(
 		exclusions,
 		bindMountDests,
 		true,
+		allowSourceOverlayXattrs,
 	)
 	if err != nil {
 		return "", fmt.Errorf("scan overlay upperdir: %w", err)
@@ -168,6 +182,7 @@ func CaptureRootfsDiff(
 		return "", err
 	}
 	published = true
+	logIgnoredOverlayXattrs(log, stats.ignoredOverlayAttrs)
 	log.Info(
 		"Captured directory rootfs diff",
 		"configured_workers", workers,
@@ -257,6 +272,7 @@ func applyRootfsDiff(
 		types.OverlaySettings{},
 		nil,
 		false,
+		rejectAllRootfsXattrs,
 	)
 	if err != nil {
 		return fmt.Errorf("scan rootfs directory artifact: %w", err)
@@ -325,6 +341,7 @@ func scanRootfs(
 	exclusions types.OverlaySettings,
 	bindMountDests []string,
 	skipWhiteouts bool,
+	xattrPolicy rootfsXattrPolicy,
 ) ([]rootfsEntry, rootfsStats, []string, error) {
 	patterns, err := exclusionPatterns(exclusions, bindMountDests)
 	if err != nil {
@@ -340,6 +357,14 @@ func scanRootfs(
 
 	entries := make([]rootfsEntry, 0, 1024)
 	stats := rootfsStats{}
+	ignored, err := inspectRootfsXattrs(root, xattrPolicy)
+	if err != nil {
+		return nil, rootfsStats{}, nil, fmt.Errorf(
+			"unsupported xattrs on .: %w",
+			err,
+		)
+	}
+	addIgnoredOverlayXattrs(&stats, ignored)
 	var deleted []string
 	var totalEntries int64
 	err = filepath.WalkDir(root, func(
@@ -416,12 +441,19 @@ func scanRootfs(
 					maxDeletedFiles,
 				)
 			}
+			ignored, err := inspectRootfsXattrs(entryPath, xattrPolicy)
+			if err != nil {
+				return fmt.Errorf("unsupported xattrs on %s: %w", rel, err)
+			}
+			addIgnoredOverlayXattrs(&stats, ignored)
 			deleted = append(deleted, deletedPath)
 			return nil
 		}
-		if err := rejectXattrs(entryPath); err != nil {
+		ignored, err := inspectRootfsXattrs(entryPath, xattrPolicy)
+		if err != nil {
 			return fmt.Errorf("unsupported xattrs on %s: %w", rel, err)
 		}
+		addIgnoredOverlayXattrs(&stats, ignored)
 		entry := rootfsEntry{path: rel, mode: mode, stat: stat}
 		switch mode & unix.S_IFMT {
 		case unix.S_IFDIR:
@@ -469,6 +501,7 @@ func scanRootfsFD(
 	exclusions types.OverlaySettings,
 	bindMountDests []string,
 	skipWhiteouts bool,
+	xattrPolicy rootfsXattrPolicy,
 ) ([]rootfsEntry, rootfsStats, []string, error) {
 	return scanRootfs(
 		ctx,
@@ -476,6 +509,7 @@ func scanRootfsFD(
 		exclusions,
 		bindMountDests,
 		skipWhiteouts,
+		xattrPolicy,
 	)
 }
 
@@ -493,18 +527,158 @@ func statxPath(entryPath string, stat *unix.Statx_t) error {
 	)
 }
 
-func rejectXattrs(entryPath string) error {
-	size, err := unix.Llistxattr(entryPath, nil)
-	if errors.Is(err, unix.ENOTSUP) {
-		return nil
-	}
+func inspectRootfsXattrs(
+	entryPath string,
+	policy rootfsXattrPolicy,
+) ([]string, error) {
+	list, err := listRootfsXattrs(entryPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if size != 0 {
-		return fmt.Errorf("%d bytes of extended attribute names", size)
+	return parseRootfsXattrs(list, policy)
+}
+
+func listRootfsXattrs(entryPath string) ([]byte, error) {
+	for range maxXattrListAttempts {
+		size, err := unix.Llistxattr(entryPath, nil)
+		if errors.Is(err, unix.ENOTSUP) {
+			return nil, nil
+		}
+		if errors.Is(err, unix.ERANGE) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list extended attributes: %w", err)
+		}
+		if size < 0 {
+			return nil, fmt.Errorf(
+				"invalid extended attribute list size %d",
+				size,
+			)
+		}
+		if size > maxXattrListBytes {
+			return nil, fmt.Errorf(
+				"extended attribute list is %d bytes, maximum is %d",
+				size,
+				maxXattrListBytes,
+			)
+		}
+		if size == 0 {
+			return nil, nil
+		}
+		list := make([]byte, size)
+		size, err = unix.Llistxattr(entryPath, list)
+		if errors.Is(err, unix.ENOTSUP) {
+			return nil, nil
+		}
+		if errors.Is(err, unix.ERANGE) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read extended attributes: %w", err)
+		}
+		if size < 0 || size > len(list) {
+			return nil, fmt.Errorf(
+				"invalid extended attribute list size %d",
+				size,
+			)
+		}
+		return list[:size], nil
 	}
-	return nil
+	return nil, fmt.Errorf("extended attribute list changed during inspection")
+}
+
+func parseRootfsXattrs(
+	list []byte,
+	policy rootfsXattrPolicy,
+) ([]string, error) {
+	if len(list) > maxXattrListBytes {
+		return nil, fmt.Errorf(
+			"extended attribute list is %d bytes, maximum is %d",
+			len(list),
+			maxXattrListBytes,
+		)
+	}
+	var names []string
+	for len(list) != 0 {
+		if len(names) >= maxXattrNames {
+			return nil, fmt.Errorf(
+				"more than %d extended attribute names",
+				maxXattrNames,
+			)
+		}
+		end := bytes.IndexByte(list, 0)
+		if end < 0 {
+			return nil, fmt.Errorf("unterminated extended attribute name")
+		}
+		if end == 0 {
+			return nil, fmt.Errorf("empty extended attribute name")
+		}
+		if end > maxXattrNameLength {
+			return nil, fmt.Errorf(
+				"extended attribute name is %d bytes, maximum is %d",
+				end,
+				maxXattrNameLength,
+			)
+		}
+		name := string(list[:end])
+		switch policy {
+		case allowSourceOverlayXattrs:
+			if !isSourceOverlayXattr(name) {
+				return nil, fmt.Errorf(
+					"extended attribute %q is not allowed",
+					name,
+				)
+			}
+			names = append(names, name)
+		case rejectAllRootfsXattrs:
+			return nil, fmt.Errorf(
+				"extended attribute %q is not allowed",
+				name,
+			)
+		default:
+			return nil, fmt.Errorf("invalid rootfs xattr policy %d", policy)
+		}
+		list = list[end+1:]
+	}
+	return names, nil
+}
+
+func isSourceOverlayXattr(name string) bool {
+	return len(name) > len(overlayXattrPrefix) &&
+		len(name) <= maxXattrNameLength &&
+		strings.HasPrefix(name, overlayXattrPrefix) &&
+		!strings.ContainsRune(name, 0)
+}
+
+func addIgnoredOverlayXattrs(stats *rootfsStats, names []string) {
+	if len(names) == 0 {
+		return
+	}
+	if stats.ignoredOverlayAttrs == nil {
+		stats.ignoredOverlayAttrs = make(map[string]int)
+	}
+	for _, name := range names {
+		stats.ignoredOverlayAttrs[name]++
+	}
+}
+
+func logIgnoredOverlayXattrs(log logr.Logger, counts map[string]int) {
+	if len(counts) == 0 {
+		return
+	}
+	names := make([]string, 0, len(counts))
+	for name := range counts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for i, name := range names {
+		names[i] = fmt.Sprintf("%q:%d", name, counts[name])
+	}
+	log.Info(
+		"Ignored source overlay xattrs for benchmark-compatible rootfs capture",
+		"xattr_name_counts", names,
+	)
 }
 
 func exclusionPatterns(
