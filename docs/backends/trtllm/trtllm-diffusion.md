@@ -21,7 +21,16 @@ image generation through `--modality image_diffusion` flag.
   pip install --no-binary imageio-ffmpeg "imageio[ffmpeg]"
   export IMAGEIO_FFMPEG_EXE=/path/to/your/ffmpeg
   ```
-  MP4 output requires an NVIDIA GPU at runtime (NVENC is a hardware encoder).
+
+- **NVENC-capable GPU for video output**: The TRT-LLM `/v1/videos` endpoint currently
+  supports only MP4 output and always encodes it with the NVENC H.264 hardware encoder
+  (`h264_nvenc`). An NVENC-capable NVIDIA GPU is mandatory. There is no software H.264
+  fallback, and the WebM/VP9 path (`libvpx-vp9`) is not exposed by the TRT-LLM video API.
+  GPUs without NVENC, including A100, H100, HGX B200, and GB200, cannot produce video
+  output. Examples of NVENC-capable data center GPUs include L4, L40, L40S, A10, A16,
+  A2, and T4. See the
+  [NVIDIA Video Encode and Decode Support Matrix](https://developer.nvidia.com/video-encode-decode-support-matrix).
+  NVENC capability alone does not guarantee sufficient VRAM or full model compatibility.
 
 ## Supported Models
 
@@ -106,3 +115,5 @@ curl -X POST http://localhost:8000/v1/images/generations \
 - Diffusion is experimental and not recommended for production use
 - Only text-to-video and text-to-image is supported in this release (image-to-video planned)
 - Requires GPU with sufficient VRAM for the diffusion model
+- MP4 video output requires an NVENC-capable GPU; GPUs without NVENC are unsupported for
+  TRT-LLM video output

@@ -2884,6 +2884,73 @@ func TestDynamoGraphDeploymentReconciler_prepareGroveRenderDeployment_PreservesL
 	g.Expect(decodeService.Spec.Selector[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
 }
 
+func TestPrepareGroveTopologyConstraintUpgrade(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	modernConstraint := func(topologyName string, domain grovev1alpha1.TopologyDomain) *grovev1alpha1.TopologyConstraint {
+		return &grovev1alpha1.TopologyConstraint{
+			TopologyName: topologyName,
+			Pack: &grovev1alpha1.TopologyPackConstraint{
+				RequiredDomain: domain,
+			},
+		}
+	}
+	legacyConstraint := func(domain grovev1alpha1.TopologyDomain) *grovev1alpha1.TopologyConstraint {
+		return &grovev1alpha1.TopologyConstraint{PackDomain: domain}
+	}
+
+	modern := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				TopologyConstraint: modernConstraint("grove-topology", "zone"),
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "explicit", TopologyConstraint: modernConstraint("grove-topology", "rack")},
+					{Name: "inherited", TopologyConstraint: modernConstraint("", "rack")},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "workers", TopologyConstraint: modernConstraint("grove-topology", "block")},
+				},
+			},
+		},
+	}
+	existing := &grovev1alpha1.PodCliqueSet{
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+				TopologyConstraint: legacyConstraint("zone"),
+				Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+					{Name: "inherited", TopologyConstraint: legacyConstraint("rack")},
+					{Name: "explicit", TopologyConstraint: legacyConstraint("rack")},
+				},
+				PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
+					{Name: "workers", TopologyConstraint: legacyConstraint("block")},
+				},
+			},
+		},
+	}
+
+	firstStep := modern.DeepCopy()
+	prepareGroveTopologyConstraintUpgrade(firstStep, existing)
+
+	g.Expect(firstStep.Spec.Template.TopologyConstraint).To(gomega.Equal(&grovev1alpha1.TopologyConstraint{
+		TopologyName: "grove-topology",
+		PackDomain:   "zone",
+	}))
+	g.Expect(firstStep.Spec.Template.Cliques[0].TopologyConstraint).To(gomega.Equal(&grovev1alpha1.TopologyConstraint{
+		TopologyName: "grove-topology",
+		PackDomain:   "rack",
+	}))
+	// This constraint can inherit the topology name repaired on its parent, so
+	// Grove can migrate its packing field in the same update.
+	g.Expect(firstStep.Spec.Template.Cliques[1].TopologyConstraint).To(gomega.Equal(modern.Spec.Template.Cliques[1].TopologyConstraint))
+	g.Expect(firstStep.Spec.Template.PodCliqueScalingGroupConfigs[0].TopologyConstraint).To(gomega.Equal(&grovev1alpha1.TopologyConstraint{
+		TopologyName: "grove-topology",
+		PackDomain:   "block",
+	}))
+
+	secondStep := modern.DeepCopy()
+	prepareGroveTopologyConstraintUpgrade(secondStep, firstStep)
+	g.Expect(secondStep).To(gomega.Equal(modern), "a repaired constraint should proceed to pack.required on the next reconciliation")
+}
+
 func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 

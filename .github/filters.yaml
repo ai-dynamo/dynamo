@@ -80,6 +80,7 @@ ignore:
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
+  - 'scripts/validate_skills.py'
 
 ci: &ci
   - '.github/workflows/**'

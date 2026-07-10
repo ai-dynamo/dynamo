@@ -26,8 +26,14 @@ use dynamo_bench::kv_router_common::replay::{
     generate_replay_artifacts_with_args_and_visibility, process_mooncake_trace,
 };
 use dynamo_kv_router::LocalBlockHash;
+use dynamo_kv_router::indexer::cuckoo::CkfMatchMode;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
-use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics};
+use dynamo_kv_router::indexer::{
+    KvIndexerInterface, KvIndexerMetrics, METRIC_EVENT_CLEARED, METRIC_EVENT_REMOVED,
+    METRIC_EVENT_STORED, METRIC_STATUS_BLOCK_NOT_FOUND, METRIC_STATUS_CAPACITY_EXHAUSTED,
+    METRIC_STATUS_INDEXER_INVARIANT_VIOLATION, METRIC_STATUS_INVALID_BLOCK,
+    METRIC_STATUS_PARENT_NOT_FOUND,
+};
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, OverlapScores, StorageTier, TokensWithHashes, WorkerWithDpRank,
@@ -43,8 +49,8 @@ use mooncake_open_loop::{
     prepare_open_loop_trial, run_open_loop,
 };
 use mooncake_shared::{
-    MooncakeBenchmarkConfig, MooncakeIndexerConfig, PreparedMooncakeBenchmark, WorkerTraceEntry,
-    merge_worker_traces, prepare_scaled_benchmark,
+    MooncakeBenchmarkConfig, MooncakeIndexerConfig, MooncakeIndexerKind, PreparedMooncakeBenchmark,
+    WorkerTraceEntry, merge_worker_traces, prepare_scaled_benchmark,
 };
 use tempfile::NamedTempFile;
 use uuid::Uuid;
@@ -52,6 +58,7 @@ use uuid::Uuid;
 const BLOCK_SIZE: u32 = 128;
 const NUM_GPU_BLOCKS: usize = 16384;
 const NUM_UNIQUE_INFERENCE_WORKERS: usize = 10;
+const CKF_PARITY_WORKERS: usize = 16;
 const BENCHMARK_DURATION_MS: u64 = 2000;
 const NUM_EVENT_WORKERS: usize = 4;
 const PARITY_NUM_GPU_BLOCKS: usize = NUM_GPU_BLOCKS;
@@ -67,13 +74,15 @@ type NormalizedOverlapScores = BTreeMap<WorkerWithDpRank, u32>;
 struct ComparableOverlapScores {
     scores: NormalizedOverlapScores,
     frequencies: Vec<usize>,
+    query_len: usize,
 }
 
-impl From<OverlapScores> for ComparableOverlapScores {
-    fn from(overlap: OverlapScores) -> Self {
+impl ComparableOverlapScores {
+    fn new(overlap: OverlapScores, query_len: usize) -> Self {
         Self {
             scores: overlap.scores.into_iter().collect(),
             frequencies: overlap.frequencies,
+            query_len,
         }
     }
 }
@@ -224,6 +233,27 @@ async fn generate_mock_engine_parity_artifacts(
     Ok(artifact_sets)
 }
 
+fn make_ckf_parity_corpus_quiescent(artifact_sets: &mut [MockEngineReplayArtifacts]) {
+    for artifact_set in artifact_sets {
+        let first_query_timestamp = artifact_set
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.kv_events.len())
+            .max()
+            .unwrap_or(0) as u64
+            + 1;
+
+        for artifact in &mut artifact_set.artifacts {
+            for (ordinal, event) in artifact.kv_events.iter_mut().enumerate() {
+                event.timestamp_us = ordinal as u64;
+            }
+            for (ordinal, request) in artifact.requests.iter_mut().enumerate() {
+                request.timestamp_us = first_query_timestamp + ordinal as u64;
+            }
+        }
+    }
+}
+
 fn original_prepared_query(
     prepared: &PreparedMooncakeBenchmark,
     benchmark: MooncakeBenchmarkConfig,
@@ -285,7 +315,7 @@ async fn collect_prepared_corpus_scores(
                         entry.id
                     );
                     let overlap = indexer.find_matches(request.to_vec()).await?;
-                    scores.push(overlap.into());
+                    scores.push(ComparableOverlapScores::new(overlap, request.len()));
                 }
                 MooncakeOperationPayload::Event(event) => indexer.apply_event(event.clone()).await,
             }
@@ -324,7 +354,7 @@ async fn collect_prepared_corpus_overlap_scores_with_metrics(
         benchmark.inference_worker_duplication_factor,
     )?;
     let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-    let indexer = config.build(BLOCK_SIZE, Arc::clone(&metrics));
+    let indexer = config.build(BLOCK_SIZE, Arc::clone(&metrics))?;
 
     Ok((
         collect_prepared_corpus_scores(indexer, &prepared, benchmark, &corpus).await?,
@@ -337,7 +367,7 @@ async fn collect_device_only_overlap_scores(
     config: &MooncakeIndexerConfig,
     artifacts: &[WorkerReplayArtifacts],
 ) -> anyhow::Result<Vec<NormalizedOverlapScores>> {
-    let indexer = config.build(BLOCK_SIZE, Arc::new(KvIndexerMetrics::new_unregistered()));
+    let indexer = config.build(BLOCK_SIZE, Arc::new(KvIndexerMetrics::new_unregistered()))?;
     let entries = collect_kv_event_replay_entries(artifacts);
     let mut scores = Vec::new();
     let mut idx = 0;
@@ -430,6 +460,389 @@ async fn assert_overlap_score_parity(
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CkfParityStats {
+    queries: u64,
+    lane_observations: u64,
+    under_reports: u64,
+    under_report_magnitude: u64,
+    over_reports: u64,
+    total_inflation: u64,
+    maximum_inflation: u32,
+    full_map_mismatches: u64,
+    wrong_best: u64,
+}
+
+impl CkfParityStats {
+    fn merge(&mut self, other: Self) {
+        self.queries += other.queries;
+        self.lane_observations += other.lane_observations;
+        self.under_reports += other.under_reports;
+        self.under_report_magnitude += other.under_report_magnitude;
+        self.over_reports += other.over_reports;
+        self.total_inflation += other.total_inflation;
+        self.maximum_inflation = self.maximum_inflation.max(other.maximum_inflation);
+        self.full_map_mismatches += other.full_map_mismatches;
+        self.wrong_best += other.wrong_best;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CkfParityBudget {
+    over_reports: u64,
+    total_inflation: u64,
+    maximum_inflation: u32,
+    full_map_mismatches: u64,
+    wrong_best: u64,
+}
+
+const CKF_PARITY_ENGINE_BUDGETS: [(&str, CkfParityBudget); 3] = [
+    (
+        "vllm",
+        CkfParityBudget {
+            over_reports: 0,
+            total_inflation: 0,
+            maximum_inflation: 0,
+            full_map_mismatches: 0,
+            wrong_best: 0,
+        },
+    ),
+    (
+        "sglang",
+        CkfParityBudget {
+            over_reports: 0,
+            total_inflation: 0,
+            maximum_inflation: 0,
+            full_map_mismatches: 0,
+            wrong_best: 0,
+        },
+    ),
+    (
+        "trtllm",
+        CkfParityBudget {
+            over_reports: 0,
+            total_inflation: 0,
+            maximum_inflation: 0,
+            full_map_mismatches: 0,
+            wrong_best: 0,
+        },
+    ),
+];
+
+const CKF_PARITY_GLOBAL_BUDGET: CkfParityBudget = CkfParityBudget {
+    over_reports: 0,
+    total_inflation: 0,
+    maximum_inflation: 0,
+    full_map_mismatches: 0,
+    wrong_best: 0,
+};
+
+fn ckf_workers() -> [WorkerWithDpRank; CKF_PARITY_WORKERS] {
+    std::array::from_fn(|lane| WorkerWithDpRank::new(lane as u64, 0))
+}
+
+fn best_configured_lane(
+    scores: &NormalizedOverlapScores,
+    workers: &[WorkerWithDpRank; CKF_PARITY_WORKERS],
+) -> Option<usize> {
+    workers
+        .iter()
+        .enumerate()
+        .filter_map(|(lane, worker)| scores.get(worker).copied().map(|depth| (lane, depth)))
+        .filter(|(_, depth)| *depth > 0)
+        .max_by(|(left_lane, left), (right_lane, right)| {
+            left.cmp(right).then_with(|| right_lane.cmp(left_lane))
+        })
+        .map(|(lane, _)| lane)
+}
+
+fn max_depth_tie_projection(
+    scores: &NormalizedOverlapScores,
+    workers: &[WorkerWithDpRank; CKF_PARITY_WORKERS],
+) -> NormalizedOverlapScores {
+    let best = workers
+        .iter()
+        .filter_map(|worker| scores.get(worker).copied())
+        .max()
+        .unwrap_or(0);
+    if best == 0 {
+        return NormalizedOverlapScores::new();
+    }
+
+    workers
+        .iter()
+        .filter_map(|worker| (scores.get(worker).copied() == Some(best)).then_some((*worker, best)))
+        .collect()
+}
+
+fn assert_max_depth_matches_project_full_ckf(
+    engine_name: &str,
+    actual: &[ComparableOverlapScores],
+    full: &[ComparableOverlapScores],
+) {
+    assert_eq!(
+        actual.len(),
+        full.len(),
+        "{engine_name} maximum-depth CKF produced a different number of query results"
+    );
+    let workers = ckf_workers();
+    for (query_idx, (actual, full)) in actual.iter().zip(full).enumerate() {
+        assert_eq!(actual.query_len, full.query_len);
+        assert!(
+            actual.frequencies.is_empty(),
+            "{engine_name} maximum-depth CKF frequencies must remain empty at query {query_idx}"
+        );
+        assert_eq!(
+            actual.scores,
+            max_depth_tie_projection(&full.scores, &workers),
+            "{engine_name} maximum-depth CKF diverged from the full CKF tie-set projection at query {query_idx}"
+        );
+    }
+}
+
+fn compare_ckf_scores(
+    engine_name: &str,
+    actual: &[ComparableOverlapScores],
+    expected: &[ComparableOverlapScores],
+) -> CkfParityStats {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{engine_name} CKF produced a different number of query results than the exact baseline"
+    );
+
+    let workers = ckf_workers();
+    let configured: HashSet<_> = workers.into_iter().collect();
+    let mut stats = CkfParityStats::default();
+    for (query_idx, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(
+            actual.query_len, expected.query_len,
+            "{engine_name} query length diverged at query {query_idx}"
+        );
+        assert!(
+            actual.frequencies.is_empty(),
+            "{engine_name} CKF frequencies must remain empty at query {query_idx}"
+        );
+        assert!(
+            actual
+                .scores
+                .keys()
+                .all(|worker| configured.contains(worker)),
+            "{engine_name} CKF returned an unconfigured identity at query {query_idx}: {:?}",
+            actual.scores
+        );
+        assert!(
+            actual.scores.values().all(|&depth| depth > 0),
+            "{engine_name} CKF must omit zero-depth scores at query {query_idx}: {:?}",
+            actual.scores
+        );
+        assert!(
+            actual
+                .scores
+                .values()
+                .all(|&depth| depth as usize <= actual.query_len),
+            "{engine_name} CKF depth exceeds query length at query {query_idx}: len={} scores={:?}",
+            actual.query_len,
+            actual.scores
+        );
+
+        stats.queries += 1;
+        stats.lane_observations += CKF_PARITY_WORKERS as u64;
+        let mut full_map_mismatch = false;
+        for worker in workers {
+            let expected_depth = expected.scores.get(&worker).copied().unwrap_or(0);
+            let actual_depth = actual.scores.get(&worker).copied().unwrap_or(0);
+            match actual_depth.cmp(&expected_depth) {
+                std::cmp::Ordering::Less => {
+                    stats.under_reports += 1;
+                    stats.under_report_magnitude += u64::from(expected_depth - actual_depth);
+                    full_map_mismatch = true;
+                }
+                std::cmp::Ordering::Greater => {
+                    let inflation = actual_depth - expected_depth;
+                    stats.over_reports += 1;
+                    stats.total_inflation += u64::from(inflation);
+                    stats.maximum_inflation = stats.maximum_inflation.max(inflation);
+                    full_map_mismatch = true;
+                }
+                std::cmp::Ordering::Equal => {}
+            }
+        }
+        stats.full_map_mismatches += u64::from(full_map_mismatch);
+        stats.wrong_best += u64::from(
+            best_configured_lane(&actual.scores, &workers)
+                != best_configured_lane(&expected.scores, &workers),
+        );
+    }
+
+    stats
+}
+
+fn indexer_error_metric_count(metrics: &KvIndexerMetrics) -> u64 {
+    let event_types = [
+        METRIC_EVENT_STORED,
+        METRIC_EVENT_REMOVED,
+        METRIC_EVENT_CLEARED,
+    ];
+    let error_statuses = [
+        METRIC_STATUS_PARENT_NOT_FOUND,
+        METRIC_STATUS_BLOCK_NOT_FOUND,
+        METRIC_STATUS_INVALID_BLOCK,
+        METRIC_STATUS_CAPACITY_EXHAUSTED,
+        METRIC_STATUS_INDEXER_INVARIANT_VIOLATION,
+    ];
+
+    event_types
+        .into_iter()
+        .flat_map(|event_type| {
+            error_statuses.into_iter().map(move |status| {
+                metrics
+                    .kv_cache_events_applied
+                    .get_metric_with_label_values(&[event_type, status])
+                    .map(|counter| counter.get())
+                    .unwrap_or(0)
+            })
+        })
+        .sum()
+}
+
+fn assert_ckf_parity_budget(scope: &str, stats: CkfParityStats, budget: CkfParityBudget) {
+    assert_eq!(stats.under_reports, 0, "{scope} CKF under-reported");
+    assert_eq!(
+        stats.under_report_magnitude, 0,
+        "{scope} CKF under-report magnitude must be zero"
+    );
+    assert!(
+        stats.over_reports <= budget.over_reports,
+        "{scope} CKF over-reports {} exceed budget {}",
+        stats.over_reports,
+        budget.over_reports
+    );
+    assert!(
+        stats.total_inflation <= budget.total_inflation,
+        "{scope} CKF total inflation {} exceeds budget {}",
+        stats.total_inflation,
+        budget.total_inflation
+    );
+    assert!(
+        stats.maximum_inflation <= budget.maximum_inflation,
+        "{scope} CKF maximum inflation {} exceeds budget {}",
+        stats.maximum_inflation,
+        budget.maximum_inflation
+    );
+    assert!(
+        stats.full_map_mismatches <= budget.full_map_mismatches,
+        "{scope} CKF full-map mismatches {} exceed budget {}",
+        stats.full_map_mismatches,
+        budget.full_map_mismatches
+    );
+    assert!(
+        stats.wrong_best <= budget.wrong_best,
+        "{scope} CKF wrong-best selections {} exceed budget {}",
+        stats.wrong_best,
+        budget.wrong_best
+    );
+}
+
+async fn measure_ckf_parity(
+    artifact_sets: &[MockEngineReplayArtifacts],
+    warning_count: &Arc<std::sync::atomic::AtomicUsize>,
+    enforce_budgets: bool,
+    publish_every_n_events: usize,
+) -> anyhow::Result<CkfParityStats> {
+    let exact = MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS);
+    let ckf = MooncakeIndexerConfig::transposed_ckf(NUM_EVENT_WORKERS, NUM_GPU_BLOCKS)
+        .with_publish_every_n_events(publish_every_n_events);
+    let max_depth_ckf = ckf
+        .clone()
+        .with_ckf_match_mode(CkfMatchMode::MaxDepthMatches);
+    assert_eq!(ckf.kind, MooncakeIndexerKind::TransposedCkf);
+    let mut global = CkfParityStats::default();
+
+    for artifact_set in artifact_sets {
+        let expected =
+            collect_prepared_corpus_overlap_scores(&exact, &artifact_set.artifacts).await?;
+        support::reset_warning_count(warning_count);
+        let (actual, metrics) =
+            collect_prepared_corpus_overlap_scores_with_metrics(&ckf, &artifact_set.artifacts)
+                .await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            warning_count.load(Ordering::Relaxed),
+            0,
+            "{} CKF parity replay emitted warning/error logs",
+            artifact_set.engine_name
+        );
+        assert_eq!(
+            support::duplicate_store_warning_count(metrics.as_ref()),
+            0,
+            "{} CKF parity replay recorded duplicate-store warnings",
+            artifact_set.engine_name
+        );
+        assert_eq!(
+            indexer_error_metric_count(metrics.as_ref()),
+            0,
+            "{} CKF parity replay recorded event errors",
+            artifact_set.engine_name
+        );
+
+        support::reset_warning_count(warning_count);
+        let (max_depth, max_depth_metrics) = collect_prepared_corpus_overlap_scores_with_metrics(
+            &max_depth_ckf,
+            &artifact_set.artifacts,
+        )
+        .await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            warning_count.load(Ordering::Relaxed),
+            0,
+            "{} maximum-depth CKF parity replay emitted warning/error logs",
+            artifact_set.engine_name
+        );
+        assert_eq!(
+            support::duplicate_store_warning_count(max_depth_metrics.as_ref()),
+            0,
+            "{} maximum-depth CKF parity replay recorded duplicate-store warnings",
+            artifact_set.engine_name
+        );
+        assert_eq!(
+            indexer_error_metric_count(max_depth_metrics.as_ref()),
+            0,
+            "{} maximum-depth CKF parity replay recorded event errors",
+            artifact_set.engine_name
+        );
+        assert_max_depth_matches_project_full_ckf(artifact_set.engine_name, &max_depth, &actual);
+
+        let stats = compare_ckf_scores(artifact_set.engine_name, &actual, &expected);
+        println!(
+            "CKF_PARITY publish_every_n_events={} engine={} {stats:?}",
+            publish_every_n_events, artifact_set.engine_name
+        );
+        assert_eq!(stats.under_reports, 0);
+        assert_eq!(stats.under_report_magnitude, 0);
+        if enforce_budgets {
+            let budget = CKF_PARITY_ENGINE_BUDGETS
+                .iter()
+                .find_map(|(engine, budget)| {
+                    (*engine == artifact_set.engine_name).then_some(*budget)
+                })
+                .expect("every parity engine must have a fixed CKF budget");
+            assert_ckf_parity_budget(artifact_set.engine_name, stats, budget);
+        }
+        global.merge(stats);
+    }
+
+    println!(
+        "CKF_PARITY publish_every_n_events={} global {global:?}",
+        publish_every_n_events
+    );
+    if enforce_budgets {
+        assert_ckf_parity_budget("global", global, CKF_PARITY_GLOBAL_BUDGET);
+    }
+    Ok(global)
 }
 
 fn approx_tokens(seed: u32, num_blocks: usize) -> Vec<u32> {
@@ -881,6 +1294,43 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
     }
 
     assert_overlap_score_parity(&variants, &artifact_sets, Some(&warning_count)).await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mooncake_trace_replays_through_fixed_d16_ckf() -> anyhow::Result<()> {
+    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
+    let mut artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
+    make_ckf_parity_corpus_quiescent(&mut artifact_sets);
+    let stats = measure_ckf_parity(&artifact_sets, &warning_count, true, 1).await?;
+    assert!(stats.queries > 0);
+    assert_eq!(
+        stats.lane_observations,
+        stats.queries * CKF_PARITY_WORKERS as u64
+    );
+    let batched = measure_ckf_parity(&artifact_sets, &warning_count, true, 16).await?;
+    assert_eq!(batched.lane_observations, stats.lane_observations);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "authoritative CKF false-positive tolerance measurement"]
+async fn mooncake_trace_measures_fixed_d16_ckf_tolerance() -> anyhow::Result<()> {
+    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
+    let mut artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
+    make_ckf_parity_corpus_quiescent(&mut artifact_sets);
+    let stats = measure_ckf_parity(&artifact_sets, &warning_count, false, 1).await?;
+    assert!(stats.queries > 0);
+    assert_eq!(
+        stats.lane_observations,
+        stats.queries * CKF_PARITY_WORKERS as u64
+    );
 
     Ok(())
 }

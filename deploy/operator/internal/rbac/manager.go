@@ -24,6 +24,10 @@ const (
 	apiGroupRBAC       = "rbac.authorization.k8s.io"
 )
 
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;delete
+
 // Manager handles dynamic RBAC creation for cluster-wide operator installations.
 type Manager struct {
 	client client.Client

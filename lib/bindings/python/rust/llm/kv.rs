@@ -126,9 +126,13 @@ struct KvIndexerCli {
     #[arg(long, default_value = "default")]
     model_name: String,
 
-    /// Tenant ID for initial workers registered via --workers
+    /// Routing group for initial workers registered via --workers
     #[arg(long, default_value = "default")]
-    tenant_id: String,
+    routing_group: String,
+
+    /// Legacy compatibility input; accepted but ignored
+    #[arg(long = "tenant-id", default_value = "default", hide = true)]
+    _tenant_id: String,
 
     /// Comma-separated peer URLs for P2P recovery (e.g. "http://host1:8090,http://host2:8091")
     #[arg(long)]
@@ -174,7 +178,7 @@ where
             threads: cli.threads,
             workers: cli.workers,
             model_name: cli.model_name,
-            tenant_id: cli.tenant_id,
+            routing_group: cli.routing_group,
             peers: cli.peers,
             access_log: cli.access_log,
             trace_id_header,
@@ -483,17 +487,17 @@ impl SelectionService {
         })
     }
 
-    /// List catalog records, optionally filtered by model and tenant.
-    #[pyo3(signature = (*, model_name = None, tenant_id = None))]
+    /// List catalog records, optionally filtered by model and routing group.
+    #[pyo3(signature = (*, model_name = None, routing_group = None))]
     fn list_workers(
         &self,
         py: Python<'_>,
         model_name: Option<String>,
-        tenant_id: Option<String>,
+        routing_group: Option<String>,
     ) -> PyResult<PyObject> {
         let workers = self
             .inner
-            .list_workers(model_name.as_deref(), tenant_id.as_deref());
+            .list_workers(model_name.as_deref(), routing_group.as_deref());
         pythonize(py, &workers)
             .map(|o| o.unbind())
             .map_err(to_pyerr)
@@ -607,16 +611,16 @@ impl SelectionService {
     }
 
     /// Current per-model active load (pending counts + per-worker potential loads).
-    #[pyo3(signature = (*, model_name = None, tenant_id = None))]
+    #[pyo3(signature = (*, model_name = None, routing_group = None))]
     fn loads(
         &self,
         py: Python<'_>,
         model_name: Option<String>,
-        tenant_id: Option<String>,
+        routing_group: Option<String>,
     ) -> PyResult<PyObject> {
         let loads = self
             .inner
-            .loads(model_name.as_deref(), tenant_id.as_deref());
+            .loads(model_name.as_deref(), routing_group.as_deref());
         pythonize(py, &loads).map(|o| o.unbind()).map_err(to_pyerr)
     }
 

@@ -25,6 +25,10 @@ harness = false
 name = "claude_trace_export"
 path = "claude_trace_export.rs"
 
+[[bin]]
+name = "request_trace_to_satf"
+path = "request_trace_to_satf.rs"
+
 [[bench]]
 name = "offline_replay_bench"
 path = "offline_replay_bench.rs"
