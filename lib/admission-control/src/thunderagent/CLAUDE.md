@@ -20,7 +20,7 @@ Each program has two independent state dimensions:
 - `Active`: its logical KV footprint counts against an assigned worker.
 - `Paused`: it has no reservation or assigned worker; a returning request remains deferred until resume.
 
-`RequestState` records the admission ID, initial context size, live request-progress and worker-eligibility handles, dispatch status, and the prior program snapshot used for rollback. `SessionRequests` serializes concurrent requests for one session: one current request and an ordered waiter set.
+`RequestState` records the admission ID, initial context size, live request-progress and worker-eligibility handles, and the prior program snapshot used for rollback. `SessionRequests` serializes concurrent requests for one session: one current request and an ordered waiter set.
 
 ## Request flow
 
@@ -56,11 +56,7 @@ Only active programs with an assigned worker contribute usage:
 normal usage = program tokens + buffer_per_program
 ```
 
-Reasoning programs read their full logical context from the retained `RequestProgress` handle during admission and reconciliation. The response path updates that handle with one relaxed atomic operation and sends no per-output actor event. Completion remains authoritative. Acting programs apply `acting_token_weight` during normal pressure and resume calculations. A separate exponentially decayed Acting value is used only when choosing placement after `resume_timeout_seconds`:
-
-```text
-decayed tokens = token_total * 2^(-idle_seconds / acting_decay_tau_seconds)
-```
+Reasoning programs read their full logical context from the retained `RequestProgress` handle during admission and reconciliation. The response path updates that handle with one relaxed atomic operation and sends no per-output actor event. Completion remains authoritative. Acting programs apply `acting_token_weight` during normal pressure and resume calculations.
 
 This is a logical projection, not live engine or indexer residency.
 
@@ -89,7 +85,7 @@ Sessions that cannot fit an eligible worker are skipped. The remaining candidate
 
 ### Forced resume
 
-A session deferred for `resume_timeout_seconds` bypasses the normal fit test. It is placed on the eligible worker with the greatest `capacity - decayed_usage`. A session waiting only because all structurally valid workers are temporarily overloaded remains deferred.
+A session deferred for `resume_timeout_seconds` bypasses the normal fit test and returns to normal worker selection. A session waiting only because all structurally valid workers are temporarily overloaded remains deferred.
 
 ### Pause
 
