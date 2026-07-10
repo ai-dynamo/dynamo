@@ -15,48 +15,100 @@ use indexmap::{IndexMap, IndexSet};
 
 use super::{ConfigError, ThunderAgentConfig, WorkerCapacity, WorkerCapacityProvider};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProgramStatus {
-    Reasoning,
-    Acting,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProgramLifecycle {
-    Active,
-    Paused,
+#[derive(Clone)]
+enum ProgramState {
+    Running {
+        progress: RequestProgress,
+        pause_after_completion: bool,
+    },
+    IdleResident {
+        footprint: usize,
+        last_activity: Instant,
+    },
+    Suspended {
+        footprint: usize,
+        since: Instant,
+    },
 }
 
 #[derive(Clone)]
 struct Program {
-    status: ProgramStatus,
-    lifecycle: ProgramLifecycle,
+    state: ProgramState,
     assigned_worker: Option<WorkerWithDpRank>,
-    token_total: usize,
     step_count: usize,
-    marked_for_pause: bool,
-    acting_since: Option<Instant>,
-    deferred_since: Option<Instant>,
 }
 
-impl Default for Program {
-    fn default() -> Self {
+impl Program {
+    fn running(
+        progress: RequestProgress,
+        assigned_worker: Option<WorkerWithDpRank>,
+        step_count: usize,
+    ) -> Self {
         Self {
-            status: ProgramStatus::Reasoning,
-            lifecycle: ProgramLifecycle::Active,
-            assigned_worker: None,
-            token_total: 0,
-            step_count: 0,
-            marked_for_pause: false,
-            acting_since: None,
-            deferred_since: None,
+            state: ProgramState::Running {
+                progress,
+                pause_after_completion: false,
+            },
+            assigned_worker,
+            step_count,
+        }
+    }
+
+    fn footprint(&self) -> usize {
+        match &self.state {
+            ProgramState::Running { progress, .. } => progress.context_tokens(),
+            ProgramState::IdleResident { footprint, .. }
+            | ProgramState::Suspended { footprint, .. } => *footprint,
+        }
+    }
+
+    fn is_idle_resident(&self) -> bool {
+        matches!(self.state, ProgramState::IdleResident { .. })
+    }
+
+    fn is_suspended(&self) -> bool {
+        matches!(self.state, ProgramState::Suspended { .. })
+    }
+
+    fn pause_after_completion(&self) -> bool {
+        matches!(
+            self.state,
+            ProgramState::Running {
+                pause_after_completion: true,
+                ..
+            }
+        )
+    }
+
+    fn mark_for_pause(&mut self) -> bool {
+        let ProgramState::Running {
+            pause_after_completion,
+            ..
+        } = &mut self.state
+        else {
+            return false;
+        };
+        !std::mem::replace(pause_after_completion, true)
+    }
+
+    fn retained_since(&self) -> Option<Instant> {
+        match self.state {
+            ProgramState::IdleResident { last_activity, .. } => Some(last_activity),
+            ProgramState::Suspended { since, .. } => Some(since),
+            ProgramState::Running { .. } => None,
+        }
+    }
+
+    fn suspended_since(&self) -> Option<Instant> {
+        match self.state {
+            ProgramState::Suspended { since, .. } => Some(since),
+            _ => None,
         }
     }
 }
 
 struct RequestState {
     session_id: String,
-    context_tokens: usize,
     progress: RequestProgress,
     worker_eligibility: WorkerEligibility,
     prior: Option<Program>,
@@ -134,7 +186,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             id,
             RequestState {
                 session_id: session_id.to_owned(),
-                context_tokens: request.context_tokens(),
                 progress: request.progress().clone(),
                 worker_eligibility: request.worker_eligibility().clone(),
                 prior: None,
@@ -158,11 +209,11 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         session_id: &str,
         now: Instant,
     ) -> AdmissionDecision {
-        self.refresh_reasoning_progress();
         let Some(request) = self.requests.get(&id) else {
             return AdmissionDecision::Defer;
         };
-        let context_tokens = request.context_tokens;
+        let context_tokens = request.progress.context_tokens();
+        let progress = request.progress.clone();
         let worker_eligibility = request.worker_eligibility.clone();
         let capacities = self.capacity.snapshot();
         let capacity_known = !capacities.is_empty();
@@ -171,6 +222,11 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let worker_is_structurally_allowed = |worker| eligibility.structurally_allows(worker);
         let prior = self.programs.get(session_id).cloned();
         let was_new = prior.is_none();
+        let was_suspended = prior.as_ref().is_some_and(Program::is_suspended);
+        let assigned_worker = prior.as_ref().and_then(|program| program.assigned_worker);
+        let step_count = prior
+            .as_ref()
+            .map_or(1, |program| program.step_count.saturating_add(1));
         let Some(request) = self.requests.get_mut(&id) else {
             return AdmissionDecision::Defer;
         };
@@ -186,27 +242,12 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 },
             );
         }
-        let (lifecycle, assigned_worker) = if let Some(program) = self.programs.get_mut(session_id)
-        {
-            program.step_count = program.step_count.saturating_add(1);
-            if context_tokens > 0 {
-                program.token_total = context_tokens;
-            }
-            program.status = ProgramStatus::Reasoning;
-            program.acting_since = None;
-            (program.lifecycle, program.assigned_worker)
-        } else {
-            let program = Program {
-                step_count: 1,
-                token_total: context_tokens,
-                ..Default::default()
-            };
-            let state = (program.lifecycle, program.assigned_worker);
-            self.programs.insert(session_id.to_owned(), program);
-            state
-        };
+        self.programs.insert(
+            session_id.to_owned(),
+            Program::running(progress, assigned_worker, step_count),
+        );
 
-        if lifecycle == ProgramLifecycle::Paused {
+        if was_suspended {
             self.defer_request(session_id, id, now, false);
             return AdmissionDecision::Defer;
         }
@@ -282,7 +323,11 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let Some(program) = self.programs.get_mut(session_id) else {
             return;
         };
-        program.lifecycle = ProgramLifecycle::Paused;
+        let footprint = program.footprint();
+        program.state = ProgramState::Suspended {
+            footprint,
+            since: now,
+        };
         if !preserve_assignment {
             program.assigned_worker = None;
         }
@@ -292,7 +337,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 .and_then(|requests| requests.current),
             Some(id)
         );
-        program.deferred_since = Some(now);
         self.paused.insert(session_id.to_owned());
     }
 
@@ -310,23 +354,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         }
         if let Some(program) = self.programs.get_mut(&request.session_id) {
             program.assigned_worker = Some(worker);
-        }
-    }
-
-    fn refresh_reasoning_progress(&mut self) {
-        for (session_id, requests) in &self.sessions {
-            let Some(id) = requests.current else {
-                continue;
-            };
-            let Some(request) = self.requests.get(&id) else {
-                continue;
-            };
-            let Some(program) = self.programs.get_mut(session_id) else {
-                continue;
-            };
-            if program.status == ProgramStatus::Reasoning {
-                program.token_total = request.progress.context_tokens();
-            }
         }
     }
 
@@ -360,16 +387,12 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         if let Some(requests) = self.sessions.get_mut(&request.session_id) {
             requests.current = None;
         }
-        if let Some(program) = self.programs.get_mut(&request.session_id) {
-            program.deferred_since = None;
-        }
-
         if completed_context_tokens.is_none() {
             match request.prior {
                 Some(prior) => {
-                    let lifecycle = prior.lifecycle;
+                    let suspended = prior.is_suspended();
                     self.programs.insert(request.session_id.clone(), prior);
-                    if lifecycle == ProgramLifecycle::Paused {
+                    if suspended {
                         self.paused.insert(request.session_id.clone());
                     } else {
                         self.paused.shift_remove(&request.session_id);
@@ -383,12 +406,13 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         } else if let Some(context_tokens) = completed_context_tokens
             && let Some(program) = self.programs.get_mut(&request.session_id)
         {
-            program.token_total = context_tokens;
-            program.status = ProgramStatus::Acting;
-            program.acting_since = Some(Instant::now());
-            let pause = std::mem::take(&mut program.marked_for_pause);
+            let pause = program.pause_after_completion();
+            program.state = ProgramState::IdleResident {
+                footprint: context_tokens,
+                last_activity: Instant::now(),
+            };
             if pause {
-                self.pause_acting(&request.session_id);
+                self.suspend_idle(&request.session_id);
             }
         }
 
@@ -418,13 +442,12 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             return Vec::new();
         }
         self.next_tick = now + Duration::from_secs_f64(self.config.scheduler_interval_seconds);
-        self.refresh_reasoning_progress();
         let expired_programs = self.expire_retained_programs(now);
         let paused_before = self.paused.len();
         let marked_before = self
             .programs
             .values()
-            .filter(|program| program.marked_for_pause)
+            .filter(|program| program.pause_after_completion())
             .count();
         let capacities = self.capacity.snapshot();
         let mut usage = self.worker_usage();
@@ -444,7 +467,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let marked = self
             .programs
             .values()
-            .filter(|program| program.marked_for_pause)
+            .filter(|program| program.pause_after_completion())
             .count();
         if greedy_resumes > 0
             || forced_resumes > 0
@@ -478,10 +501,9 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             .programs
             .iter()
             .filter(|(session_id, program)| {
-                program.status == ProgramStatus::Acting
-                    && !self.sessions.contains_key(session_id.as_str())
+                !self.sessions.contains_key(session_id.as_str())
                     && program
-                        .acting_since
+                        .retained_since()
                         .is_some_and(|since| now.saturating_duration_since(since) >= retention)
             })
             .map(|(session_id, _)| session_id.clone())
@@ -495,16 +517,18 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
     }
 
     fn program_tokens(&self, program: &Program) -> usize {
-        if program.status != ProgramStatus::Acting {
-            return program.token_total;
+        let tokens = program.footprint();
+        if program.is_idle_resident() {
+            scale_tokens(tokens, self.config.acting_token_weight)
+        } else {
+            tokens
         }
-        scale_tokens(program.token_total, self.config.acting_token_weight)
     }
 
     fn worker_usage(&self) -> HashMap<WorkerWithDpRank, WorkerUsage> {
         let mut usage = HashMap::<WorkerWithDpRank, WorkerUsage>::new();
         for program in self.programs.values() {
-            if program.lifecycle == ProgramLifecycle::Active
+            if !program.is_suspended()
                 && let Some(worker) = program.assigned_worker
             {
                 let worker_usage = usage.entry(worker).or_default();
@@ -535,12 +559,16 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             let program = &self.programs[session_id];
             let group = if program.step_count <= 1 {
                 1
-            } else if program.status == ProgramStatus::Reasoning {
+            } else if self
+                .sessions
+                .get(session_id)
+                .is_some_and(|requests| requests.current.is_some())
+            {
                 0
             } else {
                 2
             };
-            (group, program.token_total)
+            (group, program.footprint())
         });
 
         let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
@@ -565,7 +593,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let mut resumable = Vec::new();
         for session_id in paused {
             let required = self.programs[&session_id]
-                .token_total
+                .footprint()
                 .saturating_add(self.config.buffer_per_program);
             if !backend_caps.iter().any(|(worker, remaining)| {
                 self.session_allows_worker(&session_id, *worker, eligibility)
@@ -578,7 +606,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 resumable.push(session_id);
             }
         }
-        resumable.sort_by_key(|session_id| Reverse(self.programs[session_id].token_total));
+        resumable.sort_by_key(|session_id| Reverse(self.programs[session_id].footprint()));
         let mut actions = Vec::new();
         let mut resumed = 0;
         for session_id in resumable {
@@ -589,7 +617,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                     .find(|(_, (worker, remaining))| {
                         self.session_allows_worker(&session_id, *worker, eligibility)
                             && self.programs[&session_id]
-                                .token_total
+                                .footprint()
                                 .saturating_add(self.config.buffer_per_program)
                                 <= *remaining
                     })
@@ -597,7 +625,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 continue;
             };
             let required = self.programs[&session_id]
-                .token_total
+                .footprint()
                 .saturating_add(self.config.buffer_per_program);
             actions.extend(self.resume_program(&session_id, Some(worker)));
             resumed += 1;
@@ -625,10 +653,14 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             .paused
             .iter()
             .filter(|session_id| {
-                self.programs
+                self.sessions
                     .get(*session_id)
-                    .and_then(|program| program.deferred_since)
-                    .is_some_and(|since| now.saturating_duration_since(since) >= timeout)
+                    .is_some_and(|requests| requests.current.is_some())
+                    && self
+                        .programs
+                        .get(*session_id)
+                        .and_then(Program::suspended_since)
+                        .is_some_and(|since| now.saturating_duration_since(since) >= timeout)
             })
             .cloned()
             .collect();
@@ -636,9 +668,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let mut actions = Vec::new();
         let mut resumed = 0;
         for session_id in timed_out {
-            if self.programs[&session_id].lifecycle != ProgramLifecycle::Paused {
-                continue;
-            }
             if self.session_waits_for_available_worker(&session_id, eligibility) {
                 continue;
             }
@@ -656,20 +685,21 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let mut acting = HashMap::<WorkerWithDpRank, Vec<(usize, String)>>::new();
         let mut reasoning = HashMap::<WorkerWithDpRank, Vec<(usize, String)>>::new();
         for (session_id, program) in &self.programs {
-            if program.lifecycle != ProgramLifecycle::Active || program.marked_for_pause {
+            if program.is_suspended() || program.pause_after_completion() {
                 continue;
             }
             let Some(worker) = program.assigned_worker else {
                 continue;
             };
-            let candidates = match program.status {
-                ProgramStatus::Acting => &mut acting,
-                ProgramStatus::Reasoning => &mut reasoning,
+            let candidates = match program.state {
+                ProgramState::IdleResident { .. } => &mut acting,
+                ProgramState::Running { .. } => &mut reasoning,
+                ProgramState::Suspended { .. } => continue,
             };
             candidates
                 .entry(worker)
                 .or_default()
-                .push((program.token_total, session_id.clone()));
+                .push((program.footprint(), session_id.clone()));
         }
         for candidates in acting.values_mut().chain(reasoning.values_mut()) {
             candidates.sort_by_key(|(tokens, _)| *tokens);
@@ -696,7 +726,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                         continue;
                     };
                     let used = self.program_tokens(program);
-                    self.pause_acting(session_id);
+                    self.suspend_idle(session_id);
                     paused += 1;
                     let worker_usage = usage.entry(capacity.worker).or_default();
                     worker_usage.remove_program(used, self.config.buffer_per_program);
@@ -707,8 +737,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             {
                 for (_, session_id) in candidates {
                     if let Some(program) = self.programs.get_mut(session_id) {
-                        program.marked_for_pause = true;
-                        marked += 1;
+                        marked += usize::from(program.mark_for_pause());
                     }
                 }
             }
@@ -732,10 +761,9 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
     }
 
     fn deferred_eligibility_snapshots(&self) -> HashMap<AdmissionId, WorkerEligibilitySnapshot> {
-        self.programs
+        self.paused
             .iter()
-            .filter(|(_, program)| program.deferred_since.is_some())
-            .filter_map(|(session_id, _)| {
+            .filter_map(|session_id| {
                 let id = self.sessions.get(session_id)?.current?;
                 let request = self.requests.get(&id)?;
                 Some((id, request.worker_eligibility.snapshot()))
@@ -758,7 +786,12 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         {
             return false;
         }
-        if program.deferred_since.is_none() {
+        if !program.is_suspended()
+            || self
+                .sessions
+                .get(session_id)
+                .is_none_or(|requests| requests.current.is_none())
+        {
             return true;
         }
         self.sessions
@@ -776,7 +809,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let Some(program) = self.programs.get(session_id) else {
             return false;
         };
-        if program.deferred_since.is_none() {
+        if !program.is_suspended() {
             return false;
         }
         self.sessions
@@ -788,15 +821,21 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             })
     }
 
-    fn pause_acting(&mut self, session_id: &str) {
+    fn suspend_idle(&mut self, session_id: &str) {
         let Some(program) = self.programs.get_mut(session_id) else {
             return;
         };
-        if program.lifecycle != ProgramLifecycle::Active || program.status != ProgramStatus::Acting
-        {
+        let ProgramState::IdleResident {
+            footprint,
+            last_activity,
+        } = program.state
+        else {
             return;
-        }
-        program.lifecycle = ProgramLifecycle::Paused;
+        };
+        program.state = ProgramState::Suspended {
+            footprint,
+            since: last_activity,
+        };
         program.assigned_worker = None;
         self.paused.insert(session_id.to_owned());
     }
@@ -810,22 +849,39 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             .sessions
             .get(session_id)
             .and_then(|requests| requests.current);
+        let deferred_progress = match deferred_id {
+            Some(id) => {
+                let Some(request) = self.requests.get(&id) else {
+                    return Vec::new();
+                };
+                Some(request.progress.clone())
+            }
+            None => None,
+        };
         let Some(program) = self.programs.get_mut(session_id) else {
             return Vec::new();
         };
-        if program.lifecycle != ProgramLifecycle::Paused {
+        let ProgramState::Suspended { footprint, since } = program.state else {
             return Vec::new();
-        }
-        program.lifecycle = ProgramLifecycle::Active;
+        };
+        program.state = match deferred_progress {
+            Some(progress) => ProgramState::Running {
+                progress,
+                pause_after_completion: false,
+            },
+            None => ProgramState::IdleResident {
+                footprint,
+                last_activity: since,
+            },
+        };
         program.assigned_worker = worker;
-        let was_deferred = program.deferred_since.take().is_some();
         self.paused.shift_remove(session_id);
-        match (was_deferred, deferred_id) {
-            (true, Some(id)) => vec![AdmissionAction::MakeReady {
+        match deferred_id {
+            Some(id) => vec![AdmissionAction::MakeReady {
                 id,
                 placement: worker.map_or(WorkerPlacement::Any, WorkerPlacement::Exact),
             }],
-            _ => Vec::new(),
+            None => Vec::new(),
         }
     }
 }
@@ -927,6 +983,46 @@ mod tests {
             .collect()
     }
 
+    fn idle_program(
+        assigned_worker: Option<WorkerWithDpRank>,
+        footprint: usize,
+        last_activity: Instant,
+        step_count: usize,
+    ) -> Program {
+        Program {
+            state: ProgramState::IdleResident {
+                footprint,
+                last_activity,
+            },
+            assigned_worker,
+            step_count,
+        }
+    }
+
+    fn suspended_program(footprint: usize, since: Instant, step_count: usize) -> Program {
+        Program {
+            state: ProgramState::Suspended { footprint, since },
+            assigned_worker: None,
+            step_count,
+        }
+    }
+
+    fn running_program(
+        assigned_worker: Option<WorkerWithDpRank>,
+        footprint: usize,
+        step_count: usize,
+    ) -> Program {
+        let (progress, _) = RequestProgress::new(footprint);
+        Program::running(progress, assigned_worker, step_count)
+    }
+
+    fn set_suspended_since(program: &mut Program, value: Instant) {
+        let ProgramState::Suspended { since, .. } = &mut program.state else {
+            panic!("program must be suspended");
+        };
+        *since = value;
+    }
+
     fn reconcile_now<P: WorkerCapacityProvider>(
         strategy: &mut ThunderAgent<P>,
     ) -> Vec<AdmissionAction> {
@@ -962,7 +1058,8 @@ mod tests {
             id: AdmissionId::new(1),
             context_tokens: 150,
         });
-        assert_eq!(strategy.programs["a"].token_total, 150);
+        assert!(strategy.programs["a"].is_idle_resident());
+        assert_eq!(strategy.programs["a"].footprint(), 150);
         assert_eq!(
             strategy.admit(request(2, Some("a"), 120)),
             AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
@@ -985,13 +1082,9 @@ mod tests {
         let allowed = Arc::new(AtomicBool::new(false));
         let mut strategy =
             ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
-        strategy.programs.insert(
-            "paused".to_owned(),
-            Program {
-                lifecycle: ProgramLifecycle::Paused,
-                ..Program::default()
-            },
-        );
+        strategy
+            .programs
+            .insert("paused".to_owned(), suspended_program(0, Instant::now(), 0));
         strategy.paused.insert("paused".to_owned());
         let live_allowed = Arc::clone(&allowed);
         assert_eq!(
@@ -1145,7 +1238,8 @@ mod tests {
             id: AdmissionId::new(1),
             context_tokens: 140,
         });
-        assert_eq!(strategy.programs["a"].token_total, 140);
+        assert!(strategy.programs["a"].is_idle_resident());
+        assert_eq!(strategy.programs["a"].footprint(), 140);
     }
 
     #[test]
@@ -1154,27 +1248,26 @@ mod tests {
             ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
         strategy.admit(request(1, Some("a"), 100));
         let (progress, updater) = RequestProgress::new(100);
-        strategy
-            .requests
-            .get_mut(&AdmissionId::new(1))
-            .unwrap()
-            .progress = progress;
+        strategy.programs["a"].state = ProgramState::Running {
+            progress,
+            pause_after_completion: false,
+        };
         strategy.on_event(AdmissionEvent::Dispatched {
             id: AdmissionId::new(1),
             worker: worker(1),
         });
         updater.update_context_tokens(128);
-        strategy.refresh_reasoning_progress();
 
         let program = &strategy.programs["a"];
-        assert_eq!(program.status, ProgramStatus::Reasoning);
-        assert_eq!(program.token_total, 128);
+        assert!(matches!(program.state, ProgramState::Running { .. }));
+        assert_eq!(program.footprint(), 128);
 
         strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
             context_tokens: 140,
         });
-        assert_eq!(strategy.programs["a"].token_total, 140);
+        assert!(strategy.programs["a"].is_idle_resident());
+        assert_eq!(strategy.programs["a"].footprint(), 140);
     }
 
     #[test]
@@ -1191,54 +1284,20 @@ mod tests {
         for (session_id, program) in [
             (
                 "expired-active",
-                Program {
-                    status: ProgramStatus::Acting,
-                    assigned_worker: Some(worker(1)),
-                    token_total: 100,
-                    acting_since: Some(expired_at),
-                    ..Program::default()
-                },
+                idle_program(Some(worker(1)), 100, expired_at, 0),
             ),
-            (
-                "expired-paused",
-                Program {
-                    status: ProgramStatus::Acting,
-                    lifecycle: ProgramLifecycle::Paused,
-                    token_total: 200,
-                    acting_since: Some(expired_at),
-                    ..Program::default()
-                },
-            ),
+            ("expired-paused", suspended_program(200, expired_at, 0)),
             (
                 "fresh",
-                Program {
-                    status: ProgramStatus::Acting,
-                    assigned_worker: Some(worker(1)),
-                    token_total: 300,
-                    acting_since: Some(expired_at + Duration::from_nanos(1)),
-                    ..Program::default()
-                },
+                idle_program(
+                    Some(worker(1)),
+                    300,
+                    expired_at + Duration::from_nanos(1),
+                    0,
+                ),
             ),
-            (
-                "reasoning",
-                Program {
-                    status: ProgramStatus::Reasoning,
-                    assigned_worker: Some(worker(1)),
-                    token_total: 400,
-                    acting_since: Some(expired_at),
-                    ..Program::default()
-                },
-            ),
-            (
-                "busy",
-                Program {
-                    status: ProgramStatus::Acting,
-                    assigned_worker: Some(worker(1)),
-                    token_total: 500,
-                    acting_since: Some(expired_at),
-                    ..Program::default()
-                },
-            ),
+            ("reasoning", running_program(Some(worker(1)), 400, 0)),
+            ("busy", idle_program(Some(worker(1)), 500, expired_at, 0)),
         ] {
             strategy.programs.insert(session_id.to_owned(), program);
         }
@@ -1272,14 +1331,12 @@ mod tests {
         let mut strategy = ThunderAgent::new(|| capacities(&[(1, 1_000)]), config).unwrap();
         strategy.programs.insert(
             "expired".to_owned(),
-            Program {
-                status: ProgramStatus::Acting,
-                assigned_worker: Some(worker(2)),
-                token_total: 700,
-                step_count: 4,
-                acting_since: Some(Instant::now() - Duration::from_secs(901)),
-                ..Program::default()
-            },
+            idle_program(
+                Some(worker(2)),
+                700,
+                Instant::now() - Duration::from_secs(901),
+                4,
+            ),
         );
 
         assert!(reconcile_now(&mut strategy).is_empty());
@@ -1322,15 +1379,9 @@ mod tests {
         }
 
         assert!(strategy.on_event(AdmissionEvent::Reconcile).is_empty());
-        assert_eq!(
-            strategy.programs["small"].lifecycle,
-            ProgramLifecycle::Active
-        );
+        assert!(strategy.programs["small"].is_idle_resident());
         assert!(reconcile_now(&mut strategy).is_empty());
-        assert_eq!(
-            strategy.programs["small"].lifecycle,
-            ProgramLifecycle::Paused
-        );
+        assert!(strategy.programs["small"].is_suspended());
         assert_eq!(
             strategy.admit(request(3, Some("small"), 110)),
             AdmissionDecision::Defer
@@ -1353,19 +1404,18 @@ mod tests {
             ..Default::default()
         };
         let mut strategy = ThunderAgent::new(Vec::<WorkerCapacity>::new, config).unwrap();
-        strategy.programs.insert(
-            "paused".to_owned(),
-            Program {
-                lifecycle: ProgramLifecycle::Paused,
-                ..Program::default()
-            },
-        );
+        strategy
+            .programs
+            .insert("paused".to_owned(), suspended_program(0, Instant::now(), 0));
         strategy.paused.insert("paused".to_owned());
         assert_eq!(
             strategy.admit(request(1, Some("paused"), 100)),
             AdmissionDecision::Defer
         );
-        strategy.programs["paused"].deferred_since = Some(Instant::now() - Duration::from_secs(2));
+        set_suspended_since(
+            &mut strategy.programs["paused"],
+            Instant::now() - Duration::from_secs(2),
+        );
         assert_eq!(
             reconcile_now(&mut strategy),
             vec![AdmissionAction::MakeReady {
@@ -1383,32 +1433,26 @@ mod tests {
             ..Default::default()
         };
         let mut strategy = ThunderAgent::new(|| capacities(&[(1, 100), (2, 100)]), config).unwrap();
-        for (session_id, assigned_worker, token_total) in
+        for (session_id, assigned_worker, footprint) in
             [("worker-1", worker(1), 300), ("worker-2", worker(2), 200)]
         {
             strategy.programs.insert(
                 session_id.to_owned(),
-                Program {
-                    status: ProgramStatus::Acting,
-                    assigned_worker: Some(assigned_worker),
-                    token_total,
-                    ..Program::default()
-                },
+                idle_program(Some(assigned_worker), footprint, Instant::now(), 0),
             );
         }
-        strategy.programs.insert(
-            "paused".to_owned(),
-            Program {
-                lifecycle: ProgramLifecycle::Paused,
-                ..Program::default()
-            },
-        );
+        strategy
+            .programs
+            .insert("paused".to_owned(), suspended_program(0, Instant::now(), 0));
         strategy.paused.insert("paused".to_owned());
         assert_eq!(
             strategy.admit(request(1, Some("paused"), 50)),
             AdmissionDecision::Defer
         );
-        strategy.programs["paused"].deferred_since = Some(Instant::now() - Duration::from_secs(2));
+        set_suspended_since(
+            &mut strategy.programs["paused"],
+            Instant::now() - Duration::from_secs(2),
+        );
 
         assert_eq!(
             reconcile_now(&mut strategy),
@@ -1425,12 +1469,7 @@ mod tests {
             ThunderAgent::new(Vec::<WorkerCapacity>::new, Default::default()).unwrap();
         strategy.programs.insert(
             "existing".to_owned(),
-            Program {
-                status: ProgramStatus::Acting,
-                token_total: 200,
-                step_count: 3,
-                ..Program::default()
-            },
+            idle_program(None, 200, Instant::now(), 3),
         );
         assert!(matches!(
             strategy.admit(request(1, Some("existing"), 300)),
@@ -1440,8 +1479,8 @@ mod tests {
             id: AdmissionId::new(1),
         });
         let program = &strategy.programs["existing"];
-        assert_eq!(program.status, ProgramStatus::Acting);
-        assert_eq!(program.token_total, 200);
+        assert!(program.is_idle_resident());
+        assert_eq!(program.footprint(), 200);
         assert_eq!(program.step_count, 3);
     }
 
@@ -1451,13 +1490,7 @@ mod tests {
             ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
         strategy.programs.insert(
             "existing".to_owned(),
-            Program {
-                status: ProgramStatus::Acting,
-                assigned_worker: Some(worker(1)),
-                token_total: 200,
-                step_count: 3,
-                ..Program::default()
-            },
+            idle_program(Some(worker(1)), 200, Instant::now(), 3),
         );
         strategy.admit(request(1, Some("existing"), 300));
         strategy.on_event(AdmissionEvent::Dispatched {
@@ -1469,8 +1502,8 @@ mod tests {
         });
 
         let program = &strategy.programs["existing"];
-        assert_eq!(program.status, ProgramStatus::Acting);
-        assert_eq!(program.token_total, 200);
+        assert!(program.is_idle_resident());
+        assert_eq!(program.footprint(), 200);
         assert_eq!(program.step_count, 3);
     }
 
@@ -1486,7 +1519,11 @@ mod tests {
             strategy.admit(request(2, Some("same"), 900)),
             AdmissionDecision::Defer
         );
-        assert_eq!(strategy.programs["same"].token_total, 100);
+        assert!(matches!(
+            strategy.programs["same"].state,
+            ProgramState::Running { .. }
+        ));
+        assert_eq!(strategy.programs["same"].footprint(), 100);
         assert_eq!(strategy.programs["same"].step_count, 1);
 
         assert!(
@@ -1504,7 +1541,8 @@ mod tests {
             id: AdmissionId::new(1),
             context_tokens: 150,
         });
-        assert_eq!(strategy.programs["same"].token_total, 150);
+        assert!(strategy.programs["same"].is_idle_resident());
+        assert_eq!(strategy.programs["same"].footprint(), 150);
         assert_eq!(strategy.programs["same"].step_count, 1);
     }
 
@@ -1530,7 +1568,11 @@ mod tests {
                 placement: WorkerPlacement::Exact(worker(1)),
             }]
         );
-        assert_eq!(strategy.programs["same"].token_total, 120);
+        assert!(matches!(
+            strategy.programs["same"].state,
+            ProgramState::Running { .. }
+        ));
+        assert_eq!(strategy.programs["same"].footprint(), 120);
         assert_eq!(strategy.programs["same"].step_count, 1);
         assert_eq!(strategy.sessions["same"].current, Some(AdmissionId::new(2)));
     }
