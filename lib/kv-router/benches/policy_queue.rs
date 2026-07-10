@@ -14,7 +14,7 @@ use criterion::{
 use dynamo_kv_router::RouterQueuePolicy;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::scheduling::{
-    PolicyProfile, PolicyQueue, QueueSnapshot, RouterPolicyConfig, WorkerPlacement,
+    PolicyProfile, PolicyQueue, QueueSnapshot, RequestProgress, RouterPolicyConfig, WorkerPlacement,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -218,6 +218,22 @@ fn bench_drain_shared(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_request_progress(c: &mut Criterion) {
+    let mut group = c.benchmark_group("request_progress");
+    let (progress, updater) = RequestProgress::new(0);
+    let mut context_tokens = 0usize;
+    group.bench_function("update", |b| {
+        b.iter(|| {
+            context_tokens += 1;
+            updater.update_context_tokens(black_box(context_tokens));
+        });
+    });
+    group.bench_function("read", |b| {
+        b.iter(|| black_box(progress.context_tokens()));
+    });
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
@@ -225,6 +241,6 @@ criterion_group! {
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3))
         .noise_threshold(0.03);
-    targets = bench_pop_once, bench_drain_fixed_requests, bench_drain_one_per_lane, bench_build_exact_lanes, bench_blocked_fraction, bench_drain_shared
+    targets = bench_pop_once, bench_drain_fixed_requests, bench_drain_one_per_lane, bench_build_exact_lanes, bench_blocked_fraction, bench_drain_shared, bench_request_progress
 }
 criterion_main!(benches);
