@@ -3,11 +3,11 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Exact-tip Valkey router A/B
+# Source-bound Valkey router A/B
 
 This directory contains compact evidence for the policy-matched in-process
 versus Valkey HA router comparison at revision
-`c6f546b223cfc1ffe15e316948c06886b4839373`. Raw prompts, record exports, and
+`65a5cf262f173a0e9b6055ef11a292f88a1ebf4f`. Raw prompts, record exports, and
 process logs are intentionally omitted.
 
 ![Median RPS versus frontend count](rps-vs-frontends.png)
@@ -18,18 +18,18 @@ Each value is the median of three fresh topologies per arm.
 
 | Frontends | In-process RPS | Valkey HA RPS | Valkey delta | Peak Valkey primary clients |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 256.02 | 253.61 | -0.94% | 1,209 / 10,000 |
-| 10 | 253.29 | 253.29 | +0.00% | 1,142 / 10,000 |
-| 100 | 231.81 | 246.48 | **+6.32%** | 2,001 / 10,000 |
+| 1 | 254.60 | 254.38 | -0.08% | 1,209 / 10,000 |
+| 10 | 250.83 | 249.37 | -0.58% | 1,219 / 10,000 |
+| 100 | 228.94 | 245.49 | **+7.23%** | 2,001 / 10,000 |
 
-At 100 frontends, Valkey improved output throughput by 6.33%, p50 TTFT by
-7.86%, p95 TTFT by 6.73%, p50 request latency by 8.46%, p95 request latency by
-10.91%, p50 ITL by 10.79%, and p95 ITL by 51.53%. Lower latency is better.
-Average ISL was 1,024.001 tokens in both arms; average OSL was 1,049.612 for
-in-process and 1,049.640 for Valkey.
+At 100 frontends, Valkey improved output throughput by 7.24%, p50 TTFT by
+7.53%, p95 TTFT by 9.86%, p50 request latency by 8.13%, p95 request latency by
+14.21%, p50 ITL by 10.38%, and p95 ITL by 61.56%. Lower latency is better.
+Average ISL was 1,024.001 tokens in both arms; average OSL was 1,049.594 for
+in-process and 1,049.675 for Valkey.
 
 Valkey retained more throughput as frontend fan-out increased. Its median RPS
-fell 2.81% from one to 100 frontends, while the in-process baseline fell 9.45%.
+fell 3.50% from one to 100 frontends, while the in-process baseline fell 10.08%.
 This is fixed-host fan-out, not linear horizontal scaling: all frontends shared
 eight CPU cores and the worker/client resources did not increase.
 
@@ -53,11 +53,11 @@ errors or validation failures. Every one of the nine Valkey samples registered
 200/200 logical workers, ended with zero active admissions, retained an online
 replica, and reported no teardown integrity failures.
 
-The harness recorded `git.dirty=true` because its untracked output directory
-was already inside the worktree when provenance was sampled. Every campaign
-records the same source revision and matching harness, extension, module,
-Valkey, aiperf, and input hashes. `evidence.json` also records SHA-256 values for
-the omitted raw manifests and summaries so retained raw copies can be audited.
+Every campaign records `git.dirty=false`, the same source revision, a release
+extension embedding that exact revision with `build_git_dirty=false`, and
+matching harness, extension, module, Valkey, AIPerf, and input hashes.
+`evidence.json` also records SHA-256 values for the omitted raw manifests and
+summaries so retained raw copies can be audited.
 
 ## Startup hardening found by the campaign
 

@@ -465,16 +465,16 @@ requires a cross-frontend L2 tokenizer-cache hit after the second promotion.
 Two earlier host-local campaigns provide supporting workload evidence, but are
 not current-branch performance claims:
 
-- The [growing agent-history tokenizer A/B](../../bench/results/tokenizer-cache-agentic-20260706-160651/campaign/REPORT.md)
+- The [growing agent-history tokenizer A/B](https://github.com/ai-dynamo/dynamo/blob/main/bench/results/tokenizer-cache-agentic-20260706-160651/campaign/REPORT.md)
   found shared L2 useful when sessions moved among three frontends: aggregate
   effective throughput improved 15.23%, with the largest gains at four and
   eight messages. Sticky sessions were 2.85% slower because their local L1
   already held the useful prefix. The recorded checkout was dirty.
-- The [Weka-derived A/B](../../bench/results/valkey-config-weka-ab-20260707/campaign/20260707T153807Z/REPORT.md)
+- The [Weka-derived A/B](https://github.com/ai-dynamo/dynamo/blob/main/bench/results/valkey-config-weka-ab-20260707/campaign/20260707T153807Z/REPORT.md)
   completed 91,392 measured requests without errors and measured throughput
   within 1.17% of the in-process control. That campaign did not capture its Git
   revision, so use it as functional workload evidence rather than an exact-tip
-  speed claim. A separate [Weka-derived HA smoke run](../../bench/results/valkey-config-weka-20260707/campaign/20260707T100019Z/REPORT.md)
+  speed claim. A separate [Weka-derived HA smoke run](https://github.com/ai-dynamo/dynamo/blob/main/bench/results/valkey-config-weka-20260707/campaign/20260707T100019Z/REPORT.md)
   verified one shared JSON configuration across three frontends, four mock
   workers, two Valkey primary/replica groups, and three shared Sentinels.
 
@@ -506,10 +506,10 @@ A real disaggregated GPU experiment must place prefill and decode workers on
 separate nodes, configure NIXL/UCX, and verify actual transport selection.
 Valkey does not replace NIXL, and NIXL does not make a Valkey admission decision.
 
-## Current Exact-Tip Measurements
+## Current Source-Bound Measurements
 
 The policy-matched comparison ran at revision
-`c6f546b223cfc1ffe15e316948c06886b4839373` with identical release binaries,
+`65a5cf262f173a0e9b6055ef11a292f88a1ebf4f` with identical release binaries,
 generated inputs, fixed per-role CPU sets, and three fresh topologies per arm.
 Each accepted sample completed 16,384 measured requests at concurrency 4,096
 after 4,096 warmup requests. The workload used 200 logical mock workers, TCP,
@@ -517,31 +517,30 @@ requested ISL/OSL 1,024/1,024, and an unlimited closed-loop request rate.
 
 | Frontends | In-process immediate | Valkey HA | Valkey RPS change | Peak primary clients |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 256.02 RPS | 253.61 RPS | -0.94% | 1,209 / 10,000 |
-| 10 | 253.29 RPS | 253.29 RPS | +0.00% | 1,142 / 10,000 |
-| 100 | 231.81 RPS | 246.48 RPS | **+6.32%** | 2,001 / 10,000 |
+| 1 | 254.60 RPS | 254.38 RPS | -0.08% | 1,209 / 10,000 |
+| 10 | 250.83 RPS | 249.37 RPS | -0.58% | 1,219 / 10,000 |
+| 100 | 228.94 RPS | 245.49 RPS | **+7.23%** | 2,001 / 10,000 |
 
-At 100 frontends, Valkey improved output throughput by 6.33%, p50/p95 TTFT
-by 7.86%/6.73%, p50/p95 request latency by 8.46%/10.91%, and p50/p95 ITL by
-10.79%/51.53%. Average ISL was 1,024.001 tokens in both arms; average OSL was
-1,049.612 for in-process and 1,049.640 for Valkey. Valkey retained more
-throughput as fan-out rose: its median RPS fell 2.81% from one to 100
-frontends, versus 9.45% for the in-process control.
+At 100 frontends, Valkey improved output throughput by 7.24%, p50/p95 TTFT
+by 7.53%/9.86%, p50/p95 request latency by 8.13%/14.21%, and p50/p95 ITL by
+10.38%/61.56%. Average ISL was 1,024.001 tokens in both arms; average OSL was
+1,049.594 for in-process and 1,049.675 for Valkey. Valkey retained more
+throughput as fan-out rose: its median RPS fell 3.50% from one to 100
+frontends, versus 10.08% for the in-process control.
 
 This is a fixed-host fan-out comparison, not linear horizontal scaling. All
 frontends shared CPUs 2-9, workers shared CPUs 10-19, Valkey used CPUs 0-1,
 and aiperf used CPUs 20-23. Default background RDB saves and AOF rewrites
 remained enabled, so their durability cost is present in the latency tails.
-The compact [evidence, plot, hashes, and reproduction command](../../bench/results/valkey-exact-tip-ab-20260709/README.md)
+The compact [evidence, plot, hashes, and reproduction command](https://github.com/ai-dynamo/dynamo/blob/main/bench/results/valkey-exact-tip-ab-20260709/README.md)
 are checked in; the raw record exports and logs are not.
 
 All 18 samples completed without request or validation errors. Every one of
 the nine Valkey samples registered all 200 workers, ended with no active
 admissions, retained an online replica, and reported no teardown integrity
-failures. The harness recorded the checkout as dirty because its untracked
-output directory was already inside the worktree when provenance was sampled;
-all three campaigns nevertheless record the same revision and matching source,
-binary, input, and harness hashes.
+failures. All three campaigns record a clean checkout and release extension
+bound to the same revision, plus matching source, binary, input, and harness
+hashes.
 
 An earlier excluded 100-frontend attempt exposed registration-time contention:
 several workers exhausted the five-second primary-read timeout while reading
@@ -558,7 +557,7 @@ and module SHA-256
 `9b2b5e1b04d187b0a1b8d9aaa8d43e05208b3ac64eb18afb09302ab463e40308`.
 It predates the later Sentinel, tokenizer, lifecycle, admission, and safety
 fixes. The checked-in
-[sanitized provenance](../../bench/results/valkey-ha-ab-historical-20260701/provenance.json)
+[sanitized provenance](https://github.com/ai-dynamo/dynamo/blob/main/bench/results/valkey-ha-ab-historical-20260701/provenance.json)
 retains the exact binary hashes, validation state, topology, and medians.
 
 That host-local CPU-isolated benchmark used three frontends, four worker

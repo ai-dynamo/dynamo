@@ -171,7 +171,7 @@ Expected local artifacts:
 - `$VALKEY_REPO/src/valkey-cli`
 - `$DYNAMO_REPO/lib/kv-router/valkey-module/dynkv.so`
 
-The module used by the exact-tip sweep had SHA-256
+The module used by the source-bound sweep had SHA-256
 `da3751ecbb315ba8c05a509edf7049408c4694b704c558c0c038088127fcb26a`.
 A different hash after a source change is expected, but record it in the run
 artifacts.
@@ -189,8 +189,8 @@ VIRTUAL_ENV="$DYNAMO_REPO/.venv" \
 .venv/bin/python -c 'import dynamo._core; print(dynamo._core.__file__)'
 ```
 
-The exact-tip run's loaded release extension had SHA-256
-`28bec564134ed7f88d02055e66a371b05fd6dd5655631e8cd0406c6adafd303f`.
+The source-bound run's loaded release extension had SHA-256
+`5971351b6bb9fa7e60b026b7345cc68a4d15fdbc7bb12fadd000e5d34ffa5eda`.
 
 ### 4. Run focused validation
 
@@ -355,9 +355,9 @@ with `valkey_router_aiperf.py`. The harness interleaves the policy-matched
 immediate in-process and Valkey arms. The exact-tip scale comparison below uses
 three runs per arm at each frontend count.
 
-## Current exact-tip A/B
+## Current source-bound A/B
 
-Revision `c6f546b223cfc1ffe15e316948c06886b4839373` completed 18/18 accepted
+Revision `65a5cf262f173a0e9b6055ef11a292f88a1ebf4f` completed 18/18 accepted
 arm samples with 200 logical mock workers, concurrency 4,096, requested ISL/OSL
 1,024/1,024, and 1, 10, or 100 frontends. All accepted samples completed
 16,384/16,384 measured requests without request errors, cancellations,
@@ -365,14 +365,14 @@ malformed records, admission leaks, failed module calls, or replication lag.
 
 | Frontends | In-process RPS | Valkey HA RPS | Valkey change | Peak primary clients |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 256.02 | 253.61 | -0.94% | 1,209 / 10,000 |
-| 10 | 253.29 | 253.29 | +0.00% | 1,142 / 10,000 |
-| 100 | 231.81 | 246.48 | **+6.32%** | 2,001 / 10,000 |
+| 1 | 254.60 | 254.38 | -0.08% | 1,209 / 10,000 |
+| 10 | 250.83 | 249.37 | -0.58% | 1,219 / 10,000 |
+| 100 | 228.94 | 245.49 | **+7.23%** | 2,001 / 10,000 |
 
-At 100 frontends, Valkey improved output throughput 6.33%, p50/p95 TTFT
-7.86%/6.73%, p50/p95 request latency 8.46%/10.91%, and p50/p95 ITL
-10.79%/51.53%. Valkey RPS declined only 2.81% from one to 100 frontends;
-in-process RPS declined 9.45%. This is fixed-host fan-out, not added-CPU
+At 100 frontends, Valkey improved output throughput 7.24%, p50/p95 TTFT
+7.53%/9.86%, p50/p95 request latency 8.13%/14.21%, and p50/p95 ITL
+10.38%/61.56%. Valkey RPS declined only 3.50% from one to 100 frontends;
+in-process RPS declined 10.08%. This is fixed-host fan-out, not added-CPU
 horizontal scaling:
 all frontend processes shared CPUs 2-9 and all mock workers shared CPUs 10-19.
 

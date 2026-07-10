@@ -1,51 +1,731 @@
 {
-  "schema_version": 1,
-  "title": "Exact-tip in-process versus Valkey HA router A/B",
-  "source": {
-    "git_revision": "c6f546b223cfc1ffe15e316948c06886b4839373",
-    "benchmark_recorded_dirty": false,
-    "dirty_note": "The benchmark output directory was an untracked path inside the source worktree when provenance was sampled. All three campaigns record the same revision and identical source/binary hashes; compact evidence is committed as a child of that revision."
-  },
-  "workload": {
-    "model": "Qwen/Qwen3-0.6B",
-    "tokenizer": "Qwen/Qwen3-0.6B",
-    "logical_mock_workers": 200,
-    "mocker_processes": 20,
-    "data_parallel_size": 1,
-    "frontend_counts": [
-      1,
-      10,
-      100
-    ],
-    "repetitions_per_arm": 3,
-    "measured_requests_per_sample": 16384,
-    "warmup_requests_per_sample": 4096,
-    "concurrency": 4096,
-    "request_rate": "unlimited closed-loop",
-    "requested_isl": 1024,
-    "requested_osl": 1024,
-    "cpu_affinity": {
-      "valkey": "0-1",
-      "frontends": "2-9",
-      "mockers": "10-19",
-      "aiperf": "20-23"
-    }
-  },
   "arms": {
     "baseline": "inprocess_immediate",
     "candidate": "valkey_ha",
     "note": "Policy-matched immediate routing; Valkey uses authoritative admission, primary plus replica, WAIT 1, AOF everysec, and normal persistence maintenance."
   },
-  "validation": {
-    "planned_samples": 18,
-    "valid_samples": 18,
-    "request_errors": 0,
-    "valkey_samples": 9,
-    "valkey_samples_with_all_200_workers_registered": 9,
-    "residual_admissions": 0,
-    "input_dataset_consistent": true,
-    "input_dataset_sha256": "d3f236de26a8cc0e6cd8738d71fc993efced101be32e6b7d2c5ab681257b83dd"
-  },
+  "frontend_results": [
+    {
+      "analysis": {
+        "arms": {
+          "inprocess_immediate": {
+            "median_metrics": {
+              "isl_tokens_avg": 1024.0012817382812,
+              "itl_ms_p50": 0.4038395194326189,
+              "itl_ms_p95": 0.6120748873417061,
+              "osl_tokens_avg": 1049.6463623046875,
+              "output_token_throughput_tps": 267253.62847701524,
+              "request_latency_ms_p50": 2301.4520355,
+              "request_latency_ms_p95": 2577.7343444999997,
+              "request_throughput_rps": 254.5952531831602,
+              "ttft_ms_p50": 1889.804287,
+              "ttft_ms_p95": 2068.7653140999996
+            },
+            "metric_samples": {
+              "isl_tokens_avg": [
+                1024.0012817382812,
+                1024.0012817382812,
+                1024.0012817382812
+              ],
+              "itl_ms_p50": [
+                0.4008913804216425,
+                0.41170972324324323,
+                0.4038395194326189
+              ],
+              "itl_ms_p95": [
+                0.5377982956139739,
+                0.6120748873417061,
+                0.6670048443477948
+              ],
+              "osl_tokens_avg": [
+                1049.6463623046875,
+                1049.5621948242188,
+                1049.7196044921875
+              ],
+              "output_token_throughput_tps": [
+                267670.72575253446,
+                263483.0738621667,
+                267253.62847701524
+              ],
+              "request_latency_ms_p50": [
+                2295.425162,
+                2326.9785115,
+                2301.4520355
+              ],
+              "request_latency_ms_p95": [
+                2574.4613526499993,
+                2577.7343444999997,
+                2579.4738817499992
+              ],
+              "request_throughput_rps": [
+                255.01038765552923,
+                251.04093417379144,
+                254.5952531831602
+              ],
+              "ttft_ms_p50": [
+                1884.330988,
+                1912.8428474999998,
+                1889.804287
+              ],
+              "ttft_ms_p95": [
+                2068.7653140999996,
+                2061.6854037,
+                2075.2152285499997
+              ]
+            },
+            "planned_runs": 3,
+            "started_runs": 3,
+            "statuses": [
+              "ok",
+              "ok",
+              "ok"
+            ],
+            "successful_runs": 3
+          },
+          "valkey_ha": {
+            "median_metrics": {
+              "isl_tokens_avg": 1024.0012817382812,
+              "itl_ms_p50": 0.41359043844944426,
+              "itl_ms_p95": 0.7800076462350224,
+              "osl_tokens_avg": 1049.607666015625,
+              "output_token_throughput_tps": 266998.55972468085,
+              "request_latency_ms_p50": 2337.9273975,
+              "request_latency_ms_p95": 2677.10345285,
+              "request_throughput_rps": 254.38436211603212,
+              "ttft_ms_p50": 1892.5455889999998,
+              "ttft_ms_p95": 2117.7901884
+            },
+            "metric_samples": {
+              "isl_tokens_avg": [
+                1024.0012817382812,
+                1024.0012817382812,
+                1024.0012817382812
+              ],
+              "itl_ms_p50": [
+                0.41939031386425835,
+                0.40052286938418574,
+                0.41359043844944426
+              ],
+              "itl_ms_p95": [
+                2.593401801895924,
+                0.5427661199062853,
+                0.7800076462350224
+              ],
+              "osl_tokens_avg": [
+                1049.6529541015625,
+                1049.587158203125,
+                1049.607666015625
+              ],
+              "output_token_throughput_tps": [
+                267861.5471478411,
+                266998.55972468085,
+                263041.68991697626
+              ],
+              "request_latency_ms_p50": [
+                2338.7827425,
+                2284.6852894999997,
+                2337.9273975
+              ],
+              "request_latency_ms_p95": [
+                5221.114382149997,
+                2570.4820661499994,
+                2677.10345285
+              ],
+              "request_throughput_rps": [
+                255.19058094502662,
+                254.38436211603212,
+                250.60953576634842
+              ],
+              "ttft_ms_p50": [
+                1892.5455889999998,
+                1870.2670455,
+                1901.6507895
+              ],
+              "ttft_ms_p95": [
+                2154.4172597499996,
+                2067.82572785,
+                2117.7901884
+              ]
+            },
+            "planned_runs": 3,
+            "started_runs": 3,
+            "statuses": [
+              "ok",
+              "ok",
+              "ok"
+            ],
+            "successful_runs": 3
+          }
+        },
+        "comparisons": [
+          {
+            "baseline_arm": "inprocess_immediate",
+            "candidate_arm": "valkey_ha",
+            "metrics": {
+              "isl_tokens_avg": {
+                "absolute_delta": 0.0,
+                "baseline_median": 1024.0012817382812,
+                "candidate_median": 1024.0012817382812,
+                "relative_percent": 0.0
+              },
+              "itl_ms_p50": {
+                "absolute_delta": 0.009750919016825343,
+                "baseline_median": 0.4038395194326189,
+                "candidate_median": 0.41359043844944426,
+                "relative_percent": 2.4145529468054687
+              },
+              "itl_ms_p95": {
+                "absolute_delta": 0.16793275889331627,
+                "baseline_median": 0.6120748873417061,
+                "candidate_median": 0.7800076462350224,
+                "relative_percent": 27.43663600097411
+              },
+              "osl_tokens_avg": {
+                "absolute_delta": -0.0386962890625,
+                "baseline_median": 1049.6463623046875,
+                "candidate_median": 1049.607666015625,
+                "relative_percent": -0.003686602502726283
+              },
+              "output_token_throughput_tps": {
+                "absolute_delta": -255.06875233439496,
+                "baseline_median": 267253.62847701524,
+                "candidate_median": 266998.55972468085,
+                "relative_percent": -0.09544070693742958
+              },
+              "request_latency_ms_p50": {
+                "absolute_delta": 36.47536200000013,
+                "baseline_median": 2301.4520355,
+                "candidate_median": 2337.9273975,
+                "relative_percent": 1.584884735261307
+              },
+              "request_latency_ms_p95": {
+                "absolute_delta": 99.36910835000026,
+                "baseline_median": 2577.7343444999997,
+                "candidate_median": 2677.10345285,
+                "relative_percent": 3.85490105146094
+              },
+              "request_throughput_rps": {
+                "absolute_delta": -0.21089106712807393,
+                "baseline_median": 254.5952531831602,
+                "candidate_median": 254.38436211603212,
+                "relative_percent": -0.0828338566769567
+              },
+              "ttft_ms_p50": {
+                "absolute_delta": 2.741301999999905,
+                "baseline_median": 1889.804287,
+                "candidate_median": 1892.5455889999998,
+                "relative_percent": 0.14505745483050145
+              },
+              "ttft_ms_p95": {
+                "absolute_delta": 49.02487430000019,
+                "baseline_median": 2068.7653140999996,
+                "candidate_median": 2117.7901884,
+                "relative_percent": 2.3697649011158175
+              }
+            },
+            "note": "Matched immediate-routing policy: no router queue, replica sync, frontend prefill/output accounting, lower-tier credits, overlap decay, or temperature.",
+            "policy_matched": true
+          }
+        ],
+        "comparisons_suppressed": false,
+        "input_dataset_consistent": true,
+        "input_dataset_sha256": "d3f236de26a8cc0e6cd8738d71fc993efced101be32e6b7d2c5ab681257b83dd",
+        "methodology_caveats": [
+          "aiperf is closed-loop: this is a host-level throughput/latency result, not an open-loop server capacity limit.",
+          "Processes share the runner CPU set unless the per-role CPU affinity options or external isolation pin them; inspect each run's topology metadata.",
+          "Logical mock workers retain the same worker-scoped DP ranks regardless of how many independent dynamo.mocker OS processes host them.",
+          "The inprocess arm enables replica sync as a synchronized multi-frontend baseline; it is not the literal bare-CLI default.",
+          "Medians remain diagnostic during an incomplete campaign, but comparisons are suppressed unless every planned sample is valid and uses one identical input dataset."
+        ],
+        "planned_samples": 6,
+        "started_samples": 6,
+        "valid": true,
+        "valid_samples": 6,
+        "validation_errors": []
+      },
+      "frontend_count": 1
+    },
+    {
+      "analysis": {
+        "arms": {
+          "inprocess_immediate": {
+            "median_metrics": {
+              "isl_tokens_avg": 1024.0012817382812,
+              "itl_ms_p50": 0.40646936205485057,
+              "itl_ms_p95": 0.5459840413495916,
+              "osl_tokens_avg": 1049.5918579101562,
+              "output_token_throughput_tps": 263269.98728598043,
+              "request_latency_ms_p50": 2328.2744574999997,
+              "request_latency_ms_p95": 2633.5617285499998,
+              "request_throughput_rps": 250.8308208584789,
+              "ttft_ms_p50": 1909.2498335,
+              "ttft_ms_p95": 2133.356461
+            },
+            "metric_samples": {
+              "isl_tokens_avg": [
+                1024.0012817382812,
+                1024.0012817382812,
+                1024.0012817382812
+              ],
+              "itl_ms_p50": [
+                0.39367385539447997,
+                0.40646936205485057,
+                0.4376807651787342
+              ],
+              "itl_ms_p95": [
+                0.5349132071817083,
+                0.5459840413495916,
+                0.67797606248257
+              ],
+              "osl_tokens_avg": [
+                1049.572509765625,
+                1049.5918579101562,
+                1049.6156616210938
+              ],
+              "output_token_throughput_tps": [
+                269872.95420504635,
+                263269.98728598043,
+                243556.13703409143
+              ],
+              "request_latency_ms_p50": [
+                2249.9007065,
+                2328.2744574999997,
+                2456.9941565
+              ],
+              "request_latency_ms_p95": [
+                2570.7954784,
+                2633.5617285499998,
+                3294.8874361499993
+              ],
+              "request_throughput_rps": [
+                257.1265459928161,
+                250.8308208584789,
+                232.04316202554344
+              ],
+              "ttft_ms_p50": [
+                1842.942282,
+                1909.2498335,
+                2008.3343264999999
+              ],
+              "ttft_ms_p95": [
+                2075.4795084999996,
+                2133.356461,
+                2692.31002095
+              ]
+            },
+            "planned_runs": 3,
+            "started_runs": 3,
+            "statuses": [
+              "ok",
+              "ok",
+              "ok"
+            ],
+            "successful_runs": 3
+          },
+          "valkey_ha": {
+            "median_metrics": {
+              "isl_tokens_avg": 1024.0012817382812,
+              "itl_ms_p50": 0.40875734747295206,
+              "itl_ms_p95": 0.5582614508134758,
+              "osl_tokens_avg": 1049.6740112304688,
+              "output_token_throughput_tps": 261766.31847891762,
+              "request_latency_ms_p50": 2336.6570885,
+              "request_latency_ms_p95": 2642.6043044999997,
+              "request_throughput_rps": 249.3740825747211,
+              "ttft_ms_p50": 1915.0384119999999,
+              "ttft_ms_p95": 2128.66350235
+            },
+            "metric_samples": {
+              "isl_tokens_avg": [
+                1024.0012817382812,
+                1024.0012817382812,
+                1024.0012817382812
+              ],
+              "itl_ms_p50": [
+                0.4114927088571359,
+                0.40875734747295206,
+                0.40853334955647774
+              ],
+              "itl_ms_p95": [
+                0.5582614508134758,
+                0.540596804174105,
+                0.560418843588117
+              ],
+              "osl_tokens_avg": [
+                1049.6137084960938,
+                1049.6740112304688,
+                1049.693359375
+              ],
+              "output_token_throughput_tps": [
+                262552.7311583265,
+                261200.80549315232,
+                261766.31847891762
+              ],
+              "request_latency_ms_p50": [
+                2336.6570885,
+                2344.3074545,
+                2334.6126365
+              ],
+              "request_latency_ms_p95": [
+                2658.7222975499994,
+                2637.0723035,
+                2642.6043044999997
+              ],
+              "request_throughput_rps": [
+                250.14224665045296,
+                248.83992810964477,
+                249.3740825747211
+              ],
+              "ttft_ms_p50": [
+                1909.4016459999998,
+                1924.0398069999999,
+                1915.0384119999999
+              ],
+              "ttft_ms_p95": [
+                2157.0543177499994,
+                2124.3001271,
+                2128.66350235
+              ]
+            },
+            "planned_runs": 3,
+            "started_runs": 3,
+            "statuses": [
+              "ok",
+              "ok",
+              "ok"
+            ],
+            "successful_runs": 3
+          }
+        },
+        "comparisons": [
+          {
+            "baseline_arm": "inprocess_immediate",
+            "candidate_arm": "valkey_ha",
+            "metrics": {
+              "isl_tokens_avg": {
+                "absolute_delta": 0.0,
+                "baseline_median": 1024.0012817382812,
+                "candidate_median": 1024.0012817382812,
+                "relative_percent": 0.0
+              },
+              "itl_ms_p50": {
+                "absolute_delta": 0.0022879854181014903,
+                "baseline_median": 0.40646936205485057,
+                "candidate_median": 0.40875734747295206,
+                "relative_percent": 0.5628924666141849
+              },
+              "itl_ms_p95": {
+                "absolute_delta": 0.012277409463884226,
+                "baseline_median": 0.5459840413495916,
+                "candidate_median": 0.5582614508134758,
+                "relative_percent": 2.248675516877067
+              },
+              "osl_tokens_avg": {
+                "absolute_delta": 0.0821533203125,
+                "baseline_median": 1049.5918579101562,
+                "candidate_median": 1049.6740112304688,
+                "relative_percent": 0.007827168217184495
+              },
+              "output_token_throughput_tps": {
+                "absolute_delta": -1503.6688070628152,
+                "baseline_median": 263269.98728598043,
+                "candidate_median": 261766.31847891762,
+                "relative_percent": -0.57115086400997
+              },
+              "request_latency_ms_p50": {
+                "absolute_delta": 8.382631000000401,
+                "baseline_median": 2328.2744574999997,
+                "candidate_median": 2336.6570885,
+                "relative_percent": 0.36003620505296047
+              },
+              "request_latency_ms_p95": {
+                "absolute_delta": 9.0425759499999,
+                "baseline_median": 2633.5617285499998,
+                "candidate_median": 2642.6043044999997,
+                "relative_percent": 0.3433591797743283
+              },
+              "request_throughput_rps": {
+                "absolute_delta": -1.456738283757801,
+                "baseline_median": 250.8308208584789,
+                "candidate_median": 249.3740825747211,
+                "relative_percent": -0.5807652659159085
+              },
+              "ttft_ms_p50": {
+                "absolute_delta": 5.788578499999858,
+                "baseline_median": 1909.2498335,
+                "candidate_median": 1915.0384119999999,
+                "relative_percent": 0.3031860157027405
+              },
+              "ttft_ms_p95": {
+                "absolute_delta": -4.692958650000037,
+                "baseline_median": 2133.356461,
+                "candidate_median": 2128.66350235,
+                "relative_percent": -0.21998005189438602
+              }
+            },
+            "note": "Matched immediate-routing policy: no router queue, replica sync, frontend prefill/output accounting, lower-tier credits, overlap decay, or temperature.",
+            "policy_matched": true
+          }
+        ],
+        "comparisons_suppressed": false,
+        "input_dataset_consistent": true,
+        "input_dataset_sha256": "d3f236de26a8cc0e6cd8738d71fc993efced101be32e6b7d2c5ab681257b83dd",
+        "methodology_caveats": [
+          "aiperf is closed-loop: this is a host-level throughput/latency result, not an open-loop server capacity limit.",
+          "Processes share the runner CPU set unless the per-role CPU affinity options or external isolation pin them; inspect each run's topology metadata.",
+          "Logical mock workers retain the same worker-scoped DP ranks regardless of how many independent dynamo.mocker OS processes host them.",
+          "The inprocess arm enables replica sync as a synchronized multi-frontend baseline; it is not the literal bare-CLI default.",
+          "Medians remain diagnostic during an incomplete campaign, but comparisons are suppressed unless every planned sample is valid and uses one identical input dataset."
+        ],
+        "planned_samples": 6,
+        "started_samples": 6,
+        "valid": true,
+        "valid_samples": 6,
+        "validation_errors": []
+      },
+      "frontend_count": 10
+    },
+    {
+      "analysis": {
+        "arms": {
+          "inprocess_immediate": {
+            "median_metrics": {
+              "isl_tokens_avg": 1024.0012817382812,
+              "itl_ms_p50": 0.47352080942607205,
+              "itl_ms_p95": 1.6337184853560356,
+              "osl_tokens_avg": 1049.5942993164062,
+              "output_token_throughput_tps": 240304.2183365116,
+              "request_latency_ms_p50": 2635.8067145,
+              "request_latency_ms_p95": 5737.619732199999,
+              "request_throughput_rps": 228.93838603745706,
+              "ttft_ms_p50": 2134.0708904999997,
+              "ttft_ms_p95": 4962.135620349997
+            },
+            "metric_samples": {
+              "isl_tokens_avg": [
+                1024.0012817382812,
+                1024.0012817382812,
+                1024.0012817382812
+              ],
+              "itl_ms_p50": [
+                0.46103770755606843,
+                0.47352080942607205,
+                0.4861772278587558
+              ],
+              "itl_ms_p95": [
+                1.5391357169734579,
+                1.6337184853560356,
+                2.2357153049904013
+              ],
+              "osl_tokens_avg": [
+                1049.5423583984375,
+                1049.6458129882812,
+                1049.5942993164062
+              ],
+              "output_token_throughput_tps": [
+                242929.05638173598,
+                240304.2183365116,
+                238158.95295426884
+              ],
+              "request_latency_ms_p50": [
+                2595.1946865,
+                2635.8067145,
+                2693.660993
+              ],
+              "request_latency_ms_p95": [
+                5737.619732199999,
+                5735.608846499994,
+                6584.727772249988
+              ],
+              "request_throughput_rps": [
+                231.4618885439142,
+                228.93838603745706,
+                226.90572262957238
+              ],
+              "ttft_ms_p50": [
+                2101.8067805,
+                2134.0708904999997,
+                2178.2023799999997
+              ],
+              "ttft_ms_p95": [
+                4962.135620349997,
+                4739.259951549996,
+                5102.655233749999
+              ]
+            },
+            "planned_runs": 3,
+            "started_runs": 3,
+            "statuses": [
+              "ok",
+              "ok",
+              "ok"
+            ],
+            "successful_runs": 3
+          },
+          "valkey_ha": {
+            "median_metrics": {
+              "isl_tokens_avg": 1024.0012817382812,
+              "itl_ms_p50": 0.4243654064675481,
+              "itl_ms_p95": 0.6279860827148468,
+              "osl_tokens_avg": 1049.6749267578125,
+              "output_token_throughput_tps": 257694.02336422767,
+              "request_latency_ms_p50": 2421.6397695,
+              "request_latency_ms_p95": 4922.037628299999,
+              "request_throughput_rps": 245.4935598261559,
+              "ttft_ms_p50": 1973.3918084999998,
+              "ttft_ms_p95": 4472.789852849996
+            },
+            "metric_samples": {
+              "isl_tokens_avg": [
+                1024.0012817382812,
+                1024.0012817382812,
+                1024.0012817382812
+              ],
+              "itl_ms_p50": [
+                0.4274020249491137,
+                0.4190287467321323,
+                0.4243654064675481
+              ],
+              "itl_ms_p95": [
+                0.7742739384117907,
+                0.5943611017359226,
+                0.6279860827148468
+              ],
+              "osl_tokens_avg": [
+                1049.6976928710938,
+                1049.6749267578125,
+                1049.5668334960938
+              ],
+              "output_token_throughput_tps": [
+                257694.02336422767,
+                255880.30345648248,
+                257732.14584413642
+              ],
+              "request_latency_ms_p50": [
+                2421.6397695,
+                2429.6719715,
+                2418.0745764999997
+              ],
+              "request_latency_ms_p95": [
+                5115.765637299998,
+                4691.208497299995,
+                4922.037628299999
+              ],
+              "request_throughput_rps": [
+                245.4935598261559,
+                243.77099703318032,
+                245.56048992671953
+              ],
+              "ttft_ms_p50": [
+                1968.4265635,
+                1988.9998365,
+                1973.3918084999998
+              ],
+              "ttft_ms_p95": [
+                4556.0737835,
+                4212.563558049999,
+                4472.789852849996
+              ]
+            },
+            "planned_runs": 3,
+            "started_runs": 3,
+            "statuses": [
+              "ok",
+              "ok",
+              "ok"
+            ],
+            "successful_runs": 3
+          }
+        },
+        "comparisons": [
+          {
+            "baseline_arm": "inprocess_immediate",
+            "candidate_arm": "valkey_ha",
+            "metrics": {
+              "isl_tokens_avg": {
+                "absolute_delta": 0.0,
+                "baseline_median": 1024.0012817382812,
+                "candidate_median": 1024.0012817382812,
+                "relative_percent": 0.0
+              },
+              "itl_ms_p50": {
+                "absolute_delta": -0.04915540295852394,
+                "baseline_median": 0.47352080942607205,
+                "candidate_median": 0.4243654064675481,
+                "relative_percent": -10.380832685706556
+              },
+              "itl_ms_p95": {
+                "absolute_delta": -1.005732402641189,
+                "baseline_median": 1.6337184853560356,
+                "candidate_median": 0.6279860827148468,
+                "relative_percent": -61.56093670091577
+              },
+              "osl_tokens_avg": {
+                "absolute_delta": 0.08062744140625,
+                "baseline_median": 1049.5942993164062,
+                "candidate_median": 1049.6749267578125,
+                "relative_percent": 0.007681772038849879
+              },
+              "output_token_throughput_tps": {
+                "absolute_delta": 17389.805027716066,
+                "baseline_median": 240304.2183365116,
+                "candidate_median": 257694.02336422767,
+                "relative_percent": 7.236579177883651
+              },
+              "request_latency_ms_p50": {
+                "absolute_delta": -214.16694499999994,
+                "baseline_median": 2635.8067145,
+                "candidate_median": 2421.6397695,
+                "relative_percent": -8.125290212739532
+              },
+              "request_latency_ms_p95": {
+                "absolute_delta": -815.5821039000002,
+                "baseline_median": 5737.619732199999,
+                "candidate_median": 4922.037628299999,
+                "relative_percent": -14.214641993837368
+              },
+              "request_throughput_rps": {
+                "absolute_delta": 16.555173788698824,
+                "baseline_median": 228.93838603745706,
+                "candidate_median": 245.4935598261559,
+                "relative_percent": 7.231279155602241
+              },
+              "ttft_ms_p50": {
+                "absolute_delta": -160.67908199999988,
+                "baseline_median": 2134.0708904999997,
+                "candidate_median": 1973.3918084999998,
+                "relative_percent": -7.52922888903441
+              },
+              "ttft_ms_p95": {
+                "absolute_delta": -489.3457675000009,
+                "baseline_median": 4962.135620349997,
+                "candidate_median": 4472.789852849996,
+                "relative_percent": -9.861595992926238
+              }
+            },
+            "note": "Matched immediate-routing policy: no router queue, replica sync, frontend prefill/output accounting, lower-tier credits, overlap decay, or temperature.",
+            "policy_matched": true
+          }
+        ],
+        "comparisons_suppressed": false,
+        "input_dataset_consistent": true,
+        "input_dataset_sha256": "d3f236de26a8cc0e6cd8738d71fc993efced101be32e6b7d2c5ab681257b83dd",
+        "methodology_caveats": [
+          "aiperf is closed-loop: this is a host-level throughput/latency result, not an open-loop server capacity limit.",
+          "Processes share the runner CPU set unless the per-role CPU affinity options or external isolation pin them; inspect each run's topology metadata.",
+          "Logical mock workers retain the same worker-scoped DP ranks regardless of how many independent dynamo.mocker OS processes host them.",
+          "The inprocess arm enables replica sync as a synchronized multi-frontend baseline; it is not the literal bare-CLI default.",
+          "Medians remain diagnostic during an incomplete campaign, but comparisons are suppressed unless every planned sample is valid and uses one identical input dataset."
+        ],
+        "planned_samples": 6,
+        "started_samples": 6,
+        "valid": true,
+        "valid_samples": 6,
+        "validation_errors": []
+      },
+      "frontend_count": 100
+    }
+  ],
   "provenance": {
     "aiperf": {
       "configured_path": "/home/biswaranjanp/dev/dynamo_main/dynamo/bin/aiperf",
@@ -59,30 +739,32 @@
     },
     "benchmark_harness": {
       "configured_path": "/tmp/dynamo-valkey-review-v2/benchmarks/router/valkey_aiperf/provenance.py",
-      "mtime": "2026-07-09T15:01:17.514828+00:00",
-      "mtime_ns": 1783609277514828420,
+      "mtime": "2026-07-09T17:17:07.748323+00:00",
+      "mtime_ns": 1783617427748322688,
       "resolved_path": "/tmp/dynamo-valkey-review-v2/benchmarks/router/valkey_aiperf/provenance.py",
       "rust_build_profile": null,
       "rust_build_profile_source": null,
-      "sha256": "341bea6d5776dd4fac4fa3c0065f5670890fb4b102aef294504e7e2aa0994f80",
-      "size_bytes": 10021
+      "sha256": "ab1957980e5bc651e2dc5c77726bcba036117f4207e58e6f00fe42ef5f44ff97",
+      "size_bytes": 10960
     },
     "dynamo_core": {
-      "configured_path": "/tmp/dynamo-valkey-review-wheel/release-fixed-extracted/dynamo/_core.abi3.so",
-      "import_path": "/tmp/dynamo-valkey-review-wheel/release-fixed-extracted/dynamo/_core.abi3.so",
-      "matched_build_artifact_path": "/tmp/dynamo-valkey-review-stack/target/release/lib_core.so",
-      "mtime": "2026-07-09T15:52:58.706244+00:00",
-      "mtime_ns": 1783612378706243874,
-      "resolved_path": "/tmp/dynamo-valkey-review-stack/target/release/lib_core.so",
+      "build_git_dirty": false,
+      "build_git_revision": "65a5cf262f173a0e9b6055ef11a292f88a1ebf4f",
+      "configured_path": "/tmp/dynamo-valkey-exact-65a5-python/dynamo/_core.abi3.so",
+      "import_path": "/tmp/dynamo-valkey-exact-65a5-python/dynamo/_core.abi3.so",
+      "matched_build_artifact_path": "/tmp/dynamo-valkey-exact-65a5/target/release/lib_core.so",
+      "mtime": "2026-07-09T17:27:38.598098+00:00",
+      "mtime_ns": 1783618058598097771,
+      "resolved_path": "/tmp/dynamo-valkey-exact-65a5/target/release/lib_core.so",
       "rust_build_profile": "release",
       "rust_build_profile_source": "resolved_path",
-      "sha256": "28bec564134ed7f88d02055e66a371b05fd6dd5655631e8cd0406c6adafd303f",
-      "size_bytes": 129966528
+      "sha256": "5971351b6bb9fa7e60b026b7345cc68a4d15fdbc7bb12fadd000e5d34ffa5eda",
+      "size_bytes": 130011240
     },
     "dynkv_module": {
       "configured_path": "/tmp/dynamo-valkey-review-v2/lib/kv-router/valkey-module/dynkv.so",
-      "mtime": "2026-07-09T14:49:58.326665+00:00",
-      "mtime_ns": 1783608598326665003,
+      "mtime": "2026-07-09T17:27:57.867162+00:00",
+      "mtime_ns": 1783618077867162341,
       "resolved_path": "/tmp/dynamo-valkey-review-v2/lib/kv-router/valkey-module/dynkv.so",
       "rust_build_profile": null,
       "rust_build_profile_source": null,
@@ -91,7 +773,7 @@
     },
     "git": {
       "dirty": false,
-      "revision": "c6f546b223cfc1ffe15e316948c06886b4839373"
+      "revision": "65a5cf262f173a0e9b6055ef11a292f88a1ebf4f"
     },
     "python": {
       "executable": "/home/biswaranjanp/dev/dynamo_main/.venv/bin/python",
@@ -110,743 +792,64 @@
       "size_bytes": 20374848
     }
   },
+  "schema_version": 2,
+  "source": {
+    "benchmark_recorded_dirty": false,
+    "core_build_dirty": false,
+    "core_build_revision": "65a5cf262f173a0e9b6055ef11a292f88a1ebf4f",
+    "git_revision": "65a5cf262f173a0e9b6055ef11a292f88a1ebf4f",
+    "note": "All 18 samples used the clean release core built from this exact revision."
+  },
   "source_artifact_sha256": {
     "frontends_1": {
-      "manifest_json": "106d373be918e1757984294da3dd5fc510708de68b91e9ae689f7d7ee695d27c",
-      "summary_json": "fa4bc8e1fa2ca2a5ca8cd6720a7e4e850d6ae6fb18dbcc7af8eec419782473b4",
-      "schedule_json": "a098c2cf6b21b46e49db7f4c054f3891e5aa45b7d3069522d9179b668d9addb7"
+      "manifest_json": "26d8682a147979e6692cdb3d8ef30d75701838df84b284b1ff2b4bf2bd8a795a",
+      "schedule_json": "a098c2cf6b21b46e49db7f4c054f3891e5aa45b7d3069522d9179b668d9addb7",
+      "summary_json": "22247fbf528c157112e55ace308e350cae4f196e27445b95f832e9cec604ceb4"
     },
     "frontends_10": {
-      "manifest_json": "b77c94dffdfa8a34f20b126eda3ff06251e996a014f5c9cdf01758fd49a112b9",
-      "summary_json": "e751a53d3b70d876842815c3067cc88fbbee1f26b2baa55f67f5fcc0991f2f43",
-      "schedule_json": "a098c2cf6b21b46e49db7f4c054f3891e5aa45b7d3069522d9179b668d9addb7"
+      "manifest_json": "df78249ebfc989ed0f0ed3875e29a0f7a0c2c0b4e652669309183986e281a104",
+      "schedule_json": "a098c2cf6b21b46e49db7f4c054f3891e5aa45b7d3069522d9179b668d9addb7",
+      "summary_json": "7459db7175755188e378858ae86e90fb6ad3f236e0df177ae2e42b5f3f105f4a"
     },
     "frontends_100": {
-      "manifest_json": "c3d2c3e2e45851894c894015ea6bcb73243a2a6b6fa5b0e5db68bbbb56b16cb8",
-      "summary_json": "1dc21e0a313fbc197806c8c76f723443809cf033ed23fb0ccf62a7bbbad5fc42",
-      "schedule_json": "a098c2cf6b21b46e49db7f4c054f3891e5aa45b7d3069522d9179b668d9addb7"
+      "manifest_json": "accca2e059f32e228c6ed880fd160ed6401261c7ebc1fde2e003654090a9217d",
+      "schedule_json": "a098c2cf6b21b46e49db7f4c054f3891e5aa45b7d3069522d9179b668d9addb7",
+      "summary_json": "80521bb5414a32f07862b20ec90c22e26d22a35e9ec3c298146afce15c6b7cb6"
     }
   },
-  "frontend_results": [
-    {
-      "frontend_count": 1,
-      "analysis": {
-        "arms": {
-          "inprocess_immediate": {
-            "median_metrics": {
-              "isl_tokens_avg": 1024.0012817382812,
-              "itl_ms_p50": 0.4048186725403282,
-              "itl_ms_p95": 0.6899473887467107,
-              "osl_tokens_avg": 1049.612060546875,
-              "output_token_throughput_tps": 268719.1534173189,
-              "request_latency_ms_p50": 2288.6936729999998,
-              "request_latency_ms_p95": 2577.2962841499993,
-              "request_throughput_rps": 256.01506224216325,
-              "ttft_ms_p50": 1879.7108309999999,
-              "ttft_ms_p95": 2076.83985645
-            },
-            "metric_samples": {
-              "isl_tokens_avg": [
-                1024.0012817382812,
-                1024.0012817382812,
-                1024.0012817382812
-              ],
-              "itl_ms_p50": [
-                0.4006494453349286,
-                0.4048186725403282,
-                0.41271385378080894
-              ],
-              "itl_ms_p95": [
-                0.6584827606126449,
-                0.6899473887467107,
-                1.3810494429144573
-              ],
-              "osl_tokens_avg": [
-                1049.6224365234375,
-                1049.612060546875,
-                1049.5885009765625
-              ],
-              "output_token_throughput_tps": [
-                268719.1534173189,
-                268944.4828834348,
-                268593.7922388208
-              ],
-              "request_latency_ms_p50": [
-                2274.3388959999997,
-                2288.6936729999998,
-                2319.056448
-              ],
-              "request_latency_ms_p95": [
-                2577.2962841499993,
-                2564.23954375,
-                3501.489445649998
-              ],
-              "request_throughput_rps": [
-                256.01506224216325,
-                256.23227189606393,
-                255.90390137555303
-              ],
-              "ttft_ms_p50": [
-                1862.321017,
-                1879.7108309999999,
-                1884.5547725
-              ],
-              "ttft_ms_p95": [
-                2076.83985645,
-                2057.4332503,
-                2653.649324649995
-              ]
-            },
-            "planned_runs": 3,
-            "started_runs": 3,
-            "statuses": [
-              "ok",
-              "ok",
-              "ok"
-            ],
-            "successful_runs": 3
-          },
-          "valkey_ha": {
-            "median_metrics": {
-              "isl_tokens_avg": 1024.0012817382812,
-              "itl_ms_p50": 0.4035096761741002,
-              "itl_ms_p95": 0.5299780022595255,
-              "osl_tokens_avg": 1049.6138916015625,
-              "output_token_throughput_tps": 266191.3660745887,
-              "request_latency_ms_p50": 2305.7829225,
-              "request_latency_ms_p95": 2567.730675999999,
-              "request_throughput_rps": 253.61139568374546,
-              "ttft_ms_p50": 1892.9579469999999,
-              "ttft_ms_p95": 2058.1504506499996
-            },
-            "metric_samples": {
-              "isl_tokens_avg": [
-                1024.0012817382812,
-                1024.0012817382812,
-                1024.0012817382812
-              ],
-              "itl_ms_p50": [
-                0.407411135551948,
-                0.4035096761741002,
-                0.39986878528812364
-              ],
-              "itl_ms_p95": [
-                0.7133510419104755,
-                0.5299780022595255,
-                0.5245114940185887
-              ],
-              "osl_tokens_avg": [
-                1049.6348266601562,
-                1049.6033325195312,
-                1049.6138916015625
-              ],
-              "output_token_throughput_tps": [
-                269198.8286005415,
-                266191.3660745887,
-                265527.648724685
-              ],
-              "request_latency_ms_p50": [
-                2305.3815904999997,
-                2305.7829225,
-                2309.561185
-              ],
-              "request_latency_ms_p95": [
-                3265.8043430499974,
-                2558.1673932,
-                2567.730675999999
-              ],
-              "request_throughput_rps": [
-                256.4690326226198,
-                253.61139568374546,
-                252.97650007235265
-              ],
-              "ttft_ms_p50": [
-                1889.319634,
-                1892.9579469999999,
-                1898.059771
-              ],
-              "ttft_ms_p95": [
-                2716.8744394499968,
-                2058.1504506499996,
-                2053.2698059
-              ]
-            },
-            "planned_runs": 3,
-            "started_runs": 3,
-            "statuses": [
-              "ok",
-              "ok",
-              "ok"
-            ],
-            "successful_runs": 3
-          }
-        },
-        "comparisons": [
-          {
-            "baseline_arm": "inprocess_immediate",
-            "candidate_arm": "valkey_ha",
-            "metrics": {
-              "isl_tokens_avg": {
-                "absolute_delta": 0.0,
-                "baseline_median": 1024.0012817382812,
-                "candidate_median": 1024.0012817382812,
-                "relative_percent": 0.0
-              },
-              "itl_ms_p50": {
-                "absolute_delta": -0.001308996366227999,
-                "baseline_median": 0.4048186725403282,
-                "candidate_median": 0.4035096761741002,
-                "relative_percent": -0.3233537519437413
-              },
-              "itl_ms_p95": {
-                "absolute_delta": -0.15996938648718517,
-                "baseline_median": 0.6899473887467107,
-                "candidate_median": 0.5299780022595255,
-                "relative_percent": -23.185736926661836
-              },
-              "osl_tokens_avg": {
-                "absolute_delta": 0.0018310546875,
-                "baseline_median": 1049.612060546875,
-                "candidate_median": 1049.6138916015625,
-                "relative_percent": 0.00017445061431039323
-              },
-              "output_token_throughput_tps": {
-                "absolute_delta": -2527.787342730211,
-                "baseline_median": 268719.1534173189,
-                "candidate_median": 266191.3660745887,
-                "relative_percent": -0.9406800038568802
-              },
-              "request_latency_ms_p50": {
-                "absolute_delta": 17.089249500000278,
-                "baseline_median": 2288.6936729999998,
-                "candidate_median": 2305.7829225,
-                "relative_percent": 0.7466813799332017
-              },
-              "request_latency_ms_p95": {
-                "absolute_delta": -9.565608150000116,
-                "baseline_median": 2577.2962841499993,
-                "candidate_median": 2567.730675999999,
-                "relative_percent": -0.3711489520559676
-              },
-              "request_throughput_rps": {
-                "absolute_delta": -2.4036665584177968,
-                "baseline_median": 256.01506224216325,
-                "candidate_median": 253.61139568374546,
-                "relative_percent": -0.9388770087848118
-              },
-              "ttft_ms_p50": {
-                "absolute_delta": 13.247116000000005,
-                "baseline_median": 1879.7108309999999,
-                "candidate_median": 1892.9579469999999,
-                "relative_percent": 0.704742228513552
-              },
-              "ttft_ms_p95": {
-                "absolute_delta": -18.68940580000026,
-                "baseline_median": 2076.83985645,
-                "candidate_median": 2058.1504506499996,
-                "relative_percent": -0.8998963373105995
-              }
-            },
-            "note": "Matched immediate-routing policy: no router queue, replica sync, frontend prefill/output accounting, lower-tier credits, overlap decay, or temperature.",
-            "policy_matched": true
-          }
-        ],
-        "comparisons_suppressed": false,
-        "input_dataset_consistent": true,
-        "input_dataset_sha256": "d3f236de26a8cc0e6cd8738d71fc993efced101be32e6b7d2c5ab681257b83dd",
-        "methodology_caveats": [
-          "aiperf is closed-loop: this is a host-level throughput/latency result, not an open-loop server capacity limit.",
-          "Processes share the runner CPU set unless the per-role CPU affinity options or external isolation pin them; inspect each run's topology metadata.",
-          "Logical mock workers retain the same worker-scoped DP ranks regardless of how many independent dynamo.mocker OS processes host them.",
-          "The inprocess arm enables replica sync as a synchronized multi-frontend baseline; it is not the literal bare-CLI default.",
-          "Medians remain diagnostic during an incomplete campaign, but comparisons are suppressed unless every planned sample is valid and uses one identical input dataset."
-        ],
-        "planned_samples": 6,
-        "started_samples": 6,
-        "valid": true,
-        "valid_samples": 6,
-        "validation_errors": []
-      }
+  "title": "Source-bound in-process versus Valkey HA router A/B",
+  "validation": {
+    "input_dataset_consistent": true,
+    "input_dataset_sha256": "d3f236de26a8cc0e6cd8738d71fc993efced101be32e6b7d2c5ab681257b83dd",
+    "planned_samples": 18,
+    "request_errors": 0,
+    "valid_samples": 18,
+    "validation_errors": 0,
+    "valkey_samples": 9
+  },
+  "workload": {
+    "concurrency": 4096,
+    "cpu_affinity": {
+      "aiperf": "20-23",
+      "frontends": "2-9",
+      "mockers": "10-19",
+      "valkey": "0-1"
     },
-    {
-      "frontend_count": 10,
-      "analysis": {
-        "arms": {
-          "inprocess_immediate": {
-            "median_metrics": {
-              "isl_tokens_avg": 1024.0012817382812,
-              "itl_ms_p50": 0.407311900984703,
-              "itl_ms_p95": 0.6481767016263733,
-              "osl_tokens_avg": 1049.6124267578125,
-              "output_token_throughput_tps": 265856.7691569565,
-              "request_latency_ms_p50": 2316.963655,
-              "request_latency_ms_p95": 2674.1258453999994,
-              "request_throughput_rps": 253.29041690004715,
-              "ttft_ms_p50": 1895.5762144999999,
-              "ttft_ms_p95": 2135.84734305
-            },
-            "metric_samples": {
-              "isl_tokens_avg": [
-                1024.0012817382812,
-                1024.0012817382812,
-                1024.0012817382812
-              ],
-              "itl_ms_p50": [
-                0.40704059293936473,
-                0.41040475023444456,
-                0.407311900984703
-              ],
-              "itl_ms_p95": [
-                0.6481767016263733,
-                0.7215348855650512,
-                0.6202310149904756
-              ],
-              "osl_tokens_avg": [
-                1049.54931640625,
-                1049.6719360351562,
-                1049.6124267578125
-              ],
-              "output_token_throughput_tps": [
-                266929.82059342926,
-                265612.91630020615,
-                265856.7691569565
-              ],
-              "request_latency_ms_p50": [
-                2303.350523,
-                2327.2164315,
-                2316.963655
-              ],
-              "request_latency_ms_p95": [
-                2674.1258453999994,
-                2867.202001949994,
-                2638.6066425
-              ],
-              "request_throughput_rps": [
-                254.32804006525456,
-                253.04374365145463,
-                253.29041690004715
-              ],
-              "ttft_ms_p50": [
-                1882.1339154999998,
-                1904.1741714999998,
-                1895.5762144999999
-              ],
-              "ttft_ms_p95": [
-                2135.84734305,
-                2320.265071449996,
-                2123.3807511
-              ]
-            },
-            "planned_runs": 3,
-            "started_runs": 3,
-            "statuses": [
-              "ok",
-              "ok",
-              "ok"
-            ],
-            "successful_runs": 3
-          },
-          "valkey_ha": {
-            "median_metrics": {
-              "isl_tokens_avg": 1024.0012817382812,
-              "itl_ms_p50": 0.4024363145952042,
-              "itl_ms_p95": 0.5424698435160364,
-              "osl_tokens_avg": 1049.631591796875,
-              "output_token_throughput_tps": 265846.261349098,
-              "request_latency_ms_p50": 2301.158789,
-              "request_latency_ms_p95": 2624.8463075499994,
-              "request_throughput_rps": 253.29086329511284,
-              "ttft_ms_p50": 1888.148903,
-              "ttft_ms_p95": 2120.3852973
-            },
-            "metric_samples": {
-              "isl_tokens_avg": [
-                1024.0012817382812,
-                1024.0012817382812,
-                1024.0012817382812
-              ],
-              "itl_ms_p50": [
-                0.4024363145952042,
-                0.40185703113439547,
-                0.4035209846915395
-              ],
-              "itl_ms_p95": [
-                0.5424698435160364,
-                0.5452742779532771,
-                0.5357954842638802
-              ],
-              "osl_tokens_avg": [
-                1049.569091796875,
-                1049.6539916992188,
-                1049.631591796875
-              ],
-              "output_token_throughput_tps": [
-                265846.261349098,
-                266365.3768627599,
-                265457.33033489407
-              ],
-              "request_latency_ms_p50": [
-                2301.158789,
-                2299.2429174999997,
-                2310.5498654999997
-              ],
-              "request_latency_ms_p95": [
-                2624.7766431499995,
-                2624.8463075499994,
-                2626.4539549999995
-              ],
-              "request_throughput_rps": [
-                253.29086329511284,
-                253.76493489207598,
-                252.90524066682767
-              ],
-              "ttft_ms_p50": [
-                1882.7559445,
-                1888.148903,
-                1893.040123
-              ],
-              "ttft_ms_p95": [
-                2123.0398689999997,
-                2120.0342837,
-                2120.3852973
-              ]
-            },
-            "planned_runs": 3,
-            "started_runs": 3,
-            "statuses": [
-              "ok",
-              "ok",
-              "ok"
-            ],
-            "successful_runs": 3
-          }
-        },
-        "comparisons": [
-          {
-            "baseline_arm": "inprocess_immediate",
-            "candidate_arm": "valkey_ha",
-            "metrics": {
-              "isl_tokens_avg": {
-                "absolute_delta": 0.0,
-                "baseline_median": 1024.0012817382812,
-                "candidate_median": 1024.0012817382812,
-                "relative_percent": 0.0
-              },
-              "itl_ms_p50": {
-                "absolute_delta": -0.004875586389498809,
-                "baseline_median": 0.407311900984703,
-                "candidate_median": 0.4024363145952042,
-                "relative_percent": -1.1970154512332596
-              },
-              "itl_ms_p95": {
-                "absolute_delta": -0.10570685811033687,
-                "baseline_median": 0.6481767016263733,
-                "candidate_median": 0.5424698435160364,
-                "relative_percent": -16.30833966187035
-              },
-              "osl_tokens_avg": {
-                "absolute_delta": 0.0191650390625,
-                "baseline_median": 1049.6124267578125,
-                "candidate_median": 1049.631591796875,
-                "relative_percent": 0.0018259157927178523
-              },
-              "output_token_throughput_tps": {
-                "absolute_delta": -10.507807858521119,
-                "baseline_median": 265856.7691569565,
-                "candidate_median": 265846.261349098,
-                "relative_percent": -0.0039524319398907305
-              },
-              "request_latency_ms_p50": {
-                "absolute_delta": -15.804865999999947,
-                "baseline_median": 2316.963655,
-                "candidate_median": 2301.158789,
-                "relative_percent": -0.6821369841470365
-              },
-              "request_latency_ms_p95": {
-                "absolute_delta": -49.27953785,
-                "baseline_median": 2674.1258453999994,
-                "candidate_median": 2624.8463075499994,
-                "relative_percent": -1.8428279257975122
-              },
-              "request_throughput_rps": {
-                "absolute_delta": 0.00044639506569410514,
-                "baseline_median": 253.29041690004715,
-                "candidate_median": 253.29086329511284,
-                "relative_percent": 0.00017623843458327936
-              },
-              "ttft_ms_p50": {
-                "absolute_delta": -7.42731149999986,
-                "baseline_median": 1895.5762144999999,
-                "candidate_median": 1888.148903,
-                "relative_percent": -0.3918234172377489
-              },
-              "ttft_ms_p95": {
-                "absolute_delta": -15.462045750000016,
-                "baseline_median": 2135.84734305,
-                "candidate_median": 2120.3852973,
-                "relative_percent": -0.7239302846391701
-              }
-            },
-            "note": "Matched immediate-routing policy: no router queue, replica sync, frontend prefill/output accounting, lower-tier credits, overlap decay, or temperature.",
-            "policy_matched": true
-          }
-        ],
-        "comparisons_suppressed": false,
-        "input_dataset_consistent": true,
-        "input_dataset_sha256": "d3f236de26a8cc0e6cd8738d71fc993efced101be32e6b7d2c5ab681257b83dd",
-        "methodology_caveats": [
-          "aiperf is closed-loop: this is a host-level throughput/latency result, not an open-loop server capacity limit.",
-          "Processes share the runner CPU set unless the per-role CPU affinity options or external isolation pin them; inspect each run's topology metadata.",
-          "Logical mock workers retain the same worker-scoped DP ranks regardless of how many independent dynamo.mocker OS processes host them.",
-          "The inprocess arm enables replica sync as a synchronized multi-frontend baseline; it is not the literal bare-CLI default.",
-          "Medians remain diagnostic during an incomplete campaign, but comparisons are suppressed unless every planned sample is valid and uses one identical input dataset."
-        ],
-        "planned_samples": 6,
-        "started_samples": 6,
-        "valid": true,
-        "valid_samples": 6,
-        "validation_errors": []
-      }
-    },
-    {
-      "frontend_count": 100,
-      "analysis": {
-        "arms": {
-          "inprocess_immediate": {
-            "median_metrics": {
-              "isl_tokens_avg": 1024.0012817382812,
-              "itl_ms_p50": 0.46734796453861926,
-              "itl_ms_p95": 1.1921160594210636,
-              "osl_tokens_avg": 1049.6116333007812,
-              "output_token_throughput_tps": 243310.36464060648,
-              "request_latency_ms_p50": 2616.8766339999997,
-              "request_latency_ms_p95": 5414.679783799995,
-              "request_throughput_rps": 231.81422412956766,
-              "ttft_ms_p50": 2122.1408444999997,
-              "ttft_ms_p95": 4674.499596299999
-            },
-            "metric_samples": {
-              "isl_tokens_avg": [
-                1024.0012817382812,
-                1024.0012817382812,
-                1024.0012817382812
-              ],
-              "itl_ms_p50": [
-                0.45082814695479856,
-                0.46734796453861926,
-                0.4943278527886461
-              ],
-              "itl_ms_p95": [
-                0.7139730072497624,
-                1.1921160594210636,
-                2.5995915185730465
-              ],
-              "osl_tokens_avg": [
-                1049.6124267578125,
-                1049.592041015625,
-                1049.6116333007812
-              ],
-              "output_token_throughput_tps": [
-                246928.93348127668,
-                243310.36464060648,
-                230933.66250519114
-              ],
-              "request_latency_ms_p50": [
-                2557.175741,
-                2616.8766339999997,
-                2734.314657
-              ],
-              "request_latency_ms_p95": [
-                5127.445370049999,
-                5414.679783799995,
-                6456.309178049999
-              ],
-              "request_throughput_rps": [
-                235.25725037767015,
-                231.81422412956766,
-                220.01820023560447
-              ],
-              "ttft_ms_p50": [
-                2080.300379,
-                2122.1408444999997,
-                2202.938077
-              ],
-              "ttft_ms_p95": [
-                4597.578431099999,
-                4674.499596299999,
-                4958.698518199999
-              ]
-            },
-            "planned_runs": 3,
-            "started_runs": 3,
-            "statuses": [
-              "ok",
-              "ok",
-              "ok"
-            ],
-            "successful_runs": 3
-          },
-          "valkey_ha": {
-            "median_metrics": {
-              "isl_tokens_avg": 1024.0012817382812,
-              "itl_ms_p50": 0.4169205193433377,
-              "itl_ms_p95": 0.5778190077985278,
-              "osl_tokens_avg": 1049.6395874023438,
-              "output_token_throughput_tps": 258711.13705776312,
-              "request_latency_ms_p50": 2395.6027335,
-              "request_latency_ms_p95": 4823.803130949997,
-              "request_throughput_rps": 246.47616206818518,
-              "ttft_ms_p50": 1955.2430024999999,
-              "ttft_ms_p95": 4359.944467049998
-            },
-            "metric_samples": {
-              "isl_tokens_avg": [
-                1024.0012817382812,
-                1024.0012817382812,
-                1024.0012817382812
-              ],
-              "itl_ms_p50": [
-                0.4169205193433377,
-                0.4175728312854442,
-                0.4164623179936261
-              ],
-              "itl_ms_p95": [
-                0.5758064704421179,
-                0.5837724656965648,
-                0.5778190077985278
-              ],
-              "osl_tokens_avg": [
-                1049.6395874023438,
-                1049.6033935546875,
-                1049.6539306640625
-              ],
-              "output_token_throughput_tps": [
-                258711.13705776312,
-                257795.5795062789,
-                258784.6849759252
-              ],
-              "request_latency_ms_p50": [
-                2387.295878,
-                2403.5081379999997,
-                2395.6027335
-              ],
-              "request_latency_ms_p95": [
-                4734.393045599998,
-                4823.803130949997,
-                4925.364188749998
-              ],
-              "request_throughput_rps": [
-                246.47616206818518,
-                245.61237233923538,
-                246.54286276259197
-              ],
-              "ttft_ms_p50": [
-                1950.5294314999999,
-                1968.5078604999999,
-                1955.2430024999999
-              ],
-              "ttft_ms_p95": [
-                4291.714402799994,
-                4359.944467049998,
-                4464.2915408499985
-              ]
-            },
-            "planned_runs": 3,
-            "started_runs": 3,
-            "statuses": [
-              "ok",
-              "ok",
-              "ok"
-            ],
-            "successful_runs": 3
-          }
-        },
-        "comparisons": [
-          {
-            "baseline_arm": "inprocess_immediate",
-            "candidate_arm": "valkey_ha",
-            "metrics": {
-              "isl_tokens_avg": {
-                "absolute_delta": 0.0,
-                "baseline_median": 1024.0012817382812,
-                "candidate_median": 1024.0012817382812,
-                "relative_percent": 0.0
-              },
-              "itl_ms_p50": {
-                "absolute_delta": -0.050427445195281584,
-                "baseline_median": 0.46734796453861926,
-                "candidate_median": 0.4169205193433377,
-                "relative_percent": -10.790128345817267
-              },
-              "itl_ms_p95": {
-                "absolute_delta": -0.6142970516225358,
-                "baseline_median": 1.1921160594210636,
-                "candidate_median": 0.5778190077985278,
-                "relative_percent": -51.52997032192164
-              },
-              "osl_tokens_avg": {
-                "absolute_delta": 0.0279541015625,
-                "baseline_median": 1049.6116333007812,
-                "candidate_median": 1049.6395874023438,
-                "relative_percent": 0.0026632804625641333
-              },
-              "output_token_throughput_tps": {
-                "absolute_delta": 15400.772417156637,
-                "baseline_median": 243310.36464060648,
-                "candidate_median": 258711.13705776312,
-                "relative_percent": 6.329682025632202
-              },
-              "request_latency_ms_p50": {
-                "absolute_delta": -221.27390049999985,
-                "baseline_median": 2616.8766339999997,
-                "candidate_median": 2395.6027335,
-                "relative_percent": -8.455648906986262
-              },
-              "request_latency_ms_p95": {
-                "absolute_delta": -590.8766528499982,
-                "baseline_median": 5414.679783799995,
-                "candidate_median": 4823.803130949997,
-                "relative_percent": -10.912494855518935
-              },
-              "request_throughput_rps": {
-                "absolute_delta": 14.661937938617513,
-                "baseline_median": 231.81422412956766,
-                "candidate_median": 246.47616206818518,
-                "relative_percent": 6.324865522670659
-              },
-              "ttft_ms_p50": {
-                "absolute_delta": -166.89784199999986,
-                "baseline_median": 2122.1408444999997,
-                "candidate_median": 1955.2430024999999,
-                "relative_percent": -7.864597792015207
-              },
-              "ttft_ms_p95": {
-                "absolute_delta": -314.5551292500013,
-                "baseline_median": 4674.499596299999,
-                "candidate_median": 4359.944467049998,
-                "relative_percent": -6.7291722412165935
-              }
-            },
-            "note": "Matched immediate-routing policy: no router queue, replica sync, frontend prefill/output accounting, lower-tier credits, overlap decay, or temperature.",
-            "policy_matched": true
-          }
-        ],
-        "comparisons_suppressed": false,
-        "input_dataset_consistent": true,
-        "input_dataset_sha256": "d3f236de26a8cc0e6cd8738d71fc993efced101be32e6b7d2c5ab681257b83dd",
-        "methodology_caveats": [
-          "aiperf is closed-loop: this is a host-level throughput/latency result, not an open-loop server capacity limit.",
-          "Processes share the runner CPU set unless the per-role CPU affinity options or external isolation pin them; inspect each run's topology metadata.",
-          "Logical mock workers retain the same worker-scoped DP ranks regardless of how many independent dynamo.mocker OS processes host them.",
-          "The inprocess arm enables replica sync as a synchronized multi-frontend baseline; it is not the literal bare-CLI default.",
-          "Medians remain diagnostic during an incomplete campaign, but comparisons are suppressed unless every planned sample is valid and uses one identical input dataset."
-        ],
-        "planned_samples": 6,
-        "started_samples": 6,
-        "valid": true,
-        "valid_samples": 6,
-        "validation_errors": []
-      }
-    }
-  ]
+    "data_parallel_size": 1,
+    "frontend_counts": [
+      1,
+      10,
+      100
+    ],
+    "logical_mock_workers": 200,
+    "measured_requests_per_sample": 16384,
+    "mocker_processes": 20,
+    "model": "Qwen/Qwen3-0.6B",
+    "repetitions_per_arm": 3,
+    "request_rate": "unlimited closed-loop",
+    "requested_isl": 1024,
+    "requested_osl": 1024,
+    "tokenizer": "Qwen/Qwen3-0.6B",
+    "warmup_requests_per_sample": 4096
+  }
 }
