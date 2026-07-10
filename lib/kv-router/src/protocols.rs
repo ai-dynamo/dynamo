@@ -186,6 +186,11 @@ pub trait WorkerConfigLike {
         false
     }
 
+    /// Advertised peer-control endpoint used as a router_hint source, if available.
+    fn router_hint_source_control_endpoint(&self) -> Option<&str> {
+        None
+    }
+
     /// Tokens retained by the backend's native KV offloading tier, if available.
     fn native_offloading_capacity_tokens(&self) -> Option<u64> {
         None

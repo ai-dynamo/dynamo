@@ -8,6 +8,7 @@ use derive_builder::Builder;
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
+    router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -365,6 +366,14 @@ impl PreprocessedRequest {
         self.routing.get_or_insert_with(RoutingHints::default)
     }
 
+    pub fn attach_router_hint(&mut self, hint: &RouterHint) -> serde_json::Result<()> {
+        let hint_value = serde_json::to_value(hint)?;
+        let mut map = extra_args_object(self.extra_args.take());
+        map.insert(ROUTER_HINT_EXTRA_ARGS_KEY.to_string(), hint_value);
+        self.extra_args = Some(serde_json::Value::Object(map));
+        Ok(())
+    }
+
     /// Extract the token IDs and optional block MM info used for KV cache overlap computation.
     /// Falls back to the request's primary `token_ids` when no multimodal routing info is present.
     pub fn block_mm_routing_info(&self) -> (&[TokenIdType], Option<&[Option<BlockExtraInfo>]>) {
@@ -376,6 +385,15 @@ impl PreprocessedRequest {
             return (&self.token_ids, None);
         }
         (tokens, Some(mm.block_mm_infos.as_slice()))
+    }
+}
+
+fn extra_args_object(
+    extra_args: Option<serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    match extra_args {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
     }
 }
 
@@ -419,6 +437,47 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_router_hint_preserves_extra_args_object() {
+        use dynamo_kv_router::{
+            protocols::ExternalSequenceBlockHash,
+            router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
+        };
+
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .extra_args(Some(serde_json::json!({"caller": "kept"})))
+            .build()
+            .unwrap();
+        let hint = RouterHint {
+            request_id: "req-1".to_string(),
+            source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
+            kv_block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
+            start_block_index: 2,
+        };
+
+        req.attach_router_hint(&hint).unwrap();
+
+        let extra_args = req.extra_args.unwrap();
+        assert_eq!(extra_args["caller"], "kept");
+        assert_eq!(
+            extra_args[ROUTER_HINT_EXTRA_ARGS_KEY]["source_control_endpoint"],
+            "tcp://127.0.0.1:23280"
+        );
+        assert_eq!(
+            extra_args[ROUTER_HINT_EXTRA_ARGS_KEY]["kv_block_hashes"],
+            serde_json::json!([11, 22])
+        );
+        assert_eq!(
+            extra_args[ROUTER_HINT_EXTRA_ARGS_KEY]["start_block_index"],
+            2
+        );
+    }
 
     #[test]
     fn bootstrap_info_carries_only_stable_handoff_identity() {

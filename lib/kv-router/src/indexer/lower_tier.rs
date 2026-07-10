@@ -335,6 +335,36 @@ impl LowerTierIndexer {
             .unwrap_or_default()
     }
 
+    /// Walk the edge chain owned by `worker` starting from `parent_hash`,
+    /// returning each step's child block hash in order. The result may be
+    /// shorter than `local_hashes` if the source evicts blocks while the
+    /// router is preparing a hint.
+    pub fn chain_block_hashes_for_worker(
+        &self,
+        worker: WorkerWithDpRank,
+        parent_hash: Option<ExternalSequenceBlockHash>,
+        local_hashes: &[LocalBlockHash],
+    ) -> Vec<ExternalSequenceBlockHash> {
+        let mut chain = Vec::with_capacity(local_hashes.len());
+        let mut current_parent = parent_hash;
+        for &local_hash in local_hashes {
+            let key = TransitionKey {
+                parent_hash: current_parent,
+                local_hash,
+            };
+            let Some(edge) = self.edges.get(&key) else {
+                break;
+            };
+            if !edge.contains(&worker) {
+                break;
+            }
+            let child_hash = edge.child_hash();
+            chain.push(child_hash);
+            current_parent = Some(child_hash);
+        }
+        chain
+    }
+
     /// Reconstruct store events from the per-worker block index. Each block
     /// becomes a single-block `Stored` event with the correct parent hash,
     /// suitable for replaying into a fresh indexer to recreate the same state.
@@ -899,6 +929,28 @@ mod tests {
         fn dump_events(&self) -> Vec<crate::protocols::RouterEvent> {
             LowerTierIndexer::dump_events(&self.worker_blocks)
         }
+    }
+
+    #[test]
+    fn chain_block_hashes_for_worker_returns_external_hashes() {
+        let mut index = TestLowerTierIndex::new();
+        let worker = WorkerWithDpRank::new(7, 0);
+        index
+            .apply_event(store_event(7, 0, 0, None, &[11, 12], &[101, 102]))
+            .unwrap();
+
+        let chain =
+            index
+                .index
+                .chain_block_hashes_for_worker(worker, None, &local_hashes(&[11, 12]));
+
+        assert_eq!(
+            chain,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102)
+            ]
+        );
     }
 
     #[test]

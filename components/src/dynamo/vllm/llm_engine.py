@@ -51,10 +51,7 @@ from dynamo.common.backend.metrics import (
 )
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
-from dynamo.common.constants import (
-    ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
-    DisaggregationMode,
-)
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.llm import (
     ModelInput,
@@ -72,6 +69,7 @@ from dynamo.vllm.cache_info import (
     get_configured_kv_event_block_size,
 )
 from dynamo.vllm.capacity import per_rank_kv_blocks
+from dynamo.vllm.router_hints import enable_router_hint_support
 
 from .handlers import (
     VllmEnginePauseController,
@@ -816,7 +814,7 @@ class VllmLLMEngine(LLMEngine):
         model_type, worker_type, needs = self._lora_registration_topology()
 
         runtime_config = ModelRuntimeConfig()
-        runtime_config.set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
+        enable_router_hint_support(runtime_config, self.engine_args)
         # Prefill workers don't run tool/reasoning parsing (mirrors the base
         # model registration in main.py:register_vllm_model).
         if model_type != ModelType.Prefill:
