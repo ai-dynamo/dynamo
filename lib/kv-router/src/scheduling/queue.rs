@@ -20,9 +20,9 @@ use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::{
-    AdmissionAction, AdmissionDecision, AdmissionTicket, PolicyClassAdmissionController,
-    PolicyClassAdmissionStrategies, RequestProgressUpdater, WorkerEligibility,
-    WorkerEligibilitySnapshot, WorkerPlacement,
+    AdmissionAction, AdmissionDecision, AdmissionTicket, ClassAdmissionAction,
+    PolicyClassAdmissionController, PolicyClassAdmissionStrategies, RequestProgressUpdater,
+    WorkerEligibility, WorkerEligibilitySnapshot, WorkerPlacement,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -892,7 +892,12 @@ impl<
 
     fn handle_cancelled(&mut self, request_id: &str) -> bool {
         let Some(tracked) = self.tracked_admissions.get(request_id).copied() else {
-            return false;
+            let request_id = request_id.to_owned();
+            let rollback_booking = self.slots.request_worker(&request_id).is_some();
+            if rollback_booking && let Err(error) = self.slots.free(&request_id, Instant::now()) {
+                tracing::error!(%request_id, %error, "Failed to roll back cancelled scheduler booking");
+            }
+            return rollback_booking;
         };
         let rollback_booking = tracked.worker.is_some() && !tracked.dispatched;
         if rollback_booking
@@ -968,7 +973,7 @@ impl<
 
     fn apply_admission_actions(
         &mut self,
-        actions: impl IntoIterator<Item = super::queue_admission::ClassAdmissionAction>,
+        actions: impl IntoIterator<Item = ClassAdmissionAction>,
     ) -> bool {
         let mut made_ready = false;
         let mut actions: VecDeque<_> = actions.into_iter().collect();
@@ -1037,13 +1042,19 @@ impl<
         for class_index in std::mem::take(&mut self.cancelled_ready_classes) {
             let tracked_admissions = &self.tracked_admissions;
             let cancelled = self.pending.take_if_in_class(class_index, |queued| {
-                queued.admission.is_some()
-                    && queued.request.response_is_closed()
+                let Some(admission) = queued.admission.as_ref() else {
+                    return false;
+                };
+                queued.request.response_is_closed()
                     && queued
                         .request
                         .mode
                         .tracked_request_id()
-                        .is_some_and(|request_id| !tracked_admissions.contains_key(request_id))
+                        .is_some_and(|request_id| {
+                            tracked_admissions
+                                .get(request_id)
+                                .is_none_or(|tracked| tracked.ticket != admission.ticket)
+                        })
             });
             for entry in cancelled {
                 self.subtract_pending_counters(class_index, entry.snapshot());
@@ -1136,12 +1147,13 @@ impl<
             let request = queued.request;
             // A ready cancellation removes lifecycle state before its batched
             // heap cleanup; an intervening capacity update may pop it first.
-            if admission.is_some()
-                && request
-                    .mode
-                    .tracked_request_id()
-                    .is_some_and(|request_id| !self.tracked_admissions.contains_key(request_id))
-            {
+            if admission.as_ref().is_some_and(|admission| {
+                request.mode.tracked_request_id().is_some_and(|request_id| {
+                    self.tracked_admissions
+                        .get(request_id)
+                        .is_none_or(|tracked| tracked.ticket != admission.ticket)
+                })
+            }) {
                 continue;
             }
             tracing::debug!(
@@ -2382,6 +2394,33 @@ policy_classes:
         slots.free(&"unmanaged".to_owned(), decay_now()).unwrap();
     }
 
+    #[tokio::test]
+    async fn cancellation_after_bypassed_handoff_rolls_back_booking() {
+        let events = Arc::new(AtomicUsize::new(0));
+        let (queue, slots) = make_queue_with_admission_strategy(Box::new(BypassGate {
+            events: Arc::clone(&events),
+        }));
+        let (mut request, response) = make_admission_request("bypassed-handoff", 64);
+        request.policy_class = Some("agents".to_owned());
+        let cancellation = queue.cancellation_guard(Some("bypassed-handoff")).unwrap();
+
+        queue.enqueue(request).await;
+        assert_eq!(
+            slots
+                .active_request_counts()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(1)
+        );
+
+        drop(cancellation);
+        queue.update().await;
+
+        slots.assert_completely_drained(decay_now());
+        assert_eq!(events.load(Ordering::Relaxed), 0);
+        drop(response);
+    }
+
     #[derive(Default)]
     struct FinishReleaseGate {
         first: Option<AdmissionId>,
@@ -2587,6 +2626,48 @@ policy_classes:
             .collect()
         );
         slots.free(&"blocker".to_owned(), decay_now()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_ready_cleanup_does_not_remove_reused_request_id() {
+        let state = Arc::new(StdMutex::new(GateState::default()));
+        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
+            state: Arc::clone(&state),
+        }));
+
+        let (blocker, blocker_response) = make_request("blocker", 64);
+        queue.enqueue(blocker).await;
+        blocker_response.await.unwrap().unwrap();
+
+        let (mut cancelled, cancelled_response) = make_admission_request("reused", 64);
+        cancelled.policy_class = Some("agents".to_owned());
+        let cancellation = queue.cancellation_guard(Some("reused")).unwrap();
+        queue.enqueue(cancelled).await;
+        drop(cancelled_response);
+        drop(cancellation);
+        queue.update().await;
+        assert_eq!(state.lock().unwrap().aborted, vec![AdmissionId::new(0)]);
+
+        let (mut replacement, replacement_response) = make_admission_request("reused", 64);
+        replacement.policy_class = Some("agents".to_owned());
+        queue.enqueue(replacement).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        queue.reconcile().await;
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(state.lock().unwrap().aborted, vec![AdmissionId::new(0)]);
+
+        slots.free(&"blocker".to_owned(), decay_now()).unwrap();
+        queue.update().await;
+        let selected = replacement_response.await.unwrap().unwrap();
+        assert!(selected.request_progress.is_some());
+
+        queue
+            .finish("reused", RequestOutcome::Completed { context_tokens: 64 })
+            .await;
+        queue.update().await;
+        assert_eq!(state.lock().unwrap().completed_context_tokens, vec![64]);
+        slots.free(&"reused".to_owned(), decay_now()).unwrap();
     }
 
     #[tokio::test]
