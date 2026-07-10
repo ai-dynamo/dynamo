@@ -1892,8 +1892,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         return local_dp_rank
 
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
-        """Return a LoRARequest if model_name is a loaded adapter, else None."""
-        return self._lora_state.resolve_request(model_name)
+        """Return a LoRARequest for loaded adapters, or None for base model names.
+
+        Raises ValueError for unknown non-base names when LoRA is enabled.
+        """
+        return self._lora_state.resolve_request(
+            model_name,
+            base_model_names=(self._served_model_name, self.engine_args.model),
+            lora_enabled=self._lora_enabled(),
+        )
 
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
         """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""

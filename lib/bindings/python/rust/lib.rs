@@ -101,6 +101,23 @@ static INIT: OnceCell<()> = OnceCell::new();
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
 
+fn stable_fnv1a64(input: &str) -> u64 {
+    // 64-bit FNV-1a with fixed constants for deterministic cross-process output.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in input.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn lora_model_suffix(name: &str) -> String {
+    // Slug keeps keys human-readable; digest prevents slug-collision overwrite.
+    let slug = Slug::slugify(name).to_string();
+    let digest = stable_fnv1a64(name);
+    format!("{}-{:016x}", slug, digest)
+}
+
 // Helper to get appropriate span for instrumentation - always emit spans
 fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
     logging::make_client_request_span(
@@ -545,7 +562,7 @@ fn register_model<'p>(
             if let Some(lora_name) = lora_identifier.clone() {
                 card.lora = Some(llm_rs::model_card::LoraInfo {
                     name: lora_name,
-                    max_gpu_lora_count: None,
+                    max_gpu_lora_count,
                 });
             }
             card.model_type = model_type_obj;
@@ -560,9 +577,7 @@ fn register_model<'p>(
 
             // Register the Model Deployment Card via discovery interface
             let discovery = endpoint.inner.drt().discovery();
-            let model_suffix = lora_identifier
-                .as_ref()
-                .map(|name| Slug::slugify(name).to_string());
+            let model_suffix = lora_identifier.as_ref().map(|name| lora_model_suffix(name));
             let spec = rs::discovery::DiscoverySpec::from_model_with_suffix(
                 endpoint.inner.component().namespace().name().to_string(),
                 endpoint.inner.component().name().to_string(),

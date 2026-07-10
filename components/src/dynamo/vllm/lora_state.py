@@ -19,14 +19,31 @@ class LoRAState:
         self.lora_load_locks: dict[str, asyncio.Lock] = {}
         self.lora_load_locks_guard = threading.Lock()
 
-    def resolve_request(self, model_name: str | None) -> LoRARequest | None:
-        """Return a LoRARequest when model_name targets a loaded adapter."""
-        if model_name and (lora := self.loaded_loras.get(model_name)):
+    def resolve_request(
+        self,
+        model_name: str | None,
+        *,
+        base_model_names: tuple[str | None, ...] = (),
+        lora_enabled: bool = False,
+    ) -> LoRARequest | None:
+        """Resolve a model name to a loaded LoRA request.
+
+        Returns None for missing model name and base-model aliases.
+        Raises ValueError for unknown non-base names when LoRA is enabled.
+        """
+        if not model_name or model_name in base_model_names:
+            return None
+
+        if lora := self.loaded_loras.get(model_name):
             return LoRARequest(
                 lora_name=model_name,
                 lora_int_id=lora.id,
                 lora_path=lora.path,
             )
+
+        if lora_enabled:
+            raise ValueError(f"unknown model or LoRA adapter: '{model_name}'")
+
         return None
 
     def get_lock(self, lora_name: str) -> asyncio.Lock:
