@@ -1569,6 +1569,86 @@ async fn tool_choice_force_reasoning_required_keeps_reasoning_before_guided_json
     }
 }
 
+/// Gemma 4 may emit its tool-call token directly from the thought channel,
+/// without first emitting `<channel|>`. The backend-native reasoner treats that
+/// token as the boundary and activates the named-tool JSON grammar. Dynamo must
+/// make the same handoff while leaving identical marker text inside the JSON
+/// argument untouched.
+#[tokio::test]
+async fn tool_choice_gemma4_named_implicit_boundary_preserves_marker_literals() {
+    const SQL: &str = r#"SELECT a,b:and{brace} WHERE note has brace } and bracket ] plus literal marker <|tool_call>call:get_time{}<tool_call|> and string delimiter <|"|>."#;
+
+    let preprocessor = build_preprocessor(Some("gemma4"), Some("gemma4"));
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Run the exact diagnostic query."}],
+        "stream": true,
+        "temperature": 0.0,
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": "run_query"}
+        },
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "run_query",
+                "description": "Run a diagnostic query string exactly as provided.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"sql": {"type": "string"}},
+                    "required": ["sql"],
+                    "additionalProperties": false
+                }
+            }
+        }],
+        "chat_template_kwargs": {
+            "enable_thinking": true,
+            "thinking": true
+        }
+    }))
+    .unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "enable_thinking": true,
+            "thinking": true
+        }))
+        .unwrap(),
+    );
+
+    let guided_json = serde_json::json!({"sql": SQL}).to_string();
+    let input_stream = stream::iter(
+        vec![
+            mock_content_chunk("<|channel>thought\nI should call exactly once."),
+            mock_content_chunk("<|tool_"),
+            mock_content_chunk("call>"),
+            mock_content_chunk(&guided_json),
+            mock_final_chunk(),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    assert_eq!(reasoning, "I should call exactly once.");
+    assert!(
+        content.is_empty(),
+        "guided JSON leaked into content: {content:?}"
+    );
+    assert_eq!(tool_calls.len(), 1, "expected one run_query call");
+    assert_eq!(tool_calls[0].name.as_deref(), Some("run_query"));
+    let arguments: Value = serde_json::from_str(&tool_calls[0].arguments).unwrap();
+    assert_eq!(arguments, serde_json::json!({"sql": SQL}));
+    assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+}
+
 /// Mistral's bracket-prefixed opener must not be mistaken for a bare JSON array,
 /// even when the opener is split across stream chunks.
 #[tokio::test]

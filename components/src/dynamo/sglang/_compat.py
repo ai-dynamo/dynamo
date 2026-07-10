@@ -63,6 +63,92 @@ def ensure_sglang_top_level_exports() -> None:
 ensure_sglang_top_level_exports()
 
 
+def _run_scheduler_process_with_gemma4_compat(*args: Any, **kwargs: Any) -> Any:
+    """Install the grammar shim inside SGLang's spawned scheduler."""
+    ensure_gemma4_implicit_tool_reasoning_boundary()
+    from sglang.srt.managers.scheduler import run_scheduler_process
+
+    return run_scheduler_process(*args, **kwargs)
+
+
+def ensure_gemma4_implicit_tool_reasoning_boundary() -> None:
+    """Let SGLang's reasoning grammar hand off on Gemma 4 tool start.
+
+    SGLang 0.5.14 transitions its guided grammar only on ``<channel|>``.
+    Gemma 4 may instead emit ``<|tool_call>`` directly from the thought
+    channel. Attach that model-specific token ID to each reasoning grammar
+    object and preserve it across request-local copies.
+
+    Remove when the minimum supported SGLang release treats Gemma 4's tool
+    start token as an implicit reasoning end.
+    """
+    from sglang.srt.constrained.reasoner_grammar_backend import (
+        ReasonerGrammarBackend,
+        ReasonerGrammarObject,
+    )
+    from sglang.srt.entrypoints.engine import Engine
+
+    # Engine uses multiprocessing spawn, so parent class mutations are not
+    # inherited. Make the pickled scheduler target install the same shim in
+    # the child before constructing its grammar backend.
+    Engine.run_scheduler_process_func = staticmethod(
+        _run_scheduler_process_with_gemma4_compat
+    )
+
+    original_transfer_state = ReasonerGrammarObject.transfer_state
+    if getattr(original_transfer_state, "_dynamo_gemma4_tool_boundary", False):
+        return
+
+    original_backend_init = ReasonerGrammarBackend.__init__
+    original_make_grammar = ReasonerGrammarBackend._make_grammar_object
+    original_copy = ReasonerGrammarObject.copy
+
+    @wraps(original_backend_init)
+    def backend_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        bound = inspect.signature(original_backend_init).bind(self, *args, **kwargs)
+        original_backend_init(self, *args, **kwargs)
+
+        reasoning_parser = bound.arguments["reasoning_parser"]
+        tokenizer = bound.arguments["tokenizer"]
+        if type(reasoning_parser.detector).__name__ != "Gemma4Detector":
+            return
+
+        tool_start_ids = tokenizer.encode("<|tool_call>", add_special_tokens=False)
+        if len(tool_start_ids) == 1:
+            self._dynamo_implicit_think_end_id = tool_start_ids[0]
+
+    @wraps(original_make_grammar)
+    def make_grammar(self: Any, *args: Any, **kwargs: Any) -> Any:
+        grammar = original_make_grammar(self, *args, **kwargs)
+        grammar._dynamo_implicit_think_end_id = getattr(
+            self, "_dynamo_implicit_think_end_id", None
+        )
+        return grammar
+
+    @wraps(original_transfer_state)
+    def transfer_state(self: Any, token: int) -> None:
+        if self._is_thinking() and token == getattr(
+            self, "_dynamo_implicit_think_end_id", None
+        ):
+            self.tokens_after_end = 0
+            return
+        original_transfer_state(self, token)
+
+    @wraps(original_copy)
+    def copy(self: Any) -> Any:
+        grammar = original_copy(self)
+        grammar._dynamo_implicit_think_end_id = getattr(
+            self, "_dynamo_implicit_think_end_id", None
+        )
+        return grammar
+
+    transfer_state._dynamo_gemma4_tool_boundary = True  # type: ignore[attr-defined]
+    ReasonerGrammarBackend.__init__ = backend_init
+    ReasonerGrammarBackend._make_grammar_object = make_grammar
+    ReasonerGrammarObject.transfer_state = transfer_state
+    ReasonerGrammarObject.copy = copy
+
+
 def ensure_sglang_tensor_image_size() -> None:
     """Allow SGLang's image-token resolver to handle decoded image tensors.
 
@@ -228,6 +314,7 @@ def enable_disjoint_streaming_output(server_args: Any) -> None:
 
 __all__ = [
     "enable_disjoint_streaming_output",
+    "ensure_gemma4_implicit_tool_reasoning_boundary",
     "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",

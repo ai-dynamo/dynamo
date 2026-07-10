@@ -15,6 +15,7 @@ from dynamo.common.snapshot.restore_context import (
 )
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang._compat import ensure_gemma4_implicit_tool_reasoning_boundary
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
@@ -40,6 +41,8 @@ async def worker(argv: list[str] | None = None):
         argv = sys.argv[1:]
     config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
+    if getattr(config.server_args, "reasoning_parser", None) == "gemma4":
+        ensure_gemma4_implicit_tool_reasoning_boundary()
 
     if config.server_args.load_format == "gms":
         from gpu_memory_service.integrations.sglang import setup_gms

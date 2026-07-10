@@ -173,6 +173,79 @@ struct ReasoningState {
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
     bypass_bare_guided_json: bool,
     guided_json_bypass_decision: Option<bool>,
+    gemma4_guided_tool_handoff: bool,
+    gemma4_guided_handoff_states: HashMap<u32, Gemma4GuidedHandoffState>,
+}
+
+const GEMMA4_REASONING_END: &str = "<channel|>";
+const GEMMA4_TOOL_CALL_START: &str = "<|tool_call>";
+
+/// Reconcile Gemma 4's implicit tool boundary with Dynamo's separate
+/// reasoning and tool parsers. Backend-native reasoners may activate guided
+/// JSON as soon as the model emits `<|tool_call>`, without an explicit
+/// `<channel|>`. Replace only that first structural marker with the reasoning
+/// close marker. Later identical text belongs to the guided JSON argument and
+/// must remain unchanged.
+#[derive(Default)]
+struct Gemma4GuidedHandoffState {
+    buffer: String,
+    complete: bool,
+}
+
+impl Gemma4GuidedHandoffState {
+    fn marker_overlap(text: &str, marker: &str) -> usize {
+        let max = text.len().min(marker.len().saturating_sub(1));
+        (1..=max)
+            .rev()
+            .find(|&len| {
+                text.is_char_boundary(text.len() - len)
+                    && marker.is_char_boundary(len)
+                    && text.ends_with(&marker[..len])
+            })
+            .unwrap_or(0)
+    }
+
+    fn push(&mut self, text: &str) -> String {
+        if self.complete {
+            return text.to_string();
+        }
+
+        self.buffer.push_str(text);
+        let explicit_end = self.buffer.find(GEMMA4_REASONING_END);
+        let implicit_tool = self.buffer.find(GEMMA4_TOOL_CALL_START);
+        let boundary = match (explicit_end, implicit_tool) {
+            (Some(end), Some(tool)) if tool < end => Some((tool, true)),
+            (Some(end), _) => Some((end, false)),
+            (None, Some(tool)) => Some((tool, true)),
+            (None, None) => None,
+        };
+
+        if let Some((position, is_implicit_tool)) = boundary {
+            self.complete = true;
+            let buffered = std::mem::take(&mut self.buffer);
+            if !is_implicit_tool {
+                return buffered;
+            }
+
+            let mut output = String::with_capacity(buffered.len());
+            output.push_str(&buffered[..position]);
+            output.push_str(GEMMA4_REASONING_END);
+            output.push_str(&buffered[position + GEMMA4_TOOL_CALL_START.len()..]);
+            return output;
+        }
+
+        let overlap = Self::marker_overlap(&self.buffer, GEMMA4_REASONING_END)
+            .max(Self::marker_overlap(&self.buffer, GEMMA4_TOOL_CALL_START));
+        let split = self.buffer.len() - overlap;
+        let pending = self.buffer.split_off(split);
+        let output = std::mem::replace(&mut self.buffer, pending);
+        output
+    }
+
+    fn finish(&mut self) -> String {
+        self.complete = true;
+        std::mem::take(&mut self.buffer)
+    }
 }
 
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
@@ -2059,6 +2132,10 @@ impl OpenAIPreprocessor {
             self.runtime_config.reasoning_parser.as_deref(),
             request.chat_template_args.as_ref(),
         );
+        let gemma4_guided_tool_handoff = is_guided_tool_choice
+            && !uses_tool_call_structural_tag
+            && !reasoning_disabled_by_request
+            && matches!(reasoning_parser, Some("gemma4" | "gemma-4"));
 
         // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
@@ -2102,6 +2179,7 @@ impl OpenAIPreprocessor {
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
                 prompt_injected_reasoning,
                 bypass_reasoning_for_bare_guided_json,
+                gemma4_guided_tool_handoff,
             ))
         } else if should_strip_disabled_reasoning_start {
             Box::pin(Self::strip_leading_reasoning_start_from_stream(
@@ -2941,6 +3019,7 @@ impl OpenAIPreprocessor {
             parser_name,
             prompt_injected_reasoning,
             false,
+            false,
         )
     }
 
@@ -2949,6 +3028,7 @@ impl OpenAIPreprocessor {
         parser_name: String,
         prompt_injected_reasoning: bool,
         bypass_bare_guided_json: bool,
+        gemma4_guided_tool_handoff: bool,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -2967,6 +3047,8 @@ impl OpenAIPreprocessor {
             reasoning_parser: Some(reasoning_parser),
             bypass_bare_guided_json,
             guided_json_bypass_decision: None,
+            gemma4_guided_tool_handoff,
+            gemma4_guided_handoff_states: HashMap::new(),
         };
 
         stream::unfold(state, |mut state| async move {
@@ -3005,15 +3087,36 @@ impl OpenAIPreprocessor {
                     // Keep bare JSON and leading whitespace available to the tool jail.
                     response
                 } else if let Some(ref mut parser) = state.reasoning_parser {
+                    let handoff_enabled = state.gemma4_guided_tool_handoff;
+                    let handoff_states = &mut state.gemma4_guided_handoff_states;
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
                         for choice in data.inner.choices.iter_mut() {
+                            let text = match choice.delta.content.take() {
+                                Some(ChatCompletionMessageContent::Text(text)) => Some(text),
+                                other => {
+                                    choice.delta.content = other;
+                                    if handoff_enabled && choice.finish_reason.is_some() {
+                                        let pending = handoff_states
+                                            .entry(choice.index)
+                                            .or_default()
+                                            .finish();
+                                        (!pending.is_empty()).then_some(pending)
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
+
                             // Reasoning parsing only applies to text content
-                            if let Some(ChatCompletionMessageContent::Text(text)) =
-                                choice.delta.content.as_ref()
-                            {
+                            if let Some(text) = text {
+                                let text = if handoff_enabled {
+                                    handoff_states.entry(choice.index).or_default().push(&text)
+                                } else {
+                                    text
+                                };
                                 let parser_result =
-                                    parser.parse_reasoning_streaming_incremental(text, &[]);
+                                    parser.parse_reasoning_streaming_incremental(&text, &[]);
 
                                 // Update this specific choice with parsed content
                                 choice.delta.content = parser_result

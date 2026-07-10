@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gemma 4 parser investigation</title>
+  <style>
+    :root { color-scheme: light dark; --ok:#1a7f37; --bad:#cf222e; --warn:#9a6700; --line:#8c959f55; }
+    body { font: 15px/1.55 system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1.25rem; }
+    h1,h2,h3 { line-height:1.2; } h2 { margin-top:2.5rem; border-bottom:1px solid var(--line); padding-bottom:.4rem; }
+    code,pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    pre { overflow:auto; padding:1rem; border:1px solid var(--line); border-radius:8px; background:#8c959f12; }
+    table { border-collapse:collapse; width:100%; } th,td { text-align:left; vertical-align:top; padding:.55rem; border-bottom:1px solid var(--line); }
+    .ok { color:var(--ok); font-weight:700; } .bad { color:var(--bad); font-weight:700; } .warn { color:var(--warn); font-weight:700; }
+    .card { border:1px solid var(--line); border-radius:10px; padding:1rem 1.2rem; margin:1rem 0; }
+    .meta { color:#8c959f; } ul { padding-left:1.3rem; }
+  </style>
+</head>
+<body>
+  <h1>Gemma 4 tool/reasoning parser investigation</h1>
+  <p class="meta">2026-07-09 · branch <code>rmccormick/gemma4-parsers</code> · source <code>485c298fff259ea228d4d86e23fe4153aead3c8a</code></p>
+  <div class="card">
+    <strong>Result:</strong> <span class="ok">structured tool calls verified live on vLLM and SGLang</span>.
+    The checkpoint has a separate exact-copy limitation for the literal Gemma string-delimiter token.
+  </div>
+
+  <h2>Finding</h2>
+  <p>Two Gemma 4 state machines disagree at an implicit tool boundary. vLLM 0.24.0 treats
+  <code>&lt;|tool_call&gt;</code> as the end of reasoning and begins named-tool guided JSON. Dynamo's
+  pinned Gemma reasoner waits only for <code>&lt;channel|&gt;</code>, so it classifies the marker and
+  guided JSON as <code>reasoning_content</code>. The fix normalizes only the first structural
+  <code>&lt;|tool_call&gt;</code> to a reasoning close for required/named tool choices. Later identical
+  text is preserved as tool-argument data.</p>
+
+  <h2>vLLM 0.24.0 — RTX 5880 Ada</h2>
+  <table>
+    <tr><th>Item</th><th>Value</th></tr>
+    <tr><td>Weights</td><td><code>nvidia/Gemma-4-31B-IT-NVFP4</code></td></tr>
+    <tr><td>Served name</td><td><code>google/gemma-4-31B-it</code></td></tr>
+    <tr><td>Environment</td><td><code>.venv-vllm-reasoning</code>; Python 3.12.9; vLLM 0.24.0</td></tr>
+    <tr><td>Parsers</td><td><code>--dyn-tool-call-parser gemma4 --dyn-reasoning-parser gemma4 --reasoning-parser gemma4</code></td></tr>
+    <tr><td>Runtime</td><td>GPU 1; 49,140 MiB total; eager mode; max model length 4,096; ModelOpt NVFP4 via Marlin fallback</td></tr>
+  </table>
+
+  <h3>Exact request, before fix</h3>
+  <table>
+    <tr><th>HTTP</th><th>Finish</th><th>Tokens</th><th>Reasoning</th><th>Tool calls</th><th>Wall time</th></tr>
+    <tr><td>200</td><td><code>stop</code></td><td>93</td><td class="bad">331 chars; contains <code>&lt;|tool_call&gt;</code></td><td class="bad">0</td><td>11.936 s</td></tr>
+  </table>
+  <pre>The user wants me to call the `run_query` tool.
+The `sql` parameter must be exactly: `SELECT ... literal marker &lt;|tool_call&gt;{ "sql": ...</pre>
+
+  <h3>Exact request, after fix</h3>
+  <table>
+    <tr><th>HTTP</th><th>Finish</th><th>Tokens</th><th>Reasoning</th><th>Tool calls</th><th>Wall time</th></tr>
+    <tr><td>200</td><td class="ok"><code>tool_calls</code></td><td>93</td><td class="ok">165 chars; no structural marker or SQL</td><td class="ok">1 × <code>run_query</code></td><td>6.297 s</td></tr>
+  </table>
+  <p><span class="ok">Parser assertions:</span> assistant <code>content=null</code>; tool-call name exact;
+  no generated tool syntax in reasoning; argument text containing braces, brackets, and the embedded
+  <code>&lt;|tool_call&gt;call:get_time{}&lt;tool_call|&gt;</code> marker survives tool parsing.</p>
+  <p><span class="warn">Checkpoint-output limitation:</span> the generated argument is not character-exact.
+  At temperature 0, the model emits U+00A0 and omits the final period in place of the requested literal
+  <code>&lt;|"|&gt;.</code>. This alteration is present in the raw generated JSON and is independent of the
+  reasoning/tool boundary fix.</p>
+
+  <h3>vLLM startup compatibility note</h3>
+  <p>Stock vLLM 0.24.0 fails before weight loading for this checkpoint: ModelOpt excludes the tied
+  <code>lm_head</code> but assigns <code>UnquantizedLinearMethod</code>, whose <code>tie_weights</code> is
+  unimplemented. Live validation used a narrow environment-only patch that assigns
+  <code>UnquantizedEmbeddingMethod</code> to an excluded <code>ParallelLMHead</code>. The reported vLLM
+  version remains 0.24.0; this external compatibility patch is not part of the Dynamo branch.</p>
+
+  <h2>Focused regression</h2>
+  <p><span class="ok">PASS:</span> <code>cargo test -p dynamo-llm --no-default-features --test postprocessor_parsing_stream</code>
+  — 34 passed. The new replay splits the first marker across chunks and verifies the full requested SQL
+  remains exact after synthetic parser processing, including later literal special markers.</p>
+
+  <h2>SGLang 0.5.14</h2>
+  <table>
+    <tr><th>Item</th><th>Value</th></tr>
+    <tr><td>Environment</td><td><code>.venv-sglang-reasoning</code>; Python 3.12.9; SGLang 0.5.14</td></tr>
+    <tr><td>Parsers</td><td><code>--dyn-tool-call-parser gemma4 --dyn-reasoning-parser gemma4 --reasoning-parser gemma4</code></td></tr>
+    <tr><td>Required grammar option</td><td><code>--constrained-json-disable-any-whitespace</code></td></tr>
+    <tr><td>Runtime</td><td>GPU 1; full <code>Gemma4ForConditionalGeneration</code>; max model length 4,096; ModelOpt NVFP4</td></tr>
+  </table>
+
+  <h3>Failure progression</h3>
+  <table>
+    <tr><th>Configuration</th><th>Finish</th><th>Tokens</th><th>Result</th></tr>
+    <tr><td>Stock 0.5.14 native gate</td><td><code>stop</code></td><td>439</td><td class="bad">No tool calls; native grammar never activates on <code>&lt;|tool_call&gt;</code></td></tr>
+    <tr><td>Implicit boundary only</td><td><code>length</code></td><td>1,024</td><td class="bad">xgrammar permits unbounded leading whitespace</td></tr>
+    <tr><td>Boundary + no leading whitespace</td><td><code>tool_calls</code></td><td>180</td><td class="ok">One <code>run_query</code>; clean reasoning</td></tr>
+  </table>
+
+  <h3>Exact request, final branch</h3>
+  <table>
+    <tr><th>HTTP</th><th>Finish</th><th>Tokens</th><th>Reasoning</th><th>Tool calls</th><th>Wall time</th></tr>
+    <tr><td>200</td><td class="ok"><code>tool_calls</code></td><td>180</td><td class="ok">165 chars; no structural marker or full SQL</td><td class="ok">1 × <code>run_query</code></td><td>14.943 s</td></tr>
+  </table>
+  <p>The branch wraps SGLang's spawned scheduler entrypoint and installs a narrow Gemma 4
+  compatibility shim in the child process. The shim makes token ID 48
+  (<code>&lt;|tool_call&gt;</code>) an alternate reasoning-end transition and preserves that state on
+  request-local grammar copies. This is scoped to SGLang's <code>Gemma4Detector</code>.</p>
+  <p><span class="warn">Checkpoint-output limitation:</span> the schema-valid SGLang result also
+  fails character-exact SQL reproduction. It preserves the embedded tool marker but replaces the
+  delimiter suffix and continues with explanatory prose inside the string. The parser correctly
+  returns exactly the generated argument; it cannot reconstruct text the model did not emit.</p>
+
+  <h2>Launch conclusions</h2>
+  <ul>
+    <li>Use all three requested parser selectors as <code>gemma4</code> on both backends.</li>
+    <li>On SGLang 0.5.14, also use <code>--constrained-json-disable-any-whitespace</code>.</li>
+    <li>The Dynamo fix prevents structural tool syntax from leaking into reasoning and returns one named tool call on both engines.</li>
+    <li>Do not claim exact argument fidelity for this adversarial prompt; both backend runs show deterministic checkpoint/template corruption around <code>&lt;|"|&gt;</code>.</li>
+  </ul>
+</body>
+</html>

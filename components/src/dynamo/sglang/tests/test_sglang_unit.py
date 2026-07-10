@@ -21,6 +21,7 @@ import dynamo.sglang.llm_engine as sglang_llm_engine
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
+    ensure_gemma4_implicit_tool_reasoning_boundary,
     ensure_sglang_tensor_image_size,
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
@@ -159,7 +160,6 @@ def test_compat_restores_sglang_top_level_exports():
             delattr(sgl, "ServerArgs")
 
         ensure_sglang_top_level_exports()
-
         assert sgl.Engine is Engine
         assert sgl.ServerArgs is ServerArgs
     finally:
@@ -174,6 +174,40 @@ def test_compat_restores_sglang_top_level_exports():
                 delattr(sgl, "ServerArgs")
         else:
             sgl.ServerArgs = original_server_args
+
+
+def test_compat_gemma4_tool_start_ends_reasoning_grammar():
+    from sglang.srt.constrained.reasoner_grammar_backend import ReasonerGrammarBackend
+    from sglang.srt.entrypoints.engine import Engine
+    from sglang.srt.parser.reasoning_parser import ReasoningParser
+
+    class Tokenizer:
+        def encode(self, text, add_special_tokens=False):
+            del add_special_tokens
+            return {"<channel|>": [101], "<|tool_call>": [48]}[text]
+
+    grammar_backend = SimpleNamespace(
+        is_support_token_filter=False,
+        allocate_vocab_mask=None,
+        move_vocab_mask=None,
+        apply_vocab_mask=None,
+    )
+    ensure_gemma4_implicit_tool_reasoning_boundary()
+    assert (
+        Engine.run_scheduler_process_func
+        is sglang_compat._run_scheduler_process_with_gemma4_compat
+    )
+    backend = ReasonerGrammarBackend(
+        grammar_backend,
+        ReasoningParser(model_type="gemma4"),
+        Tokenizer(),
+    )
+    grammar = backend._make_grammar_object(None, reasoning=True)
+
+    assert grammar._is_thinking()
+    grammar.accept_token(48)
+    assert grammar._is_generation()
+    assert grammar.copy()._dynamo_implicit_think_end_id == 48
 
 
 def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatch):
