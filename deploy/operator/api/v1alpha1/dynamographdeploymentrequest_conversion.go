@@ -18,9 +18,9 @@
 // Conversion between v1alpha1 and v1beta1 DynamoGraphDeploymentRequest (DGDR).
 //
 // v1beta1 is the hub. DGDR conversion predates the structural DGD/DCD cleanup,
-// so this file reads legacy Dynamo 1.0/1.1 annotations and still writes them for
-// downgrade compatibility. New preservation uses sparse nvidia.com/dgdr-spec and
-// nvidia.com/dgdr-status annotations.
+// so this file still reads legacy Dynamo 1.0/1.1 annotations for forward upgrade
+// compatibility. New writes use sparse nvidia.com/dgdr-spec and
+// nvidia.com/dgdr-status annotations exclusively.
 //
 // Live source fields are authoritative. Preservation annotations are old-value
 // caches only for fields the live source version cannot represent.
@@ -31,16 +31,15 @@
 //     and planner map to v1beta1 SLA, Workload, ModelCache, and Features.Planner.
 //   - v1alpha1 ProfilingConfig.Resources, Tolerations, and NodeSelector map to
 //     v1beta1 Overrides.ProfilingJob pod fields.
-//   - v1alpha1-only spec fields are saved sparsely in annDGDRSpec and, for
-//     downgrade compatibility, in legacyAnnDGDR* annotations.
+//   - v1alpha1-only spec fields are saved sparsely in annDGDRSpec.
 //   - v1beta1-only spec fields such as Hardware, Workload Concurrency/RequestRate,
 //     SLA E2ELatency, Overrides.DGD, hub-only ProfilingJob leaves, disabled Mocker,
 //     and SearchStrategy are saved sparsely in annDGDRSpec.
 //
 // Status follows the same rules: common fields are converted from live source,
-// alpha-only status is saved in annDGDRStatus and legacy annotations, and
-// hub-only status such as ProfilingPhase, ProfilingJobName, Pareto results,
-// DeploymentInfo, and the Deployed phase is saved in annDGDRStatus.
+// while alpha-only status and hub-only status such as ProfilingPhase,
+// ProfilingJobName, Pareto results, DeploymentInfo, and the Deployed phase are
+// saved in annDGDRStatus.
 
 package v1alpha1
 
@@ -64,7 +63,8 @@ const (
 	annDGDRSpec   = "nvidia.com/dgdr-spec"
 	annDGDRStatus = "nvidia.com/dgdr-status"
 
-	// TODO(sttts): remove after 1.2 when downgrade does not matter anymore.
+	// Read-only compatibility for objects written by Dynamo 1.0/1.1. Do not
+	// emit these keys; current preservation uses annDGDRSpec and annDGDRStatus.
 	legacyAnnDGDRConfigMapRef     = "nvidia.com/dgdr-config-map-ref"
 	legacyAnnDGDROutputPVC        = "nvidia.com/dgdr-output-pvc"
 	legacyAnnDGDREnableGPUDisc    = "nvidia.com/dgdr-enable-gpu-discovery"
@@ -103,7 +103,7 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 
 	var spokeStatusSave DynamoGraphDeploymentRequestStatus
 	ConvertFromDynamoGraphDeploymentRequestStatus(&src.Status, &dst.Status, restoredHubStatus, &spokeStatusSave)
-	if err := saveDGDRSpokeAnnotations(&src.Spec, &spokeSpecSave, &src.Status, &spokeStatusSave, dst); err != nil {
+	if err := saveDGDRSpokeAnnotations(&spokeSpecSave, &spokeStatusSave, dst); err != nil {
 		return err
 	}
 
@@ -127,19 +127,11 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 
 	var hubStatusSave v1beta1.DynamoGraphDeploymentRequestStatus
 	ConvertToDynamoGraphDeploymentRequestStatus(&src.Status, &dst.Status, restoredSpokeStatus, &hubStatusSave)
-	if err := saveDGDRHubAnnotations(&hubSpecSave, &src.Status, &hubStatusSave, dst); err != nil {
+	if err := saveDGDRHubAnnotations(&hubSpecSave, &hubStatusSave, dst); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-// setAnnotation initialises the annotation map if needed and sets a key.
-func setAnnotation(obj *v1beta1.DynamoGraphDeploymentRequest, key, value string) {
-	if obj.Annotations == nil {
-		obj.Annotations = make(map[string]string)
-	}
-	obj.Annotations[key] = value
 }
 
 func restoreDGDRHubAnnotations(obj metav1.Object) (*v1beta1.DynamoGraphDeploymentRequestSpec, *v1beta1.DynamoGraphDeploymentRequestStatus) {
@@ -209,7 +201,7 @@ func scrubDGDRInternalAnnotations(obj metav1.Object) {
 	}
 }
 
-func saveDGDRSpokeAnnotations(srcSpec *DynamoGraphDeploymentRequestSpec, specSave *DynamoGraphDeploymentRequestSpec, srcStatus *DynamoGraphDeploymentRequestStatus, statusSave *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequest) error {
+func saveDGDRSpokeAnnotations(specSave *DynamoGraphDeploymentRequestSpec, statusSave *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequest) error {
 	if !dgdrAlphaSpecSaveIsZero(specSave) {
 		data, err := marshalDGDRSpokeSpec(specSave)
 		if err != nil {
@@ -222,11 +214,10 @@ func saveDGDRSpokeAnnotations(srcSpec *DynamoGraphDeploymentRequestSpec, specSav
 			return err
 		}
 	}
-	saveDGDRLegacySpokeAnnotations(srcSpec, srcStatus, dst)
 	return nil
 }
 
-func saveDGDRHubAnnotations(specSave *v1beta1.DynamoGraphDeploymentRequestSpec, srcStatus *v1beta1.DynamoGraphDeploymentRequestStatus, statusSave *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequest) error {
+func saveDGDRHubAnnotations(specSave *v1beta1.DynamoGraphDeploymentRequestSpec, statusSave *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequest) error {
 	if !dgdrHubSpecSaveIsZero(specSave) {
 		data, err := marshalDGDRHubSpec(specSave)
 		if err != nil {
@@ -238,9 +229,6 @@ func saveDGDRHubAnnotations(specSave *v1beta1.DynamoGraphDeploymentRequestSpec, 
 		if err := setJSONAnnOnObj(&dst.ObjectMeta, annDGDRStatus, statusSave); err != nil {
 			return err
 		}
-	}
-	if srcStatus != nil && srcStatus.ProfilingJobName != "" {
-		setAnnOnObj(&dst.ObjectMeta, legacyAnnDGDRProfilingJobName, srcStatus.ProfilingJobName)
 	}
 	return nil
 }
@@ -539,66 +527,6 @@ func projectProfilingConfigToProfilingJob(src *ProfilingConfigSpec, dst *v1beta1
 	}
 	if len(src.NodeSelector) > 0 {
 		podSpec.NodeSelector = maps.Clone(src.NodeSelector)
-	}
-}
-
-func saveDGDRLegacySpokeAnnotations(srcSpec *DynamoGraphDeploymentRequestSpec, srcStatus *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequest) {
-	if srcSpec != nil {
-		if srcSpec.EnableGPUDiscovery != nil && *srcSpec.EnableGPUDiscovery {
-			setAnnotation(dst, legacyAnnDGDREnableGPUDisc, annotationTrue)
-		}
-		if srcSpec.ProfilingConfig.Config != nil && srcSpec.ProfilingConfig.Config.Raw != nil {
-			setAnnotation(dst, legacyAnnDGDRProfilingConfig, string(srcSpec.ProfilingConfig.Config.Raw))
-		}
-		if srcSpec.ProfilingConfig.ConfigMapRef != nil {
-			if data, err := json.Marshal(srcSpec.ProfilingConfig.ConfigMapRef); err == nil {
-				setAnnotation(dst, legacyAnnDGDRConfigMapRef, string(data))
-			}
-		}
-		if srcSpec.ProfilingConfig.OutputPVC != "" {
-			setAnnotation(dst, legacyAnnDGDROutputPVC, srcSpec.ProfilingConfig.OutputPVC)
-		}
-		saveDGDRLegacyDeploymentOverridesAnnotation(srcSpec.DeploymentOverrides, dst)
-	}
-	if srcStatus != nil {
-		if srcStatus.Backend != "" {
-			setAnnotation(dst, legacyAnnDGDRStatusBackend, srcStatus.Backend)
-		}
-		if srcStatus.ProfilingResults != "" {
-			setAnnotation(dst, legacyAnnDGDRProfilingResults, srcStatus.ProfilingResults)
-		}
-		if srcStatus.Deployment != nil {
-			payload := dgdrDeploymentStatusAnnotation{
-				DeploymentStatus: *srcStatus.Deployment.DeepCopy(),
-				RequestState:     srcStatus.State,
-			}
-			if data, err := json.Marshal(payload); err == nil {
-				setAnnotation(dst, legacyAnnDGDRDeploymentStatus, string(data))
-			}
-		}
-	}
-}
-
-func saveDGDRLegacyDeploymentOverridesAnnotation(src *DeploymentOverridesSpec, dstObj *v1beta1.DynamoGraphDeploymentRequest) {
-	if src == nil {
-		return
-	}
-	overrides := struct {
-		Name        string            `json:"name,omitempty"`
-		Namespace   string            `json:"namespace,omitempty"`
-		Labels      map[string]string `json:"labels,omitempty"`
-		Annotations map[string]string `json:"annotations,omitempty"`
-	}{
-		Name:        src.Name,
-		Namespace:   src.Namespace,
-		Labels:      src.Labels,
-		Annotations: src.Annotations,
-	}
-	if overrides.Name == "" && overrides.Namespace == "" && len(overrides.Labels) == 0 && len(overrides.Annotations) == 0 {
-		return
-	}
-	if data, err := json.Marshal(overrides); err == nil {
-		setAnnotation(dstObj, legacyAnnDGDRDeployOverrides, string(data))
 	}
 }
 

@@ -217,19 +217,9 @@ func TestConvertTo_SpecFields(t *testing.T) {
 		t.Errorf("ModelCache.PVCMountPath: got %q, want %q", dst.Spec.ModelCache.PVCMountPath, "/data/model")
 	}
 
-	// EnableGPUDiscovery → annotation
-	if dst.Annotations[legacyAnnDGDREnableGPUDisc] != "true" {
-		t.Errorf("legacyAnnDGDREnableGPUDisc annotation: got %q, want %q", dst.Annotations[legacyAnnDGDREnableGPUDisc], "true")
-	}
-
-	// OutputPVC → annotation
-	if dst.Annotations[legacyAnnDGDROutputPVC] != "output-pvc" {
-		t.Errorf("legacyAnnDGDROutputPVC annotation: got %q, want %q", dst.Annotations[legacyAnnDGDROutputPVC], "output-pvc")
-	}
-
-	// DeploymentOverrides → annotation
-	if dst.Annotations[legacyAnnDGDRDeployOverrides] == "" {
-		t.Error("legacyAnnDGDRDeployOverrides annotation is empty")
+	// Alpha-only fields use the structural sparse payload.
+	if dst.Annotations[annDGDRSpec] == "" {
+		t.Error("annDGDRSpec structural annotation is empty")
 	}
 }
 
@@ -255,14 +245,9 @@ func TestConvertTo_StatusFields(t *testing.T) {
 		t.Errorf("Status.DGDName: got %q, want %q", dst.Status.DGDName, "my-dgd")
 	}
 
-	// Backend → annotation
-	if dst.Annotations[legacyAnnDGDRStatusBackend] != "vllm" {
-		t.Errorf("legacyAnnDGDRStatusBackend annotation: got %q, want %q", dst.Annotations[legacyAnnDGDRStatusBackend], "vllm")
-	}
-
-	// ProfilingResults → annotation
-	if dst.Annotations[legacyAnnDGDRProfilingResults] != "configmap/profiling-cm" {
-		t.Errorf("legacyAnnDGDRProfilingResults annotation: got %q, want %q", dst.Annotations[legacyAnnDGDRProfilingResults], "configmap/profiling-cm")
+	// Alpha-only status uses the structural sparse payload.
+	if dst.Annotations[annDGDRStatus] == "" {
+		t.Error("annDGDRStatus structural annotation is empty")
 	}
 }
 
@@ -370,10 +355,48 @@ func TestConvertTo_InvalidProfilingConfigJSON(t *testing.T) {
 }
 
 func TestDGDRReadsLegacyAnnotationsWrittenByOldConverter(t *testing.T) {
-	original := newV1alpha1DGDR()
-	hub, err := legacyDGDRConvertToHubForTest(original)
+	legacyBlob, err := json.Marshal(map[string]any{"extra_key": "preserved"})
 	if err != nil {
-		t.Fatalf("legacy convert to hub: %v", err)
+		t.Fatalf("marshal profiling config: %v", err)
+	}
+	legacyOverrides, err := json.Marshal(map[string]any{
+		"name": "my-dgd", "namespace": "prod", "labels": map[string]string{"team": "ml"},
+	})
+	if err != nil {
+		t.Fatalf("marshal deployment overrides: %v", err)
+	}
+	legacyDeployment, err := json.Marshal(dgdrDeploymentStatusAnnotation{
+		DeploymentStatus: DeploymentStatus{Name: "my-dgd", Namespace: "prod", State: "initializing", Created: true},
+		RequestState:     DGDRStateProfiling,
+	})
+	if err != nil {
+		t.Fatalf("marshal deployment status: %v", err)
+	}
+
+	hub := &v1beta1.DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "legacy",
+			Annotations: map[string]string{
+				legacyAnnDGDRConfigMapRef:     `{"name":"base-config","key":"disagg.yaml"}`,
+				legacyAnnDGDROutputPVC:        "output-pvc",
+				legacyAnnDGDREnableGPUDisc:    annotationTrue,
+				legacyAnnDGDRDeployOverrides:  string(legacyOverrides),
+				legacyAnnDGDRProfilingConfig:  string(legacyBlob),
+				legacyAnnDGDRStatusBackend:    "vllm",
+				legacyAnnDGDRProfilingResults: "configmap/profiling-cm",
+				legacyAnnDGDRDeploymentStatus: string(legacyDeployment),
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+			Model:   "meta-llama/Llama-3.1-8B",
+			Backend: v1beta1.BackendTypeVllm,
+			Image:   "nvcr.io/nvidia/dynamo:latest",
+		},
+		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
+			Phase:              v1beta1.DGDRPhaseProfiling,
+			ObservedGeneration: 3,
+			DGDName:            "my-dgd",
+		},
 	}
 
 	restored := &DynamoGraphDeploymentRequest{}
@@ -381,18 +404,30 @@ func TestDGDRReadsLegacyAnnotationsWrittenByOldConverter(t *testing.T) {
 		t.Fatalf("ConvertFrom() error = %v", err)
 	}
 
-	if diff := cmp.Diff(original.Spec, restored.Spec, cmpopts.IgnoreFields(ProfilingConfigSpec{}, "Config")); diff != "" {
-		t.Fatalf("spec mismatch after legacy read (-want +got):\n%s", diff)
+	if got := restored.Spec.ProfilingConfig.ConfigMapRef; got == nil || got.Name != "base-config" || got.Key != "disagg.yaml" {
+		t.Fatalf("ConfigMapRef after legacy read = %#v", got)
+	}
+	if got := restored.Spec.ProfilingConfig.OutputPVC; got != "output-pvc" {
+		t.Fatalf("OutputPVC after legacy read = %q", got)
+	}
+	if restored.Spec.EnableGPUDiscovery == nil || !*restored.Spec.EnableGPUDiscovery {
+		t.Fatal("EnableGPUDiscovery was not restored from legacy annotations")
+	}
+	if got := restored.Spec.DeploymentOverrides; got == nil || got.Name != "my-dgd" || got.Namespace != "prod" || got.Labels["team"] != "ml" {
+		t.Fatalf("DeploymentOverrides after legacy read = %#v", got)
 	}
 	assertProfilingConfigBlobHas(t, restored.Spec.ProfilingConfig.Config, map[string]any{
 		"extra_key": "preserved",
 	})
-	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
-		t.Fatalf("status mismatch after legacy read (-want +got):\n%s", diff)
+	if restored.Status.Backend != "vllm" || restored.Status.ProfilingResults != "configmap/profiling-cm" {
+		t.Fatalf("status after legacy read = %#v", restored.Status)
+	}
+	if got := restored.Status.Deployment; got == nil || got.Name != "my-dgd" || got.Namespace != "prod" || !got.Created {
+		t.Fatalf("Deployment status after legacy read = %#v", got)
 	}
 }
 
-func TestDGDRWritesLegacyAnnotationsReadableByOldConverter(t *testing.T) {
+func TestDGDRDoesNotWriteLegacyAnnotations(t *testing.T) {
 	original := newV1alpha1DGDR()
 	hub := &v1beta1.DynamoGraphDeploymentRequest{}
 	if err := original.ConvertTo(hub); err != nil {
@@ -408,21 +443,33 @@ func TestDGDRWritesLegacyAnnotationsReadableByOldConverter(t *testing.T) {
 		legacyAnnDGDRStatusBackend,
 		legacyAnnDGDRProfilingResults,
 		legacyAnnDGDRDeploymentStatus,
+		legacyAnnDGDRProfilingJobName,
 	} {
-		if hub.Annotations[key] == "" {
-			t.Fatalf("legacy annotation %q was not written", key)
+		if _, ok := hub.Annotations[key]; ok {
+			t.Fatalf("legacy annotation %q was written", key)
 		}
 	}
-
-	legacyRestored := legacyDGDRConvertFromHubForTest(hub)
-	if diff := cmp.Diff(original.Spec, legacyRestored.Spec, cmpopts.IgnoreFields(ProfilingConfigSpec{}, "Config")); diff != "" {
-		t.Fatalf("legacy restored spec mismatch (-want +got):\n%s", diff)
+	if hub.Annotations[annDGDRSpec] == "" || hub.Annotations[annDGDRStatus] == "" {
+		t.Fatalf("structural annotations were not written: %#v", hub.Annotations)
 	}
-	assertProfilingConfigBlobHas(t, legacyRestored.Spec.ProfilingConfig.Config, map[string]any{
-		"extra_key": "preserved",
-	})
-	if diff := cmp.Diff(original.Status, legacyRestored.Status); diff != "" {
-		t.Fatalf("legacy restored status mismatch (-want +got):\n%s", diff)
+}
+
+func TestDGDRReadsLegacyHubProfilingJobName(t *testing.T) {
+	spoke := &DynamoGraphDeploymentRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{legacyAnnDGDRProfilingJobName: "legacy-job"},
+		},
+		Status: DynamoGraphDeploymentRequestStatus{State: DGDRStateProfiling},
+	}
+	hub := &v1beta1.DynamoGraphDeploymentRequest{}
+	if err := spoke.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if hub.Status.ProfilingJobName != "legacy-job" {
+		t.Fatalf("ProfilingJobName = %q, want legacy-job", hub.Status.ProfilingJobName)
+	}
+	if _, ok := hub.Annotations[legacyAnnDGDRProfilingJobName]; ok {
+		t.Fatal("legacy profiling-job annotation was re-emitted")
 	}
 }
 
