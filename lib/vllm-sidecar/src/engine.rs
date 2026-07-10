@@ -27,14 +27,17 @@
 //!    discovery, validate the role is unchanged, and return the full
 //!    [`EngineConfig`].
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
-    HEALTH_CHECK_KEY, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LoraAdapter,
-    LlmRegistration, MultimodalData, PreprocessedRequest, WorkerConfig, usage,
+    HEALTH_CHECK_KEY, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
+    LlmRegistration, LoraAdapter, MultimodalData, PreprocessedRequest, PromptLogprobEntry,
+    StopReason, TopLogprob, WorkerConfig, usage,
 };
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::stream::BoxStream;
 use tokio::sync::{OnceCell, watch};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -290,6 +293,7 @@ impl LLMEngine for VllmSidecarEngine {
             // holds by construction.
             let mut generated: u32 = 0;
             let mut prompt_tokens = prompt_len;
+            let mut prompt_logprobs = None;
 
             loop {
                 tokio::select! {
@@ -321,31 +325,43 @@ impl LLMEngine for VllmSidecarEngine {
                                         // output the PrefillRouter observes is the terminal one
                                         // carrying `disaggregated_params` — the router reads
                                         // `first_output` only.
-                                        if is_prefill || t.token_ids.is_empty() {
+                                        if is_prefill || (t.tokens.is_empty() && t.text.is_empty()) {
                                             continue;
                                         }
-                                        generated += t.token_ids.len() as u32;
-                                        yield Ok(LLMEngineOutput {
-                                            token_ids: t.token_ids,
-                                            ..Default::default()
-                                        });
+                                        generated += t.tokens.len() as u32;
+                                        let mut output = token_output_to_engine(t);
+                                        output.engine_data = take_prompt_logprobs(&mut prompt_logprobs);
+                                        yield Ok(output);
+                                    }
+                                    Some(pb::generate_response::Event::Prompt(p)) => {
+                                        prompt_logprobs = prompt_output_to_json(p);
                                     }
                                     Some(pb::generate_response::Event::Finished(f)) => {
                                         let reason = pb::FinishReason::try_from(f.reason)
                                             .unwrap_or(pb::FinishReason::Unspecified);
-                                        yield Ok(finish_output(
-                                            reason, prompt_tokens, generated, None,
-                                        ));
+                                        let mut output = finish_output(
+                                            reason,
+                                            prompt_tokens,
+                                            generated,
+                                            None,
+                                            f.stop_match.and_then(stop_match_to_reason),
+                                        );
+                                        output.index = f.output_index;
+                                        output.engine_data = take_prompt_logprobs(&mut prompt_logprobs);
+                                        yield Ok(output);
                                         break;
                                     }
                                     Some(pb::generate_response::Event::PrefillReady(p)) => {
                                         let disagg = p.kv_session.map(kv_session_to_disagg_json);
-                                        yield Ok(finish_output(
+                                        let mut output = finish_output(
                                             pb::FinishReason::Stop,
                                             prompt_tokens,
                                             generated,
                                             disagg,
-                                        ));
+                                            None,
+                                        );
+                                        output.engine_data = take_prompt_logprobs(&mut prompt_logprobs);
+                                        yield Ok(output);
                                         break;
                                     }
                                     Some(pb::generate_response::Event::Error(e)) => {
@@ -385,9 +401,7 @@ impl LLMEngine for VllmSidecarEngine {
             return;
         };
         let req = pb::AbortRequest {
-            request_id: ctx.id().to_string(),
-            kv_session: None,
-            abort_all: false,
+            target: Some(pb::abort_request::Target::RequestId(ctx.id().to_string())),
         };
         // Idempotent on the engine side (unknown id → ABORTED); failures here
         // are best-effort and swallowed.
@@ -400,7 +414,7 @@ impl LLMEngine for VllmSidecarEngine {
         let mut client = self
             .pool
             .get()
-            .map(Pool::lora_client)
+            .map(Pool::control_client)
             .ok_or_else(|| client::engine_shutdown("load_lora called before start"))?;
         let response = client
             .load_lora(pb::LoadLoraRequest {
@@ -422,7 +436,7 @@ impl LLMEngine for VllmSidecarEngine {
         let mut client = self
             .pool
             .get()
-            .map(Pool::lora_client)
+            .map(Pool::control_client)
             .ok_or_else(|| client::engine_shutdown("unload_lora called before start"))?;
         let response = client
             .unload_lora(pb::UnloadLoraRequest {
@@ -440,7 +454,7 @@ impl LLMEngine for VllmSidecarEngine {
         let mut client = self
             .pool
             .get()
-            .map(Pool::lora_client)
+            .map(Pool::control_client)
             .ok_or_else(|| client::engine_shutdown("list_loras called before start"))?;
         let response = client
             .list_loras(pb::ListLorasRequest {})
@@ -457,28 +471,38 @@ impl LLMEngine for VllmSidecarEngine {
         let deadline_ms = self.transport.deadline.as_millis().min(u32::MAX as u128) as u32;
         let req = pb::DrainRequest {
             stop_accepting_new_requests: true,
-            deadline_ms,
+            deadline_ms: Some(deadline_ms),
             abort_after_deadline: false,
         };
-        match client.drain(req).await {
-            Ok(resp) => {
-                let mut stream = resp.into_inner();
-                loop {
-                    match stream.message().await {
-                        Ok(Some(_)) => continue,
-                        Ok(None) => break,
-                        Err(status) => {
-                            tracing::warn!(error = %status.message(), "vllm sidecar: drain stream error (ignored)");
-                            break;
-                        }
+        let mut stream = client
+            .drain(req)
+            .await
+            .map_err(|status| client::status_to_dynamo("Drain", status))?
+            .into_inner();
+        loop {
+            match stream
+                .message()
+                .await
+                .map_err(|status| client::status_to_dynamo("Drain stream", status))?
+            {
+                Some(response) => match response.event {
+                    Some(pb::drain_response::Event::State(state))
+                        if pb::DrainState::try_from(state) == Ok(pb::DrainState::Complete) =>
+                    {
+                        return Ok(());
                     }
+                    Some(pb::drain_response::Event::Error(error)) => {
+                        return Err(client::engine_error_to_dynamo(&error));
+                    }
+                    _ => continue,
+                },
+                None => {
+                    return Err(client::engine_shutdown(
+                        "OpenEngine Drain stream ended before COMPLETE",
+                    ));
                 }
             }
-            Err(status) => {
-                tracing::warn!(error = %status.message(), "vllm sidecar: drain RPC failed (ignored)");
-            }
         }
-        Ok(())
     }
 
     async fn watch(&self) -> Result<(), DynamoError> {
@@ -557,6 +581,24 @@ impl LLMEngine for VllmSidecarEngine {
         Ok(())
     }
 
+    async fn on_endpoint_ready(
+        &self,
+        endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        let pool = self
+            .pool
+            .get()
+            .ok_or_else(|| client::engine_shutdown("endpoint became ready before sidecar start"))?;
+        let routes = endpoint.drt().engine_routes();
+        for route in crate::prime_rl::ROUTES {
+            routes.register(
+                route.name(),
+                crate::prime_rl::callback(route, pool.prime_rl_client(), self.cancel.clone()),
+            );
+        }
+        Ok(())
+    }
+
     async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
         let Some(mut client) = self.pool.get().map(Pool::control_client) else {
             return Ok(Vec::new());
@@ -585,7 +627,7 @@ impl LLMEngine for VllmSidecarEngine {
                 Some(KvEventSource::Zmq {
                     endpoint: format!("{proto}://{}:{}", e.host, e.port),
                     topic: s.topic,
-                    dp_rank: s.data_parallel_rank,
+                    dp_rank: s.data_parallel_rank.unwrap_or(0),
                 })
             })
             .collect();
@@ -686,7 +728,7 @@ fn component_for_role(role: pb::EngineRole) -> &'static str {
 
 fn build_engine_config(discovery: &Discovery) -> EngineConfig {
     let model = &discovery.model;
-    let parallelism = discovery.engine.parallelism.clone().unwrap_or_default();
+    let parallelism = discovery.engine.parallelism.unwrap_or_default();
     let served_model_name =
         (!model.served_model_name.is_empty()).then(|| model.served_model_name.clone());
 
@@ -697,17 +739,14 @@ fn build_engine_config(discovery: &Discovery) -> EngineConfig {
         served_model_name,
         runtime_data: Default::default(),
         llm: Some(LlmRegistration {
-            context_length: (model.max_context_length != 0).then_some(model.max_context_length),
-            kv_cache_block_size: (model.kv_block_size != 0).then_some(model.kv_block_size),
-            total_kv_blocks: (model.total_kv_blocks != 0).then_some(model.total_kv_blocks),
-            max_num_seqs: (model.max_running_requests != 0).then_some(model.max_running_requests),
-            max_num_batched_tokens: (model.max_batched_tokens != 0)
-                .then_some(model.max_batched_tokens),
-            data_parallel_size: (parallelism.data_parallel_size != 0)
-                .then_some(parallelism.data_parallel_size),
-            data_parallel_start_rank: (parallelism.data_parallel_start_rank != 0)
-                .then_some(parallelism.data_parallel_start_rank),
-            supports_lora: model.supports_lora,
+            context_length: model.max_context_length,
+            kv_cache_block_size: model.kv_block_size,
+            total_kv_blocks: model.total_kv_blocks,
+            max_num_seqs: model.max_running_requests,
+            max_num_batched_tokens: model.max_batched_tokens,
+            data_parallel_size: parallelism.data_parallel_size,
+            data_parallel_start_rank: parallelism.data_parallel_start_rank,
+            supports_lora: model.supports_lora.unwrap_or(false),
             // vLLM's KV transport (NixlConnector) is internal — no
             // Dynamo-level bootstrap host/port handshake.
             bootstrap_host: None,
@@ -736,42 +775,59 @@ pub(crate) fn build_generate_request(
     let sampling = &request.sampling_options;
     // Prefill only needs to populate the KV cache for the prompt: cap to one
     // token regardless of the client's request.
-    let max_tokens = if is_prefill {
-        1
-    } else {
-        request.stop_conditions.max_tokens.unwrap_or(0)
+    validate_sampling_options(request)?;
+    validate_output_options(request)?;
+    let max_tokens = is_prefill
+        .then_some(1)
+        .or(request.stop_conditions.max_tokens);
+
+    let seed = match sampling.seed {
+        Some(seed) => Some(u64::try_from(seed).map_err(|_| {
+            client::invalid_arg("OpenEngine requires sampling.seed to be non-negative")
+        })?),
+        None => None,
     };
 
     let proto_sampling = pb::SamplingParams {
-        temperature: sampling.temperature.unwrap_or(0.0) as f64,
-        top_p: sampling.top_p.unwrap_or(0.0) as f64,
-        top_k: sampling.top_k.filter(|v| *v > 0).unwrap_or(0),
-        frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0) as f64,
-        presence_penalty: sampling.presence_penalty.unwrap_or(0.0) as f64,
-        max_tokens,
-        seed: sampling
-            .seed
-            .filter(|v| *v > 0)
-            .map(|v| v as u64)
-            .unwrap_or(0),
-        ignore_eos: request.stop_conditions.ignore_eos.unwrap_or(false),
+        temperature: sampling.temperature.map(f64::from),
+        top_p: sampling.top_p.map(f64::from),
+        top_k: sampling.top_k,
+        min_p: sampling.min_p.map(f64::from),
+        frequency_penalty: sampling.frequency_penalty.map(f64::from),
+        presence_penalty: sampling.presence_penalty.map(f64::from),
+        repetition_penalty: sampling.repetition_penalty.map(f64::from),
+        seed,
+        num_sequences: sampling.n.map(u32::from),
     };
 
-    let mut stop = Vec::new();
+    let stopping = build_stopping_options(request, max_tokens)?;
+    let response = build_response_options(request);
+    let guided = build_guided_decoding(request)?;
+
+    let mut conditions = Vec::new();
     if let Some(strings) = &request.stop_conditions.stop {
         for text in strings {
-            stop.push(pb::StopCondition {
+            conditions.push(pb::StopCondition {
                 condition: Some(pb::stop_condition::Condition::StopText(text.clone())),
             });
         }
     }
-    if let Some(ids) = &request.stop_conditions.stop_token_ids {
+    for ids in [
+        &request.stop_conditions.stop_token_ids,
+        &request.stop_conditions.stop_token_ids_visible,
+        &request.stop_conditions.stop_token_ids_hidden,
+    ] {
+        let Some(ids) = ids else { continue };
         for id in ids {
-            stop.push(pb::StopCondition {
+            conditions.push(pb::StopCondition {
                 condition: Some(pb::stop_condition::Condition::StopTokenId(*id)),
             });
         }
     }
+    let stopping = stopping.map(|mut stopping| {
+        stopping.conditions = conditions;
+        stopping
+    });
 
     // Decode-role disaggregation: lift the prefill peer's handoff into a KV
     // session the engine forwards to its connector.
@@ -791,6 +847,21 @@ pub(crate) fn build_generate_request(
     // (`dynamo.common.backend.dp_rank.forced_dp_rank`); `prefill_dp_rank` is
     // never populated by the router.
     let data_parallel_rank = request.routing.as_ref().and_then(|r| r.dp_rank);
+    let cache_salt = request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.cache_namespace.clone());
+    let priority = request
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.priority);
+    let kv = (kv_session.is_some() || data_parallel_rank.is_some() || cache_salt.is_some())
+        .then_some(pb::KvOptions {
+            session: kv_session,
+            data_parallel_rank,
+            bypass_prefix_cache: None,
+            cache_salt,
+        });
 
     let media = build_media(request)?;
     let lora_name = request
@@ -806,17 +877,167 @@ pub(crate) fn build_generate_request(
             ids: request.token_ids.clone(),
         })),
         sampling: Some(proto_sampling),
-        stop,
-        stream: true,
+        stopping,
+        response,
+        kv,
+        guided,
         media,
         lora_name,
-        data_parallel_rank,
-        kv_session,
+        priority,
         metadata: Default::default(),
-        // openengine.v1 additive request fields. Guided decoding and logprobs
-        // are not mapped yet.
-        ..Default::default()
     })
+}
+
+fn validate_sampling_options(request: &PreprocessedRequest) -> Result<(), DynamoError> {
+    let sampling = &request.sampling_options;
+    if sampling.best_of.is_some() {
+        return Err(client::invalid_arg(
+            "OpenEngine v1 does not represent sampling.best_of",
+        ));
+    }
+    if sampling.use_beam_search.unwrap_or(false) || sampling.length_penalty.is_some() {
+        return Err(client::invalid_arg(
+            "OpenEngine v1 does not represent beam-search options",
+        ));
+    }
+    if request.stop_conditions.max_thinking_tokens.is_some() {
+        return Err(client::invalid_arg(
+            "OpenEngine v1 does not represent max_thinking_tokens",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_output_options(request: &PreprocessedRequest) -> Result<(), DynamoError> {
+    if request.output_options.skip_special_tokens == Some(false) {
+        return Err(client::invalid_arg(
+            "OpenEngine v1 does not represent skip_special_tokens=false",
+        ));
+    }
+    if request.output_options.return_tokens_as_token_ids == Some(true) {
+        return Err(client::invalid_arg(
+            "OpenEngine v1 does not represent return_tokens_as_token_ids=true",
+        ));
+    }
+    Ok(())
+}
+
+fn build_stopping_options(
+    request: &PreprocessedRequest,
+    max_tokens: Option<u32>,
+) -> Result<Option<pb::StoppingOptions>, DynamoError> {
+    let stop = &request.stop_conditions;
+    let has_visible_ids = stop
+        .stop_token_ids_visible
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty());
+    let has_stop_strings = stop.stop.as_ref().is_some_and(|items| !items.is_empty());
+    let strings_are_visible = request.sampling_options.include_stop_str_in_output == Some(true);
+    let has_visible_conditions = has_visible_ids || (has_stop_strings && strings_are_visible);
+    let has_hidden_conditions = (has_stop_strings && !strings_are_visible)
+        || stop
+            .stop_token_ids
+            .as_ref()
+            .is_some_and(|ids| !ids.is_empty())
+        || stop
+            .stop_token_ids_hidden
+            .as_ref()
+            .is_some_and(|ids| !ids.is_empty());
+    if has_visible_conditions && has_hidden_conditions {
+        return Err(client::invalid_arg(
+            "OpenEngine v1 cannot mix visible and hidden stop conditions in one request",
+        ));
+    }
+
+    let include_stop_in_output = if has_visible_conditions {
+        Some(true)
+    } else if has_hidden_conditions {
+        Some(false)
+    } else {
+        request.sampling_options.include_stop_str_in_output
+    };
+    let has_options = max_tokens.is_some()
+        || stop.min_tokens.is_some()
+        || stop.ignore_eos.is_some()
+        || include_stop_in_output.is_some()
+        || has_visible_ids
+        || has_hidden_conditions;
+    Ok(has_options.then_some(pb::StoppingOptions {
+        max_tokens,
+        min_tokens: stop.min_tokens,
+        conditions: Vec::new(),
+        ignore_eos: stop.ignore_eos,
+        include_stop_in_output,
+    }))
+}
+
+fn top_n_selection(count: Option<u32>) -> Option<pb::CandidateTokenSelection> {
+    count.map(|top_n| pb::CandidateTokenSelection {
+        selection: Some(pb::candidate_token_selection::Selection::TopN(top_n)),
+    })
+}
+
+fn build_response_options(request: &PreprocessedRequest) -> Option<pb::ResponseOptions> {
+    let output = &request.output_options;
+    let has_options = output.logprobs.is_some() || output.prompt_logprobs.is_some();
+    has_options.then_some(pb::ResponseOptions {
+        return_prompt_logprobs: output.prompt_logprobs.map(|_| true),
+        prompt_candidates: top_n_selection(output.prompt_logprobs),
+        return_output_logprobs: output.logprobs.map(|_| true),
+        output_candidates: top_n_selection(output.logprobs),
+        prompt_logprob_start: None,
+    })
+}
+
+fn build_guided_decoding(
+    request: &PreprocessedRequest,
+) -> Result<Option<pb::GuidedDecoding>, DynamoError> {
+    let Some(guided) = request.sampling_options.guided_decoding.as_ref() else {
+        return Ok(None);
+    };
+    if guided.whitespace_pattern.is_some() {
+        return Err(client::invalid_arg(
+            "OpenEngine v1 does not represent guided whitespace_pattern",
+        ));
+    }
+
+    let mut guides = Vec::new();
+    if let Some(value) = guided.json.as_ref() {
+        guides.push(pb::guided_decoding::Guide::JsonSchema(
+            serde_json::to_string(value)
+                .map_err(|err| client::invalid_arg(format!("invalid guided JSON: {err}")))?,
+        ));
+    }
+    if let Some(regex) = guided.regex.as_ref() {
+        guides.push(pb::guided_decoding::Guide::Regex(regex.clone()));
+    }
+    if let Some(grammar) = guided.grammar.as_ref() {
+        guides.push(pb::guided_decoding::Guide::EbnfGrammar(grammar.clone()));
+    }
+    if let Some(structural_tag) = guided.structural_tag.as_ref() {
+        guides.push(pb::guided_decoding::Guide::StructuralTag(
+            serde_json::to_string(structural_tag).map_err(|err| {
+                client::invalid_arg(format!("invalid guided structural tag: {err}"))
+            })?,
+        ));
+    }
+    if let Some(choices) = guided.choice.as_ref()
+        && !choices.is_empty()
+    {
+        guides.push(pb::guided_decoding::Guide::Choice(pb::ChoiceConstraint {
+            choices: choices.clone(),
+        }));
+    }
+    if guides.len() > 1 {
+        return Err(client::invalid_arg(
+            "OpenEngine guided decoding accepts exactly one guide",
+        ));
+    }
+
+    Ok(Some(pb::GuidedDecoding {
+        guide: guides.pop(),
+        backend: guided.backend.clone().unwrap_or_default(),
+    }))
 }
 
 /// Map a media-map key (`image_url`/`video_url`/`audio_url`) to its proto
@@ -855,6 +1076,15 @@ fn build_media(request: &PreprocessedRequest) -> Result<Vec<pb::MediaItem>, Dyna
     let Some(map) = request.multi_modal_data.as_ref() else {
         return Ok(Vec::new());
     };
+    let populated_modalities = ["image_url", "video_url", "audio_url"]
+        .into_iter()
+        .filter(|key| map.get(*key).is_some_and(|items| !items.is_empty()))
+        .count();
+    if populated_modalities > 1 {
+        return Err(client::invalid_arg(
+            "OpenEngine sidecar cannot preserve placeholder order for mixed media modalities",
+        ));
+    }
     let mut media = Vec::new();
     for key in ["image_url", "video_url", "audio_url"] {
         let Some(items) = map.get(key) else { continue };
@@ -882,24 +1112,119 @@ fn build_media(request: &PreprocessedRequest) -> Result<Vec<pb::MediaItem>, Dyna
     Ok(media)
 }
 
+pub(crate) fn token_output_to_engine(output: pb::TokenOutput) -> LLMEngineOutput {
+    let token_ids = output.tokens.iter().map(|token| token.token_id).collect();
+    let tokens = output
+        .tokens
+        .iter()
+        .map(|token| (!token.token.is_empty()).then(|| Some(token.token.clone())))
+        .collect::<Option<Vec<_>>>();
+    let log_probs = output
+        .tokens
+        .iter()
+        .map(|token| token.logprob)
+        .collect::<Option<Vec<_>>>();
+    let has_candidates = output
+        .tokens
+        .iter()
+        .any(|token| !token.candidates.is_empty());
+    let top_logprobs = has_candidates.then(|| {
+        output
+            .tokens
+            .iter()
+            .map(|token| {
+                token
+                    .candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, candidate)| TopLogprob {
+                        rank: candidate.rank.unwrap_or(index as u32 + 1),
+                        token_id: candidate.token_id,
+                        token: Some(candidate.token.clone()),
+                        logprob: candidate.logprob,
+                        bytes: None,
+                    })
+                    .collect()
+            })
+            .collect()
+    });
+
+    LLMEngineOutput {
+        token_ids,
+        tokens,
+        text: (!output.text.is_empty()).then_some(output.text),
+        log_probs,
+        top_logprobs,
+        index: output.output_index,
+        ..Default::default()
+    }
+}
+
+fn prompt_output_to_json(output: pb::PromptOutput) -> Option<serde_json::Value> {
+    let prompt_logprobs = output
+        .tokens
+        .into_iter()
+        .map(|token| {
+            let mut candidates = HashMap::new();
+            if let Some(logprob) = token.logprob {
+                candidates.insert(
+                    token.token_id,
+                    PromptLogprobEntry {
+                        logprob: logprob as f32,
+                        rank: token.rank,
+                        decoded_token: Some(token.token.clone()),
+                    },
+                );
+            }
+            for candidate in token.candidates {
+                candidates.insert(
+                    candidate.token_id,
+                    PromptLogprobEntry {
+                        logprob: candidate.logprob as f32,
+                        rank: candidate.rank,
+                        decoded_token: Some(candidate.token),
+                    },
+                );
+            }
+            (!candidates.is_empty()).then_some(candidates)
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_value(prompt_logprobs).ok()
+}
+
+fn take_prompt_logprobs(
+    prompt_logprobs: &mut Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    prompt_logprobs
+        .take()
+        .map(|value| serde_json::json!({ "prompt_logprobs": value }))
+}
+
 fn finish_output(
     reason: pb::FinishReason,
     prompt_tokens: u32,
     generated: u32,
     disaggregated_params: Option<serde_json::Value>,
+    stop_reason: Option<StopReason>,
 ) -> LLMEngineOutput {
     let mut out = match reason {
         pb::FinishReason::Length => LLMEngineOutput::length(),
         pb::FinishReason::Cancelled => LLMEngineOutput::cancelled(),
-        pb::FinishReason::Error => {
-            LLMEngineOutput::error("engine reported error finish reason".to_string())
-        }
         // STOP and UNSPECIFIED both map to a normal stop terminal.
         _ => LLMEngineOutput::stop(),
     }
     .with_usage(usage(prompt_tokens, generated));
     out.disaggregated_params = disaggregated_params;
+    out.stop_reason = stop_reason;
     out
+}
+
+pub(crate) fn stop_match_to_reason(stop_match: pb::StopMatch) -> Option<StopReason> {
+    match stop_match.r#match? {
+        pb::stop_match::Match::StopText(text) => Some(StopReason::String(text)),
+        pb::stop_match::Match::StopTokenId(token_id) => Some(StopReason::Int(token_id.into())),
+        pb::stop_match::Match::EosTokenId(_) => None,
+    }
 }
 
 // ============================================================================

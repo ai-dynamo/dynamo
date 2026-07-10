@@ -15,6 +15,7 @@
 pub mod args;
 pub mod client;
 pub mod engine;
+mod prime_rl;
 pub mod proto;
 
 pub use engine::VllmSidecarEngine;

@@ -21,9 +21,13 @@ use tonic::transport::{Channel, Endpoint};
 use crate::args::TransportConfig;
 use crate::proto as pb;
 use crate::proto::open_engine_client::OpenEngineClient;
+use crate::proto::prime_rl::prime_rl_engine_client::PrimeRlEngineClient;
 
 /// Connected OpenEngine client over a tonic [`Channel`].
 pub type Client = OpenEngineClient<Channel>;
+
+/// Connected Prime RL extension client over the same engine channel.
+pub type PrimeRlClient = PrimeRlEngineClient<Channel>;
 
 /// Engine discovery snapshot: identity / role / parallelism plus model caps.
 #[derive(Clone, Debug)]
@@ -122,6 +126,10 @@ impl Pool {
         OpenEngineClient::new(self.channels[0].clone())
     }
 
+    /// A Prime RL extension client sharing the stable control connection.
+    pub fn prime_rl_client(&self) -> PrimeRlClient {
+        PrimeRlEngineClient::new(self.channels[0].clone())
+    }
 }
 
 /// Fetch engine + model metadata in one shot.

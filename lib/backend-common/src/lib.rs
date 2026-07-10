@@ -38,8 +38,8 @@ pub use engine::{
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, LogProbs,
     LoraAdapter, Metrics, MetricsBindings, MetricsCtx, MultimodalData, MultimodalDataMap,
     OnPublisherReady, OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest,
-    RawEngine, RoutingHints, SamplingOptions, StopConditions, StopReason, TopLogprob, TopLogprobs,
-    chunk, usage,
+    PromptLogprobEntry, RawEngine, RoutingHints, SamplingOptions, StopConditions, StopReason,
+    TopLogprob, TopLogprobs, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
