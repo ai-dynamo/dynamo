@@ -177,9 +177,8 @@ impl ActiveSequences {
 
         if let Some(first_new_prompt_idx) = first_new_prompt_idx {
             debug_assert!(
-                prompt_hashes[first_new_prompt_idx..]
-                    .iter()
-                    .all(|hash| self.blocks.contains_block(hash))
+                (first_new_prompt_idx..prompt_hashes.len())
+                    .all(|idx| self.blocks.contains_prompt_block(&prompt_hashes, idx))
             );
             let parent = first_new_prompt_idx
                 .checked_sub(1)
@@ -375,6 +374,31 @@ mod tests {
     }
 
     #[test]
+    fn active_worker_teardown_with_colliding_raw_tail_hashes() {
+        let mut sequences = ActiveSequences::new_without_expiry(1);
+        let now = Instant::now();
+        sequences.add_request_with_prefill_tracking(
+            "left".to_string(),
+            Some(vec![1, 9]),
+            None,
+            false,
+            None,
+            now,
+        );
+        sequences.add_request_with_prefill_tracking(
+            "right".to_string(),
+            Some(vec![2, 9]),
+            None,
+            false,
+            None,
+            now,
+        );
+
+        assert_eq!(sequences.active_blocks(), 4);
+        drop(sequences);
+    }
+
+    #[test]
     fn test_prompt_membership_delta_only_reports_first_add_and_last_remove() {
         let mut seq_manager = ActiveSequences::new(4);
         let decay_now = Instant::now();
@@ -430,6 +454,61 @@ mod tests {
                 hashes: vec![1, 2, 3],
             }]
         );
+    }
+
+    #[test]
+    fn colliding_raw_tail_hashes_keep_membership_lineages_independent() {
+        let mut seq_manager = ActiveSequences::new_without_expiry(1);
+        let decay_now = Instant::now();
+
+        let left = seq_manager.add_request_with_prefill_tracking(
+            "left".to_string(),
+            Some(vec![1, 9]),
+            None,
+            false,
+            None,
+            decay_now,
+        );
+        let right = seq_manager.add_request_with_prefill_tracking(
+            "right".to_string(),
+            Some(vec![2, 9]),
+            None,
+            false,
+            None,
+            decay_now,
+        );
+
+        assert_eq!(
+            left.membership_delta.stores,
+            vec![PromptMembershipStore {
+                parent: None,
+                hashes: vec![1, 9],
+            }]
+        );
+        assert_eq!(
+            right.membership_delta.stores,
+            vec![PromptMembershipStore {
+                parent: None,
+                hashes: vec![2, 9],
+            }]
+        );
+        assert_eq!(seq_manager.active_blocks(), 4);
+
+        assert_eq!(
+            seq_manager.free(&"left".to_string(), decay_now).removes,
+            vec![PromptMembershipRemove { hashes: vec![1, 9] }]
+        );
+        assert_eq!(seq_manager.active_blocks(), 2);
+        assert_eq!(
+            seq_manager.active_prompt_hashes(),
+            [2, 9].into_iter().collect()
+        );
+
+        assert_eq!(
+            seq_manager.free(&"right".to_string(), decay_now).removes,
+            vec![PromptMembershipRemove { hashes: vec![2, 9] }]
+        );
+        assert_eq!(seq_manager.active_blocks(), 0);
     }
 
     #[test]
